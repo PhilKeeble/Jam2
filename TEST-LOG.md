@@ -7209,3 +7209,333 @@ retirement or distribution completion is claimed.
   the exact failure count and resource caps, and emit the determining counters.
   Eight consecutive focused executions pass with the isolated fixture,
   including three after restoring the original cross-platform waits.
+
+### Iteration 54 - deterministic cross-platform native acceptance gate
+
+- Audited all 74 registered non-hardware CTests and replaced test success based
+  on elapsed wall time, platform timeout scaling, short polling budgets, timed
+  automation pauses, or assumed completion ordering with product-owned state,
+  event acknowledgements, callback/frame counters, exact files and hashes, or
+  explicit arm/active/release gates. Platform-neutral 300/600/900-second CTest
+  limits remain only as outer process deadmen.
+- Metronome integration now selects evidence through real Headless callbacks,
+  scheduled frames, epochs, click WAVs, and protocol counters. The Apple-only
+  priority/time-constraint and catch-up behavior was removed, along with retry
+  passes and proxy-pump speed assertions. Genuine delay, jitter, packet-loss,
+  duplication, reordering, burst-loss, authentication, frame, heartbeat, and
+  metronome measurement windows remain because timing is the behavior those
+  cases validate.
+- Native boundary validation now waits for exact network-capture blocks,
+  callback advancement, pitch-state transitions, and live monitor signal
+  before proving muted output. Debug lifecycle validation waits for engine
+  progress and the network-start event, uses the explicit network stop action,
+  and proves local-engine reuse. Controller refresh is issued from the real
+  `ReconnectScheduled` event instead of trying to observe a transient state in
+  a 200 ms window.
+- Private real-process fixtures now use explicit gates for asset validation and
+  finalization, bounded file workers, synthetic MIDI enumeration, and synthetic
+  input-plug-in completion. Cancellation invalidates held work and stale
+  callbacks. Modal click acknowledgement is emitted in the same GUI turn just
+  before the real click, and deterministic tap-tempo/playback interpolation
+  seams use explicit input time rather than sleeping.
+- Product-side race hardening found during the audit includes authoritative
+  engine metronome-mode state, a single shared asset-request expiry handler for
+  real and explicit expiry, preservation of request hash/source identity across
+  timeout cleanup, cancellation of armed and active transfer gates, and
+  build-local curated-preview cache ownership. The normal asset request-start
+  limit is now a platform-neutral 60-second hang detector because a valid
+  request can wait behind a sender's bounded serial queue; CTests invoke the
+  same handler explicitly and do not wait for that timer.
+- Full-test execution is parallel by default on macOS and Windows: logical
+  CPUs minus one, one job on one/two-thread machines, capped at eight, with a
+  validated `JAM2_TEST_JOBS` override. Four-peer, model/JamTaster, metronome,
+  security, and native CPU-heavy cases reserve four CTest processor slots.
+  This permits parallel fast cases without admitting every multi-process or
+  inference workflow at once.
+- Every CTest receives isolated `JAM2_TEST_ARTIFACT_ROOT`, `TEMP`, `TMP`, and
+  `TMPDIR` paths below `build/test-artifacts/<ctest-name>`. Successful gates
+  remove all generated contents and recreate only the empty namespaces; failed
+  gates retain evidence. Windows coverage failures retain a build-local copy
+  while the later Release phase receives a fresh workspace. No alternate Jam2
+  executable is built or tested.
+- The first complete macOS gate after the audit passed 72/74 in 759.13 seconds.
+  It deliberately exposed two remaining contention-dependent assumptions:
+  `jam2_four_wav_interruption_integration` counted four real ten-second start
+  expiries after one injected drop, and
+  `jam2_four_session_dialog_integration` let a zero-turn plug-in completion race
+  a supposedly concurrent load, leaving confirmation dialogs and cascading to
+  44 failures.
+- The WAV fault now reports the exact dropped target, maps it to the requesting
+  peer, explicitly expires that one request, and requires exactly one timeout
+  plus exact four-peer file/hash convergence. The plug-in workflow now holds
+  the first completion active, proves the competing load does not complete,
+  releases it, and waits for the renderer attachment signal before changing
+  topology. Focused proof passed asset-transfer units in 0.31 seconds, the
+  session-dialog workflow in 43.09 seconds, and the WAV interruption workflow
+  in 138.21 seconds.
+- Final acceptance: `bash ./compile.sh --tests-full` passed 74/74 cases with
+  zero failures in 492.48 seconds at parallel capacity eight. The corrected
+  contention pair passed in the full schedule (session dialog 53.42 seconds,
+  WAV interruption 156.22 seconds), all 21 metronome impairment cases passed,
+  and the post-run artifact root contained zero files and exactly 74 empty
+  namespaces. No CTest log or temporary artifact appeared outside `build/`.
+- Windows branches were reviewed statically on this Mac, `compile.cmd` retains
+  CRLF batch format, and shared C++/CTest behavior is platform-neutral; the
+  Windows gate was not executed here. Real external CoreAudio-interface,
+  physical CoreMIDI, and VST3/VFX3 device profiles remain explicitly deferred
+  in `TEST-MACOS.md` rather than being represented as passes.
+
+#### BUG-T121 - one dropped asset start inherited unrelated queue timers
+
+- Observed condition: three peers could request the same WAV while the only
+  sender served its bounded queue serially. Under full-suite contention, the
+  intended dropped request and three otherwise valid queued requests crossed
+  the old ten-second start threshold, making the test's expected `1..3` timeout
+  count depend on machine scheduling even though all four peers converged.
+- Change and proof: expose the exact dropped requester through private
+  automation state, expire only that live request through the production
+  handler, require exactly one timeout, and treat the normal 60-second limit as
+  a hang detector rather than a transfer benchmark. Focused and full-contention
+  runs both pass with exact files, hashes, retry ownership, and cleanup.
+
+#### BUG-T122 - sequential click acknowledgement did not prove concurrent load
+
+- Observed condition: the test acknowledged the first plug-in load click before
+  sending the second. Its zero-turn synthetic completion could therefore finish
+  first, making the second click a legitimate new load. The later topology
+  scenario then opened a confirmation box and accumulated minute-long command
+  deadmen instead of testing stale-completion rejection.
+- Change and proof: hold the first completion at an observable active gate,
+  issue and classify the competing request while the dialog is genuinely busy,
+  release exactly one completion, and wait for its live router attachment.
+  The four-peer session-dialog profile passes focused and under the final full
+  parallel schedule with no orphaned modal or stale plug-in/device state.
+
+### Iteration 55 - authenticated UDP route recovery and final parallel gate
+
+- The 2026-08-19 Jam2 logs showed an authenticated TCP control connection and
+  valid membership while the direct UDP edge remained in `waiting`. A later
+  attempt worked without a host-networking change. This matched the real-jam
+  report where a previously working participant dropped out and could not
+  recover. The failure was not specific to STUN or same-LAN port reuse: the
+  runtime trusted the advertised UDP endpoint, discarded authenticated packets
+  from a NAT-remapped source before it could attribute them, and left an
+  `Active` route active indefinitely because ordinary UDP sends can succeed
+  locally while the remote path is a black hole.
+- Hello/HelloAck now carry the known peer ID in their existing fixed eight-byte
+  authenticated payload. The receiver authenticates and parses the packet
+  before endpoint attribution, rejects unknown IDs, endpoint-owner collisions,
+  unmatched challenges, and attempts to move a healthy active edge, but learns
+  an observed source for a candidate/stale edge. The endpoint-only rebind keeps
+  the existing stream, replay windows, clock/drift state, and mixer gain/mute.
+- Each active peer records its last authenticated receive time. Three seconds
+  without any authenticated packet is a platform-neutral product liveness
+  failure detector, not a CTest completion benchmark: it demotes the edge and
+  restarts proof. Reauthentication of the TCP control connection also requests
+  one proof reset even when the coordinator republishes identical endpoint
+  text. Raw endpoint rebind, liveness reprobe, control reprobe, Hello/Ack, and
+  authenticated-receive-age counters are exposed in operational snapshots and
+  logs.
+- Session startup no longer reports `network.connected` merely because TCP
+  membership succeeded. It requires every current remote UDP edge to report
+  `Active`; automation exposes both membership and active-remote counts. This
+  prevents the fast-but-silent macOS path from treating the observed `waiting`
+  state as a successful product connection.
+- A quantized shared-grid Record Start or Track Restart received before the
+  authority epoch mapping is within two audio callbacks is left unconsumed so a
+  repeated transport packet can apply it later. Its latency-translated target
+  is then snapped to the nearest exact local shared-bar representation while
+  preserving the exact count-in length; missed countdowns are rejected rather
+  than silently scheduled off-grid.
+- The exactly-four-peer session-command workflow holds a deliberately wrong
+  advertised endpoint open as a UDP black hole, proves learned-source mesh
+  activation from all four peers' typed snapshots, changes an established
+  proxy's source endpoint, observes the edge leave and return to Active, and
+  then retains the existing gain, session-limit, exact one-bar record, and
+  orderly shutdown checks. Transport-grid readiness is advanced and observed
+  through engine frames rather than a wall sleep. Its successful temporary
+  data now requires `JAM2_TEST_ARTIFACT_ROOT` and is removed below the CTest's
+  private `build/test-artifacts` namespace.
+- Focused identity, endpoint ownership, rebind-preservation, reprobe, and
+  transport-alignment unit cases passed. The four-session workflow passed four
+  focused executions and the final full run. The broader controller,
+  shared-grid, leader-audio, listener-compensated, UDP-authentication, and UDP
+  sequence-security selection also passed.
+- The first post-change full gate passed 73/74 in 552.07 seconds. The only
+  failure, `jam2_metronome_shared_grid_burst_loss`, exited in 0.27 ms with
+  `Address already in use`: its coordinator released four paired peer ports
+  before creating six impairment proxies, so one of its own ephemeral proxy
+  sockets could reclaim a peer port under parallel load. Reservations now stay
+  owned while proxies are created and all four children reach the explicit
+  pre-operation barrier, then release immediately before the children bind.
+  The failed case passed focused in 19.29 seconds and passed concurrently with
+  another four-peer burst-loss case in 19.12 seconds.
+- Final acceptance: `bash ./compile.sh --tests-full` passed 74/74 in 573.38
+  seconds at capacity eight with no retry. The corrected burst-loss case passed
+  in 19.59 seconds and the stale-endpoint/rebind workflow passed in 9.04
+  seconds. The successful reset left zero files and exactly 74 empty namespaces
+  in `build/test-artifacts`. Retained pre-fix session-command/jam-sync
+  directories and temporary audit listings were removed, leaving no current
+  Jam2 test artifact in the macOS system temporary directories. Shared C++/Qt
+  and CMake behavior was reviewed for Windows, but the Windows gate was not run
+  on this Mac. External CoreAudio, physical CoreMIDI, and VST3/VFX3 profiles
+  remain explicitly deferred in `TEST-MACOS.md`.
+
+#### BUG-P106 - authenticated membership could remain bound to a dead UDP route
+
+- Observed condition: TCP authentication and membership completed, but the UDP
+  path stayed `waiting`, or a formerly Active path silently black-holed after a
+  NAT/source change while local UDP sends continued to report success.
+- Change and proof: authenticate peer-identity Hello/Ack packets before route
+  attribution, learn only inactive known-peer endpoints, preserve stream/mix
+  ownership across a rebind, expire receive-silent active routes into reprobe,
+  and reprobe on control reauthentication. The four-peer native workflow proves
+  both an initially stale advertised endpoint and a live source-endpoint change.
+
+#### BUG-P107 - early shared transport could be translated off the musical bar
+
+- Observed condition: a valid quantized transport packet could arrive before
+  the listener's shared-grid mapping converged, be consumed immediately, and
+  turn network arrival jitter into a non-bar-aligned local target.
+- Change and proof: defer without consuming the source event until the mapped
+  epoch is ready, then align the translated target to an exact shared bar while
+  preserving the count-in. Pure timing boundaries and the real four-peer
+  one-bar recording workflow require the exact schedule and recorded length.
+
+#### BUG-T123 - impairment proxies could steal released peer ports
+
+- Observed condition: under the full parallel schedule a proxy ephemeral bind
+  reclaimed a just-released peer port, so one Jam2 child failed at startup with
+  `Address already in use` before any product behavior ran.
+- Change and proof: retain every paired TCP/UDP reservation through proxy setup
+  and four-child readiness, releasing only at the explicit start handoff. The
+  failed profile passes focused, concurrently with another heavy four-peer
+  profile, and in the final full parallel gate.
+
+### Iteration 56 - physical macOS CoreAudio, CoreMIDI, and VST3 closure
+
+- Added schema-v2 hardware profiles while retaining the existing schema-v1
+  Windows contract. The v2 fields explicitly identify a second audio input, a
+  device-rejected buffer size, an instrument VST3, and a physical MIDI source.
+  The verified machine-local profile lives at `build/hardware-profile-macos.json`
+  and selects Scarlett 2i2 device 0, inputs 1/2, 48 kHz/64 frames, Gateway,
+  Surge XT, and Xjam. One frame is the exact rejected Scarlett buffer probe;
+  the driver legitimately accepted the initially proposed 4096-frame size.
+- Replaced the old five-second real-device sample and deadline-miss quotas with
+  product evidence. `jam2_hardware_plugin_device` now proves each Scarlett input
+  independently, stereo capture into the isolated worker, completed Gateway
+  process responses, live delayed-dry bypass, resumed processing, editor and
+  worker lifecycle, invalid channel/buffer recovery, and stable exact block
+  accounting. Miss, process-time, and callback-gap data remain visible but are
+  not hardware-speed acceptance thresholds.
+- Gateway's default instance correctly returned a zero wet peak because no IR
+  was loaded. The test records that zero instead of treating every valid effect
+  as a pass-through: nonzero worker-input peak proves live data reached the
+  isolated process, completed responses prove Gateway processed it, and the
+  nonzero bypass route proves Jam2 can return the aligned dry signal. This
+  avoids both the earlier silent pass and a new plug-in-specific false failure.
+- Added `jam2_hardware_midi_instrument_device`. It uses the production CoreMIDI
+  and system plug-in backends to classify physical note-on, note-off, and
+  continuous-control input; close and reopen Xjam; self-test/load Surge XT;
+  open/close its editor; prove new physical events are consumed while mute holds
+  router/send output at zero; reset/unmute; then require actual wet instrument,
+  router, and send peaks through real Scarlett callbacks. Interaction deadlines
+  are hang/operator deadmen and every phase exits on its determining signal.
+- The plug-in protocol now distinguishes reset traffic from live MIDI traffic
+  and publishes actual live events consumed by the isolated worker. It also
+  exposes maximum input peak measured inside that worker and maximum accepted
+  wet-output peak. The new counters are fixed-shape atomics, require no callback
+  allocation/lock/logging, and are available to ordinary product diagnostics,
+  not just CTests.
+- Fixed macOS POSIX shared-memory naming. Darwin rejected the full prefixed UUID;
+  the name now hashes the complete validated random token into a short namespace
+  value and reports exact `shm_open` errors. Native create/open/share coverage
+  exercises the same production transport. Bumped the private worker protocol
+  version for the new diagnostic state.
+- Hardware helper staging is now a dependency-owned build target on macOS and
+  Windows. Both hardware executables therefore receive a newly rebuilt worker
+  even when the test executable itself did not relink. macOS resolves it from
+  `build/Helpers`, and no `/var/folders` or source-tree worker copy is created.
+- Production VST3 selection no longer retries the same failed isolated scan 12
+  times or applies 5/15/30-second CPU assumptions to scan/process readiness.
+  One scanner process returns one exact result or error; scanner launch/exit and
+  worker-ready signals use generous hang deadmen and still complete immediately
+  on fast machines. Hardware editor/startup polling received the same treatment.
+- Final focused physical results: Scarlett/Gateway passed in 2.16 seconds with
+  physical peaks on both inputs, worker input 88,513 ppm, bypass/router/send
+  signal, 15 submitted/13 completed blocks, zero misses/failures/stale replies,
+  and the expected zero wet peak. Xjam/Surge XT passed in 4.90 seconds with 17
+  classified capture messages, eight live MIDI events consumed, 170 submitted/
+  168 completed blocks, zero misses/failures/stale/drop/unsupported counts, and
+  wet/router/send peaks 154,409/39,997/103,442 ppm. The capability case passed
+  the Scarlett 44.1/48 kHz and 32/64/128/256 frame matrix. Worker entrypoint,
+  system plug-in backend, shared transport, Gateway self-test, and Surge XT
+  instrument self-test focused prerequisites also passed.
+- Xjam genuinely disappeared from both the USB registry and CoreMIDI before the
+  first MIDI run, producing an explicit profile failure. Reconnecting it yielded
+  exactly one CoreMIDI input named `Xjam`, after which physical validation passed.
+  No absence or zero signal was relabelled as success.
+- All CTest temporary paths, probe results, and retained evidence remain under
+  `build/test-artifacts/<ctest-name>` through `TEMP`/`TMP`/`TMPDIR`; the profile
+  and staged helper also remain under `build/`. Successful focused namespaces
+  were reset after review. No full suite was rerun, per the request to execute
+  only hardware-related cases.
+- Remaining physical boundaries are recorded in `TEST-MACOS.md`: active-stream
+  CoreAudio removal/recovery, open-device CoreMIDI removal/GUI cleanup, a real
+  SysEx/unsupported message, DAC/output loopback, and configured Gateway wet DSP
+  after an IR becomes available. Fake/native deterministic ownership coverage
+  remains authoritative for the platform-neutral portions of those workflows.
+
+#### BUG-P108 - Darwin rejected the isolated plug-in shared-memory name
+
+- Observed condition: Gateway probe/self-test worked, but production host start
+  failed before callbacks with `Could not create plugin shared memory`.
+- Change and proof: derive a short Darwin-compatible name from the complete
+  random token, retain create-only ownership/unlink cleanup, include errno in
+  failure diagnostics, and exercise production create/open/shared state in the
+  native plug-in bridge case. Both Gateway and Surge XT subsequently ran through
+  isolated workers on macOS.
+
+#### BUG-P109 - real isolated plug-ins omitted live MIDI/input evidence
+
+- Observed condition: `InputPluginStats::midiEventsConsumed` was populated only
+  by the synthetic renderer. A physical instrument could render while the real
+  product stats still reported zero, and an effect's completed response did not
+  prove that live capture reached its worker.
+- Change and proof: carry per-block live MIDI count separately from reset events,
+  count it only after the worker calls the plug-in, measure worker input peak,
+  and expose the accepted wet-output peak. Xjam/Surge XT reports eight consumed
+  live events and Gateway reports nonzero worker input with its honest zero wet
+  output.
+
+#### BUG-T124 - the real-device case could pass silence and benchmark scheduling
+
+- Observed condition: the previous hardware case ran for five seconds, accepted
+  zero input/router/send peaks, and failed or passed from fixed warm-up/steady
+  deadline-miss quotas. A fast Mac could therefore finish without validating an
+  instrument signal, while a slower valid host could fail for scheduling.
+- Change and proof: require channel, worker, process, bypass/mute, MIDI, and
+  routed-signal evidence; stop immediately when it appears; leave only explicit
+  operator/hang deadmen; and treat miss/gap/process duration as raw diagnostics.
+  The focused cases passed from real evidence in seconds with no duration gate.
+
+#### BUG-T125 - post-join engine diagnostics were already cleared
+
+- Observed condition: the strengthened Gateway path proved every phase, then
+  reported zero frames/callbacks because the harness sampled `Engine` after
+  `join()` reset its stream control.
+- Change and proof: snapshot engine/router state immediately before shutdown,
+  then sample plug-in block accounting after callback join so its multi-atomic
+  invariant is stable. The corrected run reports 64 frames, 14 callbacks, and
+  exact 15 = 13 + two pipeline blocks.
+
+#### BUG-T126 - repeated plug-in scans mixed retries with machine-speed cutoffs
+
+- Observed condition: the production backend could launch the same failed scan
+  up to 12 times, while a valid but contended scanner/worker was rejected by
+  short 5/15/30-second ceilings. Failure time was bloated and acceptance could
+  depend on CPU scheduling.
+- Change and proof: run one isolated scan, accept only its exit/result signal,
+  report its exact start/exit/hang error, and widen only outer hang deadmen.
+  Gateway passed the final production scanner/worker path in 2.15 seconds; the
+  normal fast path gains no delay.

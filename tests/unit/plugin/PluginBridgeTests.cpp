@@ -1,21 +1,41 @@
 // Native unit coverage is owned by the repository-level test tree.
 #include "PluginAudioBridge.hpp"
+#include "PluginSharedMemory.hpp"
 #include "common.hpp"
 
 #include <algorithm>
 #include <array>
 #include <cstdint>
 #include <iostream>
+#include <string>
 
 int main()
 {
+    {
+        const std::string token =
+            "nativeplugintransport" + std::to_string(jam2::monotonic_us());
+        auto owner = jam2::pluginhost::PluginSharedMemory::create(token);
+        auto peer = jam2::pluginhost::PluginSharedMemory::open(token);
+        owner.get()->heartbeat.store(73U, std::memory_order_release);
+        if (peer.get() == nullptr ||
+            peer.get()->heartbeat.load(std::memory_order_acquire) != 73U) {
+            std::cerr << "plugin shared-memory create/open did not share state\n";
+            return 1;
+        }
+    }
+
     {
         jam2::pluginhost::SharedState shared;
         jam2::pluginhost::PluginAudioBridge bridge(
             shared, 16, jam2::audio::InputSourceKind::Audio);
         shared.plugin_latency_frames.store(7, std::memory_order_relaxed);
-        if (bridge.latency_frames(16) != 39) {
-            std::cerr << "VST3 recording latency omitted isolation or worker latency\n";
+        shared.worker_input_peak_ppm.store(321U, std::memory_order_relaxed);
+        shared.midi_events_consumed.store(4U, std::memory_order_relaxed);
+        const auto diagnostics = bridge.stats();
+        if (bridge.latency_frames(16) != 39 ||
+            diagnostics.worker_input_peak_ppm != 321U ||
+            diagnostics.midi_events_consumed != 4U) {
+            std::cerr << "VST3 transport omitted latency, input peak, or MIDI diagnostics\n";
             return 1;
         }
         std::array<std::int32_t, 16> silence{};
@@ -76,6 +96,7 @@ int main()
         (void)bridge.render_mono(request, rendered);
         const auto stats = bridge.stats();
         if (stats.deadline_misses != 1 || stats.deadline_concealments != 1 ||
+            stats.wet_output_peak_ppm < 249999U ||
             !std::all_of(rendered.begin(), rendered.end(),
                 [last_wet_sample](std::int32_t sample) {
                     return sample == last_wet_sample;
@@ -99,7 +120,8 @@ int main()
         request.sample_rate = 48000.0;
         (void)bridge.render_mono(request, rendered);
         const auto& published = shared.transport_blocks[1];
-        if (published.midi_count != 33 || published.midi[32].status != 0x92 ||
+        if (published.midi_count != 33 || published.midi_live_count != 1 ||
+            published.midi[32].status != 0x92 ||
             published.midi[32].data1 != 64) {
             std::cerr << "MIDI reset reservation corrupted the following live event\n";
             return 1;

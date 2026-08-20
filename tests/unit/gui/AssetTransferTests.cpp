@@ -823,7 +823,7 @@ void test_private_start_drop_is_one_shot_and_recoverable(const QString& folder)
     expect(transfer.armAutomationDropOutgoingStarts(1, error) && error.isEmpty(),
         "one private outgoing start drop is armed");
     expect(!transfer.armAutomationPause(
-               QStringLiteral("outgoing-validation"), 100, error),
+               QStringLiteral("outgoing-validation"), error),
         "an armed start drop excludes a simultaneous transfer pause");
     transfer.queueSend(hash, QStringLiteral("peer-b"));
     expect(context.runNext(), "start-drop fixture completes outgoing validation");
@@ -831,6 +831,8 @@ void test_private_start_drop_is_one_shot_and_recoverable(const QString& folder)
     expect(context.controls.isEmpty() && context.binaries.isEmpty() &&
             !snapshot.value(QStringLiteral("drop_outgoing_start_armed")).toBool() &&
             snapshot.value(QStringLiteral("dropped_outgoing_starts")).toInteger() == 1 &&
+            snapshot.value(QStringLiteral("last_dropped_outgoing_target")).toString() ==
+                QStringLiteral("peer-b") &&
             snapshot.value(QStringLiteral("outgoing_hash")).toString().isEmpty(),
         "start drop suppresses exactly one frame and resets the outgoing lifecycle");
 
@@ -866,6 +868,8 @@ void test_private_start_drop_is_one_shot_and_recoverable(const QString& folder)
         snapshot = countedTransfer.automationSnapshot();
         expect(countedContext.controls.isEmpty() &&
                 snapshot.value(QStringLiteral("dropped_outgoing_starts")).toInteger() == drop &&
+                snapshot.value(QStringLiteral("last_dropped_outgoing_target")).toString() ==
+                    QStringLiteral("peer-c") &&
                 snapshot.value(QStringLiteral("drop_outgoing_starts_remaining")).toInt() ==
                     3 - drop,
             "counted start drop consumes exactly one fault per outgoing request");
@@ -960,7 +964,7 @@ void test_track_batch_expiry_preserves_same_hash_ownership()
         "unrelated batch expiry is a no-op");
 }
 
-void test_private_automation_pauses_are_bounded_and_cancel_safe(const QString& folder)
+void test_private_automation_gates_are_explicit_and_cancel_safe(const QString& folder)
 {
     const QByteArray wav = pcm16Wav(112, 2950);
     const QString hash = sha256(wav);
@@ -976,29 +980,28 @@ void test_private_automation_pauses_are_bounded_and_cancel_safe(const QString& f
         context.outgoingPaths.insert(hash, path);
         AssetTransferService transfer(context);
         QString error;
-        expect(!transfer.armAutomationPause(QStringLiteral("invalid"), 1000, error) &&
+        expect(!transfer.armAutomationPause(QStringLiteral("invalid"), error) &&
                 !error.isEmpty(),
             "unknown private pause point is rejected with an explanation");
         error.clear();
-        expect(!transfer.armAutomationPause(
-                    QStringLiteral("outgoing-validation"), 99, error) &&
-                !error.isEmpty(),
-            "private pause duration below its bound is rejected");
-        error.clear();
         expect(transfer.armAutomationPause(
-                   QStringLiteral("outgoing-validation"), 5000, error),
-            "bounded outgoing-validation pause is armed");
+                   QStringLiteral("outgoing-validation"), error),
+            "outgoing-validation gate is armed");
         expect(!transfer.armAutomationPause(
-                    QStringLiteral("incoming-chunk"), 1000, error),
-            "a second private pause cannot overlap the armed pause");
+                    QStringLiteral("incoming-chunk"), error),
+            "a second private gate cannot overlap the armed gate");
         transfer.queueSend(hash, QStringLiteral("peer-b"));
         const QJsonObject paused = transfer.automationSnapshot();
         expect(paused.value(QStringLiteral("pause_active")).toString() ==
                     QStringLiteral("outgoing-validation") &&
                 paused.value(QStringLiteral("outgoing_validation_pending")).toBool() &&
                 context.tasks.empty() && context.controls.isEmpty(),
-            "outgoing validation pause is observable before worker or wire activity");
+            "outgoing validation gate is observable before worker or wire activity");
+        error.clear();
+        expect(transfer.releaseAutomationPause(error) && context.tasks.size() == 1,
+            "explicit release, not elapsed wall time, starts outgoing validation");
         transfer.cancel();
+        context.runAll();
         const QJsonObject cancelled = transfer.automationSnapshot();
         expect(cancelled.value(QStringLiteral("pause_active")).toString().isEmpty() &&
                 cancelled.value(QStringLiteral("pause_armed")).toString().isEmpty() &&
@@ -1012,8 +1015,8 @@ void test_private_automation_pauses_are_bounded_and_cancel_safe(const QString& f
         AssetTransferService transfer(context);
         QString error;
         expect(transfer.armAutomationPause(
-                   QStringLiteral("incoming-chunk"), 5000, error),
-            "bounded incoming-chunk pause is armed");
+                   QStringLiteral("incoming-chunk"), error),
+            "incoming-chunk gate is armed");
         transfer.receiveStart(startMessage(hash, wav.size()), context.expectedSource);
         transfer.receiveChunk(chunk(hash, wav), context.expectedSource);
         const QJsonObject paused = transfer.automationSnapshot();
@@ -1036,8 +1039,8 @@ void test_private_automation_pauses_are_bounded_and_cancel_safe(const QString& f
         AssetTransferService transfer(context);
         QString error;
         expect(transfer.armAutomationPause(
-                   QStringLiteral("incoming-finalize"), 5000, error),
-            "bounded incoming-finalize pause is armed");
+                   QStringLiteral("incoming-finalize"), error),
+            "incoming-finalize gate is armed");
         transfer.receiveStart(startMessage(hash, wav.size()), context.expectedSource);
         transfer.receiveChunk(chunk(hash, wav), context.expectedSource);
         expect(context.runNext(), "incoming-finalize fixture writes its durable chunk");
@@ -1048,12 +1051,14 @@ void test_private_automation_pauses_are_bounded_and_cancel_safe(const QString& f
                 paused.value(QStringLiteral("incoming_done_pending")).toBool() &&
                 context.tasks.empty(),
             "incoming finalize pause is observable before atomic validation and commit");
-        transfer.cancel();
+        transfer.discardIncoming();
         context.runAll();
-        expect(context.abandoned == 1 && context.accepted == 0 &&
+        const QJsonObject discarded = transfer.automationSnapshot();
+        expect(context.abandoned == 0 && context.accepted == 0 &&
                 !QFileInfo::exists(context.incomingAssetPath(hash)) &&
-                partialFiles(context, hash).isEmpty(),
-            "cancelling an incoming-finalize pause removes its staged WAV");
+                partialFiles(context, hash).isEmpty() &&
+                discarded.value(QStringLiteral("pause_active")).toString().isEmpty(),
+            "discarding an incoming-finalize pause removes its staged WAV and gate");
     }
 }
 
@@ -1084,7 +1089,7 @@ int main(int argc, char* argv[])
         test_active_outgoing_rerequest_restarts_from_zero(folder.path());
         test_private_start_drop_is_one_shot_and_recoverable(folder.path());
         test_track_batch_expiry_preserves_same_hash_ownership();
-        test_private_automation_pauses_are_bounded_and_cancel_safe(folder.path());
+        test_private_automation_gates_are_explicit_and_cancel_safe(folder.path());
     }
     if (failures == 0) std::cout << "Asset transfer checks passed\n";
     return failures == 0 ? 0 : 1;

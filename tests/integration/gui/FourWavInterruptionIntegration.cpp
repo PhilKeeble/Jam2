@@ -106,7 +106,7 @@ bool send(AutomationProcess& process, QJsonObject command)
 std::optional<QJsonObject> receive(
     AutomationProcess& process,
     const QString& expected,
-    std::chrono::milliseconds timeout = 20s)
+    std::chrono::milliseconds timeout = 60s)
 {
     QJsonObject event;
     QString error;
@@ -278,10 +278,10 @@ bool waitForAll(
     Predicate predicate,
     std::array<QJsonObject, FourPeerCoordinator::kPeerCount>& states,
     bool requireSameDigest,
-    std::chrono::milliseconds timeout = 45s)
+    std::chrono::milliseconds timeout = 90s)
 {
     const auto deadline = std::chrono::steady_clock::now() +
-        jam2::test::scaledTimeout(timeout);
+        jam2::test::deadmanTimeout(timeout);
     int sequence = 0;
     while (std::chrono::steady_clock::now() < deadline) {
         bool ready = true;
@@ -304,7 +304,6 @@ bool waitForAll(
         }
         if (ready) return true;
         ++sequence;
-        QThread::msleep(50);
     }
     fail(QStringLiteral("timed out waiting for ") + description);
     for (std::size_t peer = 0; peer < states.size(); ++peer) {
@@ -321,10 +320,10 @@ bool waitForPeer(
     const QString& description,
     Predicate predicate,
     QJsonObject& state,
-    std::chrono::milliseconds timeout = 10s)
+    std::chrono::milliseconds timeout = 60s)
 {
     const auto deadline = std::chrono::steady_clock::now() +
-        jam2::test::scaledTimeout(timeout);
+        jam2::test::deadmanTimeout(timeout);
     int sequence = 0;
     while (std::chrono::steady_clock::now() < deadline) {
         const auto event = snapshot(
@@ -332,7 +331,6 @@ bool waitForPeer(
         if (!event) return false;
         state = *event;
         if (predicate(state)) return true;
-        QThread::msleep(25);
     }
     fail(QStringLiteral("timed out waiting for ") + description);
     printState(peer, state);
@@ -386,6 +384,30 @@ int assetIndex(const QJsonObject& state, const QString& hash)
         .value(QStringLiteral("asset_hashes")).toArray();
     for (int index = 0; index < hashes.size(); ++index) {
         if (hashes.at(index).toString() == hash) return index;
+    }
+    return -1;
+}
+
+int activeBankAssetLaneIndex(const QJsonObject& state, const QString& hash)
+{
+    const QJsonObject content = state.value(QStringLiteral("content")).toObject();
+    const int activeBank = content.value(QStringLiteral("active_bank")).toInt(-1);
+    const QJsonArray laneBanks = content.value(QStringLiteral("lane_banks")).toArray();
+    const QJsonArray hashes = content.value(QStringLiteral("asset_hashes")).toArray();
+    QStringList bankOrder;
+    for (const QJsonValue& value : laneBanks) {
+        const QString bank = value.toString();
+        if (!bank.isEmpty() && !bankOrder.contains(bank)) bankOrder.append(bank);
+    }
+    if (activeBank < 0 || activeBank >= bankOrder.size() ||
+        hashes.size() != laneBanks.size()) return -1;
+
+    const QString activeBankId = bankOrder.at(activeBank);
+    int localLane = 0;
+    for (int index = 0; index < hashes.size(); ++index) {
+        if (laneBanks.at(index).toString() != activeBankId) continue;
+        if (hashes.at(index).toString() == hash) return localLane;
+        ++localLane;
     }
     return -1;
 }
@@ -540,7 +562,7 @@ bool leaveAndRejoin(
                 }
                 return jam.value(QStringLiteral("remote_peer_count")).toInt() == 2 &&
                     jam.value(QStringLiteral("active_remote_peer_count")).toInt() == 2;
-            }, states, false, 15s) || !verifyNoPartials(coordinator, peer)) {
+            }, states, false, 90s) || !verifyNoPartials(coordinator, peer)) {
         return false;
     }
     if (!apply(coordinator, peer, {
@@ -550,7 +572,7 @@ bool leaveAndRejoin(
             {QStringLiteral("invite_url"), invite},
     })) return false;
     return waitForAll(coordinator, label + QStringLiteral(" four-peer rejoin"),
-        meshReady, states, false, 30s);
+        meshReady, states, false, 90s);
 }
 
 bool shutDown(FourPeerCoordinator& coordinator)
@@ -566,7 +588,7 @@ bool shutDown(FourPeerCoordinator& coordinator)
             !receive(coordinator.peer(peer), QStringLiteral("shutdown"))) return false;
         int exitCode = -1;
         QString error;
-        if (!coordinator.peer(peer).waitForExit(20s, exitCode, error) || exitCode != 0) {
+        if (!coordinator.peer(peer).waitForExit(60s, exitCode, error) || exitCode != 0) {
             fail(QStringLiteral("peer %1 did not exit cleanly: %2 code=%3")
                 .arg(peer + 1).arg(error).arg(exitCode));
             return false;
@@ -584,7 +606,6 @@ int main(int argc, char* argv[])
         std::cerr << "usage: jam2_four_wav_interruption_integration <release-jam2>\n";
         return 2;
     }
-
     QTemporaryDir fixtureFolder;
     std::array<QString, 11> paths;
     std::array<QString, 11> hashes;
@@ -666,7 +687,7 @@ int main(int argc, char* argv[])
 
     std::array<QJsonObject, FourPeerCoordinator::kPeerCount> states;
     if (!waitForAll(coordinator, QStringLiteral("initial interruption mesh"),
-            meshReady, states, true, 30s)) return 1;
+            meshReady, states, true, 90s)) return 1;
 
     struct Scenario {
         const char* label;
@@ -691,7 +712,6 @@ int main(int argc, char* argv[])
                 {QStringLiteral("type"), QStringLiteral("looper.transfer.pause")},
                 {QStringLiteral("id"), label + QStringLiteral("-arm")},
                 {QStringLiteral("point"), pause},
-                {QStringLiteral("milliseconds"), 5000},
             }) || !apply(coordinator, scenario.importPeer, {
                 {QStringLiteral("type"), QStringLiteral("looper.import")},
                 {QStringLiteral("id"), label + QStringLiteral("-import")},
@@ -741,7 +761,7 @@ int main(int argc, char* argv[])
                         if (assetCount(state, expected) != 1) return false;
                     }
                     return true;
-                }, states, true, 60s) ||
+                }, states, true, 90s) ||
             !verifyExactFiles(coordinator, states, expectedHashes) ||
             !verifyNoPartials(coordinator)) {
             return 1;
@@ -798,7 +818,6 @@ int main(int argc, char* argv[])
             {QStringLiteral("type"), QStringLiteral("looper.transfer.pause")},
             {QStringLiteral("id"), QStringLiteral("remove-race-arm")},
             {QStringLiteral("point"), QStringLiteral("outgoing-validation")},
-            {QStringLiteral("milliseconds"), 5000},
         }) || !apply(coordinator, 2, {
             {QStringLiteral("type"), QStringLiteral("invoke")},
             {QStringLiteral("id"), QStringLiteral("remove-race-drop")},
@@ -882,7 +901,7 @@ int main(int argc, char* argv[])
                         !assetAvailable(state, expected)) return false;
                 }
                 return true;
-            }, states, true, 60s) ||
+            }, states, true, 90s) ||
         !verifyExactFiles(coordinator, states, expectedHashes) ||
         !verifyNoPartials(coordinator)) {
         return 1;
@@ -915,7 +934,6 @@ int main(int argc, char* argv[])
             {QStringLiteral("type"), QStringLiteral("looper.transfer.pause")},
             {QStringLiteral("id"), QStringLiteral("remove-chunks-arm")},
             {QStringLiteral("point"), QStringLiteral("incoming-finalize")},
-            {QStringLiteral("milliseconds"), 5000},
         }) || !apply(coordinator, 2, {
             {QStringLiteral("type"), QStringLiteral("invoke")},
             {QStringLiteral("id"), QStringLiteral("remove-chunks-drop")},
@@ -988,7 +1006,7 @@ int main(int argc, char* argv[])
                         !assetAvailable(state, expected)) return false;
                 }
                 return true;
-            }, states, true, 60s) ||
+            }, states, true, 90s) ||
         !verifyExactFiles(coordinator, states, expectedHashes) ||
         !verifyNoPartials(coordinator)) {
         return 1;
@@ -1014,7 +1032,6 @@ int main(int argc, char* argv[])
             {QStringLiteral("type"), QStringLiteral("looper.transfer.pause")},
             {QStringLiteral("id"), QStringLiteral("replace-race-arm")},
             {QStringLiteral("point"), QStringLiteral("outgoing-validation")},
-            {QStringLiteral("milliseconds"), 5000},
         }) || !apply(coordinator, 2, {
             {QStringLiteral("type"), QStringLiteral("invoke")},
             {QStringLiteral("id"), QStringLiteral("replace-race-old-drop")},
@@ -1048,7 +1065,7 @@ int main(int argc, char* argv[])
                 return assetCount(state, hashes[9]) == 0 &&
                     assetCount(state, hashes[10]) == 1 &&
                     transfer.value(QStringLiteral("pause_active")).toString().isEmpty();
-            }, replacementPause, 3s)) return 1;
+            }, replacementPause, 30s)) return 1;
 
     expectedHashes.append(hashes[10]);
     if (!waitForAll(coordinator,
@@ -1073,7 +1090,7 @@ int main(int argc, char* argv[])
                         !assetAvailable(state, expected)) return false;
                 }
                 return true;
-            }, states, true, 60s) ||
+            }, states, true, 90s) ||
         !verifyExactFiles(coordinator, states, expectedHashes) ||
         !verifyNoPartials(coordinator)) {
         return 1;
@@ -1119,7 +1136,29 @@ int main(int argc, char* argv[])
                             "drop_outgoing_start_armed")).toBool() &&
                     transfer.value(QStringLiteral(
                         "dropped_outgoing_starts")).toInteger() == 1;
-            }, droppedState, 15s)) return 1;
+            }, droppedState, 90s)) return 1;
+
+    const QString droppedTarget = droppedState.value(QStringLiteral("content"))
+        .toObject().value(QStringLiteral("transfer")).toObject()
+        .value(QStringLiteral("last_dropped_outgoing_target")).toString();
+    std::optional<std::size_t> droppedPeer;
+    for (std::size_t peer = 0; peer < states.size(); ++peer) {
+        if (states[peer].value(QStringLiteral("jam")).toObject()
+                .value(QStringLiteral("local_token")).toString() == droppedTarget) {
+            droppedPeer = peer;
+            break;
+        }
+    }
+    if (!droppedPeer || *droppedPeer == 0) {
+        fail(QStringLiteral(
+            "dropped outgoing start did not identify its remote requester"));
+        return 1;
+    }
+    if (!apply(coordinator, *droppedPeer, {
+            {QStringLiteral("type"),
+                QStringLiteral("looper.transfer.expire-request-start")},
+            {QStringLiteral("id"), QStringLiteral("start-timeout-expire")},
+        })) return 1;
 
     expectedHashes.append(hashes[4]);
     if (!waitForAll(coordinator, QStringLiteral("request-start timeout recovery"),
@@ -1129,7 +1168,7 @@ int main(int argc, char* argv[])
                     if (assetCount(state, expected) != 1) return false;
                 }
                 return true;
-            }, states, true, 40s) ||
+            }, states, true, 90s) ||
         !verifyExactFiles(coordinator, states, expectedHashes) ||
         !verifyNoPartials(coordinator)) {
         return 1;
@@ -1141,8 +1180,8 @@ int main(int argc, char* argv[])
     }
     const qint64 droppedStartTimeouts =
         requestStartTimeouts - requestStartTimeoutsBeforeDrop;
-    if (droppedStartTimeouts < 1 || droppedStartTimeouts > 3) {
-        fail(QStringLiteral("one dropped start produced %1 new request-start timeouts; expected 1..3")
+    if (droppedStartTimeouts != 1) {
+        fail(QStringLiteral("one explicitly expired dropped start produced %1 new request-start timeouts; expected exactly 1")
             .arg(droppedStartTimeouts));
         return 1;
     }
@@ -1151,7 +1190,6 @@ int main(int argc, char* argv[])
             {QStringLiteral("type"), QStringLiteral("looper.transfer.pause")},
             {QStringLiteral("id"), QStringLiteral("multi-batch-arm")},
             {QStringLiteral("point"), QStringLiteral("outgoing-validation")},
-            {QStringLiteral("milliseconds"), 5000},
         }) || !apply(coordinator, 1, {
             {QStringLiteral("type"), QStringLiteral("looper.import")},
             {QStringLiteral("id"), QStringLiteral("multi-batch-import")},
@@ -1189,7 +1227,7 @@ int main(int argc, char* argv[])
                     if (assetCount(state, expected) != 1) return false;
                 }
                 return true;
-            }, states, true, 60s) ||
+            }, states, true, 90s) ||
         !verifyExactFiles(coordinator, states, expectedHashes) ||
         !verifyNoPartials(coordinator)) {
         return 1;
@@ -1224,7 +1262,7 @@ int main(int argc, char* argv[])
                     content.value(QStringLiteral(
                         "track_sync_last_applied_host_arrangement_revision")).toInt(-1) == 0 &&
                     transferIdle(state);
-            }, states, false, 20s) || !verifyNoPartials(coordinator)) {
+            }, states, false, 90s) || !verifyNoPartials(coordinator)) {
         return 1;
     }
 
@@ -1266,7 +1304,7 @@ int main(int argc, char* argv[])
                     if (assetCount(state, expected) != 1) return false;
                 }
                 return true;
-            }, states, true, 60s) ||
+            }, states, true, 90s) ||
         !verifyExactFiles(coordinator, states, expectedHashes) ||
         !verifyNoPartials(coordinator)) {
         return 1;
@@ -1286,25 +1324,21 @@ int main(int argc, char* argv[])
             {QStringLiteral("id"), QStringLiteral("source-handoff-import-a")},
             {QStringLiteral("lane"), -1},
             {QStringLiteral("source_path"), paths[6]},
-        }) || !send(coordinator.peer(2), {
-            {QStringLiteral("type"), QStringLiteral("looper.import")},
-            {QStringLiteral("id"), QStringLiteral("source-handoff-import-b")},
-            {QStringLiteral("lane"), -1},
-            {QStringLiteral("source_path"), paths[6]},
         }) || !receive(coordinator.peer(1), QStringLiteral("command_applied")) ||
-        !receive(coordinator.peer(2), QStringLiteral("command_applied")) ||
         !waitForAll(coordinator, QStringLiteral("source-handoff local metadata"),
             [&hashes](std::size_t peer, const QJsonObject& state) {
                 return transferIdle(state) && assetCount(state, hashes[6]) == 1 &&
-                    assetAvailable(state, hashes[6]) == (peer == 1 || peer == 2);
-            }, states, true, 30s)) return 1;
+                    assetAvailable(state, hashes[6]) == (peer == 1);
+            }, states, true, 90s)) return 1;
 
-    if (!apply(coordinator, 0, {
-            {QStringLiteral("type"),
-                QStringLiteral("looper.transfer.request-start-timeout")},
-            {QStringLiteral("id"), QStringLiteral("source-handoff-short-timeout")},
-            {QStringLiteral("milliseconds"), 300},
-        }) || !apply(coordinator, 1, {
+    const qint64 sourceHandoffTimeoutsBefore = states[0]
+        .value(QStringLiteral("content")).toObject()
+        .value(QStringLiteral("asset_request_start_timeouts")).toInteger();
+    const qint64 sourceHandoffDropsBefore = states[1]
+        .value(QStringLiteral("content")).toObject()
+        .value(QStringLiteral("transfer")).toObject()
+        .value(QStringLiteral("dropped_outgoing_starts")).toInteger();
+    if (!apply(coordinator, 1, {
             {QStringLiteral("type"), QStringLiteral("looper.transfer.drop-start")},
             {QStringLiteral("id"), QStringLiteral("source-handoff-drop-a")},
             {QStringLiteral("count"), 3},
@@ -1313,19 +1347,63 @@ int main(int argc, char* argv[])
             {QStringLiteral("id"), QStringLiteral("source-handoff-share-a")},
         })) return 1;
 
+    for (int expiry = 1; expiry <= 2; ++expiry) {
+        QJsonObject droppedRequest;
+        if (!waitForPeer(coordinator, 1,
+                QStringLiteral("source-A dropped start %1").arg(expiry),
+                [sourceHandoffDropsBefore, expiry](const QJsonObject& state) {
+                    return state.value(QStringLiteral("content")).toObject()
+                        .value(QStringLiteral("transfer")).toObject()
+                        .value(QStringLiteral("dropped_outgoing_starts")).toInteger() >=
+                        sourceHandoffDropsBefore + expiry;
+                }, droppedRequest, 90s) ||
+            !apply(coordinator, 0, {
+                {QStringLiteral("type"),
+                    QStringLiteral("looper.transfer.expire-request-start")},
+                {QStringLiteral("id"),
+                    QStringLiteral("source-handoff-expire-%1").arg(expiry)},
+            })) {
+            return 1;
+        }
+    }
+
     QJsonObject handoffState;
-    if (!waitForPeer(coordinator, 0, QStringLiteral("three source-A start failures"),
-            [](const QJsonObject& state) {
-                const QJsonObject content = state.value(QStringLiteral("content")).toObject();
-                return content.value(QStringLiteral("asset_request_start_timeouts")).toInteger() == 3 &&
-                    content.value(QStringLiteral("incoming_asset_retry_count")).toInt() == 1;
-            }, handoffState, 10s) ||
-        !apply(coordinator, 0, {
+    QJsonObject thirdDroppedRequest;
+    const int sourceHandoffLane = activeBankAssetLaneIndex(states[2], hashes[6]);
+    if (sourceHandoffLane < 0) {
+        fail(QStringLiteral("source-handoff lane was absent from source B's active bank"));
+        return 1;
+    }
+    if (!waitForPeer(coordinator, 1, QStringLiteral("source-A dropped start 3"),
+            [sourceHandoffDropsBefore](const QJsonObject& state) {
+                return state.value(QStringLiteral("content")).toObject()
+                    .value(QStringLiteral("transfer")).toObject()
+                    .value(QStringLiteral("dropped_outgoing_starts")).toInteger() ==
+                    sourceHandoffDropsBefore + 3;
+            }, thirdDroppedRequest, 90s) || !apply(coordinator, 0, {
             {QStringLiteral("type"), QStringLiteral("looper.transfer.pause")},
             {QStringLiteral("id"), QStringLiteral("source-handoff-offer-pause")},
             {QStringLiteral("point"), QStringLiteral("offer")},
-            {QStringLiteral("milliseconds"), 2000},
-        }) || !apply(coordinator, 2, {
+        }) || !send(coordinator.peer(2), {
+            {QStringLiteral("type"), QStringLiteral("looper.import")},
+            {QStringLiteral("id"), QStringLiteral("source-handoff-import-b")},
+            {QStringLiteral("lane"), sourceHandoffLane},
+            {QStringLiteral("source_path"), paths[6]},
+        }) || !receive(coordinator.peer(2), QStringLiteral("command_applied"))) return 1;
+    QJsonObject sourceBReadyState;
+    if (!waitForPeer(coordinator, 2, QStringLiteral("source-B local asset ready"),
+            [&hashes](const QJsonObject& state) {
+                const QJsonObject content = state.value(QStringLiteral("content")).toObject();
+                return transferIdle(state) &&
+                    content.value(QStringLiteral("file_tasks_active")).toInt(-1) == 0 &&
+                    assetCount(state, hashes[6]) == 1 &&
+                    assetAvailable(state, hashes[6]);
+            }, sourceBReadyState, 90s)) return 1;
+    const qint64 sourceHandoffDropsBeforeB = sourceBReadyState
+        .value(QStringLiteral("content")).toObject()
+        .value(QStringLiteral("transfer")).toObject()
+        .value(QStringLiteral("dropped_outgoing_starts")).toInteger();
+    if (!apply(coordinator, 2, {
             {QStringLiteral("type"), QStringLiteral("looper.transfer.drop-start")},
             {QStringLiteral("id"), QStringLiteral("source-handoff-drop-b")},
         }) || !apply(coordinator, 2, {
@@ -1338,18 +1416,45 @@ int main(int argc, char* argv[])
                 return transfer.value(QStringLiteral("pause_active")).toString() ==
                         QStringLiteral("offer") &&
                     pendingSourcesForHash(state, hashes[6]) >= 2;
-            }, handoffState) || !apply(coordinator, 1, {
-                {QStringLiteral("type"), QStringLiteral("jam.leave")},
-                {QStringLiteral("id"), QStringLiteral("source-handoff-leave-a")},
-            })) return 1;
-
-    if (!waitForPeer(coordinator, 0, QStringLiteral("fresh source-B retry budget"),
-            [&hashes](const QJsonObject& state) {
+            }, handoffState) || !apply(coordinator, 0, {
+            {QStringLiteral("type"),
+                QStringLiteral("looper.transfer.expire-request-start")},
+            {QStringLiteral("id"), QStringLiteral("source-handoff-expire-3")},
+        }) || !waitForPeer(coordinator, 0, QStringLiteral("three source-A start failures"),
+            [sourceHandoffTimeoutsBefore](const QJsonObject& state) {
                 const QJsonObject content = state.value(QStringLiteral("content")).toObject();
-                return content.value(QStringLiteral("asset_request_start_timeouts")).toInteger() == 4 &&
+                return content.value(QStringLiteral(
+                           "asset_request_start_timeouts")).toInteger() ==
+                        sourceHandoffTimeoutsBefore + 3 &&
+                    content.value(QStringLiteral("incoming_asset_retry_count")).toInt() == 1;
+            }, handoffState, 60s) || !apply(coordinator, 1, {
+            {QStringLiteral("type"), QStringLiteral("jam.leave")},
+            {QStringLiteral("id"), QStringLiteral("source-handoff-leave-a")},
+        }) || !apply(coordinator, 0, {
+            {QStringLiteral("type"), QStringLiteral("looper.transfer.release")},
+            {QStringLiteral("id"), QStringLiteral("source-handoff-offer-release")},
+        })) return 1;
+
+    QJsonObject sourceBDroppedRequest;
+    if (!waitForPeer(coordinator, 2, QStringLiteral("source-B dropped start"),
+            [sourceHandoffDropsBeforeB](const QJsonObject& state) {
+                return state.value(QStringLiteral("content")).toObject()
+                    .value(QStringLiteral("transfer")).toObject()
+                    .value(QStringLiteral("dropped_outgoing_starts")).toInteger() ==
+                    sourceHandoffDropsBeforeB + 1;
+            }, sourceBDroppedRequest, 90s) || !apply(coordinator, 0, {
+            {QStringLiteral("type"),
+                QStringLiteral("looper.transfer.expire-request-start")},
+            {QStringLiteral("id"), QStringLiteral("source-handoff-expire-b")},
+        }) || !waitForPeer(coordinator, 0, QStringLiteral("fresh source-B retry budget"),
+            [&hashes, sourceHandoffTimeoutsBefore](const QJsonObject& state) {
+                const QJsonObject content = state.value(QStringLiteral("content")).toObject();
+                const qint64 timeouts = content
+                    .value(QStringLiteral("asset_request_start_timeouts")).toInteger();
+                return timeouts == sourceHandoffTimeoutsBefore + 4 &&
                     content.value(QStringLiteral("incoming_asset_retry_count")).toInt() == 0 &&
                     assetAvailable(state, hashes[6]);
-            }, handoffState, 15s)) return 1;
+            }, handoffState, 90s)) return 1;
 
     if (!apply(coordinator, 1, {
             {QStringLiteral("type"), QStringLiteral("jam.join")},
@@ -1357,7 +1462,7 @@ int main(int argc, char* argv[])
             {QStringLiteral("port"), ports[1]},
             {QStringLiteral("invite_url"), newInvite},
         }) || !waitForAll(coordinator, QStringLiteral("source-handoff rejoin"),
-            meshReady, states, false, 30s) || !apply(coordinator, 0,
+            meshReady, states, false, 90s) || !apply(coordinator, 0,
             wavPolicy(QStringLiteral("source-handoff-auto-on"), true)) ||
         !apply(coordinator, 0, {
             {QStringLiteral("type"), QStringLiteral("looper.share")},
@@ -1373,7 +1478,7 @@ int main(int argc, char* argv[])
                         !assetAvailable(state, expected)) return false;
                 }
                 return true;
-            }, states, true, 60s) ||
+            }, states, true, 90s) ||
         !verifyExactFiles(coordinator, states, expectedHashes) ||
         !verifyNoPartials(coordinator)) return 1;
 

@@ -106,6 +106,11 @@ bool Jam2RuntimeHost::submitPeerUpdate(const std::vector<Jam2RuntimePeer>& peers
     return true;
 }
 
+void Jam2RuntimeHost::submitPeerReprobe() noexcept
+{
+    peer_reprobe_requested_.store(true, std::memory_order_release);
+}
+
 bool Jam2RuntimeHost::submitPeerGain(std::uint64_t peer_id, int gain_ppm) noexcept
 {
     if (peer_id == 0 || gain_ppm < 0 || gain_ppm > 4000000) {
@@ -133,6 +138,11 @@ std::optional<std::vector<Jam2RuntimePeer>> Jam2RuntimeHost::takePeerUpdate()
     auto result = std::move(peer_update_);
     peer_update_.reset();
     return result;
+}
+
+bool Jam2RuntimeHost::takePeerReprobe() noexcept
+{
+    return peer_reprobe_requested_.exchange(false, std::memory_order_acq_rel);
 }
 
 std::vector<Jam2PeerGainUpdate> Jam2RuntimeHost::takePeerGains()
@@ -211,6 +221,7 @@ std::uint64_t Jam2RuntimeHost::nextTransportEventId() noexcept
 void Jam2RuntimeHost::reset() noexcept
 {
     stop_requested.store(false, std::memory_order_release);
+    peer_reprobe_requested_.store(false, std::memory_order_release);
     {
         std::lock_guard<std::mutex> lock(peer_mutex_);
         peer_update_.reset();

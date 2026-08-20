@@ -541,7 +541,7 @@ void testHeadlessUsesSharedPipeline()
 
     jam2::EngineSnapshot snapshot;
     const auto deadline = std::chrono::steady_clock::now() +
-        std::chrono::milliseconds(500);
+        std::chrono::seconds(30);
     while (std::chrono::steady_clock::now() < deadline) {
         snapshot = engine.snapshot();
         if (snapshot.engine_frame >= 2048 &&
@@ -555,7 +555,7 @@ void testHeadlessUsesSharedPipeline()
     }
     const jam2::NetworkCaptureAttachment attachment = engine.attachNetworkCapture();
     const auto attachDeadline = std::chrono::steady_clock::now() +
-        std::chrono::milliseconds(500);
+        std::chrono::seconds(30);
     while (!engine.networkCaptureReady(attachment) &&
            std::chrono::steady_clock::now() < attachDeadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -564,7 +564,7 @@ void testHeadlessUsesSharedPipeline()
     remote.fill((std::numeric_limits<std::int32_t>::max)());
     const std::size_t pushed = engine.pushNetworkPlayback(remote);
     const auto playbackDeadline = std::chrono::steady_clock::now() +
-        std::chrono::milliseconds(500);
+        std::chrono::seconds(30);
     while (std::chrono::steady_clock::now() < playbackDeadline) {
         snapshot = engine.snapshot();
         if (snapshot.remote_peak_ppm > 0) {

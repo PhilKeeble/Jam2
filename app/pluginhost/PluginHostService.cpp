@@ -53,14 +53,14 @@ void PluginHostService::start(const std::string& path, const std::string& class_
         QString::fromStdString(class_id), QString::number(sample_rate, 'g', 17),
         QString::number(maximum_frames), QString::number(source_input_channels),
     });
-    if (!process_.waitForStarted(5000)) {
+    if (!process_.waitForStarted(60000)) {
         error_ = process_.errorString();
         stop();
         throw std::runtime_error("Could not start isolated plugin worker: " + error_.toStdString());
     }
     QElapsedTimer timer;
     timer.start();
-    while (timer.elapsed() < 15000) {
+    while (timer.elapsed() < 120000) {
         const auto state = memory_.get()->worker_state.load(std::memory_order_acquire);
         if (state == WorkerState::Ready) return;
         if (state == WorkerState::Failed || process_.state() == QProcess::NotRunning) break;

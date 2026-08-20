@@ -9,7 +9,7 @@
 namespace jam2::pluginhost {
 
 inline constexpr std::uint32_t kProtocolMagic = 0x4a325633U; // J2V3
-inline constexpr std::uint32_t kProtocolVersion = 3;
+inline constexpr std::uint32_t kProtocolVersion = 4;
 inline constexpr std::size_t kMaximumFrames = 2048;
 inline constexpr std::size_t kMaximumMidiEvents = 512;
 inline constexpr std::size_t kTransportSlots = 4;
@@ -46,7 +46,7 @@ struct alignas(64) TransportSlot {
     std::uint32_t frames = 0;
     std::uint32_t input_channels = 0;
     std::uint32_t midi_count = 0;
-    std::uint32_t reserved = 0;
+    std::uint32_t midi_live_count = 0;
     std::array<std::array<float, kMaximumFrames>, 2> input{};
     std::array<MidiWireEvent, kMaximumMidiEvents> midi{};
 
@@ -68,6 +68,8 @@ struct alignas(64) SharedState {
     std::atomic<std::uint64_t> heartbeat{0};
     std::atomic<std::uint64_t> processed_blocks{0};
     std::atomic<std::uint64_t> failed_blocks{0};
+    std::atomic<std::uint64_t> midi_events_consumed{0};
+    std::atomic<std::uint32_t> worker_input_peak_ppm{0};
     std::atomic<std::uint64_t> process_time_last_us{0};
     std::atomic<std::uint64_t> process_time_sum_us{0};
     std::atomic<std::uint64_t> process_time_max_us{0};

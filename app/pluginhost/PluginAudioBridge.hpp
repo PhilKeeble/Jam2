@@ -23,6 +23,7 @@ struct PluginBridgeStats {
     std::uint64_t midi_late = 0;
     std::uint64_t midi_deferred = 0;
     std::uint64_t midi_dropped = 0;
+    std::uint64_t midi_events_consumed = 0;
     std::uint32_t worker_latency_frames = 0;
     std::uint32_t negotiated_input_channels = 0;
     std::uint32_t negotiated_output_channels = 0;
@@ -32,6 +33,8 @@ struct PluginBridgeStats {
     std::uint64_t worker_process_max_us = 0;
     std::size_t midi_queue_depth = 0;
     std::size_t midi_queue_high_water = 0;
+    std::uint32_t worker_input_peak_ppm = 0;
+    std::uint32_t wet_output_peak_ppm = 0;
 };
 
 class PluginAudioBridge final : public jam2::audio::InputSourceRenderer {
@@ -83,6 +86,7 @@ private:
     std::atomic<std::uint64_t> stale_responses_{0};
     std::atomic<std::uint64_t> midi_late_{0};
     std::atomic<std::uint64_t> midi_deferred_{0};
+    std::atomic<std::uint32_t> maximum_wet_output_peak_ppm_{0};
 };
 
 } // namespace jam2::pluginhost

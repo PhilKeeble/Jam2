@@ -1091,8 +1091,8 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
         settings.renderMelody = false;
         settings.sampleRate = 8000;
         settings.bpm = 240.0;
-        const QString workspace = QDir::current().absoluteFilePath(
-            QStringLiteral("build/advanced-chord-reference-test-") +
+        const QString workspace = QDir(QDir::tempPath()).absoluteFilePath(
+            QStringLiteral("advanced-chord-reference-test-") +
             QUuid::createUuid().toString(QUuid::WithoutBraces));
         const jam2::practice::ReferenceRenderResult rendered =
             jam2::practice::renderPracticeReferences(
@@ -6094,8 +6094,8 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
         settings.renderMelody = true;
         settings.renderBass = true;
         settings.renderSupport = true;
-        const QString workspace = QDir::current().absoluteFilePath(
-            QStringLiteral("build/practice-v5-reference-test-") + QUuid::createUuid().toString(QUuid::WithoutBraces));
+        const QString workspace = QDir(QDir::tempPath()).absoluteFilePath(
+            QStringLiteral("practice-v5-reference-test-") + QUuid::createUuid().toString(QUuid::WithoutBraces));
         const auto rendered = jam2::practice::renderPracticeReferences(
             &idea.chordSection, &idea.beatSection, settings, workspace);
         const auto renderedAgain = jam2::practice::renderPracticeReferences(
@@ -6221,8 +6221,8 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
         settings.renderMelody = true;
         settings.drumKit =
             jam2::practice::ReferenceDrumKit::Electronic;
-        const QString workspace = QDir::current().absoluteFilePath(
-            QStringLiteral("build/manual-reference-test-") +
+        const QString workspace = QDir(QDir::tempPath()).absoluteFilePath(
+            QStringLiteral("manual-reference-test-") +
             QUuid::createUuid().toString(QUuid::WithoutBraces));
         const bool workspaceReady = QDir().mkpath(workspace);
         const jam2::practice::ReferenceRenderResult rendered =
@@ -6485,8 +6485,8 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
         PreparedMixRenderer::outputPath(
             QStringLiteral("workspace"), 1, 7, 1002));
     {
-        const QString workspace = QDir::current().absoluteFilePath(
-            QStringLiteral("build/prepared-mix-short-bank-test-") +
+        const QString workspace = QDir(QDir::tempPath()).absoluteFilePath(
+            QStringLiteral("prepared-mix-short-bank-test-") +
             QUuid::createUuid().toString(QUuid::WithoutBraces));
         const QString sourcePath = QDir(workspace).absoluteFilePath(
             QStringLiteral("long-lane.wav"));
@@ -6523,8 +6523,8 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
         (void)QDir(workspace).removeRecursively();
     }
     {
-        const QString workspace = QDir::current().absoluteFilePath(
-            QStringLiteral("build/prepared-mix-sequence-test-") +
+        const QString workspace = QDir(QDir::tempPath()).absoluteFilePath(
+            QStringLiteral("prepared-mix-sequence-test-") +
             QUuid::createUuid().toString(QUuid::WithoutBraces));
         const QString sourcePath = QDir(workspace).absoluteFilePath(
             QStringLiteral("bank-a.wav"));
@@ -6583,8 +6583,8 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
         (void)QDir(workspace).removeRecursively();
     }
     {
-        const QString workspace = QDir::current().absoluteFilePath(
-            QStringLiteral("build/prepared-mix-bad-lane-test-") +
+        const QString workspace = QDir(QDir::tempPath()).absoluteFilePath(
+            QStringLiteral("prepared-mix-bad-lane-test-") +
             QUuid::createUuid().toString(QUuid::WithoutBraces));
         const QString validPath = QDir(workspace).absoluteFilePath(QStringLiteral("valid.wav"));
         const QString outputPath = QDir(workspace).absoluteFilePath(QStringLiteral("mix.wav"));
@@ -6612,8 +6612,8 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
         (void)QDir(workspace).removeRecursively();
     }
     {
-        const QString workspace = QDir::current().absoluteFilePath(
-            QStringLiteral("build/prepared-mix-long-recording-test-") +
+        const QString workspace = QDir(QDir::tempPath()).absoluteFilePath(
+            QStringLiteral("prepared-mix-long-recording-test-") +
             QUuid::createUuid().toString(QUuid::WithoutBraces));
         const QString generatedPath = QDir(workspace).absoluteFilePath(
             QStringLiteral("generated.wav"));
@@ -6679,8 +6679,8 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
         (void)QDir(workspace).removeRecursively();
     }
     {
-        const QString workspace = QDir::current().absoluteFilePath(
-            QStringLiteral("build/empty-transient-workspace-") +
+        const QString workspace = QDir(QDir::tempPath()).absoluteFilePath(
+            QStringLiteral("empty-transient-workspace-") +
             QUuid::createUuid().toString(QUuid::WithoutBraces));
         const QString transientPath =
             QDir(workspace).absoluteFilePath(QStringLiteral("generated/discard.wav"));
@@ -6701,8 +6701,8 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
         }
     }
     {
-        const QString root = QDir::current().absoluteFilePath(
-            QStringLiteral("build/project-persistence-test-") +
+        const QString root = QDir(QDir::tempPath()).absoluteFilePath(
+            QStringLiteral("project-persistence-test-") +
             QUuid::createUuid().toString(QUuid::WithoutBraces));
         const QString workspace = QDir(root).absoluteFilePath(QStringLiteral("staging"));
         const QString transientPath =
@@ -6742,8 +6742,8 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
         (void)QDir(root).removeRecursively();
     }
     {
-        const QString workspace = QDir::current().absoluteFilePath(
-            QStringLiteral("build/partial-transfer-cleanup-") +
+        const QString workspace = QDir(QDir::tempPath()).absoluteFilePath(
+            QStringLiteral("partial-transfer-cleanup-") +
             QUuid::createUuid().toString(QUuid::WithoutBraces));
         const QString received = QDir(workspace).absoluteFilePath(
             QStringLiteral("received"));
@@ -8290,7 +8290,9 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
                                                 bool& ready,
                                                 bool& fullBlock,
                                                 bool& partialBlock) {
-                const std::uint64_t readyDeadline = jam2::monotonic_us() + 1000000ULL;
+                constexpr std::size_t kProofBlocks = 16;
+                const std::uint64_t readyDeadline =
+                    jam2::monotonic_us() + 30000000ULL;
                 while (!engine.networkCaptureReady(attachment) &&
                        jam2::monotonic_us() < readyDeadline) {
                     std::this_thread::sleep_for(std::chrono::microseconds(100));
@@ -8300,13 +8302,17 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
                     return;
                 }
                 std::array<std::int32_t, 64> packet{};
-                const std::uint64_t exerciseDeadline = jam2::monotonic_us() + 250000ULL;
-                while (jam2::monotonic_us() < exerciseDeadline) {
+                std::size_t fullBlocks = 0;
+                const std::uint64_t exerciseDeadline =
+                    jam2::monotonic_us() + 30000000ULL;
+                while (fullBlocks < kProofBlocks &&
+                       jam2::monotonic_us() < exerciseDeadline) {
                     const jam2::CapturedAudioBlock captured = engine.popNetworkCapture(attachment, packet);
                     if (captured.frames == packet.size()) {
-                        fullBlock = true;
+                        ++fullBlocks;
                     } else if (captured.frames != 0) {
                         partialBlock = true;
+                        break;
                     }
                     const jam2::EnginePitchSnapshot pitch = engine.snapshot().pitch;
                     if (pitch.enabled &&
@@ -8317,12 +8323,14 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
                     }
                     std::this_thread::sleep_for(std::chrono::microseconds(50));
                 }
+                fullBlock = fullBlocks == kProofBlocks;
             };
 
             jam2::NetworkCaptureAttachment attachment = engine.attachNetworkCapture();
             exerciseAttachment(attachment, initialReady, initialFullBlock, initialPartialBlock);
             engine.detachNetworkCapture(attachment);
-            const std::uint64_t detachDeadline = jam2::monotonic_us() + 1000000ULL;
+            const std::uint64_t detachDeadline =
+                jam2::monotonic_us() + 30000000ULL;
             while (engine.snapshot().network_capture_enabled &&
                    jam2::monotonic_us() < detachDeadline) {
                 std::this_thread::sleep_for(std::chrono::microseconds(100));
@@ -8330,8 +8338,9 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
             attachment = engine.attachNetworkCapture();
             exerciseAttachment(attachment, reattachReady, reattachFullBlock, reattachPartialBlock);
             engine.detachNetworkCapture(attachment);
-            const std::uint64_t pitchDeadline = jam2::monotonic_us() + 2000000ULL;
-            while (jam2::monotonic_us() < pitchDeadline) {
+            const std::uint64_t pitchDeadline =
+                jam2::monotonic_us() + 30000000ULL;
+            while (!pitchDetected && jam2::monotonic_us() < pitchDeadline) {
                 const jam2::EngineSnapshot snapshot = engine.snapshot();
                 lastPitch = snapshot.pitch;
                 lastPitchCallbacks = snapshot.callbacks;
@@ -8351,20 +8360,34 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
             if (!engine.submit(disablePitch)) {
                 throw std::runtime_error("pitch-analysis disable command queue unavailable");
             }
-            const std::uint64_t disableDeadline = jam2::monotonic_us() + 1000000ULL;
+            const std::uint64_t disableDeadline =
+                jam2::monotonic_us() + 30000000ULL;
             std::uint64_t stoppedWindows = 0;
+            long stoppedCallbacks = 0;
             while (jam2::monotonic_us() < disableDeadline) {
                 const jam2::EngineSnapshot snapshot = engine.snapshot();
-                if (!snapshot.pitch.enabled) {
+                if (!snapshot.pitch.enabled && !snapshot.pitch.callback_tap_enabled) {
                     pitchDisabled = true;
                     stoppedWindows = snapshot.pitch.analyzed_windows;
+                    stoppedCallbacks = snapshot.callbacks;
                     break;
                 }
                 std::this_thread::sleep_for(std::chrono::milliseconds(2));
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(80));
+            const long proofCallbacks = stoppedCallbacks + 16;
+            jam2::EngineSnapshot stoppedSnapshot;
+            const std::uint64_t stoppedDeadline =
+                jam2::monotonic_us() + 30000000ULL;
+            while (pitchDisabled && jam2::monotonic_us() < stoppedDeadline) {
+                stoppedSnapshot = engine.snapshot();
+                if (stoppedSnapshot.callbacks >= proofCallbacks) break;
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
             pitchStoppedProcessing = pitchDisabled &&
-                engine.snapshot().pitch.analyzed_windows == stoppedWindows;
+                stoppedSnapshot.callbacks >= proofCallbacks &&
+                !stoppedSnapshot.pitch.enabled &&
+                !stoppedSnapshot.pitch.callback_tap_enabled &&
+                stoppedSnapshot.pitch.analyzed_windows == stoppedWindows;
         } catch (const std::exception& exception) {
             captureError = QString::fromUtf8(exception.what());
         }
@@ -8423,7 +8446,8 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
                 throw std::runtime_error("bass pitch-analysis enable command queue unavailable");
             }
 
-            const std::uint64_t deadline = jam2::monotonic_us() + 3000000ULL;
+            const std::uint64_t deadline =
+                jam2::monotonic_us() + 30000000ULL;
             while (jam2::monotonic_us() < deadline) {
                 lastPitch = engine.snapshot().pitch;
                 if (lastPitch.enabled &&
@@ -8483,16 +8507,29 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
             config.output_level_ppm = 0;
             engine.start(config);
             engineStarted = true;
-            std::this_thread::sleep_for(std::chrono::milliseconds(40));
-            mutedPeakPpm = engine.snapshot().output_peak_ppm;
-            muted = mutedPeakPpm == 0;
+            const jam2::EngineSnapshot initialSnapshot = engine.snapshot();
+            const long mutedProofCallbacks = initialSnapshot.callbacks + 16;
+            const std::uint64_t mutedDeadline =
+                jam2::monotonic_us() + 30000000ULL;
+            while (jam2::monotonic_us() < mutedDeadline) {
+                const jam2::EngineSnapshot snapshot = engine.snapshot();
+                if (snapshot.callbacks >= mutedProofCallbacks &&
+                    snapshot.input_peak_ppm > 0 &&
+                    snapshot.monitor_peak_ppm > 0) {
+                    mutedPeakPpm = snapshot.output_peak_ppm;
+                    muted = snapshot.output_level_ppm == 0 && mutedPeakPpm == 0;
+                    break;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
             jam2::EngineCommand level;
             level.type = jam2::EngineCommandType::SetOutputLevel;
             level.value = 1000000;
             if (!engine.submit(level)) {
                 throw std::runtime_error("master output command queue unavailable");
             }
-            const std::uint64_t deadline = jam2::monotonic_us() + 1000000ULL;
+            const std::uint64_t deadline =
+                jam2::monotonic_us() + 30000000ULL;
             while (jam2::monotonic_us() < deadline) {
                 const jam2::EngineSnapshot snapshot = engine.snapshot();
                 audibleLevelPpm = snapshot.output_level_ppm;

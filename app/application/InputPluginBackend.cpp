@@ -40,6 +40,7 @@ InputPluginStats copyStats(const pluginhost::PluginBridgeStats& source) noexcept
     result.midiLate = source.midi_late;
     result.midiDeferred = source.midi_deferred;
     result.midiDropped = source.midi_dropped;
+    result.midiEventsConsumed = source.midi_events_consumed;
     result.workerLatencyFrames = source.worker_latency_frames;
     result.negotiatedInputChannels = source.negotiated_input_channels;
     result.negotiatedOutputChannels = source.negotiated_output_channels;
@@ -49,6 +50,8 @@ InputPluginStats copyStats(const pluginhost::PluginBridgeStats& source) noexcept
     result.workerProcessMaxUs = source.worker_process_max_us;
     result.midiQueueDepth = source.midi_queue_depth;
     result.midiQueueHighWater = source.midi_queue_high_water;
+    result.workerInputPeakPpm = source.worker_input_peak_ppm;
+    result.wetOutputPeakPpm = source.wet_output_peak_ppm;
     return result;
 }
 
@@ -190,43 +193,46 @@ public:
             guiThread, workerPool, selectFirstClass = options_.selectFirstClass
         ]() mutable {
             try {
-                constexpr int maximumProbeAttempts = 12;
-                for (int attempt = 0; attempt < maximumProbeAttempts &&
-                     scan->classes.isEmpty(); ++attempt) {
-                    (void)QFile::remove(resultPath);
-                    QProcess probe;
-                    probe.setProcessChannelMode(QProcess::ForwardedChannels);
-                    probe.setInputChannelMode(QProcess::ForwardedInputChannel);
-                    probe.start(workerPath,
-                        {QStringLiteral("--probe-file"), pluginPath, resultPath});
-                    if (!probe.waitForStarted(5000) || !probe.waitForFinished(30000) ||
-                        probe.exitStatus() != QProcess::NormalExit || probe.exitCode() != 0) {
-                        if (attempt + 1 == maximumProbeAttempts) {
-                            scan->error = QStringLiteral(
-                                "The isolated scanner could not load this VST3 plugin after "
-                                "12 bounded attempts. Jam2 was not exposed to the plugin.");
-                        }
-                        continue;
-                    }
+                (void)QFile::remove(resultPath);
+                QProcess probe;
+                probe.setProcessChannelMode(QProcess::ForwardedChannels);
+                probe.setInputChannelMode(QProcess::ForwardedInputChannel);
+                probe.start(workerPath,
+                    {QStringLiteral("--probe-file"), pluginPath, resultPath});
+                if (!probe.waitForStarted(60000)) {
+                    scan->error = QStringLiteral(
+                        "The isolated VST3 scanner did not start: %1")
+                            .arg(probe.errorString());
+                } else if (!probe.waitForFinished(120000)) {
+                    probe.kill();
+                    (void)probe.waitForFinished(5000);
+                    scan->error = QStringLiteral(
+                        "The isolated VST3 scanner did not finish before its hang deadman.");
+                } else if (probe.exitStatus() != QProcess::NormalExit ||
+                           probe.exitCode() != 0) {
+                    scan->error = QStringLiteral(
+                        "The isolated VST3 scanner rejected the plugin (exit %1).")
+                            .arg(probe.exitCode());
+                } else {
                     QFile result(resultPath);
                     if (!result.open(QIODevice::ReadOnly)) {
                         scan->error = QStringLiteral(
                             "Could not read the private plugin scan result.");
-                        break;
-                    }
-                    const QList<QByteArray> lines = result.readAll().split('\n');
-                    for (const QByteArray& line : lines) {
-                        const QList<QByteArray> fields = line.trimmed().split('\t');
-                        if (fields.size() < 2) continue;
-                        QStringList values;
-                        for (const QByteArray& field : fields)
-                            values.push_back(QString::fromUtf8(field));
-                        scan->classes.push_back(std::move(values));
+                    } else {
+                        const QList<QByteArray> lines = result.readAll().split('\n');
+                        for (const QByteArray& line : lines) {
+                            const QList<QByteArray> fields = line.trimmed().split('\t');
+                            if (fields.size() < 2) continue;
+                            QStringList values;
+                            for (const QByteArray& field : fields)
+                                values.push_back(QString::fromUtf8(field));
+                            scan->classes.push_back(std::move(values));
+                        }
                     }
                 }
                 if (scan->classes.isEmpty() && scan->error.isEmpty()) {
                     scan->error = QStringLiteral(
-                        "No VST3 audio or instrument class was found after 12 isolated attempts.");
+                        "No VST3 audio or instrument class was found.");
                 }
             } catch (const std::exception& error) {
                 scan->error = QString::fromUtf8(error.what());
@@ -511,11 +517,6 @@ private:
 
 class SyntheticInputPluginBackend final : public InputPluginBackend {
 public:
-    explicit SyntheticInputPluginBackend(std::chrono::milliseconds loadDelay)
-        : loadDelay_(std::max(loadDelay, std::chrono::milliseconds::zero()))
-    {
-    }
-
     bool selectAndStart(
         QWidget& parent,
         QThreadPool&,
@@ -534,10 +535,8 @@ public:
             ? QStringLiteral("Automation MIDI Instrument %1").arg(sequence)
             : QStringLiteral("Automation Audio Effect %1").arg(sequence);
         if (progress) progress(-1, QStringLiteral("Loading deterministic input plugin…"));
-        const auto delay = static_cast<int>(std::min<std::int64_t>(
-            loadDelay_.count(), std::numeric_limits<int>::max()));
         QPointer<QWidget> owner(&parent);
-        QTimer::singleShot(delay, &parent, [
+        auto finish = [
             owner, request, completion = std::move(completion),
             progress = std::move(progress), name
         ]() mutable {
@@ -548,16 +547,74 @@ public:
                     "%1 loaded. You can open its interface now.").arg(name));
             }
             completion(std::move(host), name);
-        });
+        };
+        if (gateArmed_) {
+            gateArmed_ = false;
+            gateActive_ = true;
+            gatedCompletion_ = std::move(finish);
+        } else {
+            QTimer::singleShot(0, &parent, std::move(finish));
+        }
         return true;
     }
 
+    bool armAutomationCompletionGate(QString& error) noexcept override
+    {
+        if (gateArmed_ || gateActive_) {
+            error = QStringLiteral("an input-plugin completion gate is already armed or active");
+            return false;
+        }
+        gateArmed_ = true;
+        error.clear();
+        return true;
+    }
+
+    bool releaseAutomationCompletionGate(QString& error) noexcept override
+    {
+        if (!gateActive_ || !gatedCompletion_) {
+            error = QStringLiteral("no input-plugin completion gate is active");
+            return false;
+        }
+        gateActive_ = false;
+        auto completion = std::move(gatedCompletion_);
+        gatedCompletion_ = {};
+        error.clear();
+        completion();
+        return true;
+    }
+
+    AutomationCompletionGateState automationCompletionGateState() const noexcept override
+    {
+        if (gateActive_) return AutomationCompletionGateState::Active;
+        if (gateArmed_) return AutomationCompletionGateState::Armed;
+        return AutomationCompletionGateState::Idle;
+    }
+
 private:
-    std::chrono::milliseconds loadDelay_{};
     std::atomic<std::uint64_t> loadSequence_{0};
+    bool gateArmed_ = false;
+    bool gateActive_ = false;
+    std::function<void()> gatedCompletion_;
 };
 
 } // namespace
+
+bool InputPluginBackend::armAutomationCompletionGate(QString& error) noexcept
+{
+    error = QStringLiteral("the system input-plugin backend has no automation completion gate");
+    return false;
+}
+
+bool InputPluginBackend::releaseAutomationCompletionGate(QString& error) noexcept
+{
+    error = QStringLiteral("the system input-plugin backend has no automation completion gate");
+    return false;
+}
+
+AutomationCompletionGateState InputPluginBackend::automationCompletionGateState() const noexcept
+{
+    return AutomationCompletionGateState::Unsupported;
+}
 
 std::unique_ptr<InputPluginBackend> makeSystemInputPluginBackend()
 {
@@ -570,10 +627,9 @@ std::unique_ptr<InputPluginBackend> makeSystemInputPluginBackend(
     return std::make_unique<SystemInputPluginBackend>(std::move(options));
 }
 
-std::unique_ptr<InputPluginBackend> makeSyntheticInputPluginBackend(
-    std::chrono::milliseconds loadDelay)
+std::unique_ptr<InputPluginBackend> makeSyntheticInputPluginBackend()
 {
-    return std::make_unique<SyntheticInputPluginBackend>(loadDelay);
+    return std::make_unique<SyntheticInputPluginBackend>();
 }
 
 } // namespace jam2::application

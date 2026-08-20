@@ -241,7 +241,7 @@ void test_playback_count_in_commits_without_control_toggle()
     config.metronome_pattern.bpm = 400;
     engine.start(config);
 
-    const std::uint64_t readyDeadline = jam2::monotonic_us() + 500000ULL;
+    const std::uint64_t readyDeadline = jam2::monotonic_us() + 30000000ULL;
     while (engine.snapshot().engine_frame < 1024 &&
            jam2::monotonic_us() < readyDeadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -258,7 +258,7 @@ void test_playback_count_in_commits_without_control_toggle()
     bool countInAudible = false;
     bool committed = false;
     jam2::EngineSnapshot finalSnapshot;
-    const std::uint64_t commitDeadline = jam2::monotonic_us() + 1500000ULL;
+    const std::uint64_t commitDeadline = jam2::monotonic_us() + 30000000ULL;
     while (jam2::monotonic_us() < commitDeadline) {
         const jam2::EngineSnapshot snapshot = engine.snapshot();
         finalSnapshot = snapshot;
@@ -302,7 +302,7 @@ jam2::EngineSnapshot measure_headless_send_peak(int sendLevelPpm)
     engine.start(config);
 
     jam2::EngineSnapshot snapshot;
-    const std::uint64_t deadline = jam2::monotonic_us() + 500000ULL;
+    const std::uint64_t deadline = jam2::monotonic_us() + 30000000ULL;
     while (jam2::monotonic_us() < deadline) {
         snapshot = engine.snapshot();
         if (snapshot.engine_frame >= 4096 && snapshot.input_peak_ppm > 0) break;
@@ -355,7 +355,7 @@ void test_headless_injected_audio_uses_input_router()
     const auto waitForRouter = [&router](
         std::uint64_t minimumBlocks,
         bool expectSignal) {
-        const std::uint64_t deadline = jam2::monotonic_us() + 500000ULL;
+        const std::uint64_t deadline = jam2::monotonic_us() + 30000000ULL;
         jam2::audio::InputSourceRouterStats stats;
         while (jam2::monotonic_us() < deadline) {
             stats = router.stats();

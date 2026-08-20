@@ -137,7 +137,7 @@ bool valid_payload_size(PacketType type, std::size_t size, NetworkAudioFormat au
     switch (type) {
     case PacketType::Hello:
     case PacketType::HelloAck:
-        return size == 8;
+        return size == kPeerIdentityPayloadSize;
     case PacketType::Audio:
         return audio_bytes_per_sample(audio_format) != 0 && size > 0 &&
             size <= kMaxAudioFramesPerPacket * audio_bytes_per_sample(audio_format) &&
@@ -155,6 +155,29 @@ bool valid_payload_size(PacketType type, std::size_t size, NetworkAudioFormat au
 }
 
 } // namespace
+
+std::array<std::uint8_t, kPeerIdentityPayloadSize> encode_peer_identity(
+    std::uint64_t peer_id) noexcept
+{
+    std::array<std::uint8_t, kPeerIdentityPayloadSize> payload{};
+    for (std::size_t index = 0; index < payload.size(); ++index) {
+        payload[index] = static_cast<std::uint8_t>((peer_id >> (index * 8U)) & 0xffU);
+    }
+    return payload;
+}
+
+std::optional<std::uint64_t> decode_peer_identity(
+    std::span<const std::uint8_t> payload) noexcept
+{
+    if (payload.size() != kPeerIdentityPayloadSize) {
+        return std::nullopt;
+    }
+    std::uint64_t peer_id = 0;
+    for (std::size_t index = 0; index < payload.size(); ++index) {
+        peer_id |= static_cast<std::uint64_t>(payload[index]) << (index * 8U);
+    }
+    return peer_id == 0 ? std::nullopt : std::optional<std::uint64_t>{peer_id};
+}
 
 std::vector<std::uint8_t> encode_packet(
     const Header& header,

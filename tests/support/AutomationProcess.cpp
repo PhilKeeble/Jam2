@@ -403,7 +403,7 @@ bool AutomationProcess::readEvent(
     QJsonObject& event, std::chrono::milliseconds timeout, QString& error)
 {
     error.clear();
-    timeout = jam2::test::scaledTimeout(timeout);
+    timeout = jam2::test::deadmanTimeout(timeout);
     const auto deadline = std::chrono::steady_clock::now() + timeout;
     std::array<unsigned char, 4> prefix{};
     if (!readExact(prefix.data(), prefix.size(), deadline, error)) return false;
@@ -482,7 +482,7 @@ bool AutomationProcess::waitForExit(
     std::chrono::milliseconds timeout, int& exitCode, QString& error)
 {
     error.clear();
-    timeout = jam2::test::scaledTimeout(timeout);
+    timeout = jam2::test::deadmanTimeout(timeout);
     if (exited_) {
         exitCode = exitCode_;
         return true;

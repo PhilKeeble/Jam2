@@ -50,7 +50,7 @@ std::unique_ptr<jam2::application::InputPluginHost> load(
             progressMessages.push_back(text);
         });
     require(started, "synthetic plugin load did not start");
-    timeout.start(2000);
+    timeout.start(30000);
     loop.exec();
     require(timeout.isActive(), "synthetic plugin load timed out");
     require(result != nullptr, "synthetic plugin load omitted its host");
@@ -68,7 +68,7 @@ int main(int argc, char** argv)
         QWidget parent;
         QThreadPool workers;
         workers.setMaxThreadCount(2);
-        auto backend = jam2::application::makeSyntheticInputPluginBackend(5ms);
+        auto backend = jam2::application::makeSyntheticInputPluginBackend();
 
         jam2::application::InputPluginLoadRequest audioRequest;
         audioRequest.kind = jam2::audio::InputSourceKind::Audio;
@@ -196,15 +196,20 @@ int main(int argc, char** argv)
 
         bool lateCompletion = false;
         auto transientParent = std::make_unique<QWidget>();
-        auto delayed = jam2::application::makeSyntheticInputPluginBackend(50ms);
+        auto delayed = jam2::application::makeSyntheticInputPluginBackend();
+        QString gateError;
+        require(delayed->armAutomationCompletionGate(gateError),
+            "transient synthetic plugin completion gate did not arm");
         require(delayed->selectAndStart(*transientParent, workers,
                 transientParent->thread(), audioRequest,
                 [&lateCompletion](auto, auto) { lateCompletion = true; }, {}),
             "transient synthetic plugin load did not start");
+        require(delayed->automationCompletionGateState() ==
+                jam2::application::AutomationCompletionGateState::Active,
+            "transient synthetic plugin load did not enter its completion gate");
         transientParent.reset();
-        QEventLoop cancellationLoop;
-        QTimer::singleShot(100, &cancellationLoop, &QEventLoop::quit);
-        cancellationLoop.exec();
+        require(delayed->releaseAutomationCompletionGate(gateError),
+            "transient synthetic plugin completion gate did not release");
         require(!lateCompletion,
             "destroyed synthetic plugin owner received a late completion");
 

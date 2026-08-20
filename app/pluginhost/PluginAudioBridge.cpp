@@ -90,6 +90,7 @@ bool PluginAudioBridge::consume(std::uint64_t expected_sequence, std::size_t fra
     }
     const std::size_t channels = selected->output_channels;
     if (channels == 0 || channels > 2) return false;
+    double wet_peak = 0.0;
     for (std::size_t frame = 0; frame < frames; ++frame) {
         float sample = selected->output[0][frame];
         if (channels == 2) sample = 0.5f * (sample + selected->output[1][frame]);
@@ -97,6 +98,7 @@ bool PluginAudioBridge::consume(std::uint64_t expected_sequence, std::size_t fra
             failed_blocks_.fetch_add(1, std::memory_order_relaxed);
             return false;
         }
+        wet_peak = std::max(wet_peak, std::abs(static_cast<double>(sample)));
         output[frame] = float_to_i32(sample);
     }
     const std::uint64_t after = selected->response_generation.load(std::memory_order_acquire);
@@ -104,6 +106,13 @@ bool PluginAudioBridge::consume(std::uint64_t expected_sequence, std::size_t fra
         stale_responses_.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
+    const auto wet_peak_ppm = static_cast<std::uint32_t>(std::llround(
+        std::min(1.0, wet_peak) * 1000000.0));
+    std::uint32_t maximum = maximum_wet_output_peak_ppm_.load(
+        std::memory_order_relaxed);
+    while (wet_peak_ppm > maximum &&
+           !maximum_wet_output_peak_ppm_.compare_exchange_weak(
+               maximum, wet_peak_ppm, std::memory_order_relaxed)) {}
     completed_blocks_.fetch_add(1, std::memory_order_relaxed);
     return true;
 }
@@ -123,6 +132,7 @@ void PluginAudioBridge::publish(const jam2::audio::InputSourceRenderRequest& req
     }
 
     slot.midi_count = 0;
+    slot.midi_live_count = 0;
     auto* queue = midi_queue_.load(std::memory_order_acquire);
     const std::uint64_t dropped_before = queue ? queue->dropped() : last_midi_dropped_;
     const bool reset_midi = midi_reset_requested_.exchange(false, std::memory_order_acq_rel) ||
@@ -146,6 +156,7 @@ void PluginAudioBridge::publish(const jam2::audio::InputSourceRenderRequest& req
             static_cast<std::uint32_t>(request.frames),
             std::span<jam2::midi::Event>(midi_scratch_).subspan(reset_count));
         slot.midi_count += static_cast<std::uint32_t>(result.count);
+        slot.midi_live_count = static_cast<std::uint32_t>(result.count);
         midi_late_.fetch_add(result.late, std::memory_order_relaxed);
         midi_deferred_.fetch_add(result.deferred, std::memory_order_relaxed);
         for (std::size_t index = 0; index < result.count; ++index) {
@@ -249,6 +260,7 @@ PluginBridgeStats PluginAudioBridge::stats() const noexcept
         midi_late_.load(std::memory_order_relaxed),
         midi_deferred_.load(std::memory_order_relaxed),
         queue ? queue->dropped() : 0,
+        shared_.midi_events_consumed.load(std::memory_order_relaxed),
         shared_.plugin_latency_frames.load(std::memory_order_relaxed),
         shared_.negotiated_input_channels.load(std::memory_order_relaxed),
         shared_.negotiated_output_channels.load(std::memory_order_relaxed),
@@ -258,6 +270,8 @@ PluginBridgeStats PluginAudioBridge::stats() const noexcept
         shared_.process_time_max_us.load(std::memory_order_relaxed),
         queue ? queue->depth() : 0,
         queue ? queue->high_water() : 0,
+        shared_.worker_input_peak_ppm.load(std::memory_order_relaxed),
+        maximum_wet_output_peak_ppm_.load(std::memory_order_relaxed),
     };
 }
 

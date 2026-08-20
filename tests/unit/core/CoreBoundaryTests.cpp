@@ -194,6 +194,14 @@ void testProtocolPeerAndMixerBoundaries()
                    static_cast<jam2::protocol::ParseError>(value)) != nullptr,
             "every packet parse error has diagnostic text");
     }
+    const std::uint64_t peerIdentity = 0xfedcba9876543210ULL;
+    const auto encodedPeerIdentity = jam2::protocol::encode_peer_identity(peerIdentity);
+    expect(jam2::protocol::decode_peer_identity(encodedPeerIdentity) == peerIdentity &&
+            !jam2::protocol::decode_peer_identity(
+                std::span<const std::uint8_t>(encodedPeerIdentity).first(7)) &&
+            !jam2::protocol::decode_peer_identity(
+                jam2::protocol::encode_peer_identity(0)),
+        "UDP proof identity has a fixed nonzero eight-byte representation");
     jam2::protocol::ReplayWindow replay;
     expect(replay.observe(10) == jam2::protocol::ReplayResult::New,
         "replay window accepts its first sequence");
@@ -368,8 +376,11 @@ void testUdpStunAndSessionBoundaries()
                {2}, replacementEndpoint, jam2::PeerEndpointState::Probing) &&
             networkSession.activePeerCount() == 0 &&
             networkSession.recognizesEndpoint(replacementEndpoint) &&
-            !networkSession.acceptsEndpoint(replacementEndpoint),
-        "network endpoint replacement resets the stream in a non-active state");
+            !networkSession.acceptsEndpoint(replacementEndpoint) &&
+            networkSession.peerMixStats({2}) != nullptr &&
+            networkSession.peerMixStats({2})->gain_ppm == 700000 &&
+            networkSession.peerMixStats({2})->muted,
+        "network endpoint replacement resets the stream without losing peer mix controls");
     expect(networkSession.setPeerEndpointState({2}, jam2::PeerEndpointState::Active) &&
             networkSession.activePeerCount() == 1,
         "network endpoint promotion restores active fan-out");
@@ -380,6 +391,30 @@ void testUdpStunAndSessionBoundaries()
             receivedTwo->size == replacementPacketSize &&
             !receiverOne.recv_from(packet, 0),
         "network endpoint replacement sends only to the promoted endpoint");
+
+    jam2::UdpSocket receiverThree;
+    receiverThree.bind({"127.0.0.1", 0});
+    const auto reboundEndpoint = jam2::resolve_udp_endpoint(
+        receiverThree.local_endpoint());
+    const auto* streamBeforeRebind = &networkSession.peerStream({2});
+    expect(networkSession.rebindPeerEndpoint(
+               {2}, reboundEndpoint, jam2::PeerEndpointState::Probing) &&
+            &networkSession.peerStream({2}) == streamBeforeRebind &&
+            networkSession.recognizesEndpoint(reboundEndpoint) &&
+            !networkSession.recognizesEndpoint(replacementEndpoint) &&
+            networkSession.peerMixStats({2}) != nullptr &&
+            networkSession.peerMixStats({2})->gain_ppm == 700000 &&
+            networkSession.peerMixStats({2})->muted,
+        "authenticated endpoint rebinding preserves the peer stream and mix controls");
+    expect(networkSession.setPeerEndpointState({2}, jam2::PeerEndpointState::Active),
+        "authenticated endpoint rebinding can promote the preserved stream");
+    const std::size_t reboundPacketSize = networkSession.send(
+        jam2::protocol::PacketType::Ping, 3, 101, {});
+    const auto receivedThree = receiverThree.recv_from(packet, 500);
+    expect(reboundPacketSize == jam2::protocol::kHeaderSize && receivedThree &&
+            receivedThree->size == reboundPacketSize &&
+            !receiverTwo.recv_from(packet, 0),
+        "authenticated endpoint rebinding sends only to the newly observed endpoint");
 
     jam2::UdpSocket placeholderSocket;
     placeholderSocket.bind({"127.0.0.1", 0});
@@ -394,7 +429,7 @@ void testUdpStunAndSessionBoundaries()
         "network-session move assignment preserves the owned session");
     owner.close();
     expect(owner.bootstrapState() == jam2::SessionBootstrapState::Closed &&
-            !owner.recognizesEndpoint(replacementEndpoint),
+            !owner.recognizesEndpoint(reboundEndpoint),
         "network session close rejects every former endpoint");
     expectThrows([&] {
         (void)owner.send(jam2::protocol::PacketType::Ping, 2, 100, {});

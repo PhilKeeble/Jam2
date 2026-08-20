@@ -495,6 +495,9 @@ bool NetworkSession::updatePeerEndpoint(
         return false;
     }
     const PeerStreamConfig config = entry->config;
+    const auto* prior_mix = impl_->mixer.peerStats(peer_id.value);
+    const int prior_gain_ppm = prior_mix != nullptr ? prior_mix->gain_ppm : 1000000;
+    const bool prior_muted = prior_mix != nullptr && prior_mix->muted;
     impl_->mixer.removePeer(peer_id.value);
     PeerStreamPlayback* playback = nullptr;
     if (impl_->playback != nullptr) {
@@ -518,6 +521,8 @@ bool NetworkSession::updatePeerEndpoint(
     entry->stream = std::make_unique<PeerStream>(config, monotonic_us(), playback);
     if (playback != nullptr) {
         impl_->mixer.setPeerActive(peer_id.value, state == PeerEndpointState::Active);
+        impl_->mixer.setPeerGain(peer_id.value, prior_gain_ppm);
+        impl_->mixer.setPeerMuted(peer_id.value, prior_muted);
     }
     return true;
 }
@@ -532,6 +537,28 @@ bool NetworkSession::setPeerEndpointState(PeerId peer_id, PeerEndpointState stat
     if (state == PeerEndpointState::Active) {
         entry->send.consecutive_path_errors = 0;
     }
+    if (impl_->playback != nullptr) {
+        impl_->mixer.setPeerActive(peer_id.value, state == PeerEndpointState::Active);
+    }
+    return true;
+}
+
+bool NetworkSession::rebindPeerEndpoint(
+    PeerId peer_id,
+    const ResolvedUdpEndpoint& endpoint,
+    PeerEndpointState state) noexcept
+{
+    auto* entry = impl_->find(peer_id);
+    if (entry == nullptr) {
+        return false;
+    }
+    const auto* endpoint_owner = impl_->find(endpoint);
+    if (endpoint_owner != nullptr && endpoint_owner->descriptor.peer_id != peer_id) {
+        return false;
+    }
+    entry->descriptor.endpoint = endpoint;
+    entry->descriptor.endpoint_state = state;
+    entry->send.consecutive_path_errors = 0;
     if (impl_->playback != nullptr) {
         impl_->mixer.setPeerActive(peer_id.value, state == PeerEndpointState::Active);
     }

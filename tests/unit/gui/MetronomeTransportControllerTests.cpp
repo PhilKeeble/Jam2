@@ -2,8 +2,6 @@
 #include "PlaybackGrid.hpp"
 
 #include <QCoreApplication>
-#include <QThread>
-
 #include <cmath>
 #include <cstdint>
 #include <iostream>
@@ -73,8 +71,11 @@ void testPlaybackGrid()
 
     const std::uint64_t maximum =
         (std::numeric_limits<std::uint64_t>::max)();
+    require(jam2::gui::interpolated_playback_frame(
+                maximum - 5, 2, 48000) == maximum &&
+            jam2::gui::interpolated_playback_frame(100, 500, 48000) == 24100,
+        "playback interpolation must advance from explicit elapsed time and saturate");
     grid.updateEngine(maximum, maximum, maximum, 0, 48000, true);
-    QThread::msleep(2);
     const PlaybackGrid::Position saturated = grid.position();
     require(saturated.rawCurrentFrame == maximum &&
             saturated.currentFrame == maximum && saturated.absoluteStep == 0,

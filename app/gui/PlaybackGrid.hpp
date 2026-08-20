@@ -4,6 +4,15 @@
 
 #include <cstdint>
 
+namespace jam2::gui {
+
+std::uint64_t interpolated_playback_frame(
+    std::uint64_t frame,
+    std::int64_t elapsedMilliseconds,
+    int sampleRate) noexcept;
+
+} // namespace jam2::gui
+
 // A UI view of the engine-owned musical clock. The elapsed timer only
 // interpolates between engine reports for smooth drawing.
 class PlaybackGrid {

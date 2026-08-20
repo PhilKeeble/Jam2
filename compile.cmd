@@ -208,6 +208,8 @@ if errorlevel 1 (
 )
 
 if defined JAM2_TEST_TARGET (
+    call :resolve_test_jobs
+    if errorlevel 1 exit /b 2
     set "JAM2_TEST_ARTIFACT_ROOT=%REPO_DIR%build\test-artifacts"
     if exist "%REPO_DIR%build\test-artifacts" cmake -E remove_directory "%REPO_DIR%build\test-artifacts"
     if errorlevel 1 (
@@ -232,6 +234,13 @@ if "%JAM2_TEST_FULL_GATE%"=="1" (
         echo ERROR: Could not create the full-gate report directory.
         exit /b 1
     )
+    set "JAM2_COVERAGE_TEST_ARTIFACT_ROOT=%REPO_DIR%build\coverage\test-artifacts"
+    if exist "%REPO_DIR%build\coverage\test-artifacts" cmake -E remove_directory "%REPO_DIR%build\coverage\test-artifacts"
+    if errorlevel 1 (
+        echo.
+        echo ERROR: Could not clear the previous coverage test artifacts.
+        exit /b 1
+    )
     if defined JAM2_TEST_NAME (
         set "JAM2_CTEST_LOG_ARGS=--output-log "%REPO_DIR%build\coverage\windows-focused-release-ctest.log""
     ) else (
@@ -242,6 +251,18 @@ if "%JAM2_TEST_FULL_GATE%"=="1" (
 if not "%JAM2_TEST_FULL_GATE%"=="1" goto normal_build
 call :run_windows_coverage
 set "JAM2_COVERAGE_RESULT=%errorlevel%"
+if not "%JAM2_COVERAGE_RESULT%"=="0" (
+    cmake -E rename "%JAM2_TEST_ARTIFACT_ROOT%" "%JAM2_COVERAGE_TEST_ARTIFACT_ROOT%"
+    if errorlevel 1 (
+        echo ERROR: Could not retain failed coverage test artifacts under build\coverage.
+        exit /b 1
+    )
+) else (
+    cmake -E remove_directory "%JAM2_TEST_ARTIFACT_ROOT%"
+    if errorlevel 1 exit /b 1
+)
+cmake -E make_directory "%JAM2_TEST_ARTIFACT_ROOT%"
+if errorlevel 1 exit /b 1
 
 :normal_build
 
@@ -289,12 +310,13 @@ if errorlevel 1 (
 if defined JAM2_TEST_TARGET (
     echo.
     echo Running Jam2 %JAM2_TEST_SUITE% tests...
+    echo CTest parallel capacity: %JAM2_CTEST_JOBS% ^(override with JAM2_TEST_JOBS^)
     if defined JAM2_TEST_NAME (
-        ctest --test-dir build --output-on-failure %JAM2_CTEST_LOG_ARGS% --no-tests=error -R "^%JAM2_TEST_NAME%$"
+        ctest --test-dir build --output-on-failure --parallel %JAM2_CTEST_JOBS% %JAM2_CTEST_LOG_ARGS% --no-tests=error -R "^%JAM2_TEST_NAME%$"
     ) else if defined JAM2_TEST_LABEL (
-        ctest --test-dir build --output-on-failure %JAM2_CTEST_LOG_ARGS% -L "%JAM2_TEST_LABEL%"
+        ctest --test-dir build --output-on-failure --parallel %JAM2_CTEST_JOBS% %JAM2_CTEST_LOG_ARGS% -L "%JAM2_TEST_LABEL%"
     ) else (
-        ctest --test-dir build --output-on-failure %JAM2_CTEST_LOG_ARGS%
+        ctest --test-dir build --output-on-failure --parallel %JAM2_CTEST_JOBS% %JAM2_CTEST_LOG_ARGS%
     )
     if errorlevel 1 (
         echo.
@@ -304,23 +326,40 @@ if defined JAM2_TEST_TARGET (
 )
 
 echo.
+if defined JAM2_TEST_TARGET (
+    cmake -P "%REPO_DIR%build\ResetTestArtifactWorkspace.cmake"
+    if errorlevel 1 (
+        echo ERROR: Tests passed, but their artifact workspace could not be reset:
+        echo        "%JAM2_TEST_ARTIFACT_ROOT%"
+        exit /b 1
+    )
+)
 if not "%JAM2_COVERAGE_RESULT%"=="0" (
     echo COVERAGE GATE FAILED. The normal Release binary and tests were restored successfully.
     echo Inspect "%REPO_DIR%build\coverage" for the native coverage reports.
     exit /b 1
 )
 if defined JAM2_TEST_TARGET (
-    cmake -E remove_directory "%JAM2_TEST_ARTIFACT_ROOT%"
-    if errorlevel 1 (
-        echo ERROR: Tests passed, but their artifact workspace could not be removed:
-        echo        "%JAM2_TEST_ARTIFACT_ROOT%"
-        exit /b 1
-    )
-)
-if defined JAM2_TEST_TARGET (
     echo BUILD AND TESTS SUCCEEDED.
 ) else (
     echo BUILD SUCCEEDED.
+)
+exit /b 0
+
+:resolve_test_jobs
+if defined JAM2_TEST_JOBS (
+    echo(%JAM2_TEST_JOBS%| findstr /r "^[1-9][0-9]*$" >nul
+    if errorlevel 1 (
+        echo.
+        echo ERROR: JAM2_TEST_JOBS must be a positive integer.
+        exit /b 1
+    )
+    set "JAM2_CTEST_JOBS=%JAM2_TEST_JOBS%"
+) else (
+    set "JAM2_CTEST_JOBS=1"
+    if defined NUMBER_OF_PROCESSORS set /a JAM2_CTEST_JOBS=%NUMBER_OF_PROCESSORS%-1
+    if defined NUMBER_OF_PROCESSORS if %NUMBER_OF_PROCESSORS% LEQ 2 set "JAM2_CTEST_JOBS=1"
+    if defined NUMBER_OF_PROCESSORS if %NUMBER_OF_PROCESSORS% GTR 9 set "JAM2_CTEST_JOBS=8"
 )
 exit /b 0
 

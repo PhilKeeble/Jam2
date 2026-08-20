@@ -34,7 +34,8 @@ private:
     void handle(const QJsonObject& command);
     void emitEvent(QString event, QJsonObject fields = {});
     QJsonObject controlInventoryPage(int cursor, bool includeState);
-    bool invokeControl(const QJsonObject& command, QString& error);
+    bool invokeControl(
+        const QJsonObject& command, QString& error, bool& completionDeferred);
     void reject(const QJsonObject& command, const QString& reason);
 
     MainWindow& window_;

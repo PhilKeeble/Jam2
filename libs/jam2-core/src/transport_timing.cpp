@@ -187,4 +187,86 @@ std::optional<QuantizedTransportSchedule> next_bar_transport_schedule(
     };
 }
 
+std::optional<QuantizedTransportSchedule> align_received_transport_to_grid(
+    double sampleRate,
+    metronome::PatternSnapshot pattern,
+    std::uint64_t rawCurrentFrame,
+    std::int64_t renderOffsetFrames,
+    bool epochValid,
+    std::uint64_t epochMusicalFrame,
+    std::uint64_t estimatedTargetRawFrame,
+    std::uint64_t countInFrames) noexcept
+{
+    if (!epochValid || !std::isfinite(sampleRate) ||
+        sampleRate < static_cast<double>(limits::kMinimumSampleRate) ||
+        sampleRate > static_cast<double>(limits::kMaximumSampleRate)) {
+        return std::nullopt;
+    }
+    const int integerSampleRate = static_cast<int>(std::llround(sampleRate));
+    if (!limits::valid_sample_rate(integerSampleRate)) {
+        return std::nullopt;
+    }
+
+    pattern = metronome::sanitize(pattern);
+    const std::uint64_t stepFrames = metronome::step_interval_samples(
+        static_cast<double>(integerSampleRate),
+        pattern.bpm,
+        pattern.division,
+        pattern.tempo_pulse_units);
+    std::uint64_t stepsPerBar = 0;
+    std::uint64_t barFrames = 0;
+    if (stepFrames == 0 ||
+        !checked_multiply(
+            static_cast<std::uint64_t>(pattern.division),
+            static_cast<std::uint64_t>(pattern.beats_per_bar),
+            stepsPerBar) ||
+        !checked_multiply(stepFrames, stepsPerBar, barFrames) ||
+        barFrames == 0) {
+        return std::nullopt;
+    }
+
+    std::uint64_t estimatedMusical = 0;
+    if (!checked_musical_from_raw(
+            estimatedTargetRawFrame,
+            renderOffsetFrames,
+            estimatedMusical) ||
+        estimatedMusical < epochMusicalFrame) {
+        return std::nullopt;
+    }
+    const std::uint64_t elapsed = estimatedMusical - epochMusicalFrame;
+    const std::uint64_t completedBars = elapsed / barFrames;
+    std::uint64_t lowerOffset = 0;
+    std::uint64_t lowerBoundary = 0;
+    if (!checked_multiply(completedBars, barFrames, lowerOffset) ||
+        !checked_add(epochMusicalFrame, lowerOffset, lowerBoundary)) {
+        return std::nullopt;
+    }
+    std::uint64_t targetMusicalFrame = lowerBoundary;
+    const std::uint64_t distanceBelow = estimatedMusical - lowerBoundary;
+    if (distanceBelow > barFrames / 2ULL) {
+        if (!checked_add(lowerBoundary, barFrames, targetMusicalFrame)) {
+            return std::nullopt;
+        }
+    }
+
+    std::uint64_t targetRawFrame = 0;
+    if (!checked_raw_from_musical(
+            targetMusicalFrame,
+            renderOffsetFrames,
+            targetRawFrame) ||
+        targetRawFrame < countInFrames) {
+        return std::nullopt;
+    }
+    const std::uint64_t countdownRawFrame = targetRawFrame - countInFrames;
+    if (countdownRawFrame <= rawCurrentFrame ||
+        targetRawFrame < countdownRawFrame) {
+        return std::nullopt;
+    }
+    return QuantizedTransportSchedule{
+        countdownRawFrame,
+        targetRawFrame,
+        targetMusicalFrame,
+    };
+}
+
 } // namespace jam2

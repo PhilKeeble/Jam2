@@ -113,7 +113,6 @@ QString AssetTransferService::automationPausePointName(AutomationPausePoint poin
 
 bool AssetTransferService::armAutomationPause(
     const QString& point,
-    int milliseconds,
     QString& error)
 {
     AutomationPausePoint parsed = AutomationPausePoint::None;
@@ -127,10 +126,6 @@ bool AssetTransferService::armAutomationPause(
         error = QStringLiteral("unsupported asset-transfer pause point");
         return false;
     }
-    if (milliseconds < 100 || milliseconds > 5000) {
-        error = QStringLiteral("asset-transfer pause must be between 100 and 5000 ms");
-        return false;
-    }
     if (automationDropOutgoingStartsRemaining_ > 0 ||
         automationPauseArmed_ != AutomationPausePoint::None ||
         automationPauseActive_ != AutomationPausePoint::None) {
@@ -138,8 +133,22 @@ bool AssetTransferService::armAutomationPause(
         return false;
     }
     automationPauseArmed_ = parsed;
-    automationPauseMilliseconds_ = milliseconds;
     error.clear();
+    return true;
+}
+
+bool AssetTransferService::releaseAutomationPause(QString& error)
+{
+    if (automationPauseActive_ == AutomationPausePoint::None ||
+        !automationPauseResume_) {
+        error = QStringLiteral("no asset-transfer gate is active");
+        return false;
+    }
+    automationPauseActive_ = AutomationPausePoint::None;
+    auto resume = std::move(automationPauseResume_);
+    automationPauseResume_ = {};
+    error.clear();
+    resume();
     return true;
 }
 
@@ -156,6 +165,7 @@ bool AssetTransferService::armAutomationDropOutgoingStarts(int count, QString& e
         return false;
     }
     automationDropOutgoingStartsRemaining_ = count;
+    automationLastDroppedOutgoingTargetToken_.clear();
     error.clear();
     return true;
 }
@@ -164,7 +174,7 @@ void AssetTransferService::clearAutomationPause()
 {
     automationPauseArmed_ = AutomationPausePoint::None;
     automationPauseActive_ = AutomationPausePoint::None;
-    automationPauseMilliseconds_ = 0;
+    automationPauseResume_ = {};
     automationDropOutgoingStartsRemaining_ = 0;
 }
 
@@ -193,6 +203,8 @@ QJsonObject AssetTransferService::automationSnapshot() const
             automationDropOutgoingStartsRemaining_},
         {QStringLiteral("dropped_outgoing_starts"),
             static_cast<qint64>(automationDroppedOutgoingStarts_)},
+        {QStringLiteral("last_dropped_outgoing_target"),
+            automationLastDroppedOutgoingTargetToken_},
     };
 }
 
@@ -209,14 +221,7 @@ bool AssetTransferService::pauseForAutomation(
     if (automationPauseArmed_ != point) return false;
     automationPauseArmed_ = AutomationPausePoint::None;
     automationPauseActive_ = point;
-    const int delay = automationPauseMilliseconds_;
-    QTimer::singleShot(delay, context_.dispatchContext(),
-        [this, point, resume = std::move(resume)]() mutable {
-            if (automationPauseActive_ != point) return;
-            automationPauseActive_ = AutomationPausePoint::None;
-            automationPauseMilliseconds_ = 0;
-            resume();
-        });
+    automationPauseResume_ = std::move(resume);
     return true;
 }
 
@@ -402,6 +407,8 @@ void AssetTransferService::continueSend()
         if (automationDropOutgoingStartsRemaining_ > 0) {
             --automationDropOutgoingStartsRemaining_;
             ++automationDroppedOutgoingStarts_;
+            automationLastDroppedOutgoingTargetToken_ =
+                outgoingLooperAssetTargetToken_;
             context_.appendAssetLog(QStringLiteral(
                 "automation dropped one outgoing looper asset start: hash=%1 target=%2")
                 .arg(outgoingLooperAssetHash_, outgoingLooperAssetTargetToken_.left(8)));
@@ -565,7 +572,7 @@ void AssetTransferService::discardOutgoingHash(const QString& hash)
     if (outgoingInterrupted) {
         if (automationPauseActive_ == AutomationPausePoint::OutgoingValidation) {
             automationPauseActive_ = AutomationPausePoint::None;
-            automationPauseMilliseconds_ = 0;
+            automationPauseResume_ = {};
         }
         ++outgoingLooperAssetGeneration_;
         outgoingLooperAssetPendingHash_.clear();
@@ -594,7 +601,7 @@ void AssetTransferService::peerDisconnected(const QString& peerToken)
     if (outgoingInterrupted) {
         if (automationPauseActive_ == AutomationPausePoint::OutgoingValidation) {
             automationPauseActive_ = AutomationPausePoint::None;
-            automationPauseMilliseconds_ = 0;
+            automationPauseResume_ = {};
         }
         ++outgoingLooperAssetGeneration_;
         outgoingLooperAssetPendingHash_.clear();
@@ -612,7 +619,7 @@ void AssetTransferService::peerDisconnected(const QString& peerToken)
         if (automationPauseActive_ == AutomationPausePoint::IncomingChunk ||
             automationPauseActive_ == AutomationPausePoint::IncomingFinalize) {
             automationPauseActive_ = AutomationPausePoint::None;
-            automationPauseMilliseconds_ = 0;
+            automationPauseResume_ = {};
         }
         resetIncoming();
     }
@@ -647,6 +654,15 @@ void AssetTransferService::clearIncoming(bool abandonExpected)
     const QString interruptedHash = incomingLooperAssetHash_;
     const auto interruptedState = incomingWorkerState_;
     const bool workerPending = incomingLooperAssetWritePending_;
+    if (automationPauseArmed_ == AutomationPausePoint::IncomingChunk ||
+        automationPauseArmed_ == AutomationPausePoint::IncomingFinalize) {
+        automationPauseArmed_ = AutomationPausePoint::None;
+    }
+    if (automationPauseActive_ == AutomationPausePoint::IncomingChunk ||
+        automationPauseActive_ == AutomationPausePoint::IncomingFinalize) {
+        automationPauseActive_ = AutomationPausePoint::None;
+        automationPauseResume_ = {};
+    }
     ++incomingLooperAssetGeneration_;
     incomingLooperAssetTimer_.stop();
     incomingSequence_.reset();

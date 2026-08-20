@@ -15,6 +15,7 @@ TEST_LABEL=""
 TEST_SHOW_GUI="0"
 TEST_NAME=""
 TEST_ARTIFACT_ROOT=""
+TEST_JOBS=""
 HARDWARE_PROFILE=""
 
 print_error() {
@@ -291,6 +292,26 @@ printf '  Ninja %s:             %s\n' "$NINJA_VERSION" "$NINJA_BIN"
 printf '  Qt 6:                 %s\n' "$QT_DIR"
 
 if [[ -n "$TEST_TARGET" ]]; then
+    if [[ -n "${JAM2_TEST_JOBS:-}" ]]; then
+        if [[ ! "$JAM2_TEST_JOBS" =~ ^[1-9][0-9]*$ ]]; then
+            print_error "JAM2_TEST_JOBS must be a positive integer."
+            exit 2
+        fi
+        TEST_JOBS="$JAM2_TEST_JOBS"
+    else
+        TEST_LOGICAL_CPUS="$(sysctl -n hw.logicalcpu 2>/dev/null || true)"
+        if [[ ! "$TEST_LOGICAL_CPUS" =~ ^[1-9][0-9]*$ ]]; then
+            TEST_LOGICAL_CPUS=1
+        fi
+        if (( TEST_LOGICAL_CPUS <= 2 )); then
+            TEST_JOBS=1
+        else
+            TEST_JOBS=$((TEST_LOGICAL_CPUS - 1))
+        fi
+        if (( TEST_JOBS > 8 )); then
+            TEST_JOBS=8
+        fi
+    fi
     TEST_ARTIFACT_ROOT="$REPO_DIR/build/test-artifacts"
     if ! "$CMAKE_BIN" -E remove_directory "$TEST_ARTIFACT_ROOT" ||
         ! "$CMAKE_BIN" -E make_directory "$TEST_ARTIFACT_ROOT"; then
@@ -325,6 +346,7 @@ fi
 
 if [[ -n "$TEST_TARGET" ]]; then
     printf '\nRunning Jam2 %s tests...\n' "$TEST_SUITE"
+    printf 'CTest parallel capacity: %s (override with JAM2_TEST_JOBS)\n' "$TEST_JOBS"
     export JAM2_TEST_SHOW_GUI="$TEST_SHOW_GUI"
     CTEST_BIN="$(dirname "$CMAKE_BIN")/ctest"
     if [[ ! -x "$CTEST_BIN" ]]; then
@@ -332,18 +354,18 @@ if [[ -n "$TEST_TARGET" ]]; then
         exit 1
     fi
     if [[ -n "$TEST_NAME" ]]; then
-        TEST_COMMAND=("$CTEST_BIN" --test-dir "$REPO_DIR/build" --output-on-failure --no-tests=error -R "^${TEST_NAME}$")
+        TEST_COMMAND=("$CTEST_BIN" --test-dir "$REPO_DIR/build" --output-on-failure --parallel "$TEST_JOBS" --no-tests=error -R "^${TEST_NAME}$")
     elif [[ -n "$TEST_LABEL" ]]; then
-        TEST_COMMAND=("$CTEST_BIN" --test-dir "$REPO_DIR/build" --output-on-failure -L "$TEST_LABEL")
+        TEST_COMMAND=("$CTEST_BIN" --test-dir "$REPO_DIR/build" --output-on-failure --parallel "$TEST_JOBS" -L "$TEST_LABEL")
     else
-        TEST_COMMAND=("$CTEST_BIN" --test-dir "$REPO_DIR/build" --output-on-failure)
+        TEST_COMMAND=("$CTEST_BIN" --test-dir "$REPO_DIR/build" --output-on-failure --parallel "$TEST_JOBS")
     fi
     if ! "${TEST_COMMAND[@]}"; then
         printf '\nTESTS FAILED.\n' >&2
         exit 1
     fi
-    if ! "$CMAKE_BIN" -E remove_directory "$TEST_ARTIFACT_ROOT"; then
-        print_error "Tests passed, but their artifact workspace could not be removed: $TEST_ARTIFACT_ROOT"
+    if ! "$CMAKE_BIN" -P "$REPO_DIR/build/ResetTestArtifactWorkspace.cmake"; then
+        print_error "Tests passed, but their artifact workspace could not be reset: $TEST_ARTIFACT_ROOT"
         exit 1
     fi
     printf '\nBUILD AND TESTS SUCCEEDED.\n'

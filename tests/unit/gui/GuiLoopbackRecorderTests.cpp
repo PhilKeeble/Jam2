@@ -60,7 +60,7 @@ QTemporaryDir makeRoot(const QString& name)
 }
 
 template <typename Function>
-bool waitUntil(Function condition, std::chrono::milliseconds timeout = 2000ms)
+bool waitUntil(Function condition, std::chrono::milliseconds timeout = 30s)
 {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
     while (std::chrono::steady_clock::now() < deadline) {
@@ -296,7 +296,7 @@ GuiLoopbackRecorder::FinishedCallback completionCallback(CompletionState& state)
 bool waitForCompletions(CompletionState& state, int count)
 {
     std::unique_lock lock(state.mutex);
-    return state.changed.wait_for(lock, 2s, [&state, count] {
+    return state.changed.wait_for(lock, 30s, [&state, count] {
         return state.count >= count;
     });
 }

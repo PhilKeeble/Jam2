@@ -1,11 +1,11 @@
 #pragma once
 
+#include "AutomationCompletionGate.hpp"
 #include "input_source.hpp"
 #include "midi.hpp"
 
 #include <QString>
 
-#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -37,6 +37,8 @@ struct InputPluginStats {
     std::uint64_t workerProcessMaxUs = 0;
     std::size_t midiQueueDepth = 0;
     std::size_t midiQueueHighWater = 0;
+    std::uint32_t workerInputPeakPpm = 0;
+    std::uint32_t wetOutputPeakPpm = 0;
 };
 
 // The source graph owns this interface. The system implementation wraps the
@@ -88,6 +90,10 @@ public:
         const InputPluginLoadRequest& request,
         Completion completion,
         Progress progress) = 0;
+
+    virtual bool armAutomationCompletionGate(QString& error) noexcept;
+    virtual bool releaseAutomationCompletionGate(QString& error) noexcept;
+    virtual AutomationCompletionGateState automationCompletionGateState() const noexcept;
 };
 
 struct SystemInputPluginBackendOptions {
@@ -102,7 +108,6 @@ struct SystemInputPluginBackendOptions {
 std::unique_ptr<InputPluginBackend> makeSystemInputPluginBackend();
 std::unique_ptr<InputPluginBackend> makeSystemInputPluginBackend(
     SystemInputPluginBackendOptions options);
-std::unique_ptr<InputPluginBackend> makeSyntheticInputPluginBackend(
-    std::chrono::milliseconds loadDelay = std::chrono::milliseconds(200));
+std::unique_ptr<InputPluginBackend> makeSyntheticInputPluginBackend();
 
 } // namespace jam2::application

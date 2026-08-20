@@ -28,6 +28,7 @@ public:
     bool isNetworkRunning() const noexcept;
     bool submit(const jam2::EngineCommand& command) noexcept;
     bool updatePeers(const std::vector<Jam2RuntimePeer>& peers);
+    bool reprobePeers() noexcept;
     bool setPeerGainDb(std::uint64_t peerId, double gainDb) noexcept;
     bool setMetronomeCompensation(
         const Jam2MetronomeCompensationSettings& settings) noexcept;

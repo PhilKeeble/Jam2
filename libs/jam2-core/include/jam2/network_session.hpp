@@ -187,6 +187,13 @@ public:
         PeerId peer_id,
         const ResolvedUdpEndpoint& endpoint,
         PeerEndpointState state = PeerEndpointState::Candidate);
+    // Changes only the network address of the same authenticated membership
+    // peer. Its replay, clock, drift, mixer gain, and mute state remain owned
+    // by the existing PeerStream.
+    bool rebindPeerEndpoint(
+        PeerId peer_id,
+        const ResolvedUdpEndpoint& endpoint,
+        PeerEndpointState state = PeerEndpointState::Probing) noexcept;
     bool setPeerEndpointState(PeerId peer_id, PeerEndpointState state) noexcept;
     bool setPeerGain(PeerId peer_id, int gain_ppm) noexcept;
     bool setPeerMuted(PeerId peer_id, bool muted) noexcept;

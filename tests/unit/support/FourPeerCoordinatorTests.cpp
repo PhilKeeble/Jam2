@@ -6,6 +6,7 @@
 #include <QFileInfo>
 #include <QTemporaryDir>
 
+#include <chrono>
 #include <filesystem>
 #include <iostream>
 #include <set>
@@ -63,6 +64,7 @@ QString exerciseFailedLaunch(bool markSuccessful)
 
 int main()
 {
+    using namespace std::chrono_literals;
     const QString artifactRoot = qEnvironmentVariable("JAM2_TEST_ARTIFACT_ROOT");
     check(!artifactRoot.isEmpty(),
         "CTest omitted the build-local artifact root");
@@ -79,39 +81,32 @@ int main()
 
     LoopbackPortReservations loopbackPorts;
     QString reservationError;
-    check(loopbackPorts.reserve(16, reservationError),
-        "could not reserve 16 ports valid for both loopback TCP and UDP");
-    std::set<std::uint16_t> uniquePorts;
-    for (std::size_t index = 0; index < 16; ++index) {
-        uniquePorts.insert(loopbackPorts.port(index));
+    const bool portsReserved = loopbackPorts.reserve(16, reservationError);
+    if (!portsReserved) {
+        check(false, qPrintable(QStringLiteral(
+            "could not reserve 16 ports valid for both loopback TCP and UDP: %1")
+                .arg(reservationError)));
     }
-    check(uniquePorts.size() == 16,
-        "TCP/UDP loopback reservations were not unique");
-    bool rejectedOutOfRange = false;
-    try {
-        (void)loopbackPorts.port(16);
-    } catch (const std::out_of_range&) {
-        rejectedOutOfRange = true;
+    if (portsReserved) {
+        std::set<std::uint16_t> uniquePorts;
+        for (std::size_t index = 0; index < 16; ++index) {
+            uniquePorts.insert(loopbackPorts.port(index));
+        }
+        check(uniquePorts.size() == 16,
+            "TCP/UDP loopback reservations were not unique");
+        bool rejectedOutOfRange = false;
+        try {
+            (void)loopbackPorts.port(16);
+        } catch (const std::out_of_range&) {
+            rejectedOutOfRange = true;
+        }
+        check(rejectedOutOfRange,
+            "loopback reservation accepted an out-of-range index");
     }
-    check(rejectedOutOfRange,
-        "loopback reservation accepted an out-of-range index");
     loopbackPorts.release();
 
-    const QByteArray previousScale = qgetenv("JAM2_TEST_TIMEOUT_SCALE");
-    const bool hadPreviousScale = qEnvironmentVariableIsSet("JAM2_TEST_TIMEOUT_SCALE");
-    qputenv("JAM2_TEST_TIMEOUT_SCALE", "4");
-    check(jam2::test::scaledTimeout(std::chrono::milliseconds(7)) ==
-            std::chrono::milliseconds(28),
-        "coverage timeout scaling did not apply exactly");
-    qputenv("JAM2_TEST_TIMEOUT_SCALE", "invalid");
-    check(jam2::test::scaledTimeout(std::chrono::milliseconds(7)) ==
-            std::chrono::milliseconds(7),
-        "invalid timeout scaling did not fail closed to one");
-    if (hadPreviousScale) {
-        qputenv("JAM2_TEST_TIMEOUT_SCALE", previousScale);
-    } else {
-        qunsetenv("JAM2_TEST_TIMEOUT_SCALE");
-    }
+    check(jam2::test::deadmanTimeout(7ms) == 7ms,
+        "deadman timeout unexpectedly depends on machine speed");
 
     const QString retainedRoot = exerciseFailedLaunch(false);
     check(QFileInfo(retainedRoot).isDir(),

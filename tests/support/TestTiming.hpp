@@ -1,28 +1,15 @@
 #pragma once
 
-#include <QtGlobal>
-
 #include <chrono>
-#include <limits>
 
 namespace jam2::test {
 
-inline int timeoutScale() noexcept
-{
-    bool valid = false;
-    const int scale = qEnvironmentVariableIntValue("JAM2_TEST_TIMEOUT_SCALE", &valid);
-    return valid && scale >= 1 && scale <= 10 ? scale : 1;
-}
-
-inline std::chrono::milliseconds scaledTimeout(
+// A deadman bounds a genuinely stuck process; it is never part of a product
+// acceptance rule and must not vary with the host or operating system.
+inline constexpr std::chrono::milliseconds deadmanTimeout(
     std::chrono::milliseconds timeout) noexcept
 {
-    const auto scale = timeoutScale();
-    const auto maximum = std::chrono::milliseconds::max().count();
-    if (timeout.count() > maximum / scale) {
-        return std::chrono::milliseconds::max();
-    }
-    return timeout * scale;
+    return timeout;
 }
 
 } // namespace jam2::test

@@ -94,7 +94,6 @@
 #include <QRunnable>
 #include <QRegularExpression>
 #include <QSaveFile>
-#include <QStandardPaths>
 #include <QScrollBar>
 #include <QScreen>
 #include <QSet>
@@ -141,9 +140,25 @@ constexpr qint64 kMaxLooperAssetBytes = jam2::application::limits::kMaximumAsset
 constexpr int kMaxLooperAssetRequests = jam2::application::limits::kMaximumAssetRequests;
 constexpr int kMaxLooperTrackContributions = 512;
 constexpr qint64 kTrackBatchIdleTimeoutMs = 30000;
-constexpr int kLooperAssetRequestStartTimeoutMs = 10000;
+// This is a hang detector, not a transfer-speed requirement. A sender serves
+// its bounded asset queue serially, so a valid request can wait behind other
+// peers without indicating a failed product operation.
+constexpr int kLooperAssetRequestStartHangTimeoutMs = 60000;
 constexpr int kFirewallGuidanceDisconnectThreshold = 3;
 constexpr int kFirewallGuidanceWindowMs = 10000;
+
+QString automationCompletionGateText(
+    jam2::application::AutomationCompletionGateState state)
+{
+    using State = jam2::application::AutomationCompletionGateState;
+    switch (state) {
+    case State::Armed: return QStringLiteral("armed");
+    case State::Active: return QStringLiteral("active");
+    case State::Idle: return QStringLiteral("idle");
+    case State::Unsupported:
+    default: return QStringLiteral("unsupported");
+    }
+}
 
 QString promptJamTasterSourceDispositionDialog(QWidget* parent)
 {
@@ -1135,6 +1150,10 @@ MainWindow::MainWindow(
 MainWindow::~MainWindow()
 {
     shuttingDown_ = true;
+    QString ignored;
+    (void)automationReleaseFileWorkers(ignored);
+    std::string midiIgnored;
+    (void)midiInputBackend_->releaseAutomationCompletionGate(midiIgnored);
     fileWorkerPool_.waitForDone();
     QApplication::instance()->removeEventFilter(this);
     stopJam(false);
@@ -2415,6 +2434,7 @@ QJsonObject MainWindow::automationJamSnapshot() const
         {QStringLiteral("active_remote_peer_count"), activeRemotePeers},
         {QStringLiteral("network_attachment_ready"), session.networkAttachmentReady},
         {QStringLiteral("network_running"), jam2_.isNetworkRunning()},
+        {QStringLiteral("local_token"), session.localToken},
         {QStringLiteral("coordinator_token"), session.coordinatorToken},
         {QStringLiteral("failure"), session.failureDetail},
         {QStringLiteral("last_startup_failure"), lastJamFailureDialog_},
@@ -2985,6 +3005,14 @@ QJsonObject MainWindow::automationPerformanceSnapshot() const
         {QStringLiteral("recording_latency_adjustment_frames"),
             static_cast<qint64>(engine.recording_latency_adjustment_frames)},
         {QStringLiteral("input_source_router"), inputSourceRouter},
+        {QStringLiteral("midi_enumeration_gate"), automationCompletionGateText(
+            midiInputBackend_->automationCompletionGateState())},
+        {QStringLiteral("input_plugin_load_gate"), automationCompletionGateText(
+            inputPluginBackend_->automationCompletionGateState())},
+        {QStringLiteral("midi_discovery_completions"), static_cast<qint64>(
+            automationMidiDiscoveryCompletions_)},
+        {QStringLiteral("input_plugin_load_completions"), static_cast<qint64>(
+            automationInputPluginLoadCompletions_)},
         {QStringLiteral("midi_input_sources"), midiInputSources},
         {QStringLiteral("input_plugins"), inputPlugins},
     };
@@ -3189,7 +3217,6 @@ bool MainWindow::automationShareTracks(QString& error)
 
 bool MainWindow::automationArmTransferPause(
     const QString& point,
-    int milliseconds,
     QString& error)
 {
     if (!automationSuppressDialogs_) {
@@ -3201,11 +3228,7 @@ bool MainWindow::automationArmTransferPause(
             error = QStringLiteral("a transfer pause is already armed or active");
             return false;
         }
-        return assetTransfer_.armAutomationPause(point, milliseconds, error);
-    }
-    if (milliseconds < 100 || milliseconds > 5000) {
-        error = QStringLiteral("offer pause must be between 100 and 5000 ms");
-        return false;
+        return assetTransfer_.armAutomationPause(point, error);
     }
     const QJsonObject transfer = assetTransfer_.automationSnapshot();
     if (automationOfferPauseArmed_ || automationOfferPauseActive_ ||
@@ -3215,10 +3238,26 @@ bool MainWindow::automationArmTransferPause(
         return false;
     }
     automationOfferPauseArmed_ = true;
-    automationOfferPauseMilliseconds_ = milliseconds;
     ++automationOfferPauseGeneration_;
     error.clear();
     return true;
+}
+
+bool MainWindow::automationReleaseTransferPause(QString& error)
+{
+    if (!automationSuppressDialogs_) {
+        error = QStringLiteral("transfer gates are available only to the private GUI agent");
+        return false;
+    }
+    if (automationOfferPauseActive_) {
+        automationOfferPauseActive_ = false;
+        ++automationOfferPauseGeneration_;
+        error.clear();
+        applyPendingTrackContributions();
+        requestNextPendingAsset();
+        return true;
+    }
+    return assetTransfer_.releaseAutomationPause(error);
 }
 
 bool MainWindow::automationDropOutgoingAssetStarts(int count, QString& error)
@@ -3234,41 +3273,58 @@ bool MainWindow::automationDropOutgoingAssetStarts(int count, QString& error)
     return assetTransfer_.armAutomationDropOutgoingStarts(count, error);
 }
 
-bool MainWindow::automationSetAssetRequestStartTimeout(
-    int milliseconds,
-    QString& error)
+bool MainWindow::automationExpireAssetRequestStart(QString& error)
 {
     if (!automationSuppressDialogs_) {
-        error = QStringLiteral("transfer timing controls are available only to the private GUI agent");
+        error = QStringLiteral("transfer expiry is available only to the private GUI agent");
         return false;
     }
-    if (milliseconds < 100 || milliseconds > kLooperAssetRequestStartTimeoutMs) {
-        error = QStringLiteral("asset request start timeout must be between 100 and 10000 ms");
+    if (incomingAssetWorkflow_ == IncomingAssetWorkflow::None ||
+        incomingAssetHash_.isEmpty() || assetTransfer_.incomingTransferActive()) {
+        error = QStringLiteral("no unstarted incoming asset request is active");
         return false;
     }
-    automationAssetRequestStartTimeoutMilliseconds_ = milliseconds;
+    const std::uint64_t generation = trackWorkspace_.incomingAssetRequestGeneration;
+    const std::uint64_t timeoutsBefore = trackWorkspace_.assetRequestStartTimeouts;
+    handleAssetRequestStartTimeout(
+        incomingAssetWorkflow_,
+        incomingAssetHash_,
+        incomingAssetSourcePeerToken_,
+        generation,
+        0);
+    if (trackWorkspace_.assetRequestStartTimeouts != timeoutsBefore + 1) {
+        error = QStringLiteral("incoming asset request changed before explicit expiry");
+        return false;
+    }
     error.clear();
     return true;
 }
 
-bool MainWindow::automationHoldFileWorkers(int milliseconds, QString& error)
+bool MainWindow::automationHoldFileWorkers(QString& error)
 {
     if (!automationSuppressDialogs_) {
         error = QStringLiteral("file-worker holds are available only to the private GUI agent");
         return false;
     }
-    if (milliseconds < 100 || milliseconds > 5000) {
-        error = QStringLiteral("file-worker hold must be between 100 and 5000 ms");
-        return false;
-    }
-    if (fileWorkerTasksActive_ != 0) {
+    if (fileWorkerTasksActive_ != 0 || automationFileWorkerGate_) {
         error = QStringLiteral("file workers must be idle before arming a deterministic hold");
         return false;
     }
+    auto gate = std::make_shared<AutomationFileWorkerGate>();
+    automationFileWorkerGate_ = gate;
     for (int worker = 0; worker < 2; ++worker) {
         if (!startFileWorkerTask(
-                [milliseconds] { QThread::msleep(static_cast<unsigned long>(milliseconds)); },
+                [gate] {
+                    std::unique_lock<std::mutex> lock(gate->mutex);
+                    gate->releasedCondition.wait(lock, [&gate] { return gate->released; });
+                },
                 [] {})) {
+            {
+                std::lock_guard<std::mutex> lock(gate->mutex);
+                gate->released = true;
+            }
+            gate->releasedCondition.notify_all();
+            automationFileWorkerGate_.reset();
             error = QStringLiteral("could not occupy both bounded file workers");
             return false;
         }
@@ -3277,13 +3333,66 @@ bool MainWindow::automationHoldFileWorkers(int milliseconds, QString& error)
     return true;
 }
 
+bool MainWindow::automationReleaseFileWorkers(QString& error)
+{
+    const auto gate = automationFileWorkerGate_;
+    if (!gate) {
+        error = QStringLiteral("no file-worker gate is active");
+        return false;
+    }
+    {
+        std::lock_guard<std::mutex> lock(gate->mutex);
+        gate->released = true;
+    }
+    gate->releasedCondition.notify_all();
+    automationFileWorkerGate_.reset();
+    error.clear();
+    return true;
+}
+
+bool MainWindow::automationArmCompletionGate(
+    const QString& target, QString& error)
+{
+    if (!automationSuppressDialogs_) {
+        error = QStringLiteral("completion gates are available only to the private GUI agent");
+        return false;
+    }
+    if (target == QStringLiteral("midi-enumeration")) {
+        std::string nativeError;
+        const bool armed = midiInputBackend_->armAutomationCompletionGate(nativeError);
+        error = QString::fromStdString(nativeError);
+        return armed;
+    }
+    if (target == QStringLiteral("input-plugin-load")) {
+        return inputPluginBackend_->armAutomationCompletionGate(error);
+    }
+    error = QStringLiteral("unknown completion gate target");
+    return false;
+}
+
+bool MainWindow::automationReleaseCompletionGate(
+    const QString& target, QString& error)
+{
+    if (!automationSuppressDialogs_) {
+        error = QStringLiteral("completion gates are available only to the private GUI agent");
+        return false;
+    }
+    if (target == QStringLiteral("midi-enumeration")) {
+        std::string nativeError;
+        const bool released = midiInputBackend_->releaseAutomationCompletionGate(nativeError);
+        error = QString::fromStdString(nativeError);
+        return released;
+    }
+    if (target == QStringLiteral("input-plugin-load")) {
+        return inputPluginBackend_->releaseAutomationCompletionGate(error);
+    }
+    error = QStringLiteral("unknown completion gate target");
+    return false;
+}
+
 QJsonObject MainWindow::automationTransferSnapshot() const
 {
     QJsonObject snapshot = assetTransfer_.automationSnapshot();
-    snapshot.insert(QStringLiteral("request_start_timeout_ms"),
-        automationAssetRequestStartTimeoutMilliseconds_ > 0
-            ? automationAssetRequestStartTimeoutMilliseconds_
-            : kLooperAssetRequestStartTimeoutMs);
     if (automationOfferPauseArmed_) {
         snapshot.insert(QStringLiteral("pause_armed"), QStringLiteral("offer"));
     }
@@ -3298,8 +3407,6 @@ void MainWindow::clearAutomationTransferPause()
     ++automationOfferPauseGeneration_;
     automationOfferPauseArmed_ = false;
     automationOfferPauseActive_ = false;
-    automationOfferPauseMilliseconds_ = 0;
-    automationAssetRequestStartTimeoutMilliseconds_ = 0;
     assetTransfer_.clearAutomationPause();
 }
 
@@ -5568,12 +5675,21 @@ bool MainWindow::automaticWavSharingEnabled() const noexcept
     return jam2JamSyncAllows(jamSyncPolicy_, JamSyncRoute::AutomaticWav);
 }
 
+bool MainWindow::leaderAudioModeActive() const noexcept
+{
+    if (jam2_.isRunning()) {
+        return jam2_.engineSnapshot().metronome_mode ==
+            jam2::EngineMetronomeMode::LeaderAudio;
+    }
+    return metronomeModeBox_ &&
+        metronomeModeBox_->currentText() == QStringLiteral("leader-audio");
+}
+
 void MainWindow::showJamSyncDialog()
 {
     const bool policyLocked = sharedRecordingProtected();
-    const bool leaderAudio = metronomeModeBox_ &&
-        metronomeModeBox_->currentText() == QStringLiteral("leader-audio");
-    JamSyncDialog dialog(jamSyncPolicy_, policyLocked, leaderAudio, this);
+    JamSyncDialog dialog(
+        jamSyncPolicy_, policyLocked, leaderAudioModeActive(), this);
     if (dialog.exec() != QDialog::Accepted) return;
     requestJamSyncPolicy(dialog.policy());
 }
@@ -8738,8 +8854,7 @@ bool MainWindow::showLaneRecordingDialog(
     input.laneName = laneName;
     input.preferredMode = preferences_.recording.preferredMode;
     input.engineRunning = jam2_.isRunning();
-    input.leaderAudio = metronomeModeBox_ &&
-        metronomeModeBox_->currentText() == QStringLiteral("leader-audio");
+    input.leaderAudio = leaderAudioModeActive();
     input.inputSources.push_back({QStringLiteral("Combined My Send mix"), -1});
     const Jam2RuntimeOptions sourceOptions = runtimeOptions();
     if (auto* sourceRouter = jam2_.inputSourceRouter()) {
@@ -11475,8 +11590,7 @@ void MainWindow::sendMetronomeStateToJam(bool enabled)
 void MainWindow::setMetronomeEnabled(bool enabled, bool publishToJam)
 {
     const bool followerUsingLeaderAudio = jam2_.isNetworkRunning() &&
-        !sessionController_.isServer() && metronomeModeBox_ &&
-        metronomeModeBox_->currentText() == QStringLiteral("leader-audio");
+        !sessionController_.isServer() && leaderAudioModeActive();
     const bool localEnabled = enabled && !followerUsingLeaderAudio;
     const bool changed = metronomeTransport_.localRunning() != localEnabled;
     metronomeTransport_.setLocalState(localEnabled);
@@ -11531,7 +11645,12 @@ void MainWindow::tapTrackMetronomeTempo()
     if (!tapTempoClock_.isValid()) {
         tapTempoClock_.start();
     }
-    if (const std::optional<int> bpm = tapTempoTracker_.tap(tapTempoClock_.elapsed())) {
+    applyTapTrackMetronomeTempoAt(tapTempoClock_.elapsed());
+}
+
+void MainWindow::applyTapTrackMetronomeTempoAt(std::int64_t elapsedMs)
+{
+    if (const std::optional<int> bpm = tapTempoTracker_.tap(elapsedMs)) {
         metronomeBpmSpin_->setValue(*bpm);
     }
 }
@@ -12258,18 +12377,6 @@ void MainWindow::handleTrackBatchOffer(
     if (automationOfferPauseArmed_) {
         automationOfferPauseArmed_ = false;
         automationOfferPauseActive_ = true;
-        const int delay = automationOfferPauseMilliseconds_;
-        const quint64 generation = automationOfferPauseGeneration_;
-        QTimer::singleShot(delay, this, [this, generation] {
-            if (!automationOfferPauseActive_ ||
-                generation != automationOfferPauseGeneration_) {
-                return;
-            }
-            automationOfferPauseActive_ = false;
-            automationOfferPauseMilliseconds_ = 0;
-            applyPendingTrackContributions();
-            requestNextPendingAsset();
-        });
         return;
     }
     applyPendingTrackContributions();
@@ -12531,29 +12638,51 @@ void MainWindow::requestNextPendingAsset()
             hash,
             source.left(8))
         .arg(pendingSongRevision_));
-    const int requestStartTimeoutMs = automationAssetRequestStartTimeoutMilliseconds_ > 0
-        ? automationAssetRequestStartTimeoutMilliseconds_
-        : kLooperAssetRequestStartTimeoutMs;
-    QTimer::singleShot(requestStartTimeoutMs, this,
-        [this, workflow, hash, source, requestGeneration, requestStartTimeoutMs] {
-            if (trackWorkspace_.incomingAssetRequestGeneration != requestGeneration ||
-                incomingAssetWorkflow_ != workflow || incomingAssetHash_ != hash ||
-                incomingAssetSourcePeerToken_ != source ||
-                assetTransfer_.incomingTransferActive()) {
-                return;
-            }
-            ++trackWorkspace_.assetRequestStartTimeouts;
-            pendingTrackAssetSources_.remove(hash);
-            incomingAssetWorkflow_ = IncomingAssetWorkflow::None;
-            incomingAssetHash_.clear();
-            incomingAssetSourcePeerToken_.clear();
-            appendLog(QStringLiteral(
-                "looper asset request received no transfer start within %1 ms: "
-                "hash=%2 source=%3")
-                .arg(requestStartTimeoutMs)
-                .arg(hash, source.left(8)));
-            retryOrFailIncomingAsset(hash, source);
+    QTimer::singleShot(kLooperAssetRequestStartHangTimeoutMs, this,
+        [this, workflow, hash, source, requestGeneration] {
+            handleAssetRequestStartTimeout(
+                workflow,
+                hash,
+                source,
+                requestGeneration,
+                kLooperAssetRequestStartHangTimeoutMs);
         });
+}
+
+void MainWindow::handleAssetRequestStartTimeout(
+    IncomingAssetWorkflow workflow,
+    const QString& hash,
+    const QString& source,
+    std::uint64_t requestGeneration,
+    int timeoutMilliseconds)
+{
+    if (trackWorkspace_.incomingAssetRequestGeneration != requestGeneration ||
+        incomingAssetWorkflow_ != workflow || incomingAssetHash_ != hash ||
+        incomingAssetSourcePeerToken_ != source ||
+        assetTransfer_.incomingTransferActive()) {
+        return;
+    }
+    // Callers may pass the current request members themselves. Preserve the
+    // request identity before clearing those members so logging and retry
+    // ownership cannot observe emptied aliases.
+    const QString expiredHash = hash;
+    const QString expiredSource = source;
+    ++trackWorkspace_.assetRequestStartTimeouts;
+    pendingTrackAssetSources_.remove(expiredHash);
+    incomingAssetWorkflow_ = IncomingAssetWorkflow::None;
+    incomingAssetHash_.clear();
+    incomingAssetSourcePeerToken_.clear();
+    appendLog(timeoutMilliseconds > 0
+        ? QStringLiteral(
+            "looper asset request received no transfer start within %1 ms: "
+            "hash=%2 source=%3")
+            .arg(timeoutMilliseconds)
+            .arg(expiredHash, expiredSource.left(8))
+        : QStringLiteral(
+            "looper asset request explicitly expired after no transfer start: "
+            "hash=%1 source=%2")
+            .arg(expiredHash, expiredSource.left(8)));
+    retryOrFailIncomingAsset(expiredHash, expiredSource);
 }
 
 void MainWindow::retryOrFailIncomingAsset(
@@ -13727,12 +13856,18 @@ bool MainWindow::selectAndStartPluginAsync(
     request.sampleRate = static_cast<double>(options.sample_rate);
     request.maximumFrames = blockFrames;
     request.sourceInputChannels = sourceChannels;
+    auto observedCompletion = [this, completion = std::move(completion)](
+        std::unique_ptr<jam2::application::InputPluginHost> host,
+        QString name) mutable {
+        ++automationInputPluginLoadCompletions_;
+        if (completion) completion(std::move(host), std::move(name));
+    };
     return inputPluginBackend_->selectAndStart(
         *this,
         fileWorkerPool_,
         thread(),
         request,
-        std::move(completion),
+        std::move(observedCompletion),
         std::move(progress));
 }
 
@@ -14033,6 +14168,7 @@ void MainWindow::showMidiInputSources()
                 self, outcome, completion = std::move(completion)
             ]() mutable {
                 if (self.isNull() || !completion) return;
+                ++self->automationMidiDiscoveryCompletions_;
                 jam2::gui::MidiInputDiscoveryResult result;
                 result.error = outcome->error;
                 result.devices.reserve(
@@ -15992,9 +16128,11 @@ bool MainWindow::playCuratedIdeaPreview(
         return false;
     }
 
-    const QString cacheRoot = QDir(
-        QStandardPaths::writableLocation(QStandardPaths::CacheLocation))
-        .absoluteFilePath(QStringLiteral("idea-previews"));
+    // Keep extracted previews with Jam2's other managed data. The private GUI
+    // agent redirects this root to its build-local storage, so native tests do
+    // not leave cache artifacts in the user's profile.
+    const QString cacheRoot = appReleaseFolderPath(
+        QStringLiteral("cache/idea-previews"));
     if (!QDir().mkpath(cacheRoot)) {
         error = QStringLiteral("The preview cache folder could not be created.");
         return false;

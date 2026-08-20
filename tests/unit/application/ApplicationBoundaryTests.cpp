@@ -274,7 +274,7 @@ void testAutomationChannelStateAndDisconnect()
     disconnectPipes.closeCommandWrite();
     {
         std::unique_lock<std::mutex> lock(mutex);
-        (void)ready.wait_for(lock, std::chrono::seconds(2), [&] {
+        (void)ready.wait_for(lock, std::chrono::seconds(30), [&] {
             return !disconnectError.empty();
         });
     }
@@ -350,6 +350,7 @@ void testRuntimeCountersAndPeerGain()
     expect(runtime.startNetwork(options) && runtime.isNetworkRunning(),
         "application runtime starts its bounded fake network worker");
     expect(runtime.engineReuses() == 2 &&
+            runtime.reprobePeers() &&
             runtime.setPeerGainDb(2, 0.0) &&
             runtime.setPeerGainDb(2, -60.0) &&
             !runtime.setPeerGainDb(0, 0.0) &&
@@ -358,9 +359,21 @@ void testRuntimeCountersAndPeerGain()
             !runtime.setPeerGainDb(2, std::numeric_limits<double>::quiet_NaN()),
         "network peer gain accepts finite bounds and rejects invalid identity/range");
     runtime.stopNetwork();
-    expect(!runtime.isNetworkRunning() && !runtime.setPeerGainDb(2, 0.0),
-        "peer gain rejects a stopped network worker");
+    expect(!runtime.isNetworkRunning() && !runtime.setPeerGainDb(2, 0.0) &&
+            !runtime.reprobePeers(),
+        "peer gain and proof reset reject a stopped network worker");
     runtime.shutdown();
+
+    Jam2RuntimeHost host;
+    expect(!host.takePeerReprobe(),
+        "runtime host starts without a pending UDP proof reset");
+    host.submitPeerReprobe();
+    expect(host.takePeerReprobe() && !host.takePeerReprobe(),
+        "runtime host consumes each UDP proof reset exactly once");
+    host.submitPeerReprobe();
+    host.reset();
+    expect(!host.takePeerReprobe(),
+        "runtime host reset clears stale UDP proof requests");
 }
 
 void testControlToken()

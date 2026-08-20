@@ -604,10 +604,12 @@ void GuiTestAgent::handle(const QJsonObject& command)
             return;
         }
         QString error;
-        if (!invokeControl(command, error)) {
+        bool completionDeferred = false;
+        if (!invokeControl(command, error, completionDeferred)) {
             reject(command, error);
             return;
         }
+        if (completionDeferred) return;
         emitEvent(QStringLiteral("command_applied"), {
             {QStringLiteral("id"), command.value(QStringLiteral("id"))},
             {QStringLiteral("control"), command.value(QStringLiteral("control"))},
@@ -1077,20 +1079,33 @@ void GuiTestAgent::handle(const QJsonObject& command)
         return;
     }
     if (type == QStringLiteral("looper.transfer.pause")) {
-        int milliseconds = 0;
         const QString point = command.value(QStringLiteral("point")).toString();
-        if (!onlyFields(command, {"format", "type", "id", "point", "milliseconds"}) ||
+        if (!onlyFields(command, {"format", "type", "id", "point"}) ||
             (point != QStringLiteral("offer") &&
              point != QStringLiteral("outgoing-validation") &&
              point != QStringLiteral("incoming-chunk") &&
-             point != QStringLiteral("incoming-finalize")) ||
-            !exactInteger(command.value(QStringLiteral("milliseconds")),
-                100, 5000, milliseconds)) {
-            reject(command, QStringLiteral("transfer pause fields are invalid"));
+             point != QStringLiteral("incoming-finalize"))) {
+            reject(command, QStringLiteral("transfer gate fields are invalid"));
             return;
         }
         QString error;
-        if (!window_.automationArmTransferPause(point, milliseconds, error)) {
+        if (!window_.automationArmTransferPause(point, error)) {
+            reject(command, error);
+            return;
+        }
+        emitEvent(QStringLiteral("command_applied"), {
+            {QStringLiteral("id"), command.value(QStringLiteral("id"))},
+            {QStringLiteral("transfer"), window_.automationTransferSnapshot()},
+        });
+        return;
+    }
+    if (type == QStringLiteral("looper.transfer.release")) {
+        if (!onlyFields(command, {"format", "type", "id"})) {
+            reject(command, QStringLiteral("transfer gate release fields are invalid"));
+            return;
+        }
+        QString error;
+        if (!window_.automationReleaseTransferPause(error)) {
             reject(command, error);
             return;
         }
@@ -1119,16 +1134,13 @@ void GuiTestAgent::handle(const QJsonObject& command)
         });
         return;
     }
-    if (type == QStringLiteral("looper.transfer.request-start-timeout")) {
-        int milliseconds = 0;
-        if (!onlyFields(command, {"format", "type", "id", "milliseconds"}) ||
-            !exactInteger(command.value(QStringLiteral("milliseconds")),
-                100, 10000, milliseconds)) {
-            reject(command, QStringLiteral("transfer request-start timeout fields are invalid"));
+    if (type == QStringLiteral("looper.transfer.expire-request-start")) {
+        if (!onlyFields(command, {"format", "type", "id"})) {
+            reject(command, QStringLiteral("transfer request-start expiry fields are invalid"));
             return;
         }
         QString error;
-        if (!window_.automationSetAssetRequestStartTimeout(milliseconds, error)) {
+        if (!window_.automationExpireAssetRequestStart(error)) {
             reject(command, error);
             return;
         }
@@ -1139,21 +1151,78 @@ void GuiTestAgent::handle(const QJsonObject& command)
         return;
     }
     if (type == QStringLiteral("looper.file-workers.hold")) {
-        int milliseconds = 0;
-        if (!onlyFields(command, {"format", "type", "id", "milliseconds"}) ||
-            !exactInteger(command.value(QStringLiteral("milliseconds")),
-                100, 5000, milliseconds)) {
+        if (!onlyFields(command, {"format", "type", "id"})) {
             reject(command, QStringLiteral("file-worker hold fields are invalid"));
             return;
         }
         QString error;
-        if (!window_.automationHoldFileWorkers(milliseconds, error)) {
+        if (!window_.automationHoldFileWorkers(error)) {
             reject(command, error);
             return;
         }
         emitEvent(QStringLiteral("command_applied"), {
             {QStringLiteral("id"), command.value(QStringLiteral("id"))},
             {QStringLiteral("content"), window_.automationContentSnapshot()},
+        });
+        return;
+    }
+    if (type == QStringLiteral("looper.file-workers.release")) {
+        if (!onlyFields(command, {"format", "type", "id"})) {
+            reject(command, QStringLiteral("file-worker release fields are invalid"));
+            return;
+        }
+        QString error;
+        if (!window_.automationReleaseFileWorkers(error)) {
+            reject(command, error);
+            return;
+        }
+        emitEvent(QStringLiteral("command_applied"), {
+            {QStringLiteral("id"), command.value(QStringLiteral("id"))},
+            {QStringLiteral("content"), window_.automationContentSnapshot()},
+        });
+        return;
+    }
+    if (type == QStringLiteral("test.completion-gate.arm") ||
+        type == QStringLiteral("test.completion-gate.release")) {
+        const QString target = command.value(QStringLiteral("target")).toString();
+        if (!onlyFields(command, {"format", "type", "id", "target"}) ||
+            (target != QStringLiteral("midi-enumeration") &&
+             target != QStringLiteral("input-plugin-load"))) {
+            reject(command, QStringLiteral("completion gate fields are invalid"));
+            return;
+        }
+        QString error;
+        const bool applied = type.endsWith(QStringLiteral(".arm"))
+            ? window_.automationArmCompletionGate(target, error)
+            : window_.automationReleaseCompletionGate(target, error);
+        if (!applied) {
+            reject(command, error);
+            return;
+        }
+        emitEvent(QStringLiteral("command_applied"), {
+            {QStringLiteral("id"), command.value(QStringLiteral("id"))},
+            {QStringLiteral("target"), target},
+            {QStringLiteral("performance"), window_.automationPerformanceSnapshot()},
+        });
+        return;
+    }
+    if (type == QStringLiteral("test.metronome.tap-at")) {
+        int elapsedMs = 0;
+        const bool reset = command.value(QStringLiteral("reset")).toBool(false);
+        if (!onlyFields(command, {"format", "type", "id", "elapsed_ms", "reset"}) ||
+            !exactInteger(command.value(QStringLiteral("elapsed_ms")),
+                0, 24 * 60 * 60 * 1000, elapsedMs) ||
+            (command.contains(QStringLiteral("reset")) &&
+             !command.value(QStringLiteral("reset")).isBool())) {
+            reject(command, QStringLiteral("deterministic tap-tempo fields are invalid"));
+            return;
+        }
+        if (reset) window_.tapTempoTracker_.reset();
+        window_.applyTapTrackMetronomeTempoAt(elapsedMs);
+        emitEvent(QStringLiteral("command_applied"), {
+            {QStringLiteral("id"), command.value(QStringLiteral("id"))},
+            {QStringLiteral("elapsed_ms"), elapsedMs},
+            {QStringLiteral("performance"), window_.automationPerformanceSnapshot()},
         });
         return;
     }
@@ -1257,8 +1326,10 @@ QJsonObject GuiTestAgent::controlInventoryPage(int cursor, bool includeState)
     return page;
 }
 
-bool GuiTestAgent::invokeControl(const QJsonObject& command, QString& error)
+bool GuiTestAgent::invokeControl(
+    const QJsonObject& command, QString& error, bool& completionDeferred)
 {
+    completionDeferred = false;
     const QString id = command.value(QStringLiteral("control")).toString();
     const QString operation = command.value(QStringLiteral("operation")).toString();
     if (id.isEmpty() || id.toUtf8().size() > 256 || operation.isEmpty()) {
@@ -1325,9 +1396,27 @@ bool GuiTestAgent::invokeControl(const QJsonObject& command, QString& error)
              jam2::gui::guiControlAvailability(*button) ==
                  QStringLiteral("hardware-profile"))) {
             const QPointer<QAbstractButton> target(button);
-            QTimer::singleShot(0, button, [target] {
-                if (target && target->isEnabled()) target->click();
+            const QPointer<GuiTestAgent> self(this);
+            QTimer::singleShot(0, this, [self, target, command] {
+                if (!self) return;
+                if (!target || !target->isEnabled()) {
+                    self->reject(command,
+                        QStringLiteral("control became unavailable before its async click"));
+                    return;
+                }
+                // The acknowledgement is emitted from the GUI turn that performs
+                // the click. The click itself follows synchronously, before any
+                // command queued in response can be drained by the modal event
+                // loop. This makes command_applied an ordering signal instead of
+                // an acknowledgement that a zero-delay timer merely exists.
+                self->emitEvent(QStringLiteral("command_applied"), {
+                    {QStringLiteral("id"), command.value(QStringLiteral("id"))},
+                    {QStringLiteral("control"), command.value(QStringLiteral("control"))},
+                    {QStringLiteral("operation"), command.value(QStringLiteral("operation"))},
+                });
+                target->click();
             });
+            completionDeferred = true;
             return true;
         }
         if (operation == QStringLiteral("set-checked") && button->isCheckable() &&
@@ -1473,9 +1562,7 @@ int jam2RunGuiTestAgent(QApplication& application, int argc, char* argv[])
     MainWindow window(nullptr, jam2::application::makeSyntheticMidiInputBackend({
         {"automation-midi-0", "Automation MIDI A"},
         {"automation-midi-1", "Automation MIDI B"},
-    }, std::chrono::milliseconds(1000)),
-        jam2::application::makeSyntheticInputPluginBackend(
-            std::chrono::milliseconds(1000)));
+    }), jam2::application::makeSyntheticInputPluginBackend());
     window.resize(1920, 1080);
     if (!show) window.setAttribute(Qt::WA_DontShowOnScreen, true);
     window.show();

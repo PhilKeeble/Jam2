@@ -266,7 +266,7 @@ ProcessResult runProcess(const QString& executable, const QStringList& arguments
     process.setProcessChannelMode(QProcess::MergedChannels);
     process.start();
     const int timeout = static_cast<int>(
-        jam2::test::scaledTimeout(std::chrono::seconds(20)).count());
+        jam2::test::deadmanTimeout(std::chrono::seconds(30)).count());
     ProcessResult result;
     result.started = process.waitForStarted(timeout);
     if (result.started) result.finished = process.waitForFinished(timeout);

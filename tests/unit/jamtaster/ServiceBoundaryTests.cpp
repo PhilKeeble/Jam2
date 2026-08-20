@@ -34,7 +34,7 @@ void writeFile(const QString& path, const QByteArray& bytes)
 
 void waitUntil(const std::function<bool()>& predicate, const std::string& message)
 {
-    const auto timeout = jam2::test::scaledTimeout(std::chrono::seconds(20));
+    const auto timeout = jam2::test::deadmanTimeout(std::chrono::seconds(30));
     QElapsedTimer timer;
     timer.start();
     while (!predicate() && timer.elapsed() < timeout.count()) {

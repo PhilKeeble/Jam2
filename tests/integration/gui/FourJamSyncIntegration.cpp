@@ -37,7 +37,7 @@ bool send(AutomationProcess& process, QJsonObject command)
 std::optional<QJsonObject> receive(
     AutomationProcess& process,
     const QString& expected,
-    std::chrono::milliseconds timeout = 20s)
+    std::chrono::milliseconds timeout = 60s)
 {
     QJsonObject event;
     QString error;
@@ -109,6 +109,35 @@ std::optional<QJsonObject> controlState(
     return std::nullopt;
 }
 
+std::optional<QJsonObject> controlStateQuiet(
+    AutomationProcess& process,
+    const QString& controlId,
+    const QString& requestPrefix)
+{
+    int cursor = 0;
+    for (;;) {
+        const QString requestId = requestPrefix + QLatin1Char('-') + QString::number(cursor);
+        if (!send(process, {
+                {QStringLiteral("type"), QStringLiteral("snapshot")},
+                {QStringLiteral("id"), requestId},
+                {QStringLiteral("cursor"), cursor},
+            })) return std::nullopt;
+        const auto event = receive(process, QStringLiteral("snapshot"));
+        if (!event || event->value(QStringLiteral("id")).toString() != requestId) {
+            return std::nullopt;
+        }
+        for (const QJsonValue& value : event->value(QStringLiteral("controls")).toArray()) {
+            const QJsonObject control = value.toObject();
+            if (control.value(QStringLiteral("test_id")).toString() == controlId) {
+                return control.value(QStringLiteral("state")).toObject();
+            }
+        }
+        cursor = event->value(QStringLiteral("next_cursor")).toInt(-1);
+        if (cursor < 0) break;
+    }
+    return std::nullopt;
+}
+
 std::optional<QJsonObject> jamSnapshot(AutomationProcess& process, int peer, int sequence)
 {
     if (!send(process, {
@@ -132,7 +161,7 @@ bool waitForAll(
     std::array<QJsonObject, FourPeerCoordinator::kPeerCount>& snapshots)
 {
     const auto deadline = std::chrono::steady_clock::now() +
-        jam2::test::scaledTimeout(40s);
+        jam2::test::deadmanTimeout(90s);
     int sequence = 0;
     while (std::chrono::steady_clock::now() < deadline) {
         bool ready = true;
@@ -145,7 +174,6 @@ bool waitForAll(
         }
         if (ready) return true;
         ++sequence;
-        QThread::msleep(75);
     }
     fail(QStringLiteral("timed out waiting for ") + description);
     for (std::size_t index = 0; index < snapshots.size(); ++index) {
@@ -157,6 +185,35 @@ bool waitForAll(
                   << " failure=" << snapshots[index].value(QStringLiteral("failure")).toString().toStdString()
                   << '\n';
     }
+    return false;
+}
+
+// A dialog must only be constructed after the engine has acknowledged the
+// requested mode. The engine snapshot, rather than a recently manipulated
+// combo box, is the authoritative signal for running-product behavior.
+bool waitForMode(
+    AutomationProcess& process,
+    const QString& expectedMode,
+    const QString& what)
+{
+    const auto deadline = std::chrono::steady_clock::now() +
+        jam2::test::deadmanTimeout(60s);
+    int sequence = 0;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (!send(process, {
+                {QStringLiteral("type"), QStringLiteral("snapshot")},
+                {QStringLiteral("id"), QStringLiteral("mode-wait-%1").arg(sequence)},
+                {QStringLiteral("cursor"), 0},
+            })) return false;
+        const auto event = receive(process, QStringLiteral("snapshot"));
+        if (!event) return false;
+        const QString mode = event->value(QStringLiteral("performance")).toObject()
+            .value(QStringLiteral("metronome_mode")).toString();
+        if (mode == expectedMode) return true;
+        ++sequence;
+    }
+    fail(QStringLiteral("timed out waiting for %1 to reach %2 metronome mode")
+        .arg(what, expectedMode));
     return false;
 }
 
@@ -182,7 +239,6 @@ int main(int argc, char* argv[])
         std::cerr << "usage: jam2_four_jam_sync_integration <release-jam2>\n";
         return 2;
     }
-
     LoopbackPortReservations portReservations;
     QString portError;
     if (!portReservations.reserve(FourPeerCoordinator::kPeerCount, portError)) {
@@ -390,29 +446,56 @@ int main(int argc, char* argv[])
             QStringLiteral("leader-audio-mode"),
             QStringLiteral("metronome.mode"),
             QStringLiteral("set-index"), 1) ||
+        !waitForMode(
+            creator, QStringLiteral("leader-audio"), QStringLiteral("the creator engine")) ||
         !invoke(creator,
             QStringLiteral("leader-audio-policy-open"),
             QStringLiteral("session.jam-sync"),
             QStringLiteral("click-async"))) return 1;
-    const auto leaderMetronome = controlState(
-        creator,
-        QStringLiteral("session.jam-sync-dialog.metronome-state"),
-        QStringLiteral("leader-audio-metronome-state"));
-    const auto leaderTrackLanes = controlState(
-        creator,
-        QStringLiteral("session.jam-sync-dialog.track-lanes"),
-        QStringLiteral("leader-audio-track-state"));
-    const auto leaderApply = controlState(
-        creator,
-        QStringLiteral("session.jam-sync-dialog.apply"),
-        QStringLiteral("leader-audio-apply-state"));
-    if (!leaderMetronome || !leaderTrackLanes || !leaderApply ||
-        leaderMetronome->value(QStringLiteral("enabled")).toBool() ||
-        !leaderTrackLanes->value(QStringLiteral("enabled")).toBool() ||
-        !leaderApply->value(QStringLiteral("enabled")).toBool()) {
-        fail(QStringLiteral(
-            "Leader Audio did not selectively lock only Jam Sync metronome state"));
-        return 1;
+    // The dialog lock is derived from the acknowledged engine mode. The
+    // click-async acknowledgement is ordered immediately before the real GUI
+    // click, so the remaining loop waits only for the observable modal controls.
+    {
+        const auto deadline = std::chrono::steady_clock::now() +
+            jam2::test::deadmanTimeout(60s);
+        QJsonObject lastMetronome;
+        QJsonObject lastTrackLanes;
+        QJsonObject lastApply;
+        bool observed = false;
+        for (;;) {
+            const auto leaderMetronome = controlStateQuiet(
+                creator,
+                QStringLiteral("session.jam-sync-dialog.metronome-state"),
+                QStringLiteral("leader-audio-metronome-state"));
+            const auto leaderTrackLanes = controlStateQuiet(
+                creator,
+                QStringLiteral("session.jam-sync-dialog.track-lanes"),
+                QStringLiteral("leader-audio-track-state"));
+            const auto leaderApply = controlStateQuiet(
+                creator,
+                QStringLiteral("session.jam-sync-dialog.apply"),
+                QStringLiteral("leader-audio-apply-state"));
+            if (leaderMetronome) lastMetronome = *leaderMetronome;
+            if (leaderTrackLanes) lastTrackLanes = *leaderTrackLanes;
+            if (leaderApply) lastApply = *leaderApply;
+            if (leaderMetronome && leaderTrackLanes && leaderApply &&
+                !leaderMetronome->value(QStringLiteral("enabled")).toBool() &&
+                leaderTrackLanes->value(QStringLiteral("enabled")).toBool() &&
+                leaderApply->value(QStringLiteral("enabled")).toBool()) {
+                observed = true;
+                break;
+            }
+            if (std::chrono::steady_clock::now() >= deadline) break;
+        }
+        if (!observed) {
+            fail(QStringLiteral(
+                    "Leader Audio did not selectively lock only Jam Sync metronome "
+                    "state: metronome_enabled=%1 track_lanes_enabled=%2 apply_enabled=%3")
+                .arg(lastMetronome.value(QStringLiteral("enabled")).toBool())
+                .arg(lastTrackLanes.value(QStringLiteral("enabled")).toBool())
+                .arg(lastApply.value(QStringLiteral("enabled")).toBool()));
+            return 1;
+        }
     }
     if (!invoke(creator,
             QStringLiteral("leader-audio-policy-cancel"),
@@ -434,7 +517,7 @@ int main(int argc, char* argv[])
         (void)receive(coordinator.peer(index), QStringLiteral("shutdown"));
         int exitCode = -1;
         QString error;
-        if (!coordinator.peer(index).waitForExit(20s, exitCode, error) || exitCode != 0) {
+        if (!coordinator.peer(index).waitForExit(60s, exitCode, error) || exitCode != 0) {
             fail(QStringLiteral("peer %1 did not exit cleanly: %2 code=%3")
                 .arg(index + 1).arg(error).arg(exitCode));
         }

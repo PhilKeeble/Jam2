@@ -62,13 +62,12 @@ public:
     void receiveChunk(const QByteArray& payload, const QString& sourcePeerToken);
     void receiveDone(const QJsonObject& message, const QString& sourcePeerToken);
 
-    // Private GUI-agent controls used only by native real-process tests. They
-    // delay a local lifecycle boundary or suppress a bounded number of outgoing
-    // starts before they are emitted; neither changes a wire frame or decoder.
-    bool armAutomationPause(
-        const QString& point,
-        int milliseconds,
-        QString& error);
+    // Private GUI-agent controls used only by native real-process tests. A gate
+    // stops at an observed lifecycle boundary until the test explicitly
+    // releases it; neither the gate nor start suppression changes a wire frame
+    // or decoder.
+    bool armAutomationPause(const QString& point, QString& error);
+    bool releaseAutomationPause(QString& error);
     bool armAutomationDropOutgoingStarts(int count, QString& error);
     void clearAutomationPause();
     QJsonObject automationSnapshot() const;
@@ -125,7 +124,8 @@ private:
 
     AutomationPausePoint automationPauseArmed_ = AutomationPausePoint::None;
     AutomationPausePoint automationPauseActive_ = AutomationPausePoint::None;
-    int automationPauseMilliseconds_ = 0;
+    std::function<void()> automationPauseResume_;
     int automationDropOutgoingStartsRemaining_ = 0;
     quint64 automationDroppedOutgoingStarts_ = 0;
+    QString automationLastDroppedOutgoingTargetToken_;
 };

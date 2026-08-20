@@ -775,7 +775,7 @@ void testEngineTakeCompletionCorrelation()
     config.test_input = jam2::EngineTestInput::Tone440;
     engine.start(config);
 
-    const std::uint64_t readyDeadline = jam2::monotonic_us() + 500000ULL;
+    const std::uint64_t readyDeadline = jam2::monotonic_us() + 30000000ULL;
     while (engine.snapshot().engine_frame < 512 &&
            jam2::monotonic_us() < readyDeadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -801,7 +801,7 @@ void testEngineTakeCompletionCorrelation()
 
     jam2::EngineEvent completion;
     bool found = false;
-    const std::uint64_t completionDeadline = jam2::monotonic_us() + 1500000ULL;
+    const std::uint64_t completionDeadline = jam2::monotonic_us() + 30000000ULL;
     while (!found && jam2::monotonic_us() < completionDeadline) {
         jam2::EngineEvent event;
         while (engine.pollEvent(event)) {

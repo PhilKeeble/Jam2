@@ -58,6 +58,7 @@ struct UdpProxyStats {
     std::size_t pendingPackets = 0;
     std::size_t pendingHighWater = 0;
     std::size_t pendingLimit = 0;
+    std::uint64_t serverEndpointRebinds = 0;
 };
 
 class UdpImpairmentProxy final {
@@ -74,6 +75,7 @@ public:
         std::size_t maximumPendingPackets = 65536);
 
     bool start(QString& error);
+    bool rebindServerEndpoint(QString& error);
     void pump();
     void setDatagramTransformer(DatagramTransformer transformer);
 
@@ -166,6 +168,7 @@ private:
     std::priority_queue<PendingDatagram, std::vector<PendingDatagram>, PendingLater> pending_;
     std::uint64_t nextOrder_ = 0;
     std::size_t pendingHighWater_ = 0;
+    std::uint64_t serverEndpointRebinds_ = 0;
 };
 
 } // namespace jam2::test

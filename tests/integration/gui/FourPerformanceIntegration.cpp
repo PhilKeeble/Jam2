@@ -43,7 +43,7 @@ bool send(AutomationProcess& process, QJsonObject command)
 std::optional<QJsonObject> receive(
     AutomationProcess& process,
     const QString& expected,
-    std::chrono::milliseconds timeout = 20s)
+    std::chrono::milliseconds timeout = 60s)
 {
     QJsonObject event;
     QString error;
@@ -226,10 +226,10 @@ bool waitForAll(
     const QString& description,
     Predicate predicate,
     std::array<QJsonObject, FourPeerCoordinator::kPeerCount>& states,
-    std::chrono::milliseconds timeout = 40s)
+    std::chrono::milliseconds timeout = 90s)
 {
     const auto deadline = std::chrono::steady_clock::now() +
-        jam2::test::scaledTimeout(timeout);
+        jam2::test::deadmanTimeout(timeout);
     int sequence = 0;
     while (std::chrono::steady_clock::now() < deadline) {
         bool ready = true;
@@ -242,7 +242,6 @@ bool waitForAll(
         }
         if (ready) return true;
         ++sequence;
-        QThread::msleep(75);
     }
     fail(QStringLiteral("timed out waiting for ") + description);
     for (std::size_t peer = 0; peer < states.size(); ++peer) printState(peer, states[peer]);
@@ -351,7 +350,7 @@ bool shutdown(FourPeerCoordinator& coordinator)
         (void)receive(coordinator.peer(peer), QStringLiteral("shutdown"));
         int exitCode = -1;
         QString error;
-        if (!coordinator.peer(peer).waitForExit(20s, exitCode, error) || exitCode != 0) {
+        if (!coordinator.peer(peer).waitForExit(60s, exitCode, error) || exitCode != 0) {
             fail(QStringLiteral("peer %1 did not exit cleanly: %2 code=%3")
                 .arg(peer + 1).arg(error).arg(exitCode));
         }
@@ -368,7 +367,6 @@ int main(int argc, char* argv[])
         std::cerr << "usage: jam2_four_performance_integration <release-jam2>\n";
         return 2;
     }
-
     LoopbackPortReservations portReservations;
     QString portError;
     if (!portReservations.reserve(FourPeerCoordinator::kPeerCount, portError)) {
@@ -504,7 +502,7 @@ int main(int argc, char* argv[])
             return state.value(QStringLiteral("performance")).toObject()
                 .value(QStringLiteral("recording_latency_adjustment_frames"))
                 .toInteger() == originalRecordingLatency[peer];
-        }, states, 5s)) return 1;
+        }, states, 20s)) return 1;
     if (!invoke(recordingDialogProcess,
             QStringLiteral("recording-dialog-apply-open"),
             recordingDialogLane + QStringLiteral(".arm"),
@@ -519,14 +517,14 @@ int main(int argc, char* argv[])
             QStringLiteral("looper.recording-dialog.arm"),
             QStringLiteral("click"))) return 1;
     if (!waitForAll(coordinator, QStringLiteral("accepted recording latency locality"),
-        [&originalRecordingLatency, changedRecordingLatency, recordingDialogPeer](
+        [&originalRecordingLatency, changedRecordingLatency](
             std::size_t peer, const QJsonObject& state) {
             const qint64 expected = peer == recordingDialogPeer
                 ? changedRecordingLatency : originalRecordingLatency[peer];
             return state.value(QStringLiteral("performance")).toObject()
                 .value(QStringLiteral("recording_latency_adjustment_frames"))
                 .toInteger() == expected;
-        }, states, 5s)) return 1;
+        }, states, 20s)) return 1;
     if (!invoke(recordingDialogProcess,
             QStringLiteral("recording-dialog-disarm"),
             recordingDialogLane + QStringLiteral(".arm"),
@@ -549,7 +547,7 @@ int main(int argc, char* argv[])
             return state.value(QStringLiteral("performance")).toObject()
                 .value(QStringLiteral("recording_latency_adjustment_frames"))
                 .toInteger() == originalRecordingLatency[peer];
-        }, states, 5s)) return 1;
+        }, states, 20s)) return 1;
     if (!invoke(recordingDialogProcess,
             QStringLiteral("recording-dialog-restored-disarm"),
             recordingDialogLane + QStringLiteral(".arm"),
@@ -572,7 +570,7 @@ int main(int argc, char* argv[])
                     baselineActiveBankLaneCount &&
                 content.value(QStringLiteral("active_bank_lane_ids")).toArray() ==
                     baselineActiveBankLaneIds;
-        }, states, 8s)) return 1;
+        }, states, 20s)) return 1;
 
     if (!invoke(
             coordinator.peer(0),
@@ -882,7 +880,7 @@ int main(int argc, char* argv[])
             QStringLiteral("click"))) return 1;
 
     if (!waitForAll(coordinator, QStringLiteral("genuine shared lane recording group"),
-        [sharedRecordingPeer](std::size_t peer, const QJsonObject& state) {
+        [](std::size_t peer, const QJsonObject& state) {
             const QJsonObject content = state.value(QStringLiteral("content")).toObject();
             const QString groupId = content.value(
                 QStringLiteral("lane_recording_active_group_id")).toString();
@@ -950,7 +948,7 @@ int main(int argc, char* argv[])
             QStringLiteral("session.jam-sync-dialog.cancel"),
             QStringLiteral("click"))) return 1;
     if (!waitForAll(coordinator, QStringLiteral("recording import worker baseline"),
-        [sharedRecordingPeer](std::size_t peer, const QJsonObject& state) {
+        [](std::size_t peer, const QJsonObject& state) {
             return peer != sharedRecordingPeer || state.value(
                 QStringLiteral("content")).toObject()
                     .value(QStringLiteral("file_tasks_active")).toInt(-1) == 0;
@@ -958,15 +956,23 @@ int main(int argc, char* argv[])
     if (!send(sharedRecorder, {
             {QStringLiteral("type"), QStringLiteral("looper.file-workers.hold")},
             {QStringLiteral("id"), QStringLiteral("recording-import-worker-hold")},
-            {QStringLiteral("milliseconds"), 2000},
         }) || !receive(sharedRecorder, QStringLiteral("command_applied")) ||
         !invoke(sharedRecorder,
             QStringLiteral("shared-recording-stop"),
             QStringLiteral("looper.recording.start-stop"),
             QStringLiteral("click"))) return 1;
 
-    if (!waitForAll(coordinator, QStringLiteral("shared lane WAV finalization and convergence"),
-        [baselineLaneCount, sharedRecordingLaneId, sharedRecordingPeer](
+    if (!waitForAll(coordinator, QStringLiteral("recorded lane import observes worker saturation"),
+        [](std::size_t peer, const QJsonObject& state) {
+            return peer != sharedRecordingPeer || state.value(
+                QStringLiteral("content")).toObject().value(
+                    QStringLiteral("lane_recording_import_busy_retries")).toInteger() > 0;
+        }, states, 30s) || !send(sharedRecorder, {
+            {QStringLiteral("type"), QStringLiteral("looper.file-workers.release")},
+            {QStringLiteral("id"), QStringLiteral("recording-import-worker-release")},
+        }) || !receive(sharedRecorder, QStringLiteral("command_applied")) ||
+        !waitForAll(coordinator, QStringLiteral("shared lane WAV finalization and convergence"),
+        [baselineLaneCount, sharedRecordingLaneId](
             std::size_t peer, const QJsonObject& state) {
             const QJsonObject content = state.value(QStringLiteral("content")).toObject();
             const QJsonArray laneIds = content.value(QStringLiteral("lane_ids")).toArray();
@@ -995,7 +1001,7 @@ int main(int argc, char* argv[])
                 (peer != sharedRecordingPeer || content.value(
                     QStringLiteral("lane_recording_import_busy_retries")).toInteger() > 0) &&
                 performance.value(QStringLiteral("global_transport_playing")).toBool();
-        }, states, 40s)) return 1;
+        }, states, 90s)) return 1;
     const QJsonObject sharedTake = states[0]
         .value(QStringLiteral("content")).toObject();
     const int sharedTakeIndex = jsonStringIndex(

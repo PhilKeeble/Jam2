@@ -41,6 +41,7 @@
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <iostream>
 #include <limits>
 #include <optional>
@@ -1220,16 +1221,23 @@ int runFocusedOperation(const ParsedScenario& scenario, QJsonObject& result)
 int runLifecycleSmoke(const ParsedScenario& scenario, QJsonObject& result)
 {
     ApplicationRuntime runtime;
-    const bool localBefore = runtime.startLocal(scenario.effectiveOptions);
-    const auto pumpFor = [](int milliseconds) {
+    const auto waitUntil = [](const std::function<bool()>& predicate) {
         const auto deadline = std::chrono::steady_clock::now() +
-            std::chrono::milliseconds(milliseconds);
-        while (std::chrono::steady_clock::now() < deadline) {
+            std::chrono::seconds(30);
+        while (!predicate() && std::chrono::steady_clock::now() < deadline) {
             QCoreApplication::processEvents();
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
+        QCoreApplication::processEvents();
+        return predicate();
     };
-    pumpFor(750);
+    const bool localBefore = runtime.startLocal(scenario.effectiveOptions);
+    const jam2::EngineSnapshot initialSnapshot = runtime.engineSnapshot();
+    const bool localBeforeAdvanced = localBefore && waitUntil([&] {
+        const jam2::EngineSnapshot snapshot = runtime.engineSnapshot();
+        return snapshot.callbacks >= initialSnapshot.callbacks + 16 &&
+            snapshot.engine_frame > initialSnapshot.engine_frame;
+    });
     const std::uint64_t frameBefore = runtime.engineSnapshot().engine_frame;
     Jam2RuntimeOptions networkOptions = scenario.effectiveOptions;
     networkOptions.bind = jam2::parse_bind_endpoint("127.0.0.1:0");
@@ -1241,20 +1249,37 @@ int runLifecycleSmoke(const ParsedScenario& scenario, QJsonObject& result)
     networkOptions.local_peer_id = 1;
     networkOptions.bootstrap_coordinator_peer_id = 1;
     networkOptions.mesh_peers_configured = true;
-    networkOptions.stream_ms = 750;
+    networkOptions.stream_ms = 0;
     networkOptions.arm_stream_on_first_peer = false;
+    bool networkReady = false;
+    runtime.onStartup = [&networkReady](const Jam2RuntimeStartup&) {
+        networkReady = true;
+    };
     const bool networkStarted = runtime.startNetwork(networkOptions);
-    while (runtime.isNetworkRunning()) pumpFor(10);
+    const long callbacksBeforeNetwork = runtime.engineSnapshot().callbacks;
+    const bool networkAdvanced = networkStarted && waitUntil([&] {
+        const jam2::EngineSnapshot snapshot = runtime.engineSnapshot();
+        return networkReady && runtime.isNetworkRunning() &&
+            snapshot.callbacks >= callbacksBeforeNetwork + 16 &&
+            snapshot.engine_frame > frameBefore;
+    });
     const std::uint64_t frameNetwork = runtime.engineSnapshot().engine_frame;
+    runtime.stopNetwork();
+    const bool networkStopped = !runtime.isNetworkRunning();
     const bool localAfter = runtime.startLocal(scenario.effectiveOptions);
-    pumpFor(750);
+    const long callbacksBeforeFinalLocal = runtime.engineSnapshot().callbacks;
+    const bool localAfterAdvanced = localAfter && waitUntil([&] {
+        const jam2::EngineSnapshot snapshot = runtime.engineSnapshot();
+        return snapshot.callbacks >= callbacksBeforeFinalLocal + 16 &&
+            snapshot.engine_frame > frameNetwork;
+    });
     const std::uint64_t finalFrame = runtime.engineSnapshot().engine_frame;
     const std::uint64_t starts = runtime.engineStarts();
     const std::uint64_t restarts = runtime.engineRestarts();
     const std::uint64_t reuses = runtime.engineReuses();
     runtime.shutdown();
-    const bool ok = localBefore && networkStarted && localAfter && starts == 1 &&
-        restarts == 0 && reuses == 2 && frameBefore > 0 &&
+    const bool ok = localBeforeAdvanced && networkAdvanced && networkStopped &&
+        localAfterAdvanced && starts == 1 && restarts == 0 && reuses == 2 && frameBefore > 0 &&
         frameNetwork > frameBefore && finalFrame > frameNetwork;
     result = {
         {QStringLiteral("event"), QStringLiteral("debug_lifecycle_result")},
@@ -1262,6 +1287,8 @@ int runLifecycleSmoke(const ParsedScenario& scenario, QJsonObject& result)
         {QStringLiteral("engine_starts"), static_cast<qint64>(starts)},
         {QStringLiteral("engine_restarts"), static_cast<qint64>(restarts)},
         {QStringLiteral("engine_reuses"), static_cast<qint64>(reuses)},
+        {QStringLiteral("network_startup_observed"), networkReady},
+        {QStringLiteral("network_stop_observed"), networkStopped},
         {QStringLiteral("frame_before_network"), static_cast<qint64>(frameBefore)},
         {QStringLiteral("frame_after_network"), static_cast<qint64>(frameNetwork)},
         {QStringLiteral("frame_after_return_local"), static_cast<qint64>(finalFrame)},

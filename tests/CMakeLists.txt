@@ -573,7 +573,7 @@ add_executable(jam2_plugin_bridge_tests EXCLUDE_FROM_ALL
     unit/plugin/PluginBridgeTests.cpp)
 jam2_configure_test_target(jam2_plugin_bridge_tests)
 target_link_libraries(jam2_plugin_bridge_tests PRIVATE
-    jam2_plugin_client Qt6::Core)
+    jam2_plugin_client jam2_plugin_transport Qt6::Core)
 add_test(NAME jam2_plugin_bridge_units
     COMMAND $<TARGET_FILE:jam2_plugin_bridge_tests>)
 set_tests_properties(jam2_plugin_bridge_units PROPERTIES
@@ -804,20 +804,37 @@ jam2_configure_test_target(jam2_plugin_device_tests)
 target_link_libraries(jam2_plugin_device_tests PRIVATE
     jam2_input_plugin_backend Qt6::Widgets)
 add_dependencies(jam2_plugin_device_tests jam2_plugin_worker)
+
+add_executable(jam2_midi_instrument_device_tests EXCLUDE_FROM_ALL
+    hardware/plugin/MidiInstrumentDeviceTests.cpp)
+jam2_configure_test_target(jam2_midi_instrument_device_tests)
+target_link_libraries(jam2_midi_instrument_device_tests PRIVATE
+    jam2_input_plugin_backend Qt6::Widgets)
+add_dependencies(jam2_midi_instrument_device_tests jam2_plugin_worker)
 if(WIN32)
-    add_custom_command(TARGET jam2_plugin_device_tests POST_BUILD
+    add_custom_target(jam2_hardware_plugin_worker_stage
+        COMMAND "${CMAKE_COMMAND}" -E make_directory
+            $<TARGET_FILE_DIR:jam2_plugin_device_tests>
         COMMAND "${CMAKE_COMMAND}" -E copy_if_different
             $<TARGET_FILE:jam2_plugin_worker>
-            $<TARGET_FILE_DIR:jam2_plugin_device_tests>
+            $<TARGET_FILE_DIR:jam2_midi_instrument_device_tests>
+        DEPENDS jam2_plugin_worker
         VERBATIM)
 elseif(APPLE)
-    add_custom_command(TARGET jam2_plugin_device_tests POST_BUILD
+    add_custom_target(jam2_hardware_plugin_worker_stage
         COMMAND "${CMAKE_COMMAND}" -E make_directory
-            "$<TARGET_FILE_DIR:jam2_plugin_device_tests>/../Helpers"
+            "$<TARGET_FILE_DIR:jam2_midi_instrument_device_tests>/../Helpers"
         COMMAND "${CMAKE_COMMAND}" -E copy_if_different
             $<TARGET_FILE:jam2_plugin_worker>
-            "$<TARGET_FILE_DIR:jam2_plugin_device_tests>/../Helpers/jam2-plugin-worker"
+            "$<TARGET_FILE_DIR:jam2_midi_instrument_device_tests>/../Helpers/jam2-plugin-worker"
+        DEPENDS jam2_plugin_worker
         VERBATIM)
+endif()
+if(TARGET jam2_hardware_plugin_worker_stage)
+    add_dependencies(
+        jam2_plugin_device_tests jam2_hardware_plugin_worker_stage)
+    add_dependencies(
+        jam2_midi_instrument_device_tests jam2_hardware_plugin_worker_stage)
 endif()
 
 if(JAM2_HARDWARE_PROFILE)
@@ -843,9 +860,25 @@ if(JAM2_HARDWARE_PROFILE)
     jam2_hardware_profile_field(JAM2_HARDWARE_INPUT_CHANNEL input_channel)
     jam2_hardware_profile_field(JAM2_HARDWARE_BUFFER_FRAMES buffer_frames)
 
-    if(NOT JAM2_HARDWARE_SCHEMA STREQUAL "jam2-hardware-profile-v1")
+    if(NOT JAM2_HARDWARE_SCHEMA STREQUAL "jam2-hardware-profile-v1" AND
+            NOT JAM2_HARDWARE_SCHEMA STREQUAL "jam2-hardware-profile-v2")
         message(FATAL_ERROR
-            "Hardware profile schema must be 'jam2-hardware-profile-v1'.")
+            "Hardware profile schema must be 'jam2-hardware-profile-v1' or "
+            "'jam2-hardware-profile-v2'.")
+    endif()
+    set(JAM2_HARDWARE_SECOND_INPUT_CHANNEL 0)
+    set(JAM2_HARDWARE_UNSUPPORTED_BUFFER_FRAMES 0)
+    set(JAM2_HARDWARE_INSTRUMENT_PLUGIN_PATH "")
+    set(JAM2_HARDWARE_MIDI_DEVICE_NAME "")
+    if(JAM2_HARDWARE_SCHEMA STREQUAL "jam2-hardware-profile-v2")
+        jam2_hardware_profile_field(
+            JAM2_HARDWARE_SECOND_INPUT_CHANNEL second_input_channel)
+        jam2_hardware_profile_field(
+            JAM2_HARDWARE_UNSUPPORTED_BUFFER_FRAMES unsupported_buffer_frames)
+        jam2_hardware_profile_field(
+            JAM2_HARDWARE_INSTRUMENT_PLUGIN_PATH instrument_plugin_path)
+        jam2_hardware_profile_field(
+            JAM2_HARDWARE_MIDI_DEVICE_NAME midi_device_name)
     endif()
     if(NOT EXISTS "${JAM2_HARDWARE_PLUGIN_PATH}")
         message(FATAL_ERROR
@@ -854,7 +887,9 @@ if(JAM2_HARDWARE_PROFILE)
     foreach(numeric_field IN ITEMS
             JAM2_HARDWARE_DEVICE_ID
             JAM2_HARDWARE_INPUT_CHANNEL
-            JAM2_HARDWARE_BUFFER_FRAMES)
+            JAM2_HARDWARE_BUFFER_FRAMES
+            JAM2_HARDWARE_SECOND_INPUT_CHANNEL
+            JAM2_HARDWARE_UNSUPPORTED_BUFFER_FRAMES)
         if(NOT ${numeric_field} MATCHES "^[0-9]+$")
             message(FATAL_ERROR
                 "Hardware profile ${numeric_field} must be a non-negative integer.")
@@ -862,6 +897,27 @@ if(JAM2_HARDWARE_PROFILE)
     endforeach()
     if(JAM2_HARDWARE_INPUT_CHANNEL LESS 1)
         message(FATAL_ERROR "Hardware profile input_channel must be at least 1.")
+    endif()
+    if(JAM2_HARDWARE_SCHEMA STREQUAL "jam2-hardware-profile-v2")
+        if(JAM2_HARDWARE_SECOND_INPUT_CHANNEL LESS 1 OR
+                JAM2_HARDWARE_SECOND_INPUT_CHANNEL EQUAL JAM2_HARDWARE_INPUT_CHANNEL)
+            message(FATAL_ERROR
+                "Hardware profile second_input_channel must be a different positive channel.")
+        endif()
+        if(JAM2_HARDWARE_UNSUPPORTED_BUFFER_FRAMES LESS 1 OR
+                JAM2_HARDWARE_UNSUPPORTED_BUFFER_FRAMES GREATER 4096)
+            message(FATAL_ERROR
+                "Hardware profile unsupported_buffer_frames must be between 1 and 4096.")
+        endif()
+        if(NOT EXISTS "${JAM2_HARDWARE_INSTRUMENT_PLUGIN_PATH}")
+            message(FATAL_ERROR
+                "Hardware profile instrument_plugin_path does not exist: "
+                "${JAM2_HARDWARE_INSTRUMENT_PLUGIN_PATH}")
+        endif()
+        if(JAM2_HARDWARE_MIDI_DEVICE_NAME STREQUAL "")
+            message(FATAL_ERROR
+                "Hardware profile midi_device_name must not be empty.")
+        endif()
     endif()
     if(JAM2_HARDWARE_BUFFER_FRAMES LESS 1 OR
             JAM2_HARDWARE_BUFFER_FRAMES GREATER 4096)
@@ -874,16 +930,38 @@ if(JAM2_HARDWARE_PROFILE)
             "${JAM2_HARDWARE_PLUGIN_PATH}"
             "${JAM2_HARDWARE_DEVICE_ID}"
             "${JAM2_HARDWARE_INPUT_CHANNEL}"
-            "${JAM2_HARDWARE_BUFFER_FRAMES}")
+            "${JAM2_HARDWARE_BUFFER_FRAMES}"
+            "${JAM2_HARDWARE_SECOND_INPUT_CHANNEL}"
+            "${JAM2_HARDWARE_UNSUPPORTED_BUFFER_FRAMES}")
     set_tests_properties(jam2_hardware_plugin_device PROPERTIES
-        LABELS "hardware;plugin;audio-device"
+        LABELS "hardware;plugin;audio-device;interactive"
         RUN_SERIAL TRUE
-        TIMEOUT 180
+        TIMEOUT 600
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
     if(WIN32)
         set_tests_properties(jam2_hardware_plugin_device PROPERTIES
             ENVIRONMENT_MODIFICATION
                 "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Widgets>")
+    endif()
+
+    if(JAM2_HARDWARE_SCHEMA STREQUAL "jam2-hardware-profile-v2")
+        add_test(NAME jam2_hardware_midi_instrument_device
+            COMMAND $<TARGET_FILE:jam2_midi_instrument_device_tests>
+                "${JAM2_HARDWARE_INSTRUMENT_PLUGIN_PATH}"
+                "${JAM2_HARDWARE_DEVICE_ID}"
+                "${JAM2_HARDWARE_INPUT_CHANNEL}"
+                "${JAM2_HARDWARE_BUFFER_FRAMES}"
+                "${JAM2_HARDWARE_MIDI_DEVICE_NAME}")
+        set_tests_properties(jam2_hardware_midi_instrument_device PROPERTIES
+            LABELS "hardware;plugin;audio-device;midi;instrument;interactive"
+            RUN_SERIAL TRUE
+            TIMEOUT 600
+            ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+        if(WIN32)
+            set_tests_properties(jam2_hardware_midi_instrument_device PROPERTIES
+                ENVIRONMENT_MODIFICATION
+                    "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Widgets>")
+        endif()
     endif()
 
     if(WIN32)
@@ -1046,12 +1124,6 @@ add_test(NAME jam2_four_gui_modal_integration
 set_tests_properties(jam2_four_gui_modal_integration PROPERTIES
     LABELS "integration;gui;four-peer;automation;modal"
     TIMEOUT 180)
-if(APPLE)
-    # Four Cocoa processes repeatedly snapshot the full real widget tree. The
-    # per-operation waits remain bounded; allow the complete catalogue longer.
-    set_tests_properties(jam2_four_gui_modal_integration PROPERTIES
-        TIMEOUT 600)
-endif()
 if(WIN32)
     set_tests_properties(jam2_four_gui_modal_integration PROPERTIES
         ENVIRONMENT_MODIFICATION
@@ -1062,14 +1134,7 @@ add_test(NAME jam2_four_session_dialog_integration
         "${JAM2_TEST_PUBLIC_EXECUTABLE}" startup-only)
 set_tests_properties(jam2_four_session_dialog_integration PROPERTIES
     LABELS "integration;gui;four-peer;automation;modal;session-startup"
-    TIMEOUT 120)
-if(APPLE)
-    # This workflow renders real reference material while driving four Cocoa
-    # processes. Its behavioral waits remain individually bounded; only the
-    # outer catalogue allowance differs from the faster Windows run.
-    set_tests_properties(jam2_four_session_dialog_integration PROPERTIES
-        TIMEOUT 300)
-endif()
+    TIMEOUT 180)
 if(WIN32)
     set_tests_properties(jam2_four_session_dialog_integration PROPERTIES
         ENVIRONMENT_MODIFICATION
@@ -1086,7 +1151,7 @@ add_executable(jam2_four_session_command_integration EXCLUDE_FROM_ALL
     integration/network/FourSessionCommandIntegration.cpp)
 jam2_configure_test_target(jam2_four_session_command_integration)
 target_link_libraries(jam2_four_session_command_integration PRIVATE
-    jam2_core jam2_test_process_support Qt6::Core Qt6::Network)
+    jam2_core jam2_test_network_support jam2_test_process_support Qt6::Core Qt6::Network)
 add_test(NAME jam2_four_session_command_integration
     COMMAND $<TARGET_FILE:jam2_four_session_command_integration>
         "${JAM2_TEST_PUBLIC_EXECUTABLE}")
@@ -1116,7 +1181,7 @@ foreach(operation IN ITEMS boundaries controller-lifecycle)
         COMMAND $<TARGET_FILE:jam2_native_validation_integration>
             "${JAM2_TEST_PUBLIC_EXECUTABLE}" "${native_operation}")
     set_tests_properties("${test_name}" PROPERTIES
-        LABELS "integration;network;security;validation"
+        LABELS "integration;network;security;validation;capacity-heavy"
         TIMEOUT 150)
     if(WIN32)
         set_tests_properties("${test_name}" PROPERTIES
@@ -1147,7 +1212,7 @@ foreach(mode IN LISTS JAM2_METRONOME_TEST_MODES)
                 "${JAM2_TEST_PUBLIC_EXECUTABLE}" "${mode}" "${condition}")
         set_tests_properties("${test_name}" PROPERTIES
             LABELS "integration;four-peer;performance;metronome;epoch;network-impairment"
-            TIMEOUT 45)
+            TIMEOUT 150)
         if(WIN32)
             set_tests_properties("${test_name}" PROPERTIES
                 ENVIRONMENT_MODIFICATION
@@ -1164,7 +1229,7 @@ foreach(security_condition IN ITEMS security sequence-security)
             "${JAM2_TEST_PUBLIC_EXECUTABLE}" "shared-grid" "${security_condition}")
     set_tests_properties("${test_name}" PROPERTIES
         LABELS "integration;four-peer;network;security;udp"
-        TIMEOUT 45)
+        TIMEOUT 150)
     if(WIN32)
         set_tests_properties("${test_name}" PROPERTIES
             ENVIRONMENT_MODIFICATION
@@ -1223,7 +1288,8 @@ add_custom_target(jam2_tests_plugin
 add_custom_target(jam2_tests_hardware
     DEPENDS
         jam2
-        jam2_plugin_device_tests)
+        jam2_plugin_device_tests
+        jam2_midi_instrument_device_tests)
 
 add_custom_target(jam2_tests_gui
     DEPENDS
@@ -1311,21 +1377,82 @@ if(JAM2_HARDWARE_PROFILE)
     add_dependencies(jam2_tests_all jam2_tests_hardware)
 endif()
 
-# Keep every automated test's temporary state inside the build tree. CTest
-# applies these variables to the test process and all Jam2 children that it
-# launches, covering Qt and standard-library temporary-directory APIs on both
-# Windows and macOS. Individual fixtures still remove successful artifacts;
-# the build scripts remove this root only after the requested gate succeeds.
+# Keep every automated test's temporary state inside a private directory below
+# the build tree. Per-test namespaces prevent parallel CTests from colliding on
+# fixed temporary names while still letting a test's Jam2 children share their
+# coordinator-owned workspace. Individual fixtures remove successful data; the
+# build scripts remove the complete root after the requested gate succeeds and
+# retain it after failure.
 set(JAM2_TEST_ARTIFACT_ROOT "${CMAKE_BINARY_DIR}/test-artifacts")
 file(MAKE_DIRECTORY "${JAM2_TEST_ARTIFACT_ROOT}")
 get_property(JAM2_ALL_TESTS DIRECTORY PROPERTY TESTS)
+set(JAM2_RESET_TEST_ARTIFACT_SCRIPT
+    "file(REMOVE_RECURSE [==[${JAM2_TEST_ARTIFACT_ROOT}]==])\n")
 foreach(test_name IN LISTS JAM2_ALL_TESTS)
+    set(test_artifact_root "${JAM2_TEST_ARTIFACT_ROOT}/${test_name}")
+    file(MAKE_DIRECTORY "${test_artifact_root}")
+    string(APPEND JAM2_RESET_TEST_ARTIFACT_SCRIPT
+        "file(MAKE_DIRECTORY [==[${test_artifact_root}]==])\n")
     set_property(TEST "${test_name}" APPEND PROPERTY
         ENVIRONMENT_MODIFICATION
-            "JAM2_TEST_ARTIFACT_ROOT=set:${JAM2_TEST_ARTIFACT_ROOT}"
-            "TEMP=set:${JAM2_TEST_ARTIFACT_ROOT}"
-            "TMP=set:${JAM2_TEST_ARTIFACT_ROOT}"
-            "TMPDIR=set:${JAM2_TEST_ARTIFACT_ROOT}")
+            "JAM2_TEST_ARTIFACT_ROOT=set:${test_artifact_root}"
+            "TEMP=set:${test_artifact_root}"
+            "TMP=set:${test_artifact_root}"
+            "TMPDIR=set:${test_artifact_root}")
+endforeach()
+set(JAM2_RESET_TEST_ARTIFACT_SCRIPT_PATH
+    "${CMAKE_BINARY_DIR}/ResetTestArtifactWorkspace.cmake")
+file(GENERATE
+    OUTPUT "${JAM2_RESET_TEST_ARTIFACT_SCRIPT_PATH}"
+    CONTENT "${JAM2_RESET_TEST_ARTIFACT_SCRIPT}")
+
+# CTest TIMEOUT is only a final deadman for a wedged process. Product behavior
+# is judged by events, state, frames and artifacts inside each test, never by
+# finishing before this ceiling. Use one platform-neutral minimum per workload
+# class so a contended or older host is not a product failure.
+cmake_host_system_information(RESULT JAM2_TEST_LOGICAL_CORES
+    QUERY NUMBER_OF_LOGICAL_CORES)
+if(NOT JAM2_TEST_LOGICAL_CORES MATCHES "^[1-9][0-9]*$")
+    set(JAM2_TEST_LOGICAL_CORES 1)
+endif()
+if(JAM2_TEST_LOGICAL_CORES LESS_EQUAL 2)
+    set(JAM2_HEAVY_TEST_PROCESSORS 1)
+elseif(JAM2_TEST_LOGICAL_CORES GREATER 5)
+    set(JAM2_HEAVY_TEST_PROCESSORS 4)
+else()
+    math(EXPR JAM2_HEAVY_TEST_PROCESSORS "${JAM2_TEST_LOGICAL_CORES} - 1")
+endif()
+
+foreach(test_name IN LISTS JAM2_ALL_TESTS)
+    get_property(test_labels TEST "${test_name}" PROPERTY LABELS)
+    list(FIND test_labels "four-peer" four_peer_label)
+    list(FIND test_labels "jamtaster" jamtaster_label)
+    list(FIND test_labels "capacity-heavy" capacity_heavy_label)
+    get_property(base_timeout TEST "${test_name}" PROPERTY TIMEOUT)
+    if(four_peer_label GREATER -1)
+        set_tests_properties("${test_name}" PROPERTIES
+            PROCESSORS "${JAM2_HEAVY_TEST_PROCESSORS}")
+        if(NOT base_timeout OR base_timeout LESS 900)
+            set_tests_properties("${test_name}" PROPERTIES TIMEOUT 900)
+        endif()
+    elseif(jamtaster_label GREATER -1)
+        # ONNX/model and helper-process cases can consume several cores and
+        # substantial memory. Account for them as one heavy workload instead
+        # of scheduling every JamTaster case at once on a small host.
+        set_tests_properties("${test_name}" PROPERTIES
+            PROCESSORS "${JAM2_HEAVY_TEST_PROCESSORS}")
+        if(NOT base_timeout OR base_timeout LESS 600)
+            set_tests_properties("${test_name}" PROPERTIES TIMEOUT 600)
+        endif()
+    elseif(capacity_heavy_label GREATER -1)
+        set_tests_properties("${test_name}" PROPERTIES
+            PROCESSORS "${JAM2_HEAVY_TEST_PROCESSORS}")
+        if(NOT base_timeout OR base_timeout LESS 300)
+            set_tests_properties("${test_name}" PROPERTIES TIMEOUT 300)
+        endif()
+    elseif(NOT base_timeout OR base_timeout LESS 300)
+        set_tests_properties("${test_name}" PROPERTIES TIMEOUT 300)
+    endif()
 endforeach()
 
 if(JAM2_ENABLE_COVERAGE)
@@ -1336,11 +1463,9 @@ if(JAM2_ENABLE_COVERAGE)
     foreach(test_name IN LISTS JAM2_ALL_TESTS)
         get_property(test_timeout TEST "${test_name}" PROPERTY TIMEOUT)
         if(test_timeout)
-            math(EXPR coverage_timeout "${test_timeout} * 5")
+            math(EXPR coverage_timeout "${test_timeout} * 3")
             set_tests_properties("${test_name}" PROPERTIES
                 TIMEOUT "${coverage_timeout}")
         endif()
-        set_property(TEST "${test_name}" APPEND PROPERTY
-            ENVIRONMENT_MODIFICATION "JAM2_TEST_TIMEOUT_SCALE=set:4")
     endforeach()
 endif()

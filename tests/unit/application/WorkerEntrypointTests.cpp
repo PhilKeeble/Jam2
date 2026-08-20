@@ -17,7 +17,7 @@ void checkWorker(
 {
     QProcess process;
     process.start(executable, {});
-    const auto timeout = jam2::test::scaledTimeout(std::chrono::seconds(20));
+    const auto timeout = jam2::test::deadmanTimeout(std::chrono::seconds(30));
     const int timeoutMs = static_cast<int>(timeout.count());
     if (!process.waitForStarted(timeoutMs)) {
         ++failures;

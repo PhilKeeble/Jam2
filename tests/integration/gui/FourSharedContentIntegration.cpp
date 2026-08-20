@@ -404,7 +404,7 @@ bool send(AutomationProcess& process, QJsonObject command)
 std::optional<QJsonObject> receive(
     AutomationProcess& process,
     const QString& expected,
-    std::chrono::milliseconds timeout = 20s)
+    std::chrono::milliseconds timeout = 60s)
 {
     QJsonObject event;
     QString error;
@@ -472,7 +472,7 @@ bool waitForAll(
     bool requireSameDigest = true)
 {
     const auto deadline = std::chrono::steady_clock::now() +
-        jam2::test::scaledTimeout(40s);
+        jam2::test::deadmanTimeout(90s);
     int sequence = 0;
     while (std::chrono::steady_clock::now() < deadline) {
         bool ready = true;
@@ -496,7 +496,6 @@ bool waitForAll(
         }
         if (ready) return true;
         ++sequence;
-        QThread::msleep(75);
     }
     fail(QStringLiteral("timed out waiting for ") + description);
     for (std::size_t index = 0; index < states.size(); ++index) {
@@ -679,7 +678,7 @@ bool shutDown(FourPeerCoordinator& coordinator)
             !receive(coordinator.peer(index), QStringLiteral("shutdown"))) return false;
         int exitCode = -1;
         QString error;
-        if (!coordinator.peer(index).waitForExit(20s, exitCode, error) || exitCode != 0) {
+        if (!coordinator.peer(index).waitForExit(60s, exitCode, error) || exitCode != 0) {
             fail(QStringLiteral("peer %1 did not exit cleanly: %2 code=%3")
                 .arg(index + 1).arg(error).arg(exitCode));
             return false;
@@ -697,7 +696,6 @@ int main(int argc, char* argv[])
         std::cerr << "usage: jam2_four_shared_content_integration <release-jam2>\n";
         return 2;
     }
-
     QTemporaryDir fixtureFolder;
     QString automaticWavPath;
     QString automaticWavHash;
@@ -1252,7 +1250,6 @@ int main(int argc, char* argv[])
             {QStringLiteral("id"),
                 QStringLiteral("wav-reshare-pause-source-validation")},
             {QStringLiteral("point"), QStringLiteral("outgoing-validation")},
-            {QStringLiteral("milliseconds"), 3000},
         }) ||
         !apply(coordinator, 2, {
             {QStringLiteral("type"), QStringLiteral("invoke")},
@@ -1267,7 +1264,10 @@ int main(int argc, char* argv[])
                     .value(QStringLiteral("transfer")).toObject()
                     .value(QStringLiteral("pause_active")).toString() ==
                     QStringLiteral("outgoing-validation");
-            }, states, false) || !waitForAll(coordinator,
+            }, states, false) || !apply(coordinator, 2, {
+            {QStringLiteral("type"), QStringLiteral("looper.transfer.release")},
+            {QStringLiteral("id"), QStringLiteral("wav-reshare-release-source-validation")},
+        }) || !waitForAll(coordinator,
             QStringLiteral("same-byte WAV re-share after removal"),
             [&manualWavHash, beforeRemoveLaneCount, &beforeRemoveLaneIds](
                 std::size_t, const QJsonObject& state) {

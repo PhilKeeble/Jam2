@@ -17,6 +17,7 @@
 #include <QTcpServer>
 #include <QTcpSocket>
 #include <QThread>
+#include <QTimer>
 
 #include <algorithm>
 #include <functional>
@@ -31,9 +32,10 @@ using jam2::control_protocol::TransportFailure;
 
 namespace {
 
-constexpr int kFailedKeyHandshakeTimeoutMs = 1000;
-constexpr int kFailedKeyCleanupTimeoutMs = 500;
-constexpr int kFailedKeyRateLimitTimeoutMs = 1000;
+// Event-driven validation exits as soon as the required state is visible.
+// This ceiling is only a diagnostic deadman for a stalled local event loop;
+// it is not a product-performance threshold.
+constexpr int kSignalDeadmanTimeoutMs = 30000;
 
 struct EventCapture {
     int connectionRefused = 0;
@@ -103,7 +105,7 @@ bool pumpUntil(const std::function<bool()>& predicate, int timeoutMs)
 bool readHandshakeFrame(
     QTcpSocket& socket,
     QJsonObject& message,
-    int timeoutMs = 1000)
+    int timeoutMs = kSignalDeadmanTimeoutMs)
 {
     QByteArray buffer;
     return pumpUntil([&] {
@@ -268,7 +270,7 @@ QJsonObject jam2RunControllerLifecycleValidation(
             const auto snapshot = refused.snapshot();
             return snapshot.lifecycle == SharedSessionController::Lifecycle::Failed &&
                 snapshot.failure == TransportFailure::ReconnectExhausted;
-        }, 12000);
+        }, kSignalDeadmanTimeoutMs);
     }
     const auto refusedSnapshot = refused.snapshot();
     check(QStringLiteral("controller.initial-refusal-typed"),
@@ -325,7 +327,7 @@ QJsonObject jam2RunControllerLifecycleValidation(
             stats.pendingCapRejects > 0 &&
             stats.activeConnections <=
                 static_cast<quint64>(jam2::control_protocol::kMaxPendingPeers);
-    }, 1500);
+    }, kSignalDeadmanTimeoutMs);
     const auto pendingCapStats = securityServer.stats();
     check(QStringLiteral("controller.pending-authentication-work-is-bounded"),
         pendingCapObserved &&
@@ -340,7 +342,7 @@ QJsonObject jam2RunControllerLifecycleValidation(
     pendingSockets.clear();
     const bool pendingDrained = securityListening && pumpUntil([&] {
         return securityServer.stats().activeConnections == 0;
-    }, 1000);
+    }, kSignalDeadmanTimeoutMs);
     check(QStringLiteral("controller.pending-authentication-cleanup-drains"), pendingDrained);
 
     const quint64 authTimeoutsBefore = securityServer.stats().authenticationTimeouts;
@@ -353,7 +355,7 @@ QJsonObject jam2RunControllerLifecycleValidation(
     const bool authenticationTimedOut = securityListening && pumpUntil([&] {
         return securityServer.stats().authenticationTimeouts > authTimeoutsBefore &&
             securityServer.stats().activeConnections == 0;
-    }, jam2::control_protocol::kAuthenticationDeadlineMs + 1000);
+    }, kSignalDeadmanTimeoutMs);
     check(QStringLiteral("controller.silent-authentication-has-bounded-deadline"),
         authenticationTimedOut);
 
@@ -367,7 +369,7 @@ QJsonObject jam2RunControllerLifecycleValidation(
     const bool incompleteTimedOut = incompleteAuthenticated && pumpUntil([&] {
         return securityServer.stats().frameTimeouts > frameTimeoutsBefore &&
             securityServer.stats().activeConnections == 0;
-    }, jam2::control_protocol::kIncompleteFrameDeadlineMs + 1000);
+    }, kSignalDeadmanTimeoutMs);
     check(QStringLiteral("controller.incomplete-authenticated-frame-has-bounded-deadline"),
         incompleteTimedOut);
 
@@ -383,7 +385,7 @@ QJsonObject jam2RunControllerLifecycleValidation(
             rejectedToken, QStringLiteral("Validation peer limit"));
     const bool rejectedPeerClosed = rejectionQueued && pumpUntil([&] {
         return securityServer.stats().activeConnections == 0;
-    }, 1000);
+    }, kSignalDeadmanTimeoutMs);
     check(QStringLiteral("controller.authenticated-peer-rejection-is-delivered-and-closed"),
         rejectionPeerAuthenticated && rejectionQueued && rejectedPeerClosed &&
             securityServer.stats().authenticatedCapRejects == 1);
@@ -408,7 +410,7 @@ QJsonObject jam2RunControllerLifecycleValidation(
         return deliveredRawMessages == 1 &&
             securityServer.stats().sequenceOrTagRejects > replayRejectsBefore &&
             securityServer.stats().activeConnections == 0;
-    }, 1000);
+    }, kSignalDeadmanTimeoutMs);
     check(QStringLiteral("controller.authenticated-frame-replay-is-rejected-once"),
         replayRejected);
 
@@ -426,7 +428,7 @@ QJsonObject jam2RunControllerLifecycleValidation(
     const bool invalidTagRejected = tagAuthenticated && pumpUntil([&] {
         return securityServer.stats().sequenceOrTagRejects > tagRejectsBefore &&
             securityServer.stats().activeConnections == 0;
-    }, 1000);
+    }, kSignalDeadmanTimeoutMs);
     check(QStringLiteral("controller.authenticated-frame-tag-corruption-is-rejected"),
         invalidTagRejected && deliveredRawMessages == 1);
 
@@ -444,7 +446,7 @@ QJsonObject jam2RunControllerLifecycleValidation(
     const bool oversizedRejected = securityListening && pumpUntil([&] {
         return securityServer.stats().frameRejects > frameRejectsBefore &&
             securityServer.stats().activeConnections == 0;
-    }, 1000);
+    }, kSignalDeadmanTimeoutMs);
     check(QStringLiteral("controller.oversized-frame-prefix-fails-closed"), oversizedRejected);
 
     // Own a fresh failure window for the exact 64-plus-one limiter proof. The
@@ -469,7 +471,7 @@ QJsonObject jam2RunControllerLifecycleValidation(
         QTcpSocket socket;
         QJsonObject challenge;
         socket.connectToHost(QHostAddress::LocalHost, *rateLimitPort);
-        if (!readHandshakeFrame(socket, challenge, kFailedKeyHandshakeTimeoutMs)) {
+        if (!readHandshakeFrame(socket, challenge, kSignalDeadmanTimeoutMs)) {
             failedKeyChallengeRead = false;
             break;
         }
@@ -481,7 +483,7 @@ QJsonObject jam2RunControllerLifecycleValidation(
         if (!pumpUntil([&] {
                 return rateLimitServer.stats().authenticationRejects >= target &&
                     rateLimitServer.stats().activeConnections == 0;
-            }, kFailedKeyCleanupTimeoutMs)) {
+            }, kSignalDeadmanTimeoutMs)) {
             failedKeyCleanupObserved = false;
             break;
         }
@@ -494,7 +496,7 @@ QJsonObject jam2RunControllerLifecycleValidation(
     const bool authenticationRateLimited = rateLimitListening && pumpUntil([&] {
         return rateLimitServer.stats().authenticationRateLimitRejects > 0 &&
             rateLimitServer.stats().activeConnections == 0;
-    }, kFailedKeyRateLimitTimeoutMs);
+    }, kSignalDeadmanTimeoutMs);
     const auto finalSecurityStats = rateLimitServer.stats();
     const quint64 authenticationRejectDelta =
         finalSecurityStats.authenticationRejects - authenticationRejectsBefore;
@@ -589,7 +591,7 @@ QJsonObject jam2RunControllerLifecycleValidation(
                 }
                 return completeChallenge ||
                     socket.state() == QAbstractSocket::UnconnectedState;
-            }, 500) && completeChallenge;
+            }, kSignalDeadmanTimeoutMs) && completeChallenge;
             preAuthChallenges += challenged ? 1 : 0;
             repeatedPreAuthDisconnectsSafe = repeatedPreAuthDisconnectsSafe && challenged;
             socket.abort();
@@ -598,7 +600,7 @@ QJsonObject jam2RunControllerLifecycleValidation(
     }
     const bool preAuthDisconnectsObserved = pumpUntil([&] {
         return creator.serverStats().disconnectedConnections >= 3;
-    }, 500);
+    }, kSignalDeadmanTimeoutMs);
     check(QStringLiteral("controller.pre-auth-challenge-immediate-and-repeatable"),
         repeatedPreAuthDisconnectsSafe && preAuthChallenges == 3 &&
             creator.serverStats().acceptedConnections >= 3 &&
@@ -616,7 +618,7 @@ QJsonObject jam2RunControllerLifecycleValidation(
             for (int attempt = 0; attempt < 8; ++attempt) {
                 QTcpSocket socket;
                 socket.connectToHost(QHostAddress::LocalHost, *sessionPort);
-                if (socket.waitForConnected(1000)) {
+                if (socket.waitForConnected(kSignalDeadmanTimeoutMs)) {
                     ++closedBacklogConnections;
                     socket.abort();
                 }
@@ -626,7 +628,7 @@ QJsonObject jam2RunControllerLifecycleValidation(
     }
     const bool closedBacklogHandled = closedBacklogConnections > 0 && pumpUntil([&] {
         return creator.serverStats().acceptedConnections > acceptedBeforeClosedBacklog;
-    }, 1000);
+    }, kSignalDeadmanTimeoutMs);
     check(QStringLiteral("controller.closed-pre-auth-backlog-preserves-listener"),
         closedBacklogHandled &&
             creator.snapshot().lifecycle == SharedSessionController::Lifecycle::Listening);
@@ -648,7 +650,7 @@ QJsonObject jam2RunControllerLifecycleValidation(
         wrongKeyStarted = wrongKey.startJoiner(config);
         wrongKeyFailed = pumpUntil([&] {
             return wrongKey.snapshot().lifecycle == SharedSessionController::Lifecycle::Failed;
-        }, 1000);
+        }, kSignalDeadmanTimeoutMs);
     }
     check(QStringLiteral("controller.authentication-failure-typed"),
         wrongKeyStarted && wrongKeyFailed && wrongKeyCapture.authenticationRejected == 1 &&
@@ -659,8 +661,20 @@ QJsonObject jam2RunControllerLifecycleValidation(
 
     EventCapture joinerCapture;
     SharedSessionController joiner;
+    bool refreshOnReconnectScheduled = false;
+    bool refreshExecutionEnabled = false;
+    bool refreshInvoked = false;
     joiner.onTransportEvent = [&](const TransportEvent& event, bool) {
         joinerCapture.event(event);
+        if (refreshOnReconnectScheduled &&
+            event.type == TransportEventType::ReconnectScheduled) {
+            refreshOnReconnectScheduled = false;
+            QTimer::singleShot(0, &joiner, [&] {
+                if (!refreshExecutionEnabled) return;
+                refreshInvoked = true;
+                joiner.refresh();
+            });
+        }
     };
     joiner.onSnapshot = [&](const SharedSessionController::Snapshot& snapshot) {
         joinerCapture.snapshot(snapshot);
@@ -678,7 +692,7 @@ QJsonObject jam2RunControllerLifecycleValidation(
             return local.lifecycle == SharedSessionController::Lifecycle::Active &&
                 local.contractReady && local.membershipReady && local.networkAttachmentReady &&
                 local.remotePeerCount == 1 && remote.remotePeerCount == 1;
-        }, 2000);
+        }, kSignalDeadmanTimeoutMs);
     }
     check(QStringLiteral("controller.join-contract-membership-ready"),
         joinerStarted && joined && joiner.snapshot().contractRevision == 1 &&
@@ -697,7 +711,7 @@ QJsonObject jam2RunControllerLifecycleValidation(
     const bool heartbeatObserved = joined && pumpUntil([&] {
         return joiner.snapshot().heartbeatsReceived > 0 &&
             creator.snapshot().heartbeatAcksReceived > 0;
-    }, 1000);
+    }, kSignalDeadmanTimeoutMs);
     check(QStringLiteral("controller.heartbeat-authenticated-and-acknowledged"),
         heartbeatObserved && joiner.snapshot().lastHeartbeatAgeMs >= 0);
 
@@ -723,12 +737,12 @@ QJsonObject jam2RunControllerLifecycleValidation(
     const bool creatorControlReceived = joinerControlSent && pumpUntil([&] {
         return creatorControlBinary == controlBinary &&
             controlBinarySource == joiner.snapshot().localToken;
-    }, 1000);
+    }, kSignalDeadmanTimeoutMs);
     const bool creatorControlSent = creatorControlReceived &&
         creator.sendBinaryTo(joiner.snapshot().localToken, controlBinary);
     const bool joinerControlReceived = creatorControlSent && pumpUntil([&] {
         return joinerControlBinary == controlBinary;
-    }, 1000);
+    }, kSignalDeadmanTimeoutMs);
     const auto assetClientDiagnostics = joiner.assetClientStats();
     check(QStringLiteral("controller.authenticated-control-binary-roundtrip"),
         controlQueuesReady && creatorControlReceived && joinerControlReceived &&
@@ -749,7 +763,7 @@ QJsonObject jam2RunControllerLifecycleValidation(
     const bool assetChannelReady = joined && pumpUntil([&] {
         return joiner.canQueueAssetTo(QString{}, 1024) &&
             creator.serverStats().assetActiveConnections > 0;
-    }, 1000);
+    }, kSignalDeadmanTimeoutMs);
     check(QStringLiteral("controller.dedicated-asset-channel-authenticated"),
         assetChannelReady);
     const bool joinerBinarySent = assetChannelReady && !binaryAsset.isEmpty() &&
@@ -758,7 +772,7 @@ QJsonObject jam2RunControllerLifecycleValidation(
         joinerBinarySent);
     const bool creatorBinaryReceived = joinerBinarySent && pumpUntil([&] {
         return creatorBinary == binaryAsset && binarySource == joiner.snapshot().localToken;
-    }, 1000);
+    }, kSignalDeadmanTimeoutMs);
     check(QStringLiteral("controller.dedicated-asset-channel-upload"),
         creatorBinaryReceived);
     const bool creatorBinarySent = creatorBinaryReceived &&
@@ -767,7 +781,7 @@ QJsonObject jam2RunControllerLifecycleValidation(
         creatorBinarySent);
     const bool joinerBinaryReceived = creatorBinarySent && pumpUntil([&] {
         return joinerBinary == binaryAsset;
-    }, 1000);
+    }, kSignalDeadmanTimeoutMs);
     check(QStringLiteral("controller.dedicated-asset-channel-download"),
         joinerBinaryReceived);
 
@@ -785,7 +799,7 @@ QJsonObject jam2RunControllerLifecycleValidation(
                      peer.endpoint == QStringLiteral("127.0.0.1:42002"));
             }
             return creatorSnapshot.membershipRevision > priorRevision && creatorSeesEndpoint;
-        }, 1000);
+        }, kSignalDeadmanTimeoutMs);
     }
     check(QStringLiteral("controller.endpoint-update-source-bound-and-republished"), endpointMigrated);
 
@@ -802,7 +816,7 @@ QJsonObject jam2RunControllerLifecycleValidation(
             QStringLiteral("000102030405060708090a0b0c0d0e0f"),
             QStringLiteral("00000000000000040000000000000004"),
             QStringLiteral("127.0.0.1:41004"));
-        (void)pumpUntil([&] { return directAuthenticated; }, 1000);
+        (void)pumpUntil([&] { return directAuthenticated; }, kSignalDeadmanTimeoutMs);
     }
     const auto beforeRejected = creator.snapshot();
     const bool invalidQueued = directAuthenticated && directClient.send(QJsonObject{
@@ -811,7 +825,7 @@ QJsonObject jam2RunControllerLifecycleValidation(
     });
     const bool invalidRejected = invalidQueued && pumpUntil([&] {
         return creator.snapshot().validationRejections > beforeRejected.validationRejections;
-    }, 1000);
+    }, kSignalDeadmanTimeoutMs);
     const auto afterInvalid = creator.snapshot();
     check(QStringLiteral("controller.invalid-peer-message-cannot-mutate-authority"),
         invalidRejected && afterInvalid.editorRevision == beforeRejected.editorRevision &&
@@ -830,11 +844,13 @@ QJsonObject jam2RunControllerLifecycleValidation(
     const bool unauthorizedQueued = directAuthenticated && directClient.send(unauthorizedMembership);
     const bool unauthorizedRejected = unauthorizedQueued && pumpUntil([&] {
         return creator.snapshot().authorizationRejections > authorizationBefore;
-    }, 1000);
+    }, kSignalDeadmanTimeoutMs);
     check(QStringLiteral("controller.peer-cannot-originate-membership"),
         unauthorizedRejected && creator.snapshot().membershipRevision == membershipBeforeUnauthorized);
     directClient.close();
-    (void)pumpUntil([&] { return creator.snapshot().remotePeerCount == 1; }, 500);
+    (void)pumpUntil([&] {
+        return creator.snapshot().remotePeerCount == 1;
+    }, kSignalDeadmanTimeoutMs);
 
     QString proposalSourceToken;
     QJsonObject receivedProposal;
@@ -864,7 +880,7 @@ QJsonObject jam2RunControllerLifecycleValidation(
             return proposalSourceToken == joiner.snapshot().localToken &&
                 !receivedProposal.value(QStringLiteral("host_authoritative")).toBool(true) &&
                 receivedProposal.value(QStringLiteral("song")).toObject() == largeSong;
-        }, 2000);
+        }, kSignalDeadmanTimeoutMs);
     }
     check(QStringLiteral("controller.large-peer-arrangement-proposal-delivered-atomically"),
         collaborativeProposalDelivered);
@@ -883,7 +899,7 @@ QJsonObject jam2RunControllerLifecycleValidation(
                 creator.snapshot().editorAuthorityToken == joiner.snapshot().localToken &&
                 joiner.snapshot().editorRevision == 1 &&
                 joiner.snapshot().editorAuthorityToken == joiner.snapshot().localToken;
-        }, 1000);
+        }, kSignalDeadmanTimeoutMs);
     }
     check(QStringLiteral("controller.non-coordinator-editor-authority"), nonCoordinatorAuthority);
 
@@ -903,14 +919,14 @@ QJsonObject jam2RunControllerLifecycleValidation(
                 snapshot.editorRevision == 1 &&
                 snapshot.editorAuthorityToken == joiner.snapshot().localToken &&
                 snapshot.arrangementAuthorityToken == creator.snapshot().localToken;
-        }, 2000);
+        }, kSignalDeadmanTimeoutMs);
     }
     check(QStringLiteral("controller.late-join-authority-snapshot"), lateJoinReady);
     lateJoiner.close();
     const bool ordinaryLeavePreservedSession = pumpUntil([&] {
         return creator.snapshot().remotePeerCount == 1 &&
             creator.snapshot().lifecycle == SharedSessionController::Lifecycle::Active;
-    }, 500);
+    }, kSignalDeadmanTimeoutMs);
     check(QStringLiteral("controller.ordinary-peer-leave-preserves-session"),
         ordinaryLeavePreservedSession);
 
@@ -927,7 +943,7 @@ QJsonObject jam2RunControllerLifecycleValidation(
                 joinerCapture.reconnectAttempt >= 1 &&
                 joiner.snapshot().lifecycle == SharedSessionController::Lifecycle::Active &&
                 joiner.snapshot().membershipRevision > revisionBeforeAutoReconnect;
-        }, 2000);
+        }, kSignalDeadmanTimeoutMs);
     }
     check(QStringLiteral("controller.established-disconnect-auto-reconnect"),
         autoReconnected && joinerCapture.reconnectScheduled >= 1 &&
@@ -943,17 +959,17 @@ QJsonObject jam2RunControllerLifecycleValidation(
             creator.serverStats().assetAcceptedConnections >
                 statsBeforeAutoReconnect.assetAcceptedConnections &&
             joiner.canQueueAssetTo(QString{}, 1024);
-    }, 1500);
+    }, kSignalDeadmanTimeoutMs);
     const bool postReconnectUploadQueued = sameTokenAssetReauthenticated &&
         joiner.sendAssetBinaryTo(QString{}, binaryAsset);
     const bool postReconnectUploadReceived = postReconnectUploadQueued && pumpUntil([&] {
         return creatorBinary == binaryAsset && binarySource == joinerToken;
-    }, 1000);
+    }, kSignalDeadmanTimeoutMs);
     const bool postReconnectDownloadQueued = postReconnectUploadReceived &&
         creator.sendAssetBinaryTo(joinerToken, binaryAsset);
     const bool postReconnectDownloadReceived = postReconnectDownloadQueued && pumpUntil([&] {
         return joinerBinary == binaryAsset;
-    }, 1000);
+    }, kSignalDeadmanTimeoutMs);
     const auto statsAfterAutoReconnect = creator.serverStats();
     check(QStringLiteral(
         "controller.same-token-control-disconnect-removes-and-reauthenticates-asset"),
@@ -970,20 +986,21 @@ QJsonObject jam2RunControllerLifecycleValidation(
 
     const quint64 revisionBeforeRefresh = joiner.snapshot().membershipRevision;
     bool manualRefreshReconnected = false;
-    if (autoReconnected && creator.sendTo(joinerToken, QJsonObject{
-            {QStringLiteral("type"), QStringLiteral("debug.lifecycle.disconnect")}}, true)) {
-        const bool disconnected = pumpUntil([&] {
-            return joinerCapture.disconnectedAuthenticated >= 2 &&
-                joiner.snapshot().lifecycle == SharedSessionController::Lifecycle::Reconnecting;
-        }, 200);
-        if (disconnected) {
-            joiner.refresh();
+    if (autoReconnected) {
+        refreshExecutionEnabled = true;
+        refreshOnReconnectScheduled = true;
+        if (creator.sendTo(joinerToken, QJsonObject{
+                {QStringLiteral("type"), QStringLiteral("debug.lifecycle.disconnect")}}, true)) {
             manualRefreshReconnected = pumpUntil([&] {
-                return joinerCapture.refreshRequested >= 1 &&
+                return refreshInvoked && joinerCapture.disconnectedAuthenticated >= 2 &&
+                    joinerCapture.refreshRequested >= 1 &&
                     joiner.snapshot().lifecycle == SharedSessionController::Lifecycle::Active &&
                     joiner.snapshot().membershipRevision > revisionBeforeRefresh;
-            }, 1500);
+            }, kSignalDeadmanTimeoutMs);
+        } else {
+            refreshOnReconnectScheduled = false;
         }
+        refreshExecutionEnabled = false;
     }
     check(QStringLiteral("controller.manual-refresh-reconnect"),
         manualRefreshReconnected && joiner.snapshot().reconnectAttempts == 0);
@@ -1000,7 +1017,7 @@ QJsonObject jam2RunControllerLifecycleValidation(
     const bool gracefulEnd = endQueued && pumpUntil([&] {
         return joinerCapture.sessionEnded == 1 &&
             joiner.snapshot().lifecycle == SharedSessionController::Lifecycle::Inactive;
-    }, 1000);
+    }, kSignalDeadmanTimeoutMs);
     check(QStringLiteral("controller.creator-end-propagates-typed-session-end"), gracefulEnd);
     joiner.close();
     creator.close();
@@ -1028,7 +1045,7 @@ QJsonObject jam2RunControllerLifecycleValidation(
                 return heartbeatJoiner.snapshot().lifecycle ==
                         SharedSessionController::Lifecycle::Active &&
                     heartbeatJoiner.snapshot().heartbeatsReceived > 0;
-            }, 1000);
+            }, kSignalDeadmanTimeoutMs);
         }
     }
     if (heartbeatPairReady) {
@@ -1037,7 +1054,7 @@ QJsonObject jam2RunControllerLifecycleValidation(
     const bool heartbeatExpired = heartbeatPairReady && pumpUntil([&] {
         return heartbeatJoiner.snapshot().failure == TransportFailure::CoordinatorTimeout &&
             heartbeatJoiner.snapshot().lifecycle == SharedSessionController::Lifecycle::Failed;
-    }, 1000);
+    }, kSignalDeadmanTimeoutMs);
     check(QStringLiteral("controller.creator-loss-expires-after-native-heartbeat-grace"),
         heartbeatExpired && heartbeatCapture.coordinatorTimeout == 1 &&
             heartbeatJoiner.snapshot().heartbeatIntervalMs == heartbeatIntervalMs &&

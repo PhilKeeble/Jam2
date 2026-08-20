@@ -137,11 +137,11 @@ int main(int argc, char* argv[])
     process.setProcessChannelMode(QProcess::MergedChannels);
     process.start();
     if (!process.waitForStarted(
-            static_cast<int>(jam2::test::scaledTimeout(
-                std::chrono::seconds(10)).count())) ||
+            static_cast<int>(jam2::test::deadmanTimeout(
+                std::chrono::seconds(30)).count())) ||
         !process.waitForFinished(
-            static_cast<int>(jam2::test::scaledTimeout(
-                std::chrono::seconds(120)).count()))) {
+            static_cast<int>(jam2::test::deadmanTimeout(
+                std::chrono::seconds(240)).count()))) {
         process.kill();
         process.waitForFinished(5000);
         return fail(

@@ -831,6 +831,14 @@ void SharedSessionController::handleClientEvent(const TransportEvent& event)
         failure_ = TransportFailure::None;
         failureDetail_.clear();
         failureRetryable_ = false;
+        // A re-established control channel is fresh route evidence even when
+        // the coordinator republishes the same textual endpoints. UDP is
+        // connectionless, so an old NAT mapping can be dead while ordinary
+        // sends still report success. Force the retained runtime to prove its
+        // direct edges again instead of preserving a stale Active state.
+        if (!firstAuthentication && runtime_ != nullptr) {
+            (void)runtime_->reprobePeers();
+        }
         setLifecycle(Lifecycle::Authenticated);
         connectAssetJoiner();
     } else if (event.type == TransportEventType::Disconnected && !closing_) {

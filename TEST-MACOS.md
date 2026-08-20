@@ -4,6 +4,108 @@ Windows completion of the native test initiative does not complete macOS. When
 Codex is next run on a macOS endpoint, it must read `AGENTS.md`, `TEST-PLAN.md`, `TEST-LOG.md`, and `TEST-REVIEW.md` completely
 before making changes.
 
+## 2026-08-20 deterministic native gate (authoritative)
+
+This section records the current cross-platform goal and supersedes any older
+instruction below that requires OS-specific timeout scaling, completing work
+within a short wall-clock interval, retrying a failed CTest, measuring proxy
+pump scheduling gaps, requesting Apple/Windows test-process priority, or using
+timed automation pauses. Those entries remain as historical defect context;
+they are not current acceptance criteria.
+
+- The normal non-hardware macOS catalogue contains 74 native CTests. Product
+  acceptance is based on returned values, typed state, command/event
+  acknowledgements, engine/audio frames, protocol counters, exact files and
+  hashes, real widget state, and clean lifecycle completion. Polling exits as
+  soon as the required signal exists. Per-operation and CTest timeouts are only
+  platform-neutral deadmen for a process that is genuinely stuck.
+- Metronome and impairment evidence is selected by real synthetic-audio
+  callback frames and scheduled engine frames, not `elapsed_ms`. The headless
+  backend no longer fast-forwards missed callbacks on macOS or receives a
+  platform priority exception, so a contended machine takes longer instead of
+  manufacturing audio evidence.
+- Private race fixtures use explicit arm/observable-active/release gates for
+  asset transfer, file workers, MIDI enumeration, and synthetic plug-in load.
+  Modal opening is acknowledged from the GUI turn that performs the real
+  click. Request-start expiry invokes the same product-owned handler as the
+  genuine hanging-sender timer. No fixture sleeps for an assumed completion.
+- The executable-owned native validators follow the same rule. Headless audio
+  must produce a counted callback sequence and sixteen exact capture blocks;
+  muted-output proof first observes live input/monitor processing; pitch
+  disable proof advances through later callbacks without another analyzed
+  window. The local/network/local lifecycle waits for engine progress and the
+  network-start event, then uses the explicit stop action. Controller and TCP
+  workflows wait for typed transport/counter state, and manual refresh is
+  queued from the real `ReconnectScheduled` event rather than a short window
+  in which the transient state was assumed to remain visible.
+- `compile.sh --tests-full` and the Windows full gate run CTest in parallel by
+  default. Capacity is `logical CPUs - 1`, capped at eight and reduced to one
+  on one- or two-thread machines; `JAM2_TEST_JOBS` is an explicit positive
+  integer override. Exactly-four-peer and JamTaster/model cases consume
+  multiple CTest processor slots so older or memory-constrained hosts do not
+  run every heavy workflow at once.
+- Every CTest receives its own directory below
+  `build/test-artifacts/<ctest-name>`, including `TEMP`, `TMP`, and `TMPDIR` for
+  all child processes. Successful gates remove files and recreate only the
+  empty per-test namespaces for reliable direct reruns. Failed gates retain
+  their build-local evidence. Tests must not read or write real user
+  preferences, Application Support, external log folders, or an alternate
+  Jam2 executable.
+- Fast unit cases are valid when they directly exercise the production owner
+  and assert exact results; they are not expected to consume wall time. The
+  real-process GUI, four-peer mesh, shared-WAV, session-command, native network,
+  and 23 metronome/security workflows provide the broader macOS integration
+  proof. Synthetic MIDI and plug-in backends cover GUI ownership, cancellation,
+  late completion, routing, and cleanup without claiming physical-device
+  compatibility.
+
+The following explicitly profiled hardware coverage is deferred because it is
+not available on the current Mac. Absence is not a pass and these profiles must
+be implemented/run later:
+
+- A real external CoreAudio interface: enumeration, stable selection, open and
+  close, supported/unsupported sample rate and buffer combinations, physical
+  input/output channel routing, capture, and xrun/device-loss behavior.
+- A physical CoreMIDI device: enumeration, open/close/reopen, supported short
+  messages, unsupported/SysEx counters, routing, and disconnect lifecycle.
+- A real VST3 plug-in/device profile (also referred to as VFX3 in the current
+  request): bundle/class probing, worker and native editor lifecycle, audio and
+  MIDI processing, invalid-channel recovery, and sustained callback evidence.
+
+The ordinary Release suite must still validate all non-hardware macOS product
+areas. `--show-gui` remains an operator visibility profile over the same real
+GUI workflows; it is not a separate timing or product-correctness contract.
+The inherited checklist below has been reviewed against the current catalogue:
+unit tests 1--41 own pure/component boundaries, tests 42--49 own the hidden
+four-process GUI/session/shared-WAV workflows, tests 50--51 own native TCP,
+security, process, and engine validation, and tests 52--74 own all three
+four-peer metronome modes, seven impairment profiles, and UDP security. Older
+individual duration, retry, QoS, and pump-gap instructions are historical and
+are superseded by the signal/frame requirements above.
+
+Final acceptance evidence on 2026-08-20: `bash ./compile.sh --tests-full`
+passed 74/74 cases with zero failures in 573.38 seconds at capacity eight.
+The successful gate left exactly 74 empty per-test namespaces and no files in
+`build/test-artifacts`, and created no new test log or temporary artifact
+outside `build/`. Retained session-command and jam-sync directories from
+pre-fix manual runs, together with temporary audit listings, were identified
+and removed from the macOS system temporary directories.
+
+The session-command workflow now also proves the real direct-mesh recovery
+path with exactly four processes: a deliberately stale advertised UDP endpoint
+is kept occupied as a black hole, the authenticated peer's observed source is
+learned, every peer reports three active remotes, one established proxy source
+is rebound, the affected edge becomes non-active, and the mesh returns to
+three active remotes before the existing exact one-bar recording workflow.
+`network.connected` is accepted only after the UDP mesh is active. Quantized
+shared-grid transport is deferred until the mapped epoch is ready and is then
+placed on the exact local bar with its exact count-in. The complete 23-case
+metronome/security selection passed in the final parallel schedule, including
+the shared-grid burst-loss case that exposed and then validated the corrected
+port-reservation handoff. This completes the ordinary non-hardware macOS
+catalogue; only the explicitly listed physical CoreAudio, CoreMIDI, and
+VST3/VFX3 profiles remain deferred.
+
 ## Required macOS completion work
 
 1. Inspect the final Windows test architecture and all platform branches added
@@ -987,6 +1089,61 @@ before making changes.
 - macOS runs tests only. Do not invoke PowerShell coverage scripts, add an
   Apple coverage substitute, or compare Apple source coverage to the Windows
   manifest.
+
+## 2026-08-20 physical CoreAudio/CoreMIDI/VST3 profile closure
+
+- Use the machine-local schema-v2 profile documented in
+  `tests/hardware/README.md`. Keep that profile below `build/`; do not commit a
+  device ID or create a source-tree/system-temporary test workspace. The
+  verified profile is Scarlett 2i2 device 0, inputs 1 and 2, 48 kHz/64 frames,
+  one frame as an explicitly rejected device size, Gateway as the audio effect,
+  Surge XT as the instrument, and `Xjam` as the CoreMIDI selector.
+- `jam2_hardware_plugin_device` now covers the Iteration 13/15/32/42 real-device
+  boundary: isolated probe/probe-all/self-test, production backend load and
+  status, native editor open/close, invalid channel and unsupported buffer
+  rejection with clean recovery, independent live evidence from both physical
+  inputs, stereo source routing, live samples measured inside the worker,
+  completed effect process responses, delayed-dry bypass, resumed processing,
+  exact block accounting after callback shutdown, and RAII cleanup. It exits on
+  those signals and reports deadline/callback timing only as raw diagnostics.
+- Gateway correctly produces a zero wet peak until an IR or other plug-in
+  interaction configures it. Do not manufacture a wet pass or require an IR for
+  the host test: the accepted proof is nonzero worker input, completed Gateway
+  processing, nonzero bypass routing, and resumed processing after bypass. The
+  wet peak remains visible and was zero in the verified run.
+- `jam2_hardware_midi_instrument_device` covers the Iteration 14/15/42 physical
+  controller boundary: production CoreMIDI enumeration, an exact selector,
+  note-on/note-off/continuous-control classification, zero parser/queue loss,
+  close/reopen, isolated instrument self-test and load, native editor lifecycle,
+  physical MIDI consumption while production mute holds routed output at zero,
+  reset/unmute, and nonzero Surge XT wet/router/send signal through real
+  Scarlett callbacks. No synthetic injection substitutes for this case.
+- The verified focused results were: Scarlett/Gateway passed in 2.16 seconds
+  with 15 submitted/13 completed blocks and zero miss/failure/stale counts;
+  Xjam/Surge XT passed in 4.90 seconds with 17 classified capture messages,
+  eight live MIDI events consumed, 170 submitted/168 completed blocks, zero
+  miss/failure/stale/drop counts, and nonzero wet/router/send peaks. CoreAudio
+  capability negotiation separately passed for 44.1/48 kHz and 32/64/128/256
+  frame profiles. These durations are observations, never acceptance limits.
+- The first MIDI attempt correctly failed while Xjam had disappeared from the
+  macOS USB registry. Reconnecting it restored one exact CoreMIDI source named
+  `Xjam`; the successful case then opened, closed, and reopened it. Missing
+  hardware is therefore a failure/gate, not a silent pass.
+- Darwin plug-in shared memory uses a short build-independent POSIX name derived
+  from the complete random service token. Native create/open coverage prevents
+  recurrence of the macOS name-length failure. The real transport now exposes
+  worker-input peak, wet-output peak, and live MIDI-consumption counters; these
+  are product diagnostics as well as hardware-test evidence.
+- Production plug-in selection performs one isolated scan and accepts its
+  process/result signal rather than retrying a failed scan. Scanner launch/exit,
+  worker readiness, and editor readiness use platform-neutral hang deadmen that
+  exit immediately on the real state; none is a CPU-speed acceptance target.
+- Remaining physical work is explicitly deferred: unplug/reconnect CoreAudio
+  while a callback stream is active; remove/reappear CoreMIDI while its input is
+  open and prove GUI source cleanup/recovery; feed a real SysEx/unsupported MIDI
+  message to the production parser counter; verify the physical DAC/output with
+  an external loopback; and exercise Gateway's configured wet DSP once an IR is
+  available. The current profile does not count any of those as passed.
 
 ## macOS acceptance
 

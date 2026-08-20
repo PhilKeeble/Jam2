@@ -109,6 +109,59 @@ void testOrdinarySchedules()
         "division, meter, and eight count-in bars retain exact frame math");
 }
 
+void testReceivedGridAlignment()
+{
+    const auto corrected = jam2::align_received_transport_to_grid(
+        48000.0,
+        normalPattern(),
+        1000,
+        1000,
+        true,
+        0,
+        191304,
+        96000);
+    expect(corrected.has_value() &&
+            corrected->countdown_start_raw_frame == 95000 &&
+            corrected->target_raw_frame == 191000 &&
+            corrected->target_musical_frame == 192000,
+        "received quantized transport snaps arrival/RTT error to the shared bar");
+
+    const auto anchored = jam2::align_received_transport_to_grid(
+        48000.0,
+        normalPattern(),
+        1000,
+        -500,
+        true,
+        50000,
+        242300,
+        96000);
+    expect(anchored.has_value() &&
+            anchored->countdown_start_raw_frame == 146500 &&
+            anchored->target_raw_frame == 242500 &&
+            anchored->target_musical_frame == 242000,
+        "received grid alignment respects a mapped epoch and negative offset");
+
+    expect(!jam2::align_received_transport_to_grid(
+                48000.0,
+                normalPattern(),
+                95000,
+                1000,
+                true,
+                0,
+                191304,
+                96000) &&
+            !jam2::align_received_transport_to_grid(
+                48000.0,
+                normalPattern(),
+                1000,
+                1000,
+                false,
+                0,
+                191304,
+                96000),
+        "received grid alignment rejects a missed countdown and an invalid epoch");
+}
+
 void testInvalidAndExhaustedSchedules()
 {
     const auto pattern = normalPattern();
@@ -144,6 +197,7 @@ int main()
 {
     testFrameConversions();
     testOrdinarySchedules();
+    testReceivedGridAlignment();
     testInvalidAndExhaustedSchedules();
     if (failures != 0) {
         std::cerr << failures << " transport timing checks failed\n";

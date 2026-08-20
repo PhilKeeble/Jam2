@@ -2,8 +2,8 @@
 
 #include <algorithm>
 #include <atomic>
+#include <condition_variable>
 #include <mutex>
-#include <thread>
 #include <utility>
 
 namespace jam2::application {
@@ -89,10 +89,7 @@ private:
 
 class SyntheticMidiInputBackend final : public MidiInputBackend {
 public:
-    SyntheticMidiInputBackend(
-        std::vector<midi::DeviceInfo> devices,
-        std::chrono::milliseconds enumerationDelay)
-        : enumerationDelay_(enumerationDelay)
+    explicit SyntheticMidiInputBackend(std::vector<midi::DeviceInfo> devices)
     {
         endpoints_.reserve(devices.size());
         for (midi::DeviceInfo& device : devices) {
@@ -111,8 +108,17 @@ public:
 
     std::vector<midi::DeviceInfo> enumerate() override
     {
-        if (enumerationDelay_.count() > 0)
-            std::this_thread::sleep_for(enumerationDelay_);
+        {
+            std::unique_lock<std::mutex> lock(gateMutex_);
+            if (gateArmed_) {
+                gateArmed_ = false;
+                gateActive_ = true;
+                gateReleased_ = false;
+                gateCondition_.wait(lock, [this] { return gateReleased_; });
+                gateActive_ = false;
+                gateReleased_ = false;
+            }
+        }
         std::vector<midi::DeviceInfo> result;
         result.reserve(endpoints_.size());
         for (const auto& endpoint : endpoints_) result.push_back(endpoint->info);
@@ -174,6 +180,52 @@ public:
         return true;
     }
 
+    bool armAutomationCompletionGate(std::string& error) noexcept override
+    {
+        std::lock_guard<std::mutex> lock(gateMutex_);
+        if (gateArmed_ || gateActive_) {
+            error = "a MIDI enumeration gate is already armed or active";
+            return false;
+        }
+        gateArmed_ = true;
+        gateReleased_ = false;
+        error.clear();
+        return true;
+    }
+
+    bool releaseAutomationCompletionGate(std::string& error) noexcept override
+    {
+        bool notify = false;
+        {
+            std::lock_guard<std::mutex> lock(gateMutex_);
+            if (gateArmed_) {
+                // Teardown can run before a queued enumeration worker has
+                // entered enumerate(). Disarming here prevents that worker
+                // from subsequently blocking after its owner starts waiting
+                // for the pool to drain.
+                gateArmed_ = false;
+                gateReleased_ = false;
+            } else if (gateActive_) {
+                gateReleased_ = true;
+                notify = true;
+            } else {
+                error = "no MIDI enumeration gate is armed or active";
+                return false;
+            }
+        }
+        if (notify) gateCondition_.notify_all();
+        error.clear();
+        return true;
+    }
+
+    AutomationCompletionGateState automationCompletionGateState() const noexcept override
+    {
+        std::lock_guard<std::mutex> lock(gateMutex_);
+        if (gateActive_) return AutomationCompletionGateState::Active;
+        if (gateArmed_) return AutomationCompletionGateState::Armed;
+        return AutomationCompletionGateState::Idle;
+    }
+
 private:
     std::shared_ptr<SyntheticEndpoint> find(const std::string& id) const noexcept
     {
@@ -184,10 +236,31 @@ private:
     }
 
     std::vector<std::shared_ptr<SyntheticEndpoint>> endpoints_;
-    std::chrono::milliseconds enumerationDelay_{};
+    mutable std::mutex gateMutex_;
+    std::condition_variable gateCondition_;
+    bool gateArmed_ = false;
+    bool gateActive_ = false;
+    bool gateReleased_ = false;
 };
 
 } // namespace
+
+bool MidiInputBackend::armAutomationCompletionGate(std::string& error) noexcept
+{
+    error = "the system MIDI backend has no automation completion gate";
+    return false;
+}
+
+bool MidiInputBackend::releaseAutomationCompletionGate(std::string& error) noexcept
+{
+    error = "the system MIDI backend has no automation completion gate";
+    return false;
+}
+
+AutomationCompletionGateState MidiInputBackend::automationCompletionGateState() const noexcept
+{
+    return AutomationCompletionGateState::Unsupported;
+}
 
 std::unique_ptr<MidiInputBackend> makeSystemMidiInputBackend()
 {
@@ -195,11 +268,9 @@ std::unique_ptr<MidiInputBackend> makeSystemMidiInputBackend()
 }
 
 std::unique_ptr<MidiInputBackend> makeSyntheticMidiInputBackend(
-    std::vector<midi::DeviceInfo> devices,
-    std::chrono::milliseconds enumerationDelay)
+    std::vector<midi::DeviceInfo> devices)
 {
-    return std::make_unique<SyntheticMidiInputBackend>(
-        std::move(devices), enumerationDelay);
+    return std::make_unique<SyntheticMidiInputBackend>(std::move(devices));
 }
 
 } // namespace jam2::application

@@ -188,6 +188,15 @@ bool ApplicationRuntime::updatePeers(const std::vector<Jam2RuntimePeer>& peers)
     return isNetworkRunning() && host_.submitPeerUpdate(peers);
 }
 
+bool ApplicationRuntime::reprobePeers() noexcept
+{
+    if (!isNetworkRunning()) {
+        return false;
+    }
+    host_.submitPeerReprobe();
+    return true;
+}
+
 bool ApplicationRuntime::setPeerGainDb(std::uint64_t peerId, double gainDb) noexcept
 {
     if (!isNetworkRunning() || peerId == 0 || !std::isfinite(gainDb) ||

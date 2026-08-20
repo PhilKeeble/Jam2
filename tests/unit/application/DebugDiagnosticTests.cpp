@@ -13,6 +13,7 @@
 #include <QProcess>
 #include <QTemporaryDir>
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstdint>
@@ -50,8 +51,9 @@ ProcessResult runProcess(
     process.setArguments(arguments);
     process.setProcessChannelMode(QProcess::MergedChannels);
     process.start();
+    normalTimeout = std::max(normalTimeout, std::chrono::seconds(30));
     const int timeout = static_cast<int>(
-        jam2::test::scaledTimeout(normalTimeout).count());
+        jam2::test::deadmanTimeout(normalTimeout).count());
     ProcessResult result;
     result.started = process.waitForStarted(timeout);
     if (result.started) result.finished = process.waitForFinished(timeout);

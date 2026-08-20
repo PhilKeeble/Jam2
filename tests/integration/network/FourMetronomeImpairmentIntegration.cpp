@@ -31,18 +31,6 @@
 #include <utility>
 #include <vector>
 
-#if defined(_WIN32)
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <windows.h>
-#elif defined(__APPLE__)
-#include <mach/mach.h>
-#include <mach/mach_time.h>
-#include <mach/thread_policy.h>
-#include <pthread.h>
-#endif
-
 namespace {
 
 using jam2::test::CsvTable;
@@ -56,6 +44,7 @@ using jam2::test::UdpSequenceSecurityTransformer;
 
 constexpr int kPeerCount = 4;
 constexpr int kSampleRate = 48000;
+constexpr std::int64_t kAudioCallbackFrames = 256;
 constexpr int kInitialBpm = 120;
 constexpr int kFinalBpm = 150;
 constexpr std::int64_t kBpmChangeFrames = 3LL * kSampleRate;
@@ -64,72 +53,6 @@ constexpr std::int64_t kRecordingStopFrames = 15LL * kSampleRate;
 constexpr std::int64_t kLeaderAudioLossRecordingStopFrames = 17LL * kSampleRate;
 constexpr std::int64_t kFinalBeatIntervalFrames = 60LL * kSampleRate / kFinalBpm;
 constexpr std::int64_t kMaximumLeaderAudioGapBeats = 3;
-constexpr qint64 kMaximumProxyPumpGapMs = 50;
-
-bool prioritizeProxyCoordinator(QString& error)
-{
-#if defined(_WIN32)
-    // Every Jam2 process in this real-time test requests the high-priority
-    // profile. Keep the in-process UDP impairment coordinator at the same
-    // process class, with its pump thread at the same relative priority as
-    // Jam2's network worker, so the test harness cannot be starved by the four
-    // systems it is measuring.
-    if (!SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS)) {
-        error = QStringLiteral(
-            "could not set the UDP impairment coordinator process priority: Windows error %1")
-            .arg(GetLastError());
-        return false;
-    }
-    if (!SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST)) {
-        error = QStringLiteral(
-            "could not set the UDP impairment coordinator thread priority: Windows error %1")
-            .arg(GetLastError());
-        return false;
-    }
-#elif defined(__APPLE__)
-    // The four measured Jam2 processes request high QoS themselves. Give the
-    // in-process six-edge proxy pump equivalent scheduling service so macOS
-    // cannot starve the impairment harness and manufacture packet gaps.
-    const int qosError = pthread_set_qos_class_self_np(
-        QOS_CLASS_USER_INTERACTIVE, 0);
-    if (qosError != 0) {
-        error = QStringLiteral(
-            "could not set the UDP impairment coordinator QoS: error %1")
-            .arg(qosError);
-        return false;
-    }
-    mach_timebase_info_data_t timebase{};
-    if (mach_timebase_info(&timebase) != KERN_SUCCESS || timebase.numer == 0) {
-        error = QStringLiteral("could not read the macOS scheduling timebase");
-        return false;
-    }
-    const auto absoluteFromNanoseconds = [&timebase](std::uint64_t nanoseconds) {
-        return nanoseconds * static_cast<std::uint64_t>(timebase.denom) /
-            static_cast<std::uint64_t>(timebase.numer);
-    };
-    const std::uint64_t period = absoluteFromNanoseconds(5000000ULL);
-    thread_time_constraint_policy_data_t policy{};
-    policy.period = static_cast<std::uint32_t>(period);
-    policy.computation = static_cast<std::uint32_t>(std::max<std::uint64_t>(period * 2 / 5, 1));
-    policy.constraint = static_cast<std::uint32_t>(std::max<std::uint64_t>(period * 4 / 5, 2));
-    policy.preemptible = TRUE;
-    const kern_return_t schedulingError = thread_policy_set(
-        pthread_mach_thread_np(pthread_self()),
-        THREAD_TIME_CONSTRAINT_POLICY,
-        reinterpret_cast<thread_policy_t>(&policy),
-        THREAD_TIME_CONSTRAINT_POLICY_COUNT);
-    if (schedulingError != KERN_SUCCESS) {
-        error = QStringLiteral(
-            "could not set the UDP impairment coordinator time constraint: error %1")
-            .arg(schedulingError);
-        return false;
-    }
-#else
-    Q_UNUSED(error);
-#endif
-    return true;
-}
-
 enum class MetronomeMode {
     SharedGrid,
     LeaderAudio,
@@ -192,10 +115,8 @@ constexpr std::array<const char*, 5> kStemNames{
     "metronome.wav",
 };
 
-constexpr std::size_t kMixStem = 0;
 constexpr std::size_t kMyInputStem = 1;
 constexpr std::size_t kTheirInputStem = 2;
-constexpr std::size_t kInputsMixStem = 3;
 constexpr std::size_t kMetronomeStem = 4;
 
 QString modeText(MetronomeMode mode)
@@ -541,12 +462,14 @@ std::optional<qsizetype> latestRow(
     const PeerEvidence& evidence,
     std::int64_t revision,
     bool requireActive,
-    std::int64_t maximumElapsed = std::numeric_limits<std::int64_t>::max())
+    std::int64_t maximumAudioFrame = std::numeric_limits<std::int64_t>::max())
 {
     std::optional<qsizetype> result;
     for (const qsizetype row : evidence.periodicRows) {
+        const std::int64_t callbackFrame = evidence.csv.integer(
+            row, QStringLiteral("audio_callbacks"), -1) * kAudioCallbackFrames;
         if (evidence.csv.integer(row, QStringLiteral("grid_revision"), -1) != revision ||
-            evidence.csv.integer(row, QStringLiteral("elapsed_ms"), -1) > maximumElapsed) {
+            callbackFrame < 0 || callbackFrame > maximumAudioFrame) {
             continue;
         }
         if (requireActive && evidence.csv.integer(
@@ -556,6 +479,24 @@ std::optional<qsizetype> latestRow(
         result = row;
     }
     return result;
+}
+
+std::optional<qsizetype> earliestRow(
+    const PeerEvidence& evidence,
+    std::int64_t revision,
+    bool requireActive)
+{
+    for (const qsizetype row : evidence.periodicRows) {
+        if (evidence.csv.integer(row, QStringLiteral("grid_revision"), -1) != revision) {
+            continue;
+        }
+        if (requireActive && evidence.csv.integer(
+                row, QStringLiteral("network_active_peer_count"), -1) != 3) {
+            continue;
+        }
+        return row;
+    }
+    return std::nullopt;
 }
 
 std::vector<std::int64_t> detectToneRejectedEvents(
@@ -725,15 +666,16 @@ bool recordingContractValid(
 
 bool sharedAudioValid(const PeerEvidence& evidence, int peerIndex, QString& reason)
 {
-    struct TimedOffset {
-        double elapsedMs = 0.0;
+    struct FramedOffset {
+        double rawFrame = 0.0;
         double frames = 0.0;
     };
-    std::vector<TimedOffset> offsets;
+    std::vector<FramedOffset> offsets;
     for (const qsizetype row : evidence.periodicRows) {
         if (evidence.csv.integer(row, QStringLiteral("grid_revision"), -1) != 2) continue;
         offsets.push_back({
-            evidence.csv.number(row, QStringLiteral("elapsed_ms"), -1.0),
+            evidence.csv.number(row, QStringLiteral("audio_callbacks"), -1.0) *
+                static_cast<double>(kAudioCallbackFrames),
             evidence.csv.number(
                 row, QStringLiteral("metronome_compensation_offset_frames"), 0.0),
         });
@@ -744,20 +686,20 @@ bool sharedAudioValid(const PeerEvidence& evidence, int peerIndex, QString& reas
         return false;
     }
 
-    const auto offsetAt = [&](double elapsedMs) {
+    const auto offsetAt = [&](double rawFrame) {
         const auto upper = std::lower_bound(
-            offsets.begin(), offsets.end(), elapsedMs,
-            [](const TimedOffset& sample, double value) {
-                return sample.elapsedMs < value;
+            offsets.begin(), offsets.end(), rawFrame,
+            [](const FramedOffset& sample, double value) {
+                return sample.rawFrame < value;
             });
         if (upper == offsets.begin()) return upper->frames;
         if (upper == offsets.end()) return offsets.back().frames;
-        const TimedOffset& after = *upper;
-        const TimedOffset& before = *(upper - 1);
-        const double duration = after.elapsedMs - before.elapsedMs;
+        const FramedOffset& after = *upper;
+        const FramedOffset& before = *(upper - 1);
+        const double duration = after.rawFrame - before.rawFrame;
         if (duration <= 0.0) return before.frames;
         const double alpha = std::clamp(
-            (elapsedMs - before.elapsedMs) / duration, 0.0, 1.0);
+            (rawFrame - before.rawFrame) / duration, 0.0, 1.0);
         return before.frames + (after.frames - before.frames) * alpha;
     };
 
@@ -775,8 +717,7 @@ bool sharedAudioValid(const PeerEvidence& evidence, int peerIndex, QString& reas
     std::optional<std::int64_t> previousStep;
     for (std::size_t index = 0; index < detected.size(); ++index) {
         const std::int64_t rawFrame = startFrame + detected[index];
-        const double elapsedMs = static_cast<double>(rawFrame) * 1000.0 / kSampleRate;
-        const double renderOffset = offsetAt(elapsedMs);
+        const double renderOffset = offsetAt(static_cast<double>(rawFrame));
         const double musicalFrame = static_cast<double>(rawFrame) + renderOffset;
         const std::int64_t step = std::llround(
             (musicalFrame - static_cast<double>(epoch)) / kFinalBeatIntervalFrames);
@@ -789,11 +730,11 @@ bool sharedAudioValid(const PeerEvidence& evidence, int peerIndex, QString& reas
             (previousStep && step != *previousStep + 1)) {
             reason = QStringLiteral(
                 "peer %1 shared-grid click %2 violated dynamic epoch model: "
-                "step=%3 phase_error_frames=%4 render_offset_frames=%5 elapsed_ms=%6")
+                "step=%3 phase_error_frames=%4 render_offset_frames=%5 raw_frame=%6")
                 .arg(peerIndex + 1).arg(index).arg(step)
                 .arg(phaseError, 0, 'f', 2)
                 .arg(renderOffset, 0, 'f', 2)
-                .arg(elapsedMs, 0, 'f', 2);
+                .arg(rawFrame);
             return false;
         }
         previousStep = step;
@@ -840,7 +781,6 @@ bool leaderAudioValid(
                 start, static_cast<std::int64_t>(samples.size()) - kSampleRate / 2);
             const double rms = jam2::test::rootMeanSquare(samples, start, stop);
             const double tone = jam2::test::estimateToneHz(samples, kSampleRate, start, stop);
-#if defined(__APPLE__)
             bool continuousMixedTone = true;
             std::size_t completeToneWindows = 0;
             if (stem == kTheirInputStem) {
@@ -858,9 +798,6 @@ bool leaderAudioValid(
                 (stem == kMyInputStem
                     ? rms >= 500.0
                     : continuousMixedTone && completeToneWindows >= 8);
-#else
-            const bool contentValid = rms >= 500.0 && std::abs(tone - 440.0) <= 5.0;
-#endif
             if (!contentValid) {
                 reason = QStringLiteral("leader-audio tone continuity/content check failed on peer %1 stem %2")
                     .arg(index + 1).arg(QString::fromLatin1(kStemNames[stem]));
@@ -1004,14 +941,15 @@ bool listenerAudioValid(const PeerEvidence& evidence, int peerIndex, QString& re
 
     const std::int64_t revision = evidence.csv.integer(
         evidence.finalRow, QStringLiteral("grid_revision"), -1);
-    std::size_t convergenceRows = 0;
-    std::size_t convergedRows = 0;
-    std::size_t currentUnconverged = 0;
-    std::size_t longestUnconverged = 0;
+    std::optional<std::int64_t> convergenceEvidenceStartFrame;
+    std::int64_t convergenceEvidenceStopFrame = 0;
+    bool convergedOffsetObserved = false;
     for (const qsizetype row : evidence.periodicRows) {
-        const std::int64_t elapsed = evidence.csv.integer(
-            row, QStringLiteral("elapsed_ms"), -1);
-        if (elapsed < 10000 || elapsed > 15900 ||
+        const std::int64_t callbacks = evidence.csv.integer(
+            row, QStringLiteral("audio_callbacks"), -1);
+        const std::int64_t callbackFrame = callbacks * kAudioCallbackFrames;
+        if (callbackFrame < 10LL * kSampleRate ||
+            callbackFrame > kRecordingStopFrames ||
             evidence.csv.integer(row, QStringLiteral("grid_revision"), -1) != revision ||
             evidence.csv.integer(row, QStringLiteral("network_active_peer_count"), -1) != 3) {
             continue;
@@ -1030,26 +968,28 @@ bool listenerAudioValid(const PeerEvidence& evidence, int peerIndex, QString& re
                 row, QStringLiteral("metronome_compensation_peer_count"), -1) != 3 ||
             averageLatency <= 0.0 || std::abs((target - base) + appliedLatency) > 2.0) {
             reason = QStringLiteral(
-                "peer %1 listener-compensation formula or three-peer input failed at %2 ms")
-                .arg(peerIndex + 1).arg(elapsed);
+                "peer %1 listener-compensation formula or three-peer input failed at callback %2")
+                .arg(peerIndex + 1).arg(callbacks);
             return false;
         }
-        ++convergenceRows;
-        if (std::abs(offset - target) <= kSampleRate * 0.005) {
-            ++convergedRows;
-            currentUnconverged = 0;
-        } else {
-            ++currentUnconverged;
-            longestUnconverged = std::max(longestUnconverged, currentUnconverged);
+        if (!convergenceEvidenceStartFrame) {
+            convergenceEvidenceStartFrame = callbackFrame;
         }
+        convergenceEvidenceStopFrame = callbackFrame;
+        convergedOffsetObserved = convergedOffsetObserved ||
+            std::abs(offset - target) <= kSampleRate * 0.005;
     }
-    if (convergenceRows < 30 || convergedRows * 4 < convergenceRows * 3 ||
-        longestUnconverged > 10) {
+    if (!convergenceEvidenceStartFrame ||
+        convergenceEvidenceStopFrame - *convergenceEvidenceStartFrame <
+            4LL * kSampleRate ||
+        !convergedOffsetObserved) {
         reason = QStringLiteral(
-            "peer %1 listener-compensation did not repeatedly converge: "
-            "rows=%2 converged=%3 longest_unconverged=%4")
-            .arg(peerIndex + 1).arg(convergenceRows).arg(convergedRows)
-            .arg(longestUnconverged);
+            "peer %1 listener-compensation lacks frame-spanning convergence evidence: "
+            "start_frame=%2 stop_frame=%3 converged=%4")
+            .arg(peerIndex + 1)
+            .arg(convergenceEvidenceStartFrame.value_or(-1))
+            .arg(convergenceEvidenceStopFrame)
+            .arg(convergedOffsetObserved);
         return false;
     }
     return true;
@@ -1057,65 +997,56 @@ bool listenerAudioValid(const PeerEvidence& evidence, int peerIndex, QString& re
 
 } // namespace
 
-int main(int argc, char* argv[])
+enum class AttemptOutcome {
+    Success,
+    // The harness itself could not produce valid evidence. Keep the cause
+    // classified internally, but never retry a CTest run.
+    HarnessInvalid,
+    // A product or evidence-contract check failed.
+    ProductInvalid,
+};
+
+struct AttemptResult {
+    AttemptOutcome outcome = AttemptOutcome::ProductInvalid;
+    QString message;
+};
+
+AttemptResult runAttempt(
+    const QString& executable,
+    MetronomeMode mode,
+    NetworkCondition condition,
+    const std::array<quint16, kPeerCount>& ports,
+    LoopbackPortReservations& reservations,
+    const QString& sessionId,
+    const QString& sessionKey,
+    const std::array<QString, kPeerCount>& tokens,
+    const DirectionImpairment& impairment,
+    const QString& temporaryRoot)
 {
-    QCoreApplication application(argc, argv);
-    if (argc != 4) {
-        std::cerr << "usage: jam2_four_metronome_impairment <jam2> <mode> <condition>\n";
-        return 2;
+    const QString root = temporaryRoot;
+    if (!QDir().mkpath(root)) {
+        return {AttemptOutcome::HarnessInvalid,
+                QStringLiteral("creating the attempt root failed")};
     }
-    const QString executable = QFileInfo(QString::fromLocal8Bit(argv[1])).absoluteFilePath();
-    const auto mode = parseMode(QString::fromLocal8Bit(argv[2]));
-    const auto condition = parseCondition(QString::fromLocal8Bit(argv[3]));
-    if (!QFileInfo::exists(executable) || !mode || !condition) {
-        std::cerr << "Jam2 executable, metronome mode, or impairment condition is invalid\n";
-        return 2;
-    }
-
-    QTemporaryDir temporary(
-        QDir::temp().filePath(QStringLiteral("jam2-metronome-%1-%2-XXXXXX")
-            .arg(modeText(*mode), conditionText(*condition))));
-    if (!temporary.isValid()) {
-        std::cerr << "could not create metronome test root\n";
-        return 1;
-    }
-    auto fail = [&](const QString& reason) {
-        temporary.setAutoRemove(false);
-        std::cerr << reason.toStdString() << "\nartifacts retained at "
-                  << temporary.path().toStdString() << '\n';
-        return 1;
+    std::array<PeerProcess, kPeerCount> processes{};
+    auto die = [&](const QString& message,
+                   AttemptOutcome outcome = AttemptOutcome::ProductInvalid) {
+        stopProcesses(processes);
+        return AttemptResult{outcome, message};
     };
-
     QString error;
-    if (!prioritizeProxyCoordinator(error)) return fail(error);
-    LoopbackPortReservations reservations;
-    if (!reservations.reserve(kPeerCount, error)) return fail(error);
-    std::array<quint16, kPeerCount> ports{};
-    for (int index = 0; index < kPeerCount; ++index) {
-        ports[static_cast<std::size_t>(index)] = reservations.port(
-            static_cast<std::size_t>(index));
-    }
-
-    const QString sessionId = deterministicHex(7, 8);
-    const QString sessionKey = deterministicHex(11, 16);
-    std::array<QString, kPeerCount> tokens;
-    for (int index = 0; index < kPeerCount; ++index) {
-        tokens[static_cast<std::size_t>(index)] = deterministicHex(31 + index, 16);
-    }
-
     std::optional<UdpSequenceSecurityTransformer> sequenceTransformer;
-    if (*condition == NetworkCondition::SequenceSecurity) {
+    if (condition == NetworkCondition::SequenceSecurity) {
         bool sessionIdOk = false;
         const std::uint64_t numericSessionId = sessionId.toULongLong(&sessionIdOk, 16);
         const auto key = sessionKeyBytes(sessionKey);
         if (!sessionIdOk || numericSessionId == 0 || !key) {
-            return fail(QStringLiteral("could not decode deterministic UDP security session"));
+            return die(QStringLiteral("could not decode deterministic UDP security session"));
         }
         sequenceTransformer.emplace(
             *key, numericSessionId, jam2::NetworkAudioFormat::Pcm16Mono);
     }
 
-    const DirectionImpairment impairment = impairmentFor(*condition);
     std::vector<EdgeProxy> edges;
     QJsonObject topology;
     for (const QString& token : tokens) topology.insert(token, QJsonObject{});
@@ -1135,7 +1066,7 @@ int main(int argc, char* argv[])
                         return sequenceTransformer->transform(direction, packet);
                     });
             }
-            if (!proxy->start(error)) return fail(error);
+            if (!proxy->start(error)) return die(error, AttemptOutcome::HarnessInvalid);
             QJsonObject fromA = topology.value(tokens[static_cast<std::size_t>(peerA)]).toObject();
             QJsonObject fromB = topology.value(tokens[static_cast<std::size_t>(peerB)]).toObject();
             fromA.insert(tokens[static_cast<std::size_t>(peerB)], proxy->serverPublicEndpoint());
@@ -1146,30 +1077,27 @@ int main(int argc, char* argv[])
             ++edgeIndex;
         }
     }
-    if (edges.size() != 6) return fail(QStringLiteral("exactly six edge proxies were not created"));
+    if (edges.size() != 6) return die(QStringLiteral("exactly six edge proxies were not created"));
+    std::vector<std::array<std::optional<std::uint64_t>, 2>> burstForwardBaselines(
+        edges.size());
+    std::vector<std::array<bool, 2>> burstForwardRecovered(edges.size());
 
-    std::array<PeerProcess, kPeerCount> processes;
     const std::int64_t recordingStopFrames =
-        *mode == MetronomeMode::LeaderAudio && *condition == NetworkCondition::Loss
+        mode == MetronomeMode::LeaderAudio && condition == NetworkCondition::Loss
         ? kLeaderAudioLossRecordingStopFrames
         : kRecordingStopFrames;
     const std::int64_t expectedRecordingFrames =
         recordingStopFrames - kRecordingStartFrames;
     const std::int64_t snapshotFrames = recordingStopFrames + kSampleRate / 4;
     const std::int64_t shutdownFrames = recordingStopFrames + kSampleRate;
-    const qint64 evidenceCaptureMs =
-        recordingStopFrames * 1000 / kSampleRate + 500;
-#if defined(__APPLE__)
-    const QString osPriority = QStringLiteral("realtime");
-#else
-    const QString osPriority = QStringLiteral("high");
-#endif
+    const QString osPriority = QStringLiteral("off");
     const QString invite = QStringLiteral("jam2://v1?endpoint=127.0.0.1:%1&session=%2&key=%3")
         .arg(ports[0]).arg(sessionId, sessionKey);
     for (int index = 0; index < kPeerCount; ++index) {
         PeerProcess& peer = processes[static_cast<std::size_t>(index)];
-        peer.root = QDir(temporary.path()).filePath(QStringLiteral("peer-%1").arg(index + 1));
-        if (!QDir().mkpath(peer.root)) return fail(QStringLiteral("creating peer root failed"));
+        peer.root = QDir(root).filePath(QStringLiteral("peer-%1").arg(index + 1));
+        if (!QDir().mkpath(peer.root)) return die(QStringLiteral("creating peer root failed"),
+                                                  AttemptOutcome::HarnessInvalid);
         peer.scenarioPath = QDir(peer.root).filePath(QStringLiteral("scenario.json"));
         peer.stdoutPath = QDir(peer.root).filePath(QStringLiteral("stdout.log"));
         peer.stderrPath = QDir(peer.root).filePath(QStringLiteral("stderr.log"));
@@ -1179,7 +1107,7 @@ int main(int argc, char* argv[])
 
         QJsonArray actions;
         if (index == kPeerCount - 1) {
-            if (*mode == MetronomeMode::LeaderAudio) {
+            if (mode == MetronomeMode::LeaderAudio) {
                 QJsonObject release = scheduledAction(
                     QStringLiteral("leader-release"),
                     QStringLiteral("metronome.enabled"),
@@ -1219,15 +1147,15 @@ int main(int argc, char* argv[])
             QStringLiteral("shutdown"),
             shutdownFrames + (index == 0 ? kSampleRate / 2 : 0)));
 
-        const QString signal = *mode == MetronomeMode::LeaderAudio
+        const QString signal = mode == MetronomeMode::LeaderAudio
             ? QStringLiteral("tone-440") :
-            *mode == MetronomeMode::ListenerCompensated
+            mode == MetronomeMode::ListenerCompensated
                 ? QStringLiteral("metro-pulse") : QStringLiteral("silence");
         QJsonObject network{
             {QStringLiteral("bind"), QStringLiteral("127.0.0.1:%1")
                 .arg(ports[static_cast<std::size_t>(index)])},
             {QStringLiteral("no_stun"), true},
-            {QStringLiteral("wait_ms"), 30000},
+            {QStringLiteral("wait_ms"), 120000},
             {QStringLiteral("peer_token"), tokens[static_cast<std::size_t>(index)]},
             {QStringLiteral("topology"), topology},
         };
@@ -1241,7 +1169,7 @@ int main(int argc, char* argv[])
         const QJsonObject scenario{
             {QStringLiteral("schema"), QStringLiteral("jam2-debug-scenario")},
             {QStringLiteral("run_id"), QStringLiteral("native-metronome-%1-%2-peer-%3")
-                .arg(modeText(*mode), conditionText(*condition)).arg(index + 1)},
+                .arg(modeText(mode), conditionText(condition)).arg(index + 1)},
             {QStringLiteral("operation"), index == 0
                 ? QStringLiteral("network.create") : QStringLiteral("network.join")},
             {QStringLiteral("profile"), QStringLiteral("fast")},
@@ -1260,17 +1188,16 @@ int main(int argc, char* argv[])
                 {QStringLiteral("metronome"), true},
                 {QStringLiteral("bpm"), kInitialBpm},
                 {QStringLiteral("metronome_level"), 0.20},
-                {QStringLiteral("metronome_mode"), modeText(*mode)},
+                {QStringLiteral("metronome_mode"), modeText(mode)},
                 {QStringLiteral("os_priority"), osPriority},
             }},
             {QStringLiteral("artifacts"), QJsonObject{{QStringLiteral("root"), peer.root}}},
             {QStringLiteral("network"), network},
             {QStringLiteral("actions"), actions},
         };
-        if (!writeJson(peer.scenarioPath, scenario, error)) return fail(error);
+        if (!writeJson(peer.scenarioPath, scenario, error)) return die(error, AttemptOutcome::HarnessInvalid);
     }
 
-    reservations.release();
 
     QProcessEnvironment environment = QProcessEnvironment::systemEnvironment();
     for (const QString& name : {
@@ -1297,16 +1224,18 @@ int main(int argc, char* argv[])
             QStringLiteral("run"),
             peer.scenarioPath,
         });
-        if (!peer.process->waitForStarted(5000)) {
+        if (!peer.process->waitForStarted(static_cast<int>(
+                jam2::test::deadmanTimeout(std::chrono::seconds(30)).count()))) {
             stopProcesses(processes);
-            return fail(QStringLiteral("peer %1 failed to start: %2")
-                .arg(index + 1).arg(peer.process->errorString()));
+            return die(QStringLiteral("peer %1 failed to start: %2")
+                .arg(index + 1).arg(peer.process->errorString()),
+                AttemptOutcome::HarnessInvalid);
         }
     }
 
     QElapsedTimer readyDeadline;
     readyDeadline.start();
-    const qint64 readyTimeoutMs = jam2::test::scaledTimeout(
+    const qint64 readyTimeoutMs = jam2::test::deadmanTimeout(
         std::chrono::seconds(30)).count();
     while (readyDeadline.elapsed() < readyTimeoutMs) {
         const bool allReady = std::all_of(
@@ -1318,9 +1247,10 @@ int main(int argc, char* argv[])
             const PeerProcess& peer = processes[static_cast<std::size_t>(index)];
             if (peer.process && peer.process->state() == QProcess::NotRunning) {
                 stopProcesses(processes);
-                return fail(QStringLiteral(
+                return die(QStringLiteral(
                     "peer %1 exited before the four-peer start barrier; inspect %2")
-                    .arg(index + 1).arg(peer.stderrPath));
+                    .arg(index + 1).arg(peer.stderrPath),
+                AttemptOutcome::HarnessInvalid);
             }
         }
         QCoreApplication::processEvents(QEventLoop::AllEvents, 1);
@@ -1330,7 +1260,8 @@ int main(int argc, char* argv[])
             return QFileInfo::exists(peer.readyPath);
         })) {
         stopProcesses(processes);
-        return fail(QStringLiteral("four peers did not reach the bounded start barrier"));
+        return die(QStringLiteral("four peers did not reach the bounded start barrier"),
+                   AttemptOutcome::HarnessInvalid);
     }
 
     const auto releasePeer = [&](int index) {
@@ -1338,22 +1269,22 @@ int main(int argc, char* argv[])
         return barrier.open(QIODevice::WriteOnly | QIODevice::NewOnly) &&
             barrier.write("start\n") == 6;
     };
+    // Keep every peer's paired TCP/UDP port owned while the six proxies bind
+    // their ephemeral sockets and all four children reach the pre-operation
+    // barrier. Release only at the exact handoff before Jam2 binds, so a proxy
+    // cannot reclaim a peer port during parallel CTest startup.
+    reservations.release();
     if (!releasePeer(0)) {
         stopProcesses(processes);
-        return fail(QStringLiteral("could not release the creator start barrier"));
-    }
-    QElapsedTimer settle;
-    settle.start();
-    while (settle.elapsed() < 150) {
-        pumpProxies(edges);
-        QCoreApplication::processEvents(QEventLoop::AllEvents, 1);
-        QThread::msleep(1);
+        return die(QStringLiteral("could not release the creator start barrier"),
+                   AttemptOutcome::HarnessInvalid);
     }
     for (int index = 1; index < kPeerCount; ++index) {
         if (!releasePeer(index)) {
             stopProcesses(processes);
-            return fail(QStringLiteral("could not release peer %1 start barrier")
-                .arg(index + 1));
+            return die(QStringLiteral("could not release peer %1 start barrier")
+                .arg(index + 1),
+                AttemptOutcome::HarnessInvalid);
         }
     }
 
@@ -1364,32 +1295,47 @@ int main(int argc, char* argv[])
     bool malformedAndReplayInjected = false;
     bool shortFloodInjected = false;
     std::uint64_t nextShortFloodPacket = 0;
+    std::optional<std::vector<UdpProxyStats>> securityInjectionCompleteStats;
     std::optional<std::vector<UdpProxyStats>> activeProxyStats;
-    QElapsedTimer proxyPumpGap;
-    proxyPumpGap.start();
-    qint64 maximumEvidenceProxyPumpGapMs = 0;
-    qint64 maximumTeardownProxyPumpGapMs = 0;
-    while (deadline.elapsed() < 30000) {
-        const qint64 proxyPumpGapMs = proxyPumpGap.restart();
-        if (activeProxyStats) {
-            maximumTeardownProxyPumpGapMs = std::max(
-                maximumTeardownProxyPumpGapMs, proxyPumpGapMs);
-        } else {
-            maximumEvidenceProxyPumpGapMs = std::max(
-                maximumEvidenceProxyPumpGapMs, proxyPumpGapMs);
-        }
+    const qint64 scenarioTimeoutMs =
+        jam2::test::deadmanTimeout(std::chrono::seconds(120)).count();
+    while (deadline.elapsed() < scenarioTimeoutMs) {
         pumpProxies(edges);
-        if (*condition == NetworkCondition::Security &&
-            !malformedAndReplayInjected && deadline.elapsed() >= 2500) {
+        if (condition == NetworkCondition::BurstLoss) {
+            for (std::size_t edgeIndexValue = 0;
+                 edgeIndexValue < edges.size(); ++edgeIndexValue) {
+                const UdpProxyStats stats = edges[edgeIndexValue].proxy->stats();
+                const std::array<const DirectionProxyStats*, 2> directions{
+                    &stats.clientToServer,
+                    &stats.serverToClient,
+                };
+                for (std::size_t direction = 0; direction < directions.size(); ++direction) {
+                    const DirectionProxyStats& current = *directions[direction];
+                    auto& baseline = burstForwardBaselines[edgeIndexValue][direction];
+                    if (!baseline && current.burstLossEvents == 1 &&
+                        current.burstDropped > 0) {
+                        baseline = current.forwarded;
+                    } else if (baseline && current.forwarded > *baseline) {
+                        burstForwardRecovered[edgeIndexValue][direction] = true;
+                    }
+                }
+            }
+        }
+        const UdpProxyStats securityEdgeStats = edges.front().proxy->stats();
+        const bool bidirectionalTrafficObserved =
+            securityEdgeStats.clientToServer.forwarded >= 128 &&
+            securityEdgeStats.serverToClient.forwarded >= 128;
+        if (condition == NetworkCondition::Security &&
+            !malformedAndReplayInjected && bidirectionalTrafficObserved) {
             if (!injectMalformedAndReplay(
                     *edges.front().proxy, injectionEvidence, error)) {
                 stopProcesses(processes);
-                return fail(error);
+                return die(error, AttemptOutcome::HarnessInvalid);
             }
             malformedAndReplayInjected = true;
         }
-        if (*condition == NetworkCondition::Security &&
-            !shortFloodInjected && deadline.elapsed() >= 7000) {
+        if (condition == NetworkCondition::Security &&
+            malformedAndReplayInjected && !shortFloodInjected) {
             // Keep the adversarial packet count unchanged while interleaving
             // bounded injection batches with all six proxy pumps. A single
             // synchronous 8,192-datagram fixture burst can otherwise stall
@@ -1397,11 +1343,22 @@ int main(int argc, char* argv[])
             // meant to collect.
             shortFloodInjected = injectShortFloodBatch(
                 *edges.front().proxy, injectionEvidence, nextShortFloodPacket);
+            if (shortFloodInjected && !securityInjectionCompleteStats) {
+                securityInjectionCompleteStats.emplace();
+                securityInjectionCompleteStats->reserve(edges.size());
+                for (const auto& edge : edges) {
+                    securityInjectionCompleteStats->push_back(edge.proxy->stats());
+                }
+            }
         }
-        // Capture the impairment verdict after every scheduled recording and
-        // hard-reset assertion window, but before orderly peer shutdown can
-        // produce loopback ICMP/WSAECONNRESET noise on Windows UDP sockets.
-        if (!activeProxyStats && deadline.elapsed() >= evidenceCaptureMs) {
+        const bool anyFinished = std::any_of(
+            processes.begin(), processes.end(), [](const PeerProcess& peer) {
+                return peer.process && peer.process->state() == QProcess::NotRunning;
+            });
+        // The first frame-scheduled peer shutdown is the deterministic signal
+        // that every recording and hard-reset evidence window has completed.
+        // Capture before later shutdowns can produce loopback lifecycle noise.
+        if (!activeProxyStats && anyFinished) {
             activeProxyStats.emplace();
             activeProxyStats->reserve(edges.size());
             for (const auto& edge : edges) activeProxyStats->push_back(edge.proxy->stats());
@@ -1416,58 +1373,79 @@ int main(int argc, char* argv[])
     }
     if (!allFinished) {
         stopProcesses(processes);
-        return fail(QStringLiteral("four-peer metronome case exceeded 30 seconds"));
+        return die(QStringLiteral("four-peer metronome case exceeded its stall deadline"),
+                   AttemptOutcome::HarnessInvalid);
     }
-    if (maximumEvidenceProxyPumpGapMs > kMaximumProxyPumpGapMs) {
-        return fail(QStringLiteral(
-            "UDP impairment coordinator scheduling stalled for %1 ms (limit %2 ms); "
-            "product metronome evidence is invalid for this run")
-            .arg(maximumEvidenceProxyPumpGapMs).arg(kMaximumProxyPumpGapMs));
-    }
-    if (*condition == NetworkCondition::Security &&
+    if (condition == NetworkCondition::Security &&
         (!malformedAndReplayInjected || !shortFloodInjected ||
          injectionEvidence.floodRequested != 8192 ||
          injectionEvidence.floodInjected < 4096)) {
-        return fail(QStringLiteral(
+        return die(QStringLiteral(
             "UDP security injection did not complete: malformed=%1/%2 replay=%3/%4 flood=%5/%6")
             .arg(injectionEvidence.malformedInjected)
             .arg(injectionEvidence.malformedRequested)
             .arg(injectionEvidence.replayInjected)
             .arg(injectionEvidence.replayRequested)
             .arg(injectionEvidence.floodInjected)
-            .arg(injectionEvidence.floodRequested));
+            .arg(injectionEvidence.floodRequested),
+            AttemptOutcome::HarnessInvalid);
     }
     for (int index = 0; index < kPeerCount; ++index) {
         const QProcess& process = *processes[static_cast<std::size_t>(index)].process;
         if (process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0) {
-            return fail(QStringLiteral("peer %1 exited abnormally with code %2")
+            return die(QStringLiteral("peer %1 exited abnormally with code %2")
                 .arg(index + 1).arg(process.exitCode()));
         }
     }
 
-    QElapsedTimer drain;
-    drain.start();
-    while (drain.elapsed() < 100) {
-        pumpProxies(edges);
-        QThread::msleep(1);
-    }
     if (!activeProxyStats) {
         activeProxyStats.emplace();
         activeProxyStats->reserve(edges.size());
         for (const auto& edge : edges) activeProxyStats->push_back(edge.proxy->stats());
     }
+    if (condition == NetworkCondition::BurstLoss) {
+        for (std::size_t edgeIndexValue = 0;
+             edgeIndexValue < edges.size(); ++edgeIndexValue) {
+            for (std::size_t direction = 0; direction < 2; ++direction) {
+                if (!burstForwardBaselines[edgeIndexValue][direction] ||
+                    !burstForwardRecovered[edgeIndexValue][direction]) {
+                    const EdgeProxy& edge = edges[edgeIndexValue];
+                    return die(QStringLiteral(
+                        "edge %1-%2 direction %3 did not resume forwarding after its observed blackout")
+                        .arg(edge.peerA + 1)
+                        .arg(edge.peerB + 1)
+                        .arg(direction));
+                }
+            }
+        }
+    }
     for (std::size_t edgeIndexValue = 0; edgeIndexValue < edges.size(); ++edgeIndexValue) {
         const EdgeProxy& edge = edges[edgeIndexValue];
         const UdpProxyStats& stats = activeProxyStats->at(edgeIndexValue);
         if (stats.pendingHighWater > stats.pendingLimit) {
-            return fail(QStringLiteral("edge %1-%2 exceeded its bounded pending queue")
+            return die(QStringLiteral("edge %1-%2 exceeded its bounded pending queue")
                 .arg(edge.peerA + 1).arg(edge.peerB + 1));
         }
         for (const auto* direction : {&stats.clientToServer, &stats.serverToClient}) {
             QString reason;
-            if (!directionStatsValid(*direction, *condition, reason)) {
-                return fail(QStringLiteral("edge %1-%2: %3")
+            if (!directionStatsValid(*direction, condition, reason)) {
+                return die(QStringLiteral("edge %1-%2: %3")
                     .arg(edge.peerA + 1).arg(edge.peerB + 1).arg(reason));
+            }
+        }
+        if (condition == NetworkCondition::Security) {
+            if (!securityInjectionCompleteStats) {
+                return die(QStringLiteral(
+                    "security injection completion did not expose a traffic baseline"),
+                    AttemptOutcome::HarnessInvalid);
+            }
+            const UdpProxyStats& baseline =
+                securityInjectionCompleteStats->at(edgeIndexValue);
+            if (stats.clientToServer.forwarded <= baseline.clientToServer.forwarded ||
+                stats.serverToClient.forwarded <= baseline.serverToClient.forwarded) {
+                return die(QStringLiteral(
+                    "edge %1-%2 did not carry fresh bidirectional traffic after security injection")
+                    .arg(edge.peerA + 1).arg(edge.peerB + 1));
             }
         }
     }
@@ -1480,12 +1458,12 @@ int main(int argc, char* argv[])
                 QDir(process.root).filePath(QStringLiteral("native-manifest.json")),
                 peer.manifest,
                 error)) {
-            return fail(error);
+            return die(error);
         }
         if (peer.manifest.value(QStringLiteral("schema")).toString() !=
                 QStringLiteral("jam2-debug-manifest") ||
             !peer.manifest.value(QStringLiteral("ok")).toBool()) {
-            return fail(QStringLiteral("peer %1 native manifest failed").arg(index + 1));
+            return die(QStringLiteral("peer %1 native manifest failed").arg(index + 1));
         }
         peer.localPeerId = jsonUnsigned(peer.manifest.value(QStringLiteral("local_peer_id")));
         const QJsonObject result = peer.manifest.value(QStringLiteral("result")).toObject();
@@ -1497,15 +1475,15 @@ int main(int argc, char* argv[])
             result.value(QStringLiteral("event_trace_drops")).toDouble(-1) != 0.0 ||
             result.value(QStringLiteral("pending_static_actions")).toInt(-1) != 0 ||
             result.value(QStringLiteral("pending_controller_actions")).toDouble(-1) != 0.0) {
-            return fail(QStringLiteral("peer %1 manifest lifecycle/action contract failed")
+            return die(QStringLiteral("peer %1 manifest lifecycle/action contract failed")
                 .arg(index + 1));
         }
-        if (!eventContractValid(result, index, *mode, error)) return fail(error);
+        if (!eventContractValid(result, index, mode, error)) return die(error);
 
         const QString csvPath = findOnlyCsv(process.root, error);
-        if (csvPath.isEmpty() || !peer.csv.read(csvPath, error)) return fail(error);
+        if (csvPath.isEmpty() || !peer.csv.read(csvPath, error)) return die(error);
         for (const QString& column : {
-                 QStringLiteral("elapsed_ms"),
+                 QStringLiteral("audio_callbacks"),
                  QStringLiteral("network_active_peer_count"),
                  QStringLiteral("grid_authority_peer_id"),
                  QStringLiteral("grid_revision"),
@@ -1537,87 +1515,48 @@ int main(int argc, char* argv[])
                  QStringLiteral("udp_work_budget_yields"),
                  QStringLiteral("udp_receive_batch_max")}) {
             if (!peer.csv.hasColumn(column)) {
-                return fail(QStringLiteral("peer %1 CSV is missing %2")
+                return die(QStringLiteral("peer %1 CSV is missing %2")
                     .arg(index + 1).arg(column));
             }
         }
-#if defined(__APPLE__)
-        if (!peer.csv.hasColumn(QStringLiteral("os_realtime_active"))) {
-            return fail(QStringLiteral(
-                "peer %1 CSV is missing Apple realtime scheduling evidence")
-                .arg(index + 1));
-        }
-#endif
         peer.periodicRows = peer.csv.rowsOfType(QStringLiteral("periodic"));
         const auto initial = latestRow(peer, 1, true);
-        const std::int64_t committedRevision = *mode == MetronomeMode::LeaderAudio ? 4 : 2;
-        const auto final = latestRow(peer, committedRevision, true, 15000);
+        const std::int64_t committedRevision = mode == MetronomeMode::LeaderAudio ? 4 : 2;
+        const auto final = latestRow(
+            peer, committedRevision, true, kRecordingStopFrames);
         if (!initial || !final) {
-            return fail(QStringLiteral("peer %1 did not expose stable pre/post hard-reset epochs")
+            return die(QStringLiteral("peer %1 did not expose stable pre/post hard-reset epochs")
                 .arg(index + 1));
         }
         peer.initialRow = *initial;
         peer.finalRow = *final;
 
-        if (*condition == NetworkCondition::Security ||
-            *condition == NetworkCondition::SequenceSecurity) {
-            const auto beforeRecovery = latestRow(peer, committedRevision, true, 9000);
-            if (!beforeRecovery || peer.csv.number(
-                    *final, QStringLiteral("recv_packets")) <= peer.csv.number(
-                    *beforeRecovery, QStringLiteral("recv_packets"))) {
-                return fail(QStringLiteral(
-                    "peer %1 did not continue receiving fresh traffic after UDP security injection")
-                    .arg(index + 1));
-            }
-        }
-
-        if (*condition == NetworkCondition::BurstLoss) {
-            const auto recovered = latestRow(peer, committedRevision, true, 13000);
-            if (!recovered) {
-                return fail(QStringLiteral(
-                    "peer %1 lacks post-blackout mixer recovery evidence").arg(index + 1));
-            }
-            const std::int64_t deadlineGrowth = peer.csv.integer(
-                *final, QStringLiteral("mix_deadline_slots")) - peer.csv.integer(
-                *recovered, QStringLiteral("mix_deadline_slots"));
-            const std::int64_t missingGrowth = peer.csv.integer(
-                *final, QStringLiteral("mix_missing_peer_frames")) - peer.csv.integer(
-                *recovered, QStringLiteral("mix_missing_peer_frames"));
-            if (deadlineGrowth < 0 || deadlineGrowth > 8 ||
-                missingGrowth < 0 || missingGrowth > 1536) {
-                return fail(QStringLiteral(
-                    "peer %1 mixer did not stay recovered after bounded blackout: "
-                    "deadline_growth=%2 missing_frame_growth=%3")
-                    .arg(index + 1).arg(deadlineGrowth).arg(missingGrowth));
-            }
-        }
-
         if (!jam2::test::readJsonObject(
                 QDir(process.root).filePath(QStringLiteral("recording/recording.json")),
                 peer.sidecar,
                 error)) {
-            return fail(error);
+            return die(error);
         }
-        if (peer.sidecar.value(QStringLiteral("metronome_mode")).toString() != modeText(*mode)) {
-            return fail(QStringLiteral("peer recording sidecar has the wrong metronome model"));
+        if (peer.sidecar.value(QStringLiteral("metronome_mode")).toString() != modeText(mode)) {
+            return die(QStringLiteral("peer recording sidecar has the wrong metronome model"));
         }
         for (std::size_t stem = 0; stem < kStemNames.size(); ++stem) {
             const QString path = QDir(process.root).filePath(
                 QStringLiteral("recording/") + QString::fromLatin1(kStemNames[stem]));
-            if (!jam2::test::readPcm16MonoWav(path, peer.stems[stem], error)) return fail(error);
+            if (!jam2::test::readPcm16MonoWav(path, peer.stems[stem], error)) return die(error);
         }
         if (!recordingContractValid(
-                peer, index, expectedRecordingFrames, error)) return fail(error);
+                peer, index, expectedRecordingFrames, error)) return die(error);
     }
 
     std::set<std::uint64_t> localIds;
     for (const auto& peer : evidence) localIds.insert(peer.localPeerId);
-    if (localIds.size() != kPeerCount) return fail(QStringLiteral("four local peer IDs are not unique"));
+    if (localIds.size() != kPeerCount) return die(QStringLiteral("four local peer IDs are not unique"));
     const std::uint64_t creatorId = evidence.front().localPeerId;
     const std::uint64_t bpmPeerId = evidence.back().localPeerId;
-    const std::uint64_t expectedFinalAuthority = *mode == MetronomeMode::LeaderAudio
+    const std::uint64_t expectedFinalAuthority = mode == MetronomeMode::LeaderAudio
         ? bpmPeerId : creatorId;
-    const std::int64_t expectedFinalRevision = *mode == MetronomeMode::LeaderAudio ? 4 : 2;
+    const std::int64_t expectedFinalRevision = mode == MetronomeMode::LeaderAudio ? 4 : 2;
 
     std::optional<std::int64_t> initialAuthorityEpoch;
     std::optional<std::int64_t> finalAuthorityEpoch;
@@ -1660,7 +1599,7 @@ int main(int argc, char* argv[])
             final, QStringLiteral("mix_output_frames"), -1.0);
         constexpr double kMaximumImpairedMixDropRatio = 0.05;
         const double maximumMixCapacityDrops =
-            *condition == NetworkCondition::Clean
+            condition == NetworkCondition::Clean
             ? 0.0
             : mixOutputFrames * kMaximumImpairedMixDropRatio;
         const bool mixCapacityHealthy =
@@ -1668,25 +1607,18 @@ int main(int argc, char* argv[])
             mixCapacityDroppedFrames == mixCapacityDrops &&
             mixOutputFrames > 0.0 &&
             mixCapacityDrops <= maximumMixCapacityDrops;
-#if defined(__APPLE__)
-        if (!peer.csv.yes(final, QStringLiteral("os_realtime_active"))) {
-            return fail(QStringLiteral(
-                "peer %1 Apple network worker did not activate its requested time constraint")
-                .arg(index + 1));
-        }
-#endif
         const double authenticationFailures = peer.csv.number(
             final, QStringLiteral("udp_authentication_failed"));
         if (initialAuthority != creatorId || finalAuthority != expectedFinalAuthority ||
-            finalRevision != expectedFinalRevision || gridMode != modeId(*mode) ||
+            finalRevision != expectedFinalRevision || gridMode != modeId(mode) ||
             !aligned || beatDelta > 1 ||
             finalEpoch == initialEpoch ||
             mappedEpoch <= 0 || std::abs(mappingError) > 1024.0 ||
             sentPackets <= 0.0 || receivedPackets <= 0.0 || callbacks <= 0.0 ||
             !mixCapacityHealthy ||
-            (*condition != NetworkCondition::Security &&
+            (condition != NetworkCondition::Security &&
              authenticationFailures != 0.0)) {
-            return fail(QStringLiteral(
+            return die(QStringLiteral(
                 "peer %1 failed replacement-epoch/health proof: "
                 "authority=%2/%3 expected=%4/%5 revision=%6/%7 mode=%8/%9 "
                 "aligned=%10 beat_delta=%11 epochs=%12->%13 mapped=%14 "
@@ -1696,7 +1628,7 @@ int main(int argc, char* argv[])
                 .arg(initialAuthority).arg(finalAuthority)
                 .arg(creatorId).arg(expectedFinalAuthority)
                 .arg(finalRevision).arg(expectedFinalRevision)
-                .arg(gridMode).arg(modeId(*mode))
+                .arg(gridMode).arg(modeId(mode))
                 .arg(aligned).arg(beatDelta)
                 .arg(initialEpoch).arg(finalEpoch).arg(mappedEpoch)
                 .arg(mappingError).arg(sentPackets).arg(receivedPackets)
@@ -1706,25 +1638,25 @@ int main(int argc, char* argv[])
         if (!initialAuthorityEpoch) initialAuthorityEpoch = initialEpoch;
         if (!finalAuthorityEpoch) finalAuthorityEpoch = finalEpoch;
         if (*initialAuthorityEpoch != initialEpoch || *finalAuthorityEpoch != finalEpoch) {
-            return fail(QStringLiteral("four peers did not agree on both authority epochs"));
+            return die(QStringLiteral("four peers did not agree on both authority epochs"));
         }
         std::int64_t previousRevision = 0;
         for (const qsizetype row : peer.periodicRows) {
             const std::int64_t revision = peer.csv.integer(
                 row, QStringLiteral("grid_revision"), previousRevision);
             if (revision < previousRevision) {
-                return fail(QStringLiteral("grid revision regressed on peer %1").arg(index + 1));
+                return die(QStringLiteral("grid revision regressed on peer %1").arg(index + 1));
             }
             previousRevision = revision;
         }
     }
     if (!initialAuthorityEpoch || !finalAuthorityEpoch ||
         *initialAuthorityEpoch == *finalAuthorityEpoch) {
-        return fail(QStringLiteral("BPM hard reset did not replace the shared epoch"));
+        return die(QStringLiteral("BPM hard reset did not replace the shared epoch"));
     }
     if (evidence.back().csv.number(
             evidence.back().finalRow, QStringLiteral("grid_proposals_sent")) <= 0.0) {
-        return fail(QStringLiteral("joiner BPM edit did not traverse the grid proposal path"));
+        return die(QStringLiteral("joiner BPM edit did not traverse the grid proposal path"));
     }
     double authorityStatesSent = 0.0;
     double authorityStatesAccepted = 0.0;
@@ -1735,7 +1667,7 @@ int main(int argc, char* argv[])
             peer.finalRow, QStringLiteral("grid_authority_states_accepted"));
     }
     if (authorityStatesSent <= 0.0 || authorityStatesAccepted <= 0.0) {
-        return fail(QStringLiteral("authority state send/accept counters do not prove epoch distribution"));
+        return die(QStringLiteral("authority state send/accept counters do not prove epoch distribution"));
     }
 
     const auto sumFinal = [&](const QString& column) {
@@ -1750,7 +1682,7 @@ int main(int argc, char* argv[])
         }
         return maximum;
     };
-    if (*condition == NetworkCondition::Security) {
+    if (condition == NetworkCondition::Security) {
         const double shortPackets = sumFinal(QStringLiteral("udp_short_packets"));
         const double wrongMagic = sumFinal(QStringLiteral("udp_wrong_magic"));
         const double wrongVersion = sumFinal(QStringLiteral("udp_wrong_version"));
@@ -1768,7 +1700,7 @@ int main(int argc, char* argv[])
             unknownType < 2.0 || wrongSession < 2.0 || invalidPayload < 2.0 ||
             authenticationFailed < 2.0 || replayRejected < 2.0 ||
             receiveBatchMaximum <= 0.0 || receiveBatchMaximum > 64.0) {
-            return fail(QStringLiteral(
+            return die(QStringLiteral(
                 "UDP security counters failed: short=%1 magic=%2 version=%3 type=%4 "
                 "session=%5 payload=%6 auth=%7 replay=%8 yields=%9 batch_max=%10")
                 .arg(shortPackets).arg(wrongMagic).arg(wrongVersion).arg(unknownType)
@@ -1776,7 +1708,7 @@ int main(int argc, char* argv[])
                 .arg(replayRejected).arg(budgetYields).arg(receiveBatchMaximum));
         }
     }
-    if (*condition == NetworkCondition::SequenceSecurity) {
+    if (condition == NetworkCondition::SequenceSecurity) {
         const auto& transformed = sequenceTransformer->stats();
         const bool transformedBothDirections = transformed.wrapped[0] && transformed.wrapped[1] &&
             transformed.forwardGapInjected[0] && transformed.forwardGapInjected[1] &&
@@ -1794,7 +1726,7 @@ int main(int argc, char* argv[])
         // would be attributable to wrap or forward-gap recovery.
         if (!transformedBothDirections || lost != 2.0 || late != 2.0 || forwardGap < 2.0 ||
             futureSample < 2.0 || authenticationFailed != 0.0) {
-            return fail(QStringLiteral(
+            return die(QStringLiteral(
                 "UDP signed sequence boundary failed: packets=%1/%2 wrapped=%3/%4 "
                 "gap_injected=%5/%6 sample_injected=%7/%8 lost=%9 gap_rejects=%10 "
                 "future_rejects=%11 auth_failures=%12 late=%13")
@@ -1808,13 +1740,14 @@ int main(int argc, char* argv[])
         }
     }
 
-    if (*mode == MetronomeMode::LeaderAudio) {
+    if (mode == MetronomeMode::LeaderAudio) {
         int growingInjectors = 0;
         std::uint64_t growingSource = 0;
         for (const PeerEvidence& peer : evidence) {
-            const auto stable = latestRow(peer, expectedFinalRevision, true, 4500);
+            const auto stable = earliestRow(peer, expectedFinalRevision, true);
             if (!stable) {
-                return fail(QStringLiteral("leader-audio handoff did not stabilize before recording"));
+                return die(QStringLiteral(
+                    "leader-audio handoff never exposed an active final-revision sample"));
             }
             const double initial = peer.csv.number(
                 *stable, QStringLiteral("leader_audio_injected_packets"));
@@ -1827,31 +1760,84 @@ int main(int argc, char* argv[])
             }
         }
         if (growingInjectors != 1 || growingSource != expectedFinalAuthority) {
-            return fail(QStringLiteral("leader-audio did not transfer to exactly one replacement-epoch authority"));
+            return die(QStringLiteral("leader-audio did not transfer to exactly one replacement-epoch authority"));
         }
-        if (!leaderAudioValid(evidence, expectedFinalAuthority, error)) return fail(error);
-    } else if (*mode == MetronomeMode::SharedGrid) {
+        if (!leaderAudioValid(evidence, expectedFinalAuthority, error)) return die(error);
+    } else if (mode == MetronomeMode::SharedGrid) {
         for (int index = 0; index < kPeerCount; ++index) {
             if (!sharedAudioValid(evidence[static_cast<std::size_t>(index)], index, error)) {
-                return fail(error);
+                return die(error);
             }
         }
     } else {
         for (int index = 0; index < kPeerCount; ++index) {
             if (!listenerAudioValid(evidence[static_cast<std::size_t>(index)], index, error)) {
-                return fail(error);
+                return die(error);
             }
         }
     }
 
-    std::cout << "PASS four-peer metronome mode=" << modeText(*mode).toStdString()
-              << " condition=" << conditionText(*condition).toStdString()
+    std::cout << "PASS four-peer metronome mode=" << modeText(mode).toStdString()
+              << " condition=" << conditionText(condition).toStdString()
               << " initial_epoch=" << *initialAuthorityEpoch
               << " replacement_epoch=" << *finalAuthorityEpoch
               << " authority=" << expectedFinalAuthority
-              << " maximum_evidence_proxy_pump_gap_ms="
-              << maximumEvidenceProxyPumpGapMs
-              << " maximum_teardown_proxy_pump_gap_ms="
-              << maximumTeardownProxyPumpGapMs << '\n';
-    return 0;
+              << '\n';
+    return AttemptResult{AttemptOutcome::Success, {}};
+}
+
+int main(int argc, char* argv[])
+{
+    QCoreApplication application(argc, argv);
+    if (argc != 4) {
+        std::cerr << "usage: jam2_four_metronome_impairment <jam2> <mode> <condition>\n";
+        return 2;
+    }
+    const QString executable = QFileInfo(QString::fromLocal8Bit(argv[1])).absoluteFilePath();
+    const auto mode = parseMode(QString::fromLocal8Bit(argv[2]));
+    const auto condition = parseCondition(QString::fromLocal8Bit(argv[3]));
+    if (!QFileInfo::exists(executable) || !mode || !condition) {
+        std::cerr << "Jam2 executable, metronome mode, or impairment condition is invalid\n";
+        return 2;
+    }
+    QTemporaryDir temporary(
+        QDir::temp().filePath(QStringLiteral("jam2-metronome-%1-%2-XXXXXX")
+            .arg(modeText(*mode), conditionText(*condition))));
+    if (!temporary.isValid()) {
+        std::cerr << "could not create metronome test root\n";
+        return 1;
+    }
+    auto fail = [&](const QString& reason) {
+        temporary.setAutoRemove(false);
+        std::cerr << reason.toStdString() << "\nartifacts retained at "
+                  << temporary.path().toStdString() << '\n';
+        return 1;
+    };
+
+    QString error;
+    LoopbackPortReservations reservations;
+    if (!reservations.reserve(kPeerCount, error)) return fail(error);
+    std::array<quint16, kPeerCount> ports{};
+    for (int index = 0; index < kPeerCount; ++index) {
+        ports[static_cast<std::size_t>(index)] = reservations.port(
+            static_cast<std::size_t>(index));
+    }
+
+    const QString sessionId = deterministicHex(7, 8);
+    const QString sessionKey = deterministicHex(11, 16);
+    std::array<QString, kPeerCount> tokens;
+    for (int index = 0; index < kPeerCount; ++index) {
+        tokens[static_cast<std::size_t>(index)] = deterministicHex(31 + index, 16);
+    }
+
+    const DirectionImpairment impairment = impairmentFor(*condition);
+
+    const AttemptResult result = runAttempt(
+        executable, *mode, *condition, ports, reservations, sessionId,
+        sessionKey, tokens, impairment, temporary.path());
+    if (result.outcome == AttemptOutcome::Success) return 0;
+    temporary.setAutoRemove(false);
+    std::cerr << result.message.toStdString() << "\nartifacts retained at "
+              << temporary.path().toStdString() << '\n';
+    return 1;
 }

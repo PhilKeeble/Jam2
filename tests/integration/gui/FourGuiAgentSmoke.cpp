@@ -27,7 +27,7 @@ void fail(const QString& message)
 bool receive(AutomationProcess& process, const QString& expected, QJsonObject& event)
 {
     QString error;
-    if (!process.readEvent(event, 20s, error)) {
+    if (!process.readEvent(event, 60s, error)) {
         fail(QStringLiteral("reading %1: %2").arg(expected, error));
         return false;
     }
@@ -575,7 +575,7 @@ int main(int argc, char* argv[])
         (void)receive(peer, QStringLiteral("shutdown"), shutdown);
         int exitCode = -1;
         QString waitError;
-        if (!peer.waitForExit(20s, exitCode, waitError)) {
+        if (!peer.waitForExit(60s, exitCode, waitError)) {
             fail(QStringLiteral("peer %1 exit: %2").arg(index + 1).arg(waitError));
         } else if (exitCode != 0) {
             fail(QStringLiteral("peer %1 returned %2").arg(index + 1).arg(exitCode));

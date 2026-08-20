@@ -84,7 +84,7 @@ WorkerRun runWorker(
         arguments << QStringLiteral("--models") << explicitModels;
     }
     process.start(worker, arguments, QIODevice::ReadOnly);
-    const auto timeout = jam2::test::scaledTimeout(std::chrono::seconds(90));
+    const auto timeout = jam2::test::deadmanTimeout(std::chrono::seconds(90));
     const int timeoutMs = static_cast<int>(timeout.count());
     require(process.waitForStarted(timeoutMs),
         "staged JamTaster worker must start");

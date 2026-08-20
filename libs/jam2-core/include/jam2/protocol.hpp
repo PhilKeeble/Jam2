@@ -2,6 +2,7 @@
 
 #include "common.hpp"
 
+#include <array>
 #include <cstdint>
 #include <optional>
 #include <span>
@@ -34,8 +35,9 @@ struct Header {
     PacketType type{};
     std::uint64_t session_id{};
     std::uint32_t sequence{};
-    // Audio/metronome/transport packets carry a sample-time value. Ping/pong
-    // packets carry their monotonic timing token. No packet needs both.
+    // Audio/metronome/transport packets carry a sample-time value. Endpoint
+    // proof and ping/pong packets carry their monotonic challenge token. No
+    // packet needs both.
     std::uint64_t timing_value{};
     std::uint16_t payload_length{};
     std::uint64_t auth_tag{};
@@ -46,6 +48,7 @@ constexpr std::size_t kMaxAudioFramesPerPacket = 256;
 constexpr std::size_t kMetronomeStatePayloadSize = 56;
 constexpr std::size_t kTransportStatePayloadSize = 28;
 constexpr std::size_t kMaxDatagramSize = kHeaderSize + kMaxAudioFramesPerPacket * 3;
+constexpr std::size_t kPeerIdentityPayloadSize = 8;
 
 enum class ParseError : std::uint8_t {
     None = 0,
@@ -129,6 +132,11 @@ ParseResult parse_packet(
     const std::array<std::uint8_t, 16>& key,
     std::uint64_t expected_session_id,
     NetworkAudioFormat audio_format);
+
+std::array<std::uint8_t, kPeerIdentityPayloadSize> encode_peer_identity(
+    std::uint64_t peer_id) noexcept;
+std::optional<std::uint64_t> decode_peer_identity(
+    std::span<const std::uint8_t> payload) noexcept;
 
 const char* parse_error_text(ParseError error);
 const char* audio_format_text(NetworkAudioFormat format) noexcept;

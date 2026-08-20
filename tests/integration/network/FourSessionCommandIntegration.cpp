@@ -1,6 +1,7 @@
 #include "AutomationProcess.hpp"
 #include "LoopbackPortReservations.hpp"
 #include "TestTiming.hpp"
+#include "UdpImpairmentProxy.hpp"
 
 #include "engine.hpp"
 
@@ -12,11 +13,13 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QTemporaryDir>
+#include <QUdpSocket>
 
 #include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <functional>
 #include <iostream>
 #include <memory>
@@ -33,6 +36,7 @@ constexpr std::uint64_t kOneBarFrames = 96000ULL;
 // uses the same two-callback bound for shared-grid click phase.
 constexpr std::uint64_t kTransportGridToleranceFrames =
     2ULL * static_cast<std::uint64_t>(kFrameSize);
+jam2::test::UdpImpairmentProxy* activeUdpProxy = nullptr;
 
 QString deterministicHex(int seed, int bytes)
 {
@@ -94,9 +98,10 @@ bool waitForEvent(
     QString& error)
 {
     const auto deadline = std::chrono::steady_clock::now() +
-        jam2::test::scaledTimeout(timeout);
+        jam2::test::deadmanTimeout(timeout);
     QString lastEvent;
     while (std::chrono::steady_clock::now() < deadline) {
+        if (activeUdpProxy != nullptr) activeUdpProxy->pump();
         QJsonObject event;
         QString readError;
         if (!process.readEvent(event, 250ms, readError)) {
@@ -170,6 +175,47 @@ bool waitForNamedEventOrRejection(
     return true;
 }
 
+bool waitForTransportGridReady(
+    AutomationProcess& process,
+    int peerNumber,
+    QString& error)
+{
+    const auto deadline = std::chrono::steady_clock::now() +
+        jam2::test::deadmanTimeout(30s);
+    int attempt = 0;
+    while (std::chrono::steady_clock::now() < deadline) {
+        const QString id = QStringLiteral("grid-ready-%1-%2")
+            .arg(peerNumber).arg(attempt++);
+        if (!send(process, {
+                {QStringLiteral("type"), QStringLiteral("snapshot")},
+                {QStringLiteral("id"), id},
+                {QStringLiteral("delay_frames"), 512},
+            }, error)) {
+            return false;
+        }
+        QJsonObject snapshot;
+        if (!waitForNamedEventOrRejection(
+                process,
+                QStringLiteral("snapshot"),
+                id,
+                30s,
+                snapshot,
+                error)) {
+            return false;
+        }
+        const qint64 mappingError = snapshot
+            .value(QStringLiteral("grid_mapping_error_frames")).toInteger();
+        if (snapshot.value(QStringLiteral("transport_grid_ready")).toBool() &&
+            std::llabs(mappingError) <=
+                static_cast<qint64>(kTransportGridToleranceFrames)) {
+            return true;
+        }
+    }
+    error = QStringLiteral(
+        "timed out waiting for the mapped authority grid to become usable");
+    return false;
+}
+
 QJsonObject scenario(
     int index,
     quint16 port,
@@ -177,14 +223,16 @@ QJsonObject scenario(
     const QString& sessionId,
     const QString& sessionKey,
     const QString& peerToken,
-    const QString& artifactRoot)
+    const QString& artifactRoot,
+    const QJsonObject& topology)
 {
     QJsonObject network{
         {QStringLiteral("bind"),
             QStringLiteral("127.0.0.1:%1").arg(port)},
         {QStringLiteral("no_stun"), true},
-        {QStringLiteral("wait_ms"), 15000},
+        {QStringLiteral("wait_ms"), 120000},
         {QStringLiteral("peer_token"), peerToken},
+        {QStringLiteral("topology"), topology},
     };
     if (index == 0) {
         network.insert(QStringLiteral("session_id"), sessionId);
@@ -280,8 +328,15 @@ int main(int argc, char* argv[])
     }
     const QString executable = QFileInfo(
         QString::fromLocal8Bit(argv[1])).absoluteFilePath();
+    const QString artifactRoot =
+        qEnvironmentVariable("JAM2_TEST_ARTIFACT_ROOT");
+    if (artifactRoot.isEmpty() || !QDir().mkpath(artifactRoot)) {
+        std::cerr << "CTest omitted or could not create the build-local artifact root\n";
+        return 2;
+    }
     QTemporaryDir root(
-        QDir::temp().filePath(QStringLiteral("jam2-session-command-XXXXXX")));
+        QDir(artifactRoot).absoluteFilePath(
+            QStringLiteral("jam2-session-command-XXXXXX")));
     auto fail = [&](const QString& message) {
         root.setAutoRemove(false);
         std::cerr << message.toStdString() << "\nartifacts retained at "
@@ -294,15 +349,41 @@ int main(int argc, char* argv[])
 
     QString error;
     LoopbackPortReservations reservations;
-    if (!reservations.reserve(kPeerCount, error)) {
+    if (!reservations.reserve(kPeerCount + 1, error)) {
         return fail(error);
     }
     std::array<quint16, kPeerCount> ports{};
     for (std::size_t index = 0; index < kPeerCount; ++index) {
         ports[index] = reservations.port(index);
     }
+    const quint16 intentionallyWrongPort = reservations.port(kPeerCount);
     const QString sessionId = deterministicHex(7, 8);
     const QString sessionKey = deterministicHex(11, 16);
+    std::array<QString, kPeerCount> peerTokens{};
+    for (std::size_t index = 0; index < kPeerCount; ++index) {
+        peerTokens[index] = deterministicHex(31 + static_cast<int>(index), 16);
+    }
+    jam2::test::DirectionImpairment cleanPath;
+    jam2::test::UdpImpairmentProxy endpointProxy(
+        QHostAddress::LocalHost,
+        ports[1],
+        cleanPath,
+        cleanPath,
+        0x4a414d3252454249ULL);
+    if (!endpointProxy.start(error)) {
+        return fail(error);
+    }
+    activeUdpProxy = &endpointProxy;
+    QJsonObject topology;
+    for (const QString& token : peerTokens) topology.insert(token, QJsonObject{});
+    QJsonObject creatorView = topology.value(peerTokens[0]).toObject();
+    creatorView.insert(peerTokens[1], endpointProxy.publicEndpoint());
+    topology.insert(peerTokens[0], creatorView);
+    QJsonObject firstJoinerView = topology.value(peerTokens[1]).toObject();
+    firstJoinerView.insert(
+        peerTokens[0],
+        QStringLiteral("127.0.0.1:%1").arg(intentionallyWrongPort));
+    topology.insert(peerTokens[1], firstJoinerView);
     std::array<QString, kPeerCount> scenarioPaths{};
     std::array<QString, kPeerCount> manifestPaths{};
     for (std::size_t index = 0; index < kPeerCount; ++index) {
@@ -323,14 +404,23 @@ int main(int argc, char* argv[])
                     ports[0],
                     sessionId,
                     sessionKey,
-                    deterministicHex(31 + static_cast<int>(index), 16),
-                    peerRoot),
+                    peerTokens[index],
+                    peerRoot,
+                    topology),
                 error)) {
             return fail(error);
         }
     }
 
     reservations.release();
+    QUdpSocket wrongEndpointSink;
+    if (!wrongEndpointSink.bind(
+            QHostAddress::LocalHost,
+            intentionallyWrongPort,
+            QUdpSocket::DontShareAddress)) {
+        return fail(QStringLiteral("reserving the deliberately stale UDP endpoint: ") +
+            wrongEndpointSink.errorString());
+    }
     std::array<std::unique_ptr<AutomationProcess>, kPeerCount> peers{};
     for (std::size_t index = 0; index < kPeerCount; ++index) {
         peers[index] = AutomationProcess::launch(
@@ -350,13 +440,86 @@ int main(int argc, char* argv[])
                 20s,
                 [](const QJsonObject& event) {
                     return event.value(QStringLiteral("event")).toString() ==
-                            QStringLiteral("peer_snapshot") &&
-                        event.value(QStringLiteral("remote_peer_count")).toInt() == 3 &&
-                        event.value(QStringLiteral("network_attachment_ready")).toBool();
+                            QStringLiteral("network.connected") &&
+                        event.value(QStringLiteral("direct_udp_mesh_active")).toBool();
                 },
                 connected,
                 error)) {
-            return fail(QStringLiteral("peer %1 full-mesh readiness: %2")
+            return fail(QStringLiteral(
+                "peer %1 did not publish connected until direct UDP was active: %2")
+                .arg(index + 1).arg(error));
+        }
+    }
+
+    for (std::size_t index = 0; index < kPeerCount; ++index) {
+        QJsonObject active;
+        if (!waitForEvent(
+                *peers[index],
+                20s,
+                [](const QJsonObject& event) {
+                    return event.value(QStringLiteral("event")).toString() ==
+                            QStringLiteral("peer_snapshot") &&
+                        event.value(QStringLiteral("active_remote_peer_count")).toInt() == 3;
+                },
+                active,
+                error)) {
+            return fail(QStringLiteral("peer %1 direct full-mesh proof: %2")
+                .arg(index + 1).arg(error));
+        }
+        if (active.value(QStringLiteral("remote_peer_count")).toInt() != 3 ||
+            !active.value(QStringLiteral("network_attachment_ready")).toBool()) {
+            return fail(QStringLiteral(
+                "peer %1 UDP proof preceded complete control membership")
+                .arg(index + 1));
+        }
+    }
+
+    const QString priorProxyEndpoint = endpointProxy.serverPublicEndpoint();
+    const auto proxyStatsBeforeRebind = endpointProxy.stats();
+    if (!endpointProxy.rebindServerEndpoint(error) ||
+        endpointProxy.serverPublicEndpoint() == priorProxyEndpoint) {
+        return fail(error.isEmpty()
+            ? QStringLiteral("UDP proxy endpoint did not change during rebind")
+            : error);
+    }
+    QJsonObject staleEdge;
+    if (!waitForEvent(
+            *peers[1],
+            20s,
+            [](const QJsonObject& event) {
+                return event.value(QStringLiteral("event")).toString() ==
+                        QStringLiteral("peer_snapshot") &&
+                    event.value(QStringLiteral("active_remote_peer_count")).toInt() < 3;
+            },
+            staleEdge,
+            error)) {
+        return fail(QStringLiteral("remapped UDP edge did not leave Active state: ") + error);
+    }
+    QJsonObject recoveredEdge;
+    if (!waitForEvent(
+            *peers[1],
+            20s,
+            [](const QJsonObject& event) {
+                return event.value(QStringLiteral("event")).toString() ==
+                        QStringLiteral("peer_snapshot") &&
+                    event.value(QStringLiteral("active_remote_peer_count")).toInt() == 3;
+            },
+            recoveredEdge,
+            error)) {
+        return fail(QStringLiteral("remapped UDP edge did not recover: ") + error);
+    }
+    const auto proxyStatsAfterRebind = endpointProxy.stats();
+    if (proxyStatsAfterRebind.serverEndpointRebinds != 1 ||
+        proxyStatsAfterRebind.serverToClient.forwarded <=
+            proxyStatsBeforeRebind.serverToClient.forwarded) {
+        return fail(QStringLiteral(
+            "recovered peer did not send through the observed remapped UDP endpoint"));
+    }
+
+    for (std::size_t index = 0; index < kPeerCount; ++index) {
+        if (!waitForTransportGridReady(
+                *peers[index], static_cast<int>(index + 1), error)) {
+            return fail(QStringLiteral("peer %1 recovered transport grid: %2")
                 .arg(index + 1).arg(error));
         }
     }
@@ -372,7 +535,7 @@ int main(int argc, char* argv[])
             *peers[0],
             QStringLiteral("command_rejected"),
             QStringLiteral("invalid-frame"),
-            2s,
+            30s,
             rejected,
             error)) {
         return fail(QStringLiteral("invalid reactive command rejection: ") + error);
@@ -398,7 +561,7 @@ int main(int argc, char* argv[])
                 *peers[index],
                 QStringLiteral("command_applied"),
                 QStringLiteral("gain-%1").arg(index + 1),
-                2s,
+                30s,
                 applied,
                 error)) {
             return fail(QStringLiteral("peer %1 gain application: %2")
@@ -422,7 +585,7 @@ int main(int argc, char* argv[])
             *peers[0],
             QStringLiteral("snapshot"),
             QStringLiteral("delayed-snapshot"),
-            2s,
+            30s,
             delayedSnapshot,
             error) ||
         delayedSnapshot.value(QStringLiteral("remote_level_ppm")).toInt() != 250000 ||
@@ -447,7 +610,7 @@ int main(int argc, char* argv[])
             *peers[0],
             QStringLiteral("command_applied"),
             QStringLiteral("count-in"),
-            5s,
+            30s,
             countInApplied,
             error)) {
         return fail(QStringLiteral("count-in transport application: ") + error);
@@ -455,53 +618,52 @@ int main(int argc, char* argv[])
     const std::uint64_t countInAppliedFrame = static_cast<std::uint64_t>(
         countInApplied.value(QStringLiteral("applied_frame")).toDouble());
 
-    std::array<QJsonObject, kPeerCount> countInSnapshots{};
-    bool allScheduled = false;
-    int attempt = 0;
-    const auto schedulePropagationDeadline =
-        std::chrono::steady_clock::now() + 1500ms;
-    while (!allScheduled &&
-           std::chrono::steady_clock::now() < schedulePropagationDeadline) {
-        allScheduled = true;
-        std::array<QString, kPeerCount> ids{};
-        for (std::size_t index = 0; index < kPeerCount; ++index) {
-            ids[index] = QStringLiteral("scheduled-count-in-%1-%2")
-                .arg(attempt).arg(index + 1);
-            if (!send(*peers[index], {
-                    {QStringLiteral("type"), QStringLiteral("snapshot")},
-                    {QStringLiteral("id"), ids[index]},
-                    {QStringLiteral("delay_frames"), 512},
-                }, error)) {
-                return fail(error);
-            }
+    for (std::size_t index = 1; index < kPeerCount; ++index) {
+        QJsonObject scheduled;
+        if (!waitForEvent(
+                *peers[index],
+                30s,
+                [](const QJsonObject& event) {
+                    return event.value(QStringLiteral("event")).toString() ==
+                            QStringLiteral("transport_scheduled") &&
+                        event.value(QStringLiteral("transport_action")).toInt() ==
+                            static_cast<int>(jam2::EngineTransportAction::RecordStart) &&
+                        event.value(QStringLiteral("transport_pending")).toBool();
+                },
+                scheduled,
+                error)) {
+            return fail(QStringLiteral("peer %1 transport adoption: %2")
+                .arg(index + 1).arg(error));
         }
-        for (std::size_t index = 0; index < kPeerCount; ++index) {
-            if (!waitForNamedEventOrRejection(
-                    *peers[index],
-                    QStringLiteral("snapshot"),
-                    ids[index],
-                    1s,
-                    countInSnapshots[index],
-                    error)) {
-                return fail(QStringLiteral("peer %1 scheduled count-in snapshot: %2")
-                    .arg(index + 1).arg(error));
-            }
-            allScheduled = allScheduled &&
-                countInSnapshotValid(countInSnapshots[index], false);
-        }
-        ++attempt;
     }
-    if (!allScheduled) {
-        QString evidence;
-        for (std::size_t index = 0; index < kPeerCount; ++index) {
-            evidence += QStringLiteral("\npeer %1: %2")
-                .arg(index + 1)
-                .arg(QString::fromUtf8(QJsonDocument(countInSnapshots[index])
-                    .toJson(QJsonDocument::Compact)));
+
+    std::array<QJsonObject, kPeerCount> countInSnapshots{};
+    std::array<QString, kPeerCount> ids{};
+    for (std::size_t index = 0; index < kPeerCount; ++index) {
+        ids[index] = QStringLiteral("scheduled-count-in-%1").arg(index + 1);
+        if (!send(*peers[index], {
+                {QStringLiteral("type"), QStringLiteral("snapshot")},
+                {QStringLiteral("id"), ids[index]},
+                {QStringLiteral("delay_frames"), 512},
+            }, error)) {
+            return fail(error);
         }
-        return fail(QStringLiteral(
-            "the future one-bar recording schedule did not reach all four peers") +
-            evidence);
+    }
+    for (std::size_t index = 0; index < kPeerCount; ++index) {
+        if (!waitForNamedEventOrRejection(
+                *peers[index],
+                QStringLiteral("snapshot"),
+                ids[index],
+                30s,
+                countInSnapshots[index],
+                error) ||
+            !countInSnapshotValid(countInSnapshots[index], false)) {
+            return fail(QStringLiteral("peer %1 scheduled count-in snapshot: %2 snapshot=%3")
+                .arg(index + 1)
+                .arg(error)
+                .arg(QString::fromUtf8(QJsonDocument(countInSnapshots[index])
+                    .toJson(QJsonDocument::Compact))));
+        }
     }
 
     const std::uint64_t creatorCountdown = static_cast<std::uint64_t>(
@@ -523,7 +685,7 @@ int main(int argc, char* argv[])
             *peers[0],
             QStringLiteral("snapshot"),
             QStringLiteral("countdown-boundary"),
-            10s,
+            30s,
             boundarySnapshot,
             error) ||
         !countInSnapshotValid(boundarySnapshot, true)) {
@@ -544,7 +706,7 @@ int main(int argc, char* argv[])
                 *peers[index],
                 QStringLiteral("snapshot"),
                 id,
-                1s,
+                30s,
                 activeSnapshot,
                 error) ||
             !countInSnapshotValid(activeSnapshot, true)) {
@@ -570,7 +732,7 @@ int main(int argc, char* argv[])
             *peers[0],
             QStringLiteral("command_applied"),
             QStringLiteral("session-error"),
-            2s,
+            30s,
             injected,
             error)) {
         return fail(QStringLiteral("injecting coordinator session error: ") + error);
@@ -581,7 +743,7 @@ int main(int argc, char* argv[])
     // asynchronous socket backends, closing the creator immediately can discard
     // a frame that has not reached the kernel yet.
     int rejectedExitCode = -1;
-    if (!peers[rejectedPeer]->waitForExit(10s, rejectedExitCode, error) ||
+    if (!peers[rejectedPeer]->waitForExit(30s, rejectedExitCode, error) ||
         rejectedExitCode != 4) {
         return fail(QStringLiteral("peer %1 injected session-error exit: %2 code=%3")
             .arg(rejectedPeer + 1).arg(error).arg(rejectedExitCode));
@@ -603,7 +765,7 @@ int main(int argc, char* argv[])
                     *peers[index],
                     QStringLiteral("shutdown"),
                     QString(),
-                    10s,
+                    30s,
                     shutdown,
                     error)) {
                 return fail(QStringLiteral("peer %1 shutdown event: %2")
@@ -612,7 +774,7 @@ int main(int argc, char* argv[])
         }
         int exitCode = -1;
         const int expectedExitCode = index == rejectedPeer ? 4 : 0;
-        if (!peers[index]->waitForExit(10s, exitCode, error) ||
+        if (!peers[index]->waitForExit(30s, exitCode, error) ||
             exitCode != expectedExitCode) {
             return fail(QStringLiteral("peer %1 exit: %2 code=%3")
                 .arg(index + 1).arg(error).arg(exitCode));

@@ -9,6 +9,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <string>
 #include <thread>
@@ -60,20 +61,47 @@ int probe_file(const std::string& path, const std::string& output_path)
     return 0;
 }
 
-int self_test(const std::string& path)
+int self_test(const std::string& path, bool instrument)
 {
     const auto plugins = jam2::pluginhost::scan_vst3(path);
     if (plugins.empty()) throw std::runtime_error("No audio-effect classes found");
     for (const auto& plugin : plugins) {
         jam2::pluginhost::Vst3Instance instance;
         instance.load(path, plugin.class_id);
-        instance.configure(48000.0, 256, instance.input_channels() == 0 ? 0U : 1U);
+        instance.configure(
+            48000.0,
+            256,
+            instrument ? 0U : (instance.input_channels() == 0 ? 0U : 1U));
         std::vector<float> left(256, 0.0f);
         std::vector<float> right(256, 0.0f);
         std::vector<float> out_left(256, 0.0f);
         std::vector<float> out_right(256, 0.0f);
-        if (!instance.process(left, right, {}, out_left, out_right))
-            throw std::runtime_error("VST3 process call failed for " + plugin.name);
+        bool rendered_signal = false;
+        for (int block = 0; block < (instrument ? 32 : 1); ++block) {
+            const jam2::pluginhost::MidiMessage note_on{0, 0x90, 60, 100};
+            const auto midi = instrument && block == 0
+                ? std::span<const jam2::pluginhost::MidiMessage>(&note_on, 1U)
+                : std::span<const jam2::pluginhost::MidiMessage>{};
+            if (!instance.process(
+                    instrument ? std::span<const float>{} : std::span<const float>(left),
+                    instrument ? std::span<const float>{} : std::span<const float>(right),
+                    midi,
+                    out_left,
+                    out_right)) {
+                throw std::runtime_error("VST3 process call failed for " + plugin.name);
+            }
+            rendered_signal = rendered_signal ||
+                std::any_of(out_left.cbegin(), out_left.cend(), [](float sample) {
+                    return sample != 0.0F;
+                }) ||
+                std::any_of(out_right.cbegin(), out_right.cend(), [](float sample) {
+                    return sample != 0.0F;
+                });
+        }
+        if (instrument && !rendered_signal) {
+            throw std::runtime_error(
+                "VST3 instrument accepted MIDI but rendered no signal for " + plugin.name);
+        }
         instance.reset();
         std::cout << "OK\t" << plugin.name << '\n';
     }
@@ -167,8 +195,10 @@ int run_worker(int argc, char** argv)
                 const std::size_t frames = selected->frames;
                 const std::size_t input_channels = selected->input_channels;
                 const std::size_t midi_count = selected->midi_count;
+                const std::size_t midi_live_count = selected->midi_live_count;
                 if ((before & 1U) != 0U || frames == 0 || frames > maximum_frames ||
-                    input_channels > 2 || midi_count > midi.size()) continue;
+                    input_channels > 2 || midi_count > midi.size() ||
+                    midi_live_count > midi_count) continue;
                 for (std::size_t channel = 0; channel < 2; ++channel)
                     std::copy_n(selected->input[channel].begin(), frames, input[channel].begin());
                 for (std::size_t index = 0; index < midi_count; ++index) {
@@ -176,6 +206,24 @@ int run_worker(int argc, char** argv)
                     midi[index] = {source.sample_offset, source.status, source.data1, source.data2};
                 }
                 if (selected->request_generation.load(std::memory_order_acquire) != before) continue;
+
+                double worker_input_peak = 0.0;
+                for (std::size_t channel = 0; channel < input_channels; ++channel) {
+                    for (std::size_t frame = 0; frame < frames; ++frame) {
+                        worker_input_peak = std::max(
+                            worker_input_peak,
+                            std::abs(static_cast<double>(input[channel][frame])));
+                    }
+                }
+                const auto worker_input_peak_ppm = static_cast<std::uint32_t>(
+                    std::llround(std::min(1.0, worker_input_peak) * 1000000.0));
+                std::uint32_t maximum_input = state.worker_input_peak_ppm.load(
+                    std::memory_order_relaxed);
+                while (worker_input_peak_ppm > maximum_input &&
+                       !state.worker_input_peak_ppm.compare_exchange_weak(
+                           maximum_input,
+                           worker_input_peak_ppm,
+                           std::memory_order_relaxed)) {}
 
                 const auto left = input_channels > 0
                     ? std::span<const float>(input[0].data(), frames) : std::span<const float>{};
@@ -186,6 +234,10 @@ int run_worker(int argc, char** argv)
                     std::span<const jam2::pluginhost::MidiMessage>(midi.data(), midi_count),
                     std::span<float>(output[0].data(), frames),
                     std::span<float>(output[1].data(), frames));
+                if (midi_live_count > 0) {
+                    state.midi_events_consumed.fetch_add(
+                        midi_live_count, std::memory_order_relaxed);
+                }
                 const auto process_us = static_cast<std::uint64_t>(
                     std::chrono::duration_cast<std::chrono::microseconds>(
                         std::chrono::steady_clock::now() - process_started).count());
@@ -257,14 +309,16 @@ int main(int argc, char** argv)
         if (command == "--probe-file" && argc >= 4)
             return probe_file(path, argument(3, argc, argv));
         if ((command != "--probe" && command != "--probe-all" &&
-             command != "--self-test") || path.empty()) {
-            std::cerr << "usage: jam2-plugin-worker --probe|--probe-all|--self-test <plugin.vst3>\n"
+             command != "--self-test" && command != "--self-test-instrument") ||
+            path.empty()) {
+            std::cerr << "usage: jam2-plugin-worker --probe|--probe-all|--self-test|"
+                         "--self-test-instrument <plugin.vst3>\n"
                          "       jam2-plugin-worker --run <token> <plugin.vst3> <class> <rate> <frames> <source-channels>\n";
             return 2;
         }
         if (command == "--probe") return probe(path);
         if (command == "--probe-all") return probe_all(path);
-        return self_test(path);
+        return self_test(path, command == "--self-test-instrument");
     } catch (const std::exception& error) {
         std::cerr << "plugin-worker error: " << error.what() << '\n';
         return 1;

@@ -148,6 +148,7 @@ public:
             handleAutomationEngineEvent(event);
         };
         runtime_.onNetworkSnapshot = [this](const Jam2NetworkOperationalSnapshot& snapshot) {
+            int activeRemotePeers = 0;
             for (const Jam2OperationalPeer& peer : snapshot.peers) {
                 const SharedSessionController::EdgeState edge =
                     peer.endpoint_state == jam2::PeerEndpointState::Active
@@ -170,6 +171,16 @@ public:
                     proof,
                     peer.receiving_audio
                         ? QStringLiteral("receiving") : QStringLiteral("waiting"));
+                activeRemotePeers +=
+                    peer.endpoint_state == jam2::PeerEndpointState::Active ? 1 : 0;
+            }
+            udpMeshActive_ = !snapshot.peers.empty() &&
+                activeRemotePeers == static_cast<int>(snapshot.peers.size());
+            transportGridReady_ = snapshot.transport_grid_ready;
+            gridMappingErrorFrames_ = snapshot.grid_mapping_error_frames;
+            if (udpMeshActive_ && runtimeStarted_ &&
+                sessionController_.snapshot().networkAttachmentReady) {
+                emitJoinConnected();
             }
         };
         runtime_.onNetworkFinished = [this](int code) { handleRuntimeFinished(code); };
@@ -197,10 +208,12 @@ public:
             coordinatorToken_ = snapshot.coordinatorToken;
             emitAutomation(QStringLiteral("peer_snapshot"), {
                 {QStringLiteral("remote_peer_count"), snapshot.remotePeerCount},
+                {QStringLiteral("active_remote_peer_count"), activeRemotePeers},
                 {QStringLiteral("coordinator_token"), snapshot.coordinatorToken},
                 {QStringLiteral("network_attachment_ready"), snapshot.networkAttachmentReady},
             });
-            if (!creator_ && snapshot.networkAttachmentReady && runtimeStarted_) {
+            if (snapshot.networkAttachmentReady && runtimeStarted_ &&
+                udpMeshActive_) {
                 emitJoinConnected();
             }
         };
@@ -842,11 +855,33 @@ private:
             {QStringLiteral("track_sync"), trackSyncEnabled_},
             {QStringLiteral("network_running"), runtime_.isNetworkRunning()},
             {QStringLiteral("remote_peer_count"), network.remotePeerCount},
+            {QStringLiteral("transport_grid_ready"), transportGridReady_},
+            {QStringLiteral("grid_mapping_error_frames"),
+                static_cast<qint64>(gridMappingErrorFrames_)},
         });
     }
 
     void handleAutomationEngineEvent(const jam2::EngineEvent& event)
     {
+        if (event.type == jam2::EngineEventType::CommandApplied) {
+            const jam2::EngineSnapshot snapshot = runtime_.engineSnapshot();
+            if (snapshot.transport_revision != automationTransportRevision_) {
+                automationTransportRevision_ = snapshot.transport_revision;
+                emitAutomation(QStringLiteral("transport_scheduled"), {
+                    {QStringLiteral("transport_revision"),
+                        static_cast<qint64>(snapshot.transport_revision)},
+                    {QStringLiteral("transport_action"),
+                        static_cast<int>(snapshot.transport_action)},
+                    {QStringLiteral("transport_countdown_start_frame"),
+                        static_cast<qint64>(snapshot.transport_countdown_start_frame)},
+                    {QStringLiteral("transport_target_frame"),
+                        static_cast<qint64>(snapshot.transport_target_frame)},
+                    {QStringLiteral("transport_musical_frame"),
+                        static_cast<qint64>(snapshot.transport_musical_frame)},
+                    {QStringLiteral("transport_pending"), snapshot.transport_pending},
+                });
+            }
+        }
         if (event.type != jam2::EngineEventType::CommandApplied &&
             event.type != jam2::EngineEventType::CommandRejected) return;
         const QString id = commandActions_.take(event.cookie);
@@ -1194,7 +1229,8 @@ private:
         runtimeStarted_ = true;
         if (creator_) {
             completeCreatorBootstrap();
-        } else if (sessionController_.snapshot().networkAttachmentReady) {
+        } else if (sessionController_.snapshot().networkAttachmentReady &&
+                   udpMeshActive_) {
             emitJoinConnected();
         }
     }
@@ -1256,7 +1292,6 @@ private:
         writeConsoleLine(QStringLiteral("Coordinator membership accepted peer %1; remote peers=%2")
             .arg(QString::number(requirePeerId(token)))
             .arg(std::max(0, static_cast<int>(peers_.size()) - 1)));
-        emitStartup(QStringLiteral("connected"));
     }
 
     QJsonObject debugTopology() const
@@ -1360,6 +1395,10 @@ private:
         object[QStringLiteral("endpoint_mode")] = creator_
             ? (publicCandidateText_.isEmpty() ? QStringLiteral("local/manual") : QStringLiteral("STUN/manual public candidate"))
             : QStringLiteral("jam2-url TCP bootstrap");
+        object[QStringLiteral("direct_udp_mesh_active")] = udpMeshActive_;
+        object[QStringLiteral("transport_grid_ready")] = transportGridReady_;
+        object[QStringLiteral("grid_mapping_error_frames")] =
+            static_cast<qint64>(gridMappingErrorFrames_);
         if (creator_ && !connectionUrl_.isEmpty()) {
             object[QStringLiteral("connection_url")] = connectionUrl_;
             object[QStringLiteral("session_peer_limit")] = sessionPeerLimit_;
@@ -1519,6 +1558,9 @@ private:
     bool runtimeStarted_ = false;
     bool controlStarted_ = false;
     bool joinedStartupEmitted_ = false;
+    bool udpMeshActive_ = false;
+    bool transportGridReady_ = false;
+    std::int64_t gridMappingErrorFrames_ = 0;
     bool hadAuthenticatedPeer_ = false;
     bool finishing_ = false;
     int maxActiveRemotePeerCount_ = 0;
@@ -1558,6 +1600,7 @@ private:
     std::uint64_t automationEventRejects_ = 0;
     std::uint64_t automationDisconnects_ = 0;
     std::uint64_t automationTraceDrops_ = 0;
+    std::uint64_t automationTransportRevision_ = 0;
     mutable std::mutex automationCommandMutex_;
     std::deque<QJsonObject> automationCommandQueue_;
     std::size_t automationCommandQueueHighWater_ = 0;

@@ -43,6 +43,14 @@ std::uint64_t elapsedFrames(
 
 } // namespace
 
+std::uint64_t jam2::gui::interpolated_playback_frame(
+    std::uint64_t frame,
+    std::int64_t elapsedMilliseconds,
+    int sampleRate) noexcept
+{
+    return saturatingAdd(frame, elapsedFrames(elapsedMilliseconds, sampleRate));
+}
+
 void PlaybackGrid::setPattern(
     double bpm,
     int beatsPerBar,
@@ -89,10 +97,11 @@ PlaybackGrid::Position PlaybackGrid::position() const
         std::uint64_t rawFrame = engineFrame_;
         std::uint64_t musicalFrame = engineMusicalFrame_;
         if (engineRunning_ && engineReportTime_.isValid()) {
-            const std::uint64_t advanced = elapsedFrames(
-                engineReportTime_.elapsed(), engineSampleRate_);
-            rawFrame = saturatingAdd(rawFrame, advanced);
-            musicalFrame = saturatingAdd(musicalFrame, advanced);
+            const qint64 elapsedMilliseconds = engineReportTime_.elapsed();
+            rawFrame = jam2::gui::interpolated_playback_frame(
+                rawFrame, elapsedMilliseconds, engineSampleRate_);
+            musicalFrame = jam2::gui::interpolated_playback_frame(
+                musicalFrame, elapsedMilliseconds, engineSampleRate_);
         }
         const std::uint64_t epochFrame = engineEpochFrame_;
         result.engineAnchored = true;

@@ -83,6 +83,31 @@ bool UdpImpairmentProxy::start(QString& error)
     return true;
 }
 
+bool UdpImpairmentProxy::rebindServerEndpoint(QString& error)
+{
+    error.clear();
+    const quint16 previousPort = serverSocket_.localPort();
+    serverSocket_.close();
+    QUdpSocket previousPortReservation;
+    if (previousPort != 0 && !previousPortReservation.bind(
+            QHostAddress::LocalHost,
+            previousPort,
+            QUdpSocket::DontShareAddress)) {
+        error = QStringLiteral("reserving the previous UDP proxy endpoint failed: ") +
+            previousPortReservation.errorString();
+        return false;
+    }
+    constexpr auto bindMode = QUdpSocket::ShareAddress | QUdpSocket::ReuseAddressHint;
+    if (!serverSocket_.bind(QHostAddress::LocalHost, 0, bindMode)) {
+        error = QStringLiteral("rebinding server-facing UDP proxy socket failed: ") +
+            serverSocket_.errorString();
+        return false;
+    }
+    previousPortReservation.close();
+    ++serverEndpointRebinds_;
+    return true;
+}
+
 void UdpImpairmentProxy::pump()
 {
     releaseDue();
@@ -146,6 +171,7 @@ UdpProxyStats UdpImpairmentProxy::stats() const noexcept
         pending_.size(),
         pendingHighWater_,
         maximumPendingPackets_,
+        serverEndpointRebinds_,
     };
 }
 

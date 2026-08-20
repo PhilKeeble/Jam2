@@ -29,8 +29,17 @@ int main()
         require(devices[1].id == "fake-b" && devices[1].name == "Fake MIDI B",
             "synthetic MIDI inventory changed second device");
 
-        jam2::midi::EventQueue queue;
         std::string error;
+        require(backend->armAutomationCompletionGate(error) &&
+                backend->automationCompletionGateState() ==
+                    jam2::application::AutomationCompletionGateState::Armed,
+            "synthetic MIDI enumeration gate did not expose its armed state");
+        require(backend->releaseAutomationCompletionGate(error) &&
+                backend->automationCompletionGateState() ==
+                    jam2::application::AutomationCompletionGateState::Idle,
+            "an unstarted MIDI enumeration gate could not be safely disarmed");
+
+        jam2::midi::EventQueue queue;
         const jam2::midi::Event noteOn{1000, 0, 0x90, 60, 100, 3};
         require(!backend->inject("fake-a", noteOn, error),
             "closed synthetic MIDI input accepted an event");
@@ -93,6 +102,9 @@ int main()
         // Enumeration is read-only and an impossible identifier must be rejected
         // before WinMM attempts to open any physical endpoint.
         auto systemBackend = jam2::application::makeSystemMidiInputBackend();
+        require(systemBackend->automationCompletionGateState() ==
+                jam2::application::AutomationCompletionGateState::Unsupported,
+            "system MIDI backend unexpectedly exposed a private completion gate");
         (void)systemBackend->enumerate();
         error.clear();
         auto invalidSystemDevice = systemBackend->open(

@@ -1,8 +1,8 @@
 #pragma once
 
+#include "AutomationCompletionGate.hpp"
 #include "midi.hpp"
 
-#include <chrono>
 #include <memory>
 #include <string>
 #include <vector>
@@ -28,11 +28,16 @@ public:
         const std::string& id,
         const midi::Event& event,
         std::string& error) noexcept = 0;
+
+    // Deterministic private-automation seam implemented only by the synthetic
+    // backend. Production system backends remain unsupported.
+    virtual bool armAutomationCompletionGate(std::string& error) noexcept;
+    virtual bool releaseAutomationCompletionGate(std::string& error) noexcept;
+    virtual AutomationCompletionGateState automationCompletionGateState() const noexcept;
 };
 
 std::unique_ptr<MidiInputBackend> makeSystemMidiInputBackend();
 std::unique_ptr<MidiInputBackend> makeSyntheticMidiInputBackend(
-    std::vector<midi::DeviceInfo> devices,
-    std::chrono::milliseconds enumerationDelay = {});
+    std::vector<midi::DeviceInfo> devices);
 
 } // namespace jam2::application

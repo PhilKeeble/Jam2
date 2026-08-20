@@ -157,6 +157,10 @@ struct Jam2OperationalPeer {
     bool receiving_audio = false;
     double gain_db = 0.0;
     int peak_ppm = 0;
+    std::uint64_t endpoint_rebinds = 0;
+    std::uint64_t liveness_reprobes = 0;
+    std::uint64_t control_reprobes = 0;
+    std::uint64_t last_authenticated_receive_age_ms = 0;
 };
 
 struct Jam2NetworkOperationalSnapshot {
@@ -166,6 +170,10 @@ struct Jam2NetworkOperationalSnapshot {
     std::uint64_t local_peer_id = 0;
     Jam2MetronomeCompensationSettings metronome_compensation;
     std::vector<Jam2OperationalPeer> peers;
+    // True only when a quantized shared-grid action can be placed against the
+    // currently mapped authority clock within two audio callbacks.
+    bool transport_grid_ready = false;
+    std::int64_t grid_mapping_error_frames = 0;
 };
 
 struct Jam2PeerDiagnostics {
@@ -244,10 +252,12 @@ struct Jam2RuntimeHost {
 
     bool submitCommand(const jam2::EngineCommand& command) noexcept;
     bool submitPeerUpdate(const std::vector<Jam2RuntimePeer>& peers);
+    void submitPeerReprobe() noexcept;
     bool submitPeerGain(std::uint64_t peer_id, int gain_ppm) noexcept;
     bool submitMetronomeCompensation(
         const Jam2MetronomeCompensationSettings& settings) noexcept;
     std::optional<std::vector<Jam2RuntimePeer>> takePeerUpdate();
+    bool takePeerReprobe() noexcept;
     std::vector<Jam2PeerGainUpdate> takePeerGains();
     std::optional<Jam2MetronomeCompensationSettings> takeMetronomeCompensation();
     std::optional<jam2::EngineCommand> takeCommand(std::uint64_t current_frame);
@@ -258,6 +268,7 @@ struct Jam2RuntimeHost {
 private:
     std::mutex peer_mutex_;
     std::optional<std::vector<Jam2RuntimePeer>> peer_update_;
+    std::atomic<bool> peer_reprobe_requested_{false};
     std::mutex command_mutex_;
     std::deque<jam2::EngineCommand> commands_;
     std::mutex peer_gain_mutex_;

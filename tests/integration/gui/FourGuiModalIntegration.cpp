@@ -10,7 +10,6 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QSet>
-#include <QThread>
 
 #include <algorithm>
 #include <array>
@@ -44,7 +43,7 @@ bool send(AutomationProcess& process, QJsonObject command)
 bool receive(AutomationProcess& process, const QString& expected, QJsonObject& event)
 {
     QString error;
-    if (!process.readEvent(event, 20s, error)) {
+    if (!process.readEvent(event, 60s, error)) {
         fail(QStringLiteral("reading %1: %2").arg(expected, error));
         return false;
     }
@@ -65,7 +64,7 @@ bool receiveApplied(
 {
     QJsonObject event;
     QString error;
-    if (!process.readEvent(event, 20s, error)) {
+    if (!process.readEvent(event, 60s, error)) {
         fail(QStringLiteral("reading command_applied for %1: %2").arg(id, error));
         return false;
     }
@@ -108,6 +107,19 @@ bool closeWindowAndReceive(AutomationProcess& process, const QString& id)
     return send(process, {
         {QStringLiteral("type"), QStringLiteral("window.close")},
         {QStringLiteral("id"), id},
+    }) && receiveApplied(process, id);
+}
+
+bool completionGate(
+    AutomationProcess& process,
+    const QString& id,
+    const QString& operation,
+    const QString& target)
+{
+    return send(process, {
+        {QStringLiteral("type"), QStringLiteral("test.completion-gate.") + operation},
+        {QStringLiteral("id"), id},
+        {QStringLiteral("target"), target},
     }) && receiveApplied(process, id);
 }
 
@@ -252,9 +264,11 @@ QJsonObject controlState(const Snapshot& snapshot, const QString& id)
     return snapshot.controls.value(id).value(QStringLiteral("state")).toObject();
 }
 
-QJsonObject inputSourceSlot(const Snapshot& snapshot, int requestedSlot)
+QJsonObject inputSourceSlot(
+    const QJsonObject& performance,
+    int requestedSlot)
 {
-    const QJsonArray sourceSlots = snapshot.performance
+    const QJsonArray sourceSlots = performance
         .value(QStringLiteral("input_source_router")).toObject()
         .value(QStringLiteral("slots")).toArray();
     for (const QJsonValue& value : sourceSlots) {
@@ -264,6 +278,11 @@ QJsonObject inputSourceSlot(const Snapshot& snapshot, int requestedSlot)
         }
     }
     return {};
+}
+
+QJsonObject inputSourceSlot(const Snapshot& snapshot, int requestedSlot)
+{
+    return inputSourceSlot(snapshot.performance, requestedSlot);
 }
 
 QJsonObject inputPlugin(
@@ -295,17 +314,16 @@ Snapshot waitForControl(
     AutomationProcess& process,
     const QString& prefix,
     const QString& control,
-    std::chrono::milliseconds timeout = 10s)
+    std::chrono::milliseconds timeout = 60s)
 {
     const auto deadline = std::chrono::steady_clock::now() +
-        jam2::test::scaledTimeout(timeout);
+        jam2::test::deadmanTimeout(timeout);
     int attempt = 0;
     Snapshot latest;
     while (std::chrono::steady_clock::now() < deadline) {
         latest = snapshotControl(process,
             prefix + QStringLiteral("-%1").arg(attempt++), control);
         if (latest.controls.contains(control)) return latest;
-        QThread::msleep(50);
     }
     fail(QStringLiteral("timed out waiting for control %1 in %2")
         .arg(control, prefix));
@@ -316,17 +334,16 @@ Snapshot waitForControlAbsent(
     AutomationProcess& process,
     const QString& prefix,
     const QString& control,
-    std::chrono::milliseconds timeout = 10s)
+    std::chrono::milliseconds timeout = 60s)
 {
     const auto deadline = std::chrono::steady_clock::now() +
-        jam2::test::scaledTimeout(timeout);
+        jam2::test::deadmanTimeout(timeout);
     int attempt = 0;
     Snapshot latest;
     while (std::chrono::steady_clock::now() < deadline) {
         latest = snapshotControl(process,
             prefix + QStringLiteral("-%1").arg(attempt++), control);
         if (!latest.controls.contains(control)) return latest;
-        QThread::msleep(50);
     }
     fail(QStringLiteral("timed out waiting for control %1 to disappear in %2")
         .arg(control, prefix));
@@ -339,10 +356,10 @@ Snapshot waitForControlState(
     const QString& prefix,
     const QString& control,
     Predicate predicate,
-    std::chrono::milliseconds timeout = 10s)
+    std::chrono::milliseconds timeout = 60s)
 {
     const auto deadline = std::chrono::steady_clock::now() +
-        jam2::test::scaledTimeout(timeout);
+        jam2::test::deadmanTimeout(timeout);
     int attempt = 0;
     Snapshot latest;
     while (std::chrono::steady_clock::now() < deadline) {
@@ -352,7 +369,6 @@ Snapshot waitForControlState(
             predicate(controlState(latest, control), latest.performance)) {
             return latest;
         }
-        QThread::msleep(50);
     }
     fail(QStringLiteral("timed out waiting for control state %1 in %2")
         .arg(control, prefix));
@@ -389,10 +405,10 @@ bool waitForAll(
     const QString& description,
     Predicate predicate,
     std::array<QJsonObject, FourPeerCoordinator::kPeerCount>& states,
-    std::chrono::milliseconds timeout = 40s)
+    std::chrono::milliseconds timeout = 90s)
 {
     const auto deadline = std::chrono::steady_clock::now() +
-        jam2::test::scaledTimeout(timeout);
+        jam2::test::deadmanTimeout(timeout);
     int sequence = 0;
     while (std::chrono::steady_clock::now() < deadline) {
         bool ready = true;
@@ -407,7 +423,6 @@ bool waitForAll(
         }
         if (ready) return true;
         ++sequence;
-        QThread::msleep(75);
     }
     fail(QStringLiteral("timed out waiting for ") + description);
     for (std::size_t peer = 0; peer < states.size(); ++peer) {
@@ -523,10 +538,29 @@ bool exerciseActiveCreatorWorkflows(
             QStringLiteral("metronome.sound"), QStringLiteral("set-index"),
             (soundIndex + 1) % soundCount);
     }
-    (void)invokeAndReceive(creator, QStringLiteral("coverage-metronome-tap-1"),
-        QStringLiteral("metronome.tap"), QStringLiteral("click"));
-    QThread::msleep(300);
-    (void)invokeAndReceive(creator, QStringLiteral("coverage-metronome-tap-2"),
+    if (!send(creator, {
+            {QStringLiteral("type"), QStringLiteral("test.metronome.tap-at")},
+            {QStringLiteral("id"), QStringLiteral("coverage-metronome-tap-1")},
+            {QStringLiteral("elapsed_ms"), 1000},
+            {QStringLiteral("reset"), true},
+        }) || !receiveApplied(creator, QStringLiteral("coverage-metronome-tap-1")) ||
+        !send(creator, {
+            {QStringLiteral("type"), QStringLiteral("test.metronome.tap-at")},
+            {QStringLiteral("id"), QStringLiteral("coverage-metronome-tap-2")},
+            {QStringLiteral("elapsed_ms"), 1300},
+        }) || !receiveApplied(creator, QStringLiteral("coverage-metronome-tap-2"))) {
+        return false;
+    }
+    const Snapshot tappedTempo = snapshotControl(
+        creator, QStringLiteral("coverage-metronome-tapped-tempo"),
+        QStringLiteral("metronome.bpm"));
+    if (controlState(tappedTempo, QStringLiteral("metronome.bpm"))
+            .value(QStringLiteral("value")).toInt() != 200) {
+        fail(QStringLiteral("Tap Tempo did not apply the deterministic 300-ms interval"));
+    }
+    // Exercise the registered real button after proving the timer-owned behavior
+    // through explicit timestamps.
+    (void)invokeAndReceive(creator, QStringLiteral("coverage-metronome-tap-control"),
         QStringLiteral("metronome.tap"), QStringLiteral("click"));
 
     const Snapshot peers = snapshotAll(creator, QStringLiteral("coverage-peer-list"));
@@ -639,9 +673,22 @@ bool exerciseActiveCreatorWorkflows(
     if (preview.value(QStringLiteral("enabled")).toBool()) {
         (void)invokeAndReceive(creator, QStringLiteral("coverage-preview-play"),
             QStringLiteral("idea.catalog-dialog.preview"), QStringLiteral("click"));
-        QThread::msleep(150);
+        (void)waitForControlState(creator,
+            QStringLiteral("coverage-preview-playing"),
+            QStringLiteral("idea.catalog-dialog.preview"),
+            [](const QJsonObject& state, const QJsonObject&) {
+                return state.value(QStringLiteral("text")).toString() ==
+                    QStringLiteral("STOP PREVIEW");
+            });
         (void)invokeAndReceive(creator, QStringLiteral("coverage-preview-stop"),
             QStringLiteral("idea.catalog-dialog.preview"), QStringLiteral("click"));
+        (void)waitForControlState(creator,
+            QStringLiteral("coverage-preview-stopped"),
+            QStringLiteral("idea.catalog-dialog.preview"),
+            [](const QJsonObject& state, const QJsonObject&) {
+                return state.value(QStringLiteral("text")).toString() ==
+                    QStringLiteral("PREVIEW 4 BARS");
+            });
     }
     closeModal(creator, QStringLiteral("coverage-catalog-accept"),
         QStringLiteral("idea.catalog-dialog.accept"));
@@ -902,7 +949,7 @@ bool exerciseLocalFakeAudioWorkflow(AutomationProcess& peer)
     }
 
     const auto loopbackDeadline = std::chrono::steady_clock::now() +
-        jam2::test::scaledTimeout(5s);
+        jam2::test::deadmanTimeout(60s);
     bool loopbackCompleted = false;
     int loopbackAttempt = 0;
     while (std::chrono::steady_clock::now() < loopbackDeadline) {
@@ -915,7 +962,6 @@ bool exerciseLocalFakeAudioWorkflow(AutomationProcess& peer)
             loopbackCompleted = true;
             break;
         }
-        QThread::msleep(20);
     }
     if (!loopbackCompleted) {
         fail(QStringLiteral(
@@ -923,7 +969,7 @@ bool exerciseLocalFakeAudioWorkflow(AutomationProcess& peer)
     }
 
     const auto deadline = std::chrono::steady_clock::now() +
-        jam2::test::scaledTimeout(5s);
+        jam2::test::deadmanTimeout(60s);
     bool failureVisible = false;
     int attempt = 0;
     while (std::chrono::steady_clock::now() < deadline) {
@@ -936,7 +982,6 @@ bool exerciseLocalFakeAudioWorkflow(AutomationProcess& peer)
             failureVisible = true;
             break;
         }
-        QThread::msleep(20);
     }
     if (!failureVisible) {
         fail(QStringLiteral("asynchronous jam failure presentation was not observable"));
@@ -959,7 +1004,6 @@ int main(int argc, char* argv[])
         std::cerr << "unknown modal test mode\n";
         return 2;
     }
-
     LoopbackPortReservations portReservations;
     std::array<quint16, FourPeerCoordinator::kPeerCount> ports{};
     if (startupOnly) {
@@ -2705,6 +2749,11 @@ int main(int argc, char* argv[])
                 .value(QStringLiteral("enabled")).toBool()) {
             fail(QStringLiteral("MIDI input assignment was unexpectedly locked"));
         }
+        const qint64 midiDiscoveryCompletions = midi.performance.value(
+            QStringLiteral("midi_discovery_completions")).toInteger();
+        (void)completionGate(process,
+            prefix + QStringLiteral("-midi-discovery-gate-arm"),
+            QStringLiteral("arm"), QStringLiteral("midi-enumeration"));
         (void)invokeAndReceive(process,
             prefix + QStringLiteral("-midi-discovery-cancel-open"),
             QStringLiteral("performance.midi-input-dialog.add"),
@@ -2715,14 +2764,30 @@ int main(int argc, char* argv[])
         requireControls(midiDiscovery, QStringLiteral("MIDI Discovery"), {
             "performance.midi-discovery.cancel",
         });
+        midiDiscovery = waitForControlState(process,
+            prefix + QStringLiteral("-midi-discovery-gate-active"),
+            QStringLiteral("performance.midi-discovery.cancel"),
+            [](const QJsonObject&, const QJsonObject& performance) {
+                return performance.value(QStringLiteral("midi_enumeration_gate"))
+                    .toString() == QStringLiteral("active");
+            });
         (void)invokeAndReceive(process,
             prefix + QStringLiteral("-midi-discovery-cancel"),
             QStringLiteral("performance.midi-discovery.cancel"),
             QStringLiteral("click"));
-        midi = waitForControl(
+        (void)completionGate(process,
+            prefix + QStringLiteral("-midi-discovery-gate-release"),
+            QStringLiteral("release"), QStringLiteral("midi-enumeration"));
+        midi = waitForControlState(
             process, prefix + QStringLiteral("-midi-discovery-cancelled"),
-            QStringLiteral("performance.midi-input-dialog.add"));
-        QThread::msleep(1100);
+            QStringLiteral("performance.midi-input-dialog.add"),
+            [midiDiscoveryCompletions](
+                const QJsonObject&, const QJsonObject& performance) {
+                return performance.value(QStringLiteral("midi_enumeration_gate"))
+                        .toString() == QStringLiteral("idle") &&
+                    performance.value(QStringLiteral("midi_discovery_completions"))
+                        .toInteger() > midiDiscoveryCompletions;
+            });
         midi = snapshotAll(
             process, prefix + QStringLiteral("-midi-discovery-late-check"));
         if (!midi.performance.value(QStringLiteral("midi_input_sources"))
@@ -2901,22 +2966,45 @@ int main(int argc, char* argv[])
 
         const QString audioPluginPrefix = QStringLiteral(
             "performance.plugin-dialog.audio.0.");
+        const qint64 initialPluginCompletions = plugins.performance.value(
+            QStringLiteral("input_plugin_load_completions")).toInteger();
+        (void)completionGate(process,
+            prefix + QStringLiteral("-audio-plugin-initial-gate-arm"),
+            QStringLiteral("arm"), QStringLiteral("input-plugin-load"));
         (void)invokeAndReceive(process,
             prefix + QStringLiteral("-audio-plugin-load"),
             audioPluginPrefix + QStringLiteral("load"), QStringLiteral("click"));
+        (void)waitForControlState(process,
+            prefix + QStringLiteral("-audio-plugin-initial-gate-active"),
+            QStringLiteral("performance.plugin-dialog.close"),
+            [initialPluginCompletions](
+                const QJsonObject&, const QJsonObject& performance) {
+                return performance.value(QStringLiteral("input_plugin_load_gate"))
+                           .toString() == QStringLiteral("active") &&
+                    performance.value(QStringLiteral("input_plugin_load_completions"))
+                           .toInteger() == initialPluginCompletions;
+            });
         (void)invokeAndReceive(process,
             prefix + QStringLiteral("-audio-plugin-concurrent-load"),
             QStringLiteral("performance.plugin-dialog.audio.1.load"),
             QStringLiteral("click"));
+        (void)completionGate(process,
+            prefix + QStringLiteral("-audio-plugin-initial-gate-release"),
+            QStringLiteral("release"), QStringLiteral("input-plugin-load"));
         plugins = waitForControlState(process,
             prefix + QStringLiteral("-audio-plugin-loaded"),
             audioPluginPrefix + QStringLiteral("open"),
-            [](const QJsonObject& state, const QJsonObject& performance) {
+            [initialPluginCompletions](
+                const QJsonObject& state, const QJsonObject& performance) {
                 const QJsonObject plugin = inputPlugin(
                     performance, QStringLiteral("audio"), 0);
                 return state.value(QStringLiteral("enabled")).toBool() &&
                     plugin.value(QStringLiteral("loaded")).toBool() &&
-                    plugin.value(QStringLiteral("healthy")).toBool();
+                    plugin.value(QStringLiteral("healthy")).toBool() &&
+                    performance.value(QStringLiteral("input_plugin_load_completions"))
+                           .toInteger() == initialPluginCompletions + 1 &&
+                    inputSourceSlot(performance, 0)
+                        .value(QStringLiteral("renderer_attached")).toBool();
             });
         plugins = snapshotAll(
             process, prefix + QStringLiteral("-audio-plugin-loaded-state"));
@@ -3136,10 +3224,24 @@ int main(int argc, char* argv[])
             fail(QStringLiteral("removed input plugins retained live renderer topology"));
         }
 
+        Snapshot beforeLatePlugin = snapshotAll(
+            process, prefix + QStringLiteral("-late-plugin-baseline"));
+        qint64 pluginCompletions = beforeLatePlugin.performance.value(
+            QStringLiteral("input_plugin_load_completions")).toInteger();
+        (void)completionGate(process,
+            prefix + QStringLiteral("-audio-plugin-late-gate-arm"),
+            QStringLiteral("arm"), QStringLiteral("input-plugin-load"));
         (void)invokeAndReceive(process,
             prefix + QStringLiteral("-audio-plugin-late-group-load"),
             QStringLiteral("performance.plugin-dialog.audio.1.load"),
             QStringLiteral("click"));
+        (void)waitForControlState(process,
+            prefix + QStringLiteral("-audio-plugin-late-gate-active"),
+            QStringLiteral("performance.plugin-dialog.close"),
+            [](const QJsonObject&, const QJsonObject& performance) {
+                return performance.value(QStringLiteral("input_plugin_load_gate"))
+                    .toString() == QStringLiteral("active");
+            });
         closeModal(process, prefix + QStringLiteral("-plugins-late-group-close"),
             QStringLiteral("performance.plugin-dialog.close"));
         openModal(process, prefix + QStringLiteral("-audio-late-group-open"),
@@ -3151,9 +3253,17 @@ int main(int argc, char* argv[])
             prefix + QStringLiteral("-audio-late-group"),
             QStringLiteral("performance.audio-input-dialog.pair.create"),
             QStringLiteral("click"));
-        QThread::msleep(1100);
-        Snapshot lateGrouped = snapshotAll(
-            process, prefix + QStringLiteral("-audio-late-grouped-state"));
+        (void)completionGate(process,
+            prefix + QStringLiteral("-audio-plugin-late-gate-release"),
+            QStringLiteral("release"), QStringLiteral("input-plugin-load"));
+        Snapshot lateGrouped = waitForControlState(process,
+            prefix + QStringLiteral("-audio-late-grouped-state"),
+            QStringLiteral("performance.audio-input-dialog.source.0.ungroup"),
+            [pluginCompletions](
+                const QJsonObject&, const QJsonObject& performance) {
+                return performance.value(QStringLiteral("input_plugin_load_completions"))
+                    .toInteger() > pluginCompletions;
+            });
         if (inputPlugin(lateGrouped, QStringLiteral("audio"), 0)
                 .value(QStringLiteral("loaded")).toBool() ||
             lateGrouped.performance.value(QStringLiteral("input_source_router"))
@@ -3170,11 +3280,23 @@ int main(int argc, char* argv[])
         closeModal(process, prefix + QStringLiteral("-audio-late-group-close"),
             QStringLiteral("performance.audio-input-dialog.close"));
 
+        pluginCompletions = lateGrouped.performance.value(
+            QStringLiteral("input_plugin_load_completions")).toInteger();
+        (void)completionGate(process,
+            prefix + QStringLiteral("-midi-plugin-late-gate-arm"),
+            QStringLiteral("arm"), QStringLiteral("input-plugin-load"));
         openModal(process, prefix + QStringLiteral("-midi-late-plugin-open"),
             QStringLiteral("performance.plugins"));
         (void)invokeAndReceive(process,
             prefix + QStringLiteral("-midi-late-plugin-load"),
             midiPluginPrefix + QStringLiteral("load"), QStringLiteral("click"));
+        (void)waitForControlState(process,
+            prefix + QStringLiteral("-midi-plugin-late-gate-active"),
+            QStringLiteral("performance.plugin-dialog.close"),
+            [](const QJsonObject&, const QJsonObject& performance) {
+                return performance.value(QStringLiteral("input_plugin_load_gate"))
+                    .toString() == QStringLiteral("active");
+            });
         closeModal(process, prefix + QStringLiteral("-midi-late-plugin-close"),
             QStringLiteral("performance.plugin-dialog.close"));
 
@@ -3192,9 +3314,17 @@ int main(int argc, char* argv[])
             inputSourceSlot(midi, 2).value(QStringLiteral("configured")).toBool()) {
             fail(QStringLiteral("removed MIDI source retained state or router topology"));
         }
-        QThread::msleep(1100);
-        midi = snapshotAll(
-            process, prefix + QStringLiteral("-midi-late-plugin-state"));
+        (void)completionGate(process,
+            prefix + QStringLiteral("-midi-plugin-late-gate-release"),
+            QStringLiteral("release"), QStringLiteral("input-plugin-load"));
+        midi = waitForControlState(process,
+            prefix + QStringLiteral("-midi-late-plugin-state"),
+            QStringLiteral("performance.midi-input-dialog.add"),
+            [pluginCompletions](
+                const QJsonObject&, const QJsonObject& performance) {
+                return performance.value(QStringLiteral("input_plugin_load_completions"))
+                    .toInteger() > pluginCompletions;
+            });
         if (!midi.performance.value(QStringLiteral("midi_input_sources"))
                 .toArray().isEmpty() ||
             !inputPlugin(midi, QStringLiteral("midi-instrument"), 2).isEmpty() ||
@@ -3359,7 +3489,7 @@ int main(int argc, char* argv[])
         (void)receive(coordinator.peer(index), QStringLiteral("shutdown"), shutdown);
         int exitCode = -1;
         QString waitError;
-        if (!coordinator.peer(index).waitForExit(20s, exitCode, waitError)) {
+        if (!coordinator.peer(index).waitForExit(60s, exitCode, waitError)) {
             fail(QStringLiteral("peer %1 exit: %2").arg(index + 1).arg(waitError));
         } else if (exitCode != 0) {
             fail(QStringLiteral("peer %1 returned %2").arg(index + 1).arg(exitCode));

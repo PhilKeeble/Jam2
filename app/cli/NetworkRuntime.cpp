@@ -1637,6 +1637,15 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
         std::uint64_t sent_pings = 0;
         std::uint64_t sent_pongs = 0;
         std::uint64_t recv_pongs = 0;
+        std::uint64_t sent_hellos = 0;
+        std::uint64_t sent_hello_acks = 0;
+        std::uint64_t recv_hello_acks = 0;
+        std::uint64_t endpoint_rebinds = 0;
+        std::uint64_t liveness_reprobes = 0;
+        std::uint64_t control_reprobes = 0;
+        std::uint64_t transport_grid_deferrals = 0;
+        std::uint64_t transport_countdown_missed_packets = 0;
+        std::uint64_t last_authenticated_receive_us = 0;
         std::uint64_t last_transport_revision = 0;
         std::uint64_t listener_epoch_frame = 0;
         std::uint64_t listener_epoch_revision = 0;
@@ -1669,6 +1678,8 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
     }
 
     const jam2::PeerId local_peer_id{*options.local_peer_id};
+    const auto local_peer_identity =
+        jam2::protocol::encode_peer_identity(local_peer_id.value);
     std::vector<jam2::NetworkPeerDescriptor> peer_descriptors;
     peer_descriptors.reserve(peers.size());
     for (std::size_t peer_index = 0; peer_index < resolved_mesh_peers.size(); ++peer_index) {
@@ -1715,6 +1726,25 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
         return descriptor != nullptr
             ? descriptor->endpoint_state
             : jam2::PeerEndpointState::Failed;
+    };
+    constexpr std::uint64_t kAuthenticatedPeerLivenessTimeoutUs = 3000000ULL;
+    auto reset_peer_proof = [&](
+                                MeshPeerState& peer,
+                                bool liveness_reprobe,
+                                bool control_reprobe) {
+        if (!network_session.setPeerEndpointState(
+                peer.peer_id,
+                jam2::PeerEndpointState::Candidate)) {
+            return false;
+        }
+        peer.probe_challenges = {};
+        peer.proof_attempts = 0;
+        peer.proof_deadline_us = 0;
+        peer.next_probe_us = 0;
+        peer.last_authenticated_receive_us = 0;
+        peer.liveness_reprobes += liveness_reprobe ? 1ULL : 0ULL;
+        peer.control_reprobes += control_reprobe ? 1ULL : 0ULL;
+        return true;
     };
     const std::uint64_t bootstrap_coordinator_peer_id = *options.bootstrap_coordinator_peer_id;
     if (bootstrap_coordinator_peer_id != local_peer_id.value &&
@@ -1810,6 +1840,34 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
     std::int64_t mesh_grid_target_offset_frames = 0;
     bool mesh_grid_target_valid = false;
     std::uint64_t mesh_grid_last_update_us = 0;
+
+    auto grid_mapping_error_frames = [&]() noexcept {
+        return mesh_grid_target_valid
+            ? mesh_grid_target_offset_frames -
+                commands.state.metronome_render_offset_frames.load(
+                    std::memory_order_relaxed)
+            : 0LL;
+    };
+    auto transport_grid_ready = [&]() noexcept {
+        if (!commands.state.metronome_epoch_valid.load(
+                std::memory_order_relaxed)) {
+            return false;
+        }
+        if (commands.state.metronome_mode.load(std::memory_order_relaxed) !=
+                metronome_mode_id(MetronomeMode::SharedGrid) ||
+            authority.localIsGridAuthority()) {
+            return true;
+        }
+        if (!mesh_grid_target_valid) {
+            return false;
+        }
+        const std::int64_t error = grid_mapping_error_frames();
+        const std::uint64_t magnitude = error >= 0
+            ? static_cast<std::uint64_t>(error)
+            : static_cast<std::uint64_t>(-(error + 1)) + 1ULL;
+        return magnitude <=
+            2ULL * static_cast<std::uint64_t>(options.frame_size);
+    };
 
     auto grid_run_state_from_runtime = [&]() {
         return jam2::GridRunState::Running;
@@ -2228,6 +2286,20 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                           << " endpoint_unverified_drops=" << peer.proof_unverified_drops
                           << " endpoint_unmatched_pongs=" << peer.proof_unmatched_pongs
                           << " endpoint_challenge_overwrites=" << peer.proof_challenge_overwrites
+                          << " endpoint_hellos_sent=" << peer.sent_hellos
+                          << " endpoint_hello_acks_sent=" << peer.sent_hello_acks
+                          << " endpoint_hello_acks_received=" << peer.recv_hello_acks
+                          << " endpoint_rebinds=" << peer.endpoint_rebinds
+                          << " endpoint_liveness_reprobes=" << peer.liveness_reprobes
+                          << " endpoint_control_reprobes=" << peer.control_reprobes
+                          << " transport_grid_deferrals=" << peer.transport_grid_deferrals
+                          << " transport_countdown_missed_packets="
+                          << peer.transport_countdown_missed_packets
+                          << " endpoint_authenticated_receive_age_ms="
+                          << (peer.last_authenticated_receive_us > 0 &&
+                                  now_us >= peer.last_authenticated_receive_us
+                              ? (now_us - peer.last_authenticated_receive_us) / 1000ULL
+                              : 0ULL)
                           << " udp_send_would_block=" << (send_stats != nullptr ? send_stats->would_block_drops : 0ULL)
                           << " udp_send_no_buffer=" << (send_stats != nullptr ? send_stats->no_buffer_drops : 0ULL)
                           << " udp_send_unreachable=" << (send_stats != nullptr ? send_stats->unreachable_errors : 0ULL)
@@ -2266,6 +2338,9 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
             options.metronome_compensation_deadband_ms,
             options.metronome_compensation_slew_ms_per_sec,
         };
+        snapshot.transport_grid_ready = transport_grid_ready();
+        snapshot.grid_mapping_error_frames = grid_mapping_error_frames();
+        const std::uint64_t snapshot_time_us = jam2::monotonic_us();
         snapshot.peers.reserve(peers.size());
         for (const auto& entry : peers) {
             const auto& peer = entry.second;
@@ -2288,6 +2363,13 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                 network_session.peerStream(peer.peer_id).stats().expected_remote_sample_time > 0,
                 gain_db,
                 mix_stats != nullptr ? mix_stats->recent_peak_ppm : 0,
+                peer.endpoint_rebinds,
+                peer.liveness_reprobes,
+                peer.control_reprobes,
+                peer.last_authenticated_receive_us > 0 &&
+                        snapshot_time_us >= peer.last_authenticated_receive_us
+                    ? (snapshot_time_us - peer.last_authenticated_receive_us) / 1000ULL
+                    : 0ULL,
             });
         }
         runtime_host.network_snapshot(snapshot);
@@ -2493,6 +2575,7 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                 it->second.proof_attempts = 0;
                 it->second.proof_deadline_us = 0;
                 it->second.next_probe_us = 0;
+                it->second.last_authenticated_receive_us = 0;
                 ++endpoint_updates;
             }
             ++it;
@@ -2532,12 +2615,49 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
         }
     };
 
+    auto apply_forced_reprobe = [&]() {
+        if (!runtime_host.takePeerReprobe()) {
+            return;
+        }
+        std::size_t reset = 0;
+        for (auto& entry : peers) {
+            reset += reset_peer_proof(entry.second, false, true) ? 1U : 0U;
+        }
+        const std::string line =
+            "UDP proof reset after authenticated control reconnect: peers=" +
+            std::to_string(reset);
+        std::cout << line << '\n';
+        if (runtime_host.log) runtime_host.log(line);
+    };
+
     while (jam2::monotonic_us() < receive_deadline &&
            !commands.state.quit.load(std::memory_order_relaxed) &&
            !runtime_host.stop_requested.load(std::memory_order_acquire)) {
         apply_runtime_host_commands();
         apply_membership_update();
+        apply_forced_reprobe();
         const std::uint64_t now = jam2::monotonic_us();
+        for (auto& entry : peers) {
+            auto& peer = entry.second;
+            if (peer_endpoint_state(peer.peer_id) != jam2::PeerEndpointState::Active ||
+                peer.last_authenticated_receive_us == 0 ||
+                now - peer.last_authenticated_receive_us <
+                    kAuthenticatedPeerLivenessTimeoutUs) {
+                continue;
+            }
+            const std::uint64_t silent_ms =
+                (now - peer.last_authenticated_receive_us) / 1000ULL;
+            if (reset_peer_proof(peer, true, false)) {
+                const std::string line =
+                    "UDP peer liveness expired: peer_id=" +
+                    std::to_string(peer.peer_id.value) +
+                    " authenticated_receive_silence_ms=" +
+                    std::to_string(silent_ms) +
+                    " action=reprobe";
+                std::cout << line << '\n';
+                if (runtime_host.log) runtime_host.log(line);
+            }
+        }
         if (now >= next_operational_snapshot) {
             publish_operational_snapshot();
             next_operational_snapshot = now + 100000ULL;
@@ -2825,13 +2945,13 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
 
                     peer.next_probe_us = now + 250000ULL;
                 }
-                const std::uint32_t ping_sequence = packet_schedule.takeControlSequence();
+                const std::uint32_t control_sequence = packet_schedule.takeControlSequence();
                 ProbeChallenge& challenge =
-                    peer.probe_challenges[ping_sequence % peer.probe_challenges.size()];
+                    peer.probe_challenges[control_sequence % peer.probe_challenges.size()];
                 if (challenge.used) {
                     ++peer.proof_challenge_overwrites;
                 }
-                challenge = ProbeChallenge{ping_sequence, now, true};
+                challenge = ProbeChallenge{control_sequence, now, true};
                 if (endpoint_state == jam2::PeerEndpointState::Probing) {
                     ++peer.proof_attempts;
                     if (peer.proof_attempts == 8) {
@@ -2839,14 +2959,21 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                         peer.proof_deadline_us = now + 1000000ULL;
                     }
                 }
+                const bool proving =
+                    endpoint_state != jam2::PeerEndpointState::Active;
                 if (network_session.sendToPeer(
-                    peer.peer_id,
-                    jam2::protocol::PacketType::Ping,
-                    ping_sequence,
-                    now,
-                    {},
-                    true) != 0) {
-                    ++peer.sent_pings;
+                        peer.peer_id,
+                        proving
+                            ? jam2::protocol::PacketType::Hello
+                            : jam2::protocol::PacketType::Ping,
+                        control_sequence,
+                        now,
+                        proving
+                            ? std::span<const std::uint8_t>(local_peer_identity)
+                            : std::span<const std::uint8_t>{},
+                        true) != 0) {
+                    if (proving) ++peer.sent_hellos;
+                    else ++peer.sent_pings;
                 }
             }
             packet_schedule.commitPing();
@@ -3038,20 +3165,133 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
             received_any = true;
             const auto& from = received->endpoint;
             const std::span<const std::uint8_t> bytes = received->bytes;
-            const jam2::PeerId source_peer_id = network_session.peerIdForEndpoint(from);
-            auto peer_it = peers.find(source_peer_id.value);
-            if (peer_it == peers.end()) {
-                continue;
-            }
-            auto& peer = peer_it->second;
+            const jam2::PeerId endpoint_peer_id =
+                network_session.peerIdForEndpoint(from);
             const auto parsed = network_session.parse(bytes);
             if (!parsed) {
-                peer.udp_parse.observe(parsed.error);
-                ++peer.ignored_packets;
+                const auto known = peers.find(endpoint_peer_id.value);
+                if (known != peers.end()) {
+                    known->second.udp_parse.observe(parsed.error);
+                    ++known->second.ignored_packets;
+                }
                 continue;
             }
+            MeshPeerState* attributed_peer = nullptr;
             try {
                 const auto& header = parsed.header;
+                const auto payload = std::span<const std::uint8_t>(
+                    bytes.data() + jam2::protocol::kHeaderSize,
+                    header.payload_length);
+                if (header.type == jam2::protocol::PacketType::Hello ||
+                    header.type == jam2::protocol::PacketType::HelloAck) {
+                    const auto claimed_peer_id =
+                        jam2::protocol::decode_peer_identity(payload);
+                    auto claimed = claimed_peer_id
+                        ? peers.find(*claimed_peer_id)
+                        : peers.end();
+                    if (claimed == peers.end() ||
+                        (endpoint_peer_id.value != 0 &&
+                         endpoint_peer_id.value != *claimed_peer_id)) {
+                        if (claimed != peers.end()) {
+                            ++claimed->second.proof_unverified_drops;
+                            ++claimed->second.ignored_packets;
+                        }
+                        continue;
+                    }
+                    auto& peer = claimed->second;
+                    attributed_peer = &peer;
+                    const auto* descriptor = network_session.peer(peer.peer_id);
+                    if (descriptor == nullptr) {
+                        ++peer.ignored_packets;
+                        continue;
+                    }
+                    const bool endpoint_changed = descriptor->endpoint != from;
+                    if (endpoint_changed &&
+                        descriptor->endpoint_state == jam2::PeerEndpointState::Active) {
+                        // An established path must first expire through the
+                        // authenticated receive-liveness gate. This prevents
+                        // another session member from flapping a healthy edge.
+                        ++peer.proof_unverified_drops;
+                        ++peer.ignored_packets;
+                        continue;
+                    }
+
+                    if (header.type == jam2::protocol::PacketType::HelloAck) {
+                        ProbeChallenge& challenge = peer.probe_challenges[
+                            header.sequence % peer.probe_challenges.size()];
+                        if (!challenge.used ||
+                            challenge.sequence != header.sequence ||
+                            challenge.send_time_us != header.timing_value) {
+                            ++peer.proof_unmatched_pongs;
+                            ++peer.ignored_packets;
+                            continue;
+                        }
+                        challenge.used = false;
+                    }
+
+                    if (endpoint_changed) {
+                        const std::string before = jam2::endpoint_to_string(
+                            jam2::format_udp_endpoint(descriptor->endpoint));
+                        if (!network_session.rebindPeerEndpoint(
+                                peer.peer_id,
+                                from,
+                                jam2::PeerEndpointState::Probing)) {
+                            ++peer.proof_unverified_drops;
+                            ++peer.ignored_packets;
+                            continue;
+                        }
+                        peer.probe_challenges = {};
+                        peer.proof_attempts = 0;
+                        peer.proof_deadline_us = 0;
+                        peer.next_probe_us = 0;
+                        ++peer.endpoint_rebinds;
+                        const std::string line =
+                            "Authenticated UDP endpoint learned: peer_id=" +
+                            std::to_string(peer.peer_id.value) +
+                            " advertised=" + before +
+                            " observed=" + jam2::endpoint_to_string(
+                                jam2::format_udp_endpoint(from));
+                        std::cout << line << '\n';
+                        if (runtime_host.log) runtime_host.log(line);
+                    }
+
+                    const std::uint64_t receive_time = jam2::monotonic_us();
+                    peer.last_authenticated_receive_us = receive_time;
+                    if (header.type == jam2::protocol::PacketType::Hello) {
+                        if (network_session.sendToPeer(
+                                peer.peer_id,
+                                jam2::protocol::PacketType::HelloAck,
+                                header.sequence,
+                                header.timing_value,
+                                local_peer_identity,
+                                true) != 0) {
+                            ++peer.sent_hello_acks;
+                        }
+                        continue;
+                    }
+
+                    if (receive_time >= header.timing_value) {
+                        network_session.peerStream(peer.peer_id).observeRtt(
+                            receive_time - header.timing_value);
+                    }
+                    network_session.setPeerEndpointState(
+                        peer.peer_id,
+                        jam2::PeerEndpointState::Active);
+                    peer.proof_attempts = 0;
+                    peer.proof_deadline_us = 0;
+                    peer.next_probe_us = 0;
+                    peer.probe_challenges = {};
+                    ++peer.proof_successes;
+                    ++peer.recv_hello_acks;
+                    continue;
+                }
+
+                auto peer_it = peers.find(endpoint_peer_id.value);
+                if (peer_it == peers.end()) {
+                    continue;
+                }
+                auto& peer = peer_it->second;
+                attributed_peer = &peer;
                 if (header.type != jam2::protocol::PacketType::Ping &&
                     header.type != jam2::protocol::PacketType::Pong &&
                     (peer_endpoint_state(peer.peer_id) != jam2::PeerEndpointState::Active ||
@@ -3060,6 +3300,7 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                     ++peer.ignored_packets;
                     continue;
                 }
+                peer.last_authenticated_receive_us = jam2::monotonic_us();
                 if (header.type == jam2::protocol::PacketType::Audio) {
                     if (header.payload_length != audio_payload_size) {
                         ++peer.ignored_packets;
@@ -3318,16 +3559,102 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                         runtime_host.lane_recording_isolation_enabled.load(
                             std::memory_order_acquire);
                     const bool accept_during_recording = !recording_isolated;
+                    const bool quantized_shared_grid_action =
+                        commands.state.metronome_mode.load(
+                            std::memory_order_relaxed) ==
+                                metronome_mode_id(MetronomeMode::SharedGrid) &&
+                        (transport.action ==
+                                jam2::EngineTransportAction::TrackRestart ||
+                         transport.action ==
+                                jam2::EngineTransportAction::RecordStart);
+                    const bool grid_mapping_ready =
+                        !quantized_shared_grid_action ||
+                        transport_grid_ready();
+                    std::optional<QuantizedSchedule> translated_schedule;
+                    if (track_transport && accept_track_transport &&
+                        peer.recv_pongs > 0 &&
+                        peer_stream.stats().rtt_min_us > 0 &&
+                        audio.engine != nullptr &&
+                        grid_mapping_ready) {
+                        const std::uint64_t one_way_frames =
+                            peer_stream.stats().rtt_min_us *
+                            static_cast<std::uint64_t>(options.sample_rate) /
+                            2000000ULL;
+                        const std::uint64_t receiver_now =
+                            current_engine_frame(audio.engine.get());
+                        const auto translated_sender_frame =
+                            [&](std::uint64_t sender_frame) noexcept {
+                                const std::uint64_t sender_lead =
+                                    sender_frame > header.timing_value
+                                    ? sender_frame - header.timing_value
+                                    : 0ULL;
+                                const std::uint64_t remaining =
+                                    sender_lead > one_way_frames
+                                    ? sender_lead - one_way_frames
+                                    : 0ULL;
+                                return receiver_now >
+                                    (std::numeric_limits<std::uint64_t>::max)() -
+                                        remaining
+                                    ? (std::numeric_limits<std::uint64_t>::max)()
+                                    : receiver_now + remaining;
+                            };
+                        const std::uint64_t estimated_target_raw =
+                            translated_sender_frame(
+                                transport.target_sender_frame);
+                        if (quantized_shared_grid_action &&
+                            transport.target_sender_frame >=
+                                transport.countdown_start_sender_frame) {
+                            translated_schedule =
+                                jam2::align_received_transport_to_grid(
+                                    static_cast<double>(options.sample_rate),
+                                    metronome_pattern_from_runtime(
+                                        commands.state),
+                                    receiver_now,
+                                    commands.state
+                                        .metronome_render_offset_frames.load(
+                                            std::memory_order_relaxed),
+                                    commands.state.metronome_epoch_valid.load(
+                                        std::memory_order_relaxed),
+                                    commands.state
+                                        .metronome_epoch_sample_time.load(
+                                            std::memory_order_relaxed),
+                                    estimated_target_raw,
+                                    transport.target_sender_frame -
+                                        transport.countdown_start_sender_frame);
+                        } else if (!quantized_shared_grid_action) {
+                            const std::uint64_t countdown_start_raw = std::min(
+                                estimated_target_raw,
+                                translated_sender_frame(
+                                    transport.countdown_start_sender_frame));
+                            translated_schedule = QuantizedSchedule{
+                                countdown_start_raw,
+                                estimated_target_raw,
+                                jam2::transport_musical_frame_from_raw(
+                                    estimated_target_raw,
+                                    commands.state
+                                        .metronome_render_offset_frames.load(
+                                            std::memory_order_relaxed)),
+                            };
+                        }
+                    }
                     const bool track_transport_ready =
                         !track_transport || !accept_track_transport ||
                         (peer.recv_pongs > 0 &&
                          peer_stream.stats().rtt_min_us > 0 &&
-                         audio.engine != nullptr);
+                         audio.engine != nullptr &&
+                         grid_mapping_ready &&
+                         translated_schedule.has_value());
                     if (!track_transport_ready) {
                         // Transport packets are repeated until their target.
                         // Do not consume this source event counter before the
                         // rejoined edge has the clock mapping needed to apply
                         // it; a later repeat can then schedule the same action.
+                        if (!grid_mapping_ready) {
+                            ++peer.transport_grid_deferrals;
+                        } else if (quantized_shared_grid_action &&
+                                   !translated_schedule.has_value()) {
+                            ++peer.transport_countdown_missed_packets;
+                        }
                         ++peer.ignored_packets;
                         continue;
                     }
@@ -3353,41 +3680,11 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                         accepted_transport &&
                         peer.recv_pongs > 0 &&
                         peer_stream.stats().rtt_min_us > 0 &&
-                        audio.engine != nullptr) {
-                        const std::uint64_t one_way_frames = peer_stream.stats().rtt_min_us *
-                            static_cast<std::uint64_t>(options.sample_rate) / 2000000ULL;
-                        const std::uint64_t receiver_now =
-                            current_engine_frame(audio.engine.get());
-                        const auto translated_sender_frame =
-                            [&](std::uint64_t sender_frame) noexcept {
-                                const std::uint64_t sender_lead =
-                                    sender_frame > header.timing_value
-                                    ? sender_frame - header.timing_value
-                                    : 0ULL;
-                                const std::uint64_t remaining =
-                                    sender_lead > one_way_frames
-                                    ? sender_lead - one_way_frames
-                                    : 0ULL;
-                                return receiver_now >
-                                    (std::numeric_limits<std::uint64_t>::max)() - remaining
-                                    ? (std::numeric_limits<std::uint64_t>::max)()
-                                    : receiver_now + remaining;
-                            };
-                        const std::uint64_t target_raw_frame =
-                            translated_sender_frame(transport.target_sender_frame);
-                        const std::uint64_t countdown_start_raw_frame = std::min(
-                            target_raw_frame,
-                            translated_sender_frame(
-                                transport.countdown_start_sender_frame));
-                        mesh_transport_applied_target_frame = target_raw_frame;
-                        const std::int64_t offset =
-                            commands.state.metronome_render_offset_frames.load(std::memory_order_relaxed);
-                        const QuantizedSchedule schedule{
-                            countdown_start_raw_frame,
-                            target_raw_frame,
-                            jam2::transport_musical_frame_from_raw(
-                                target_raw_frame, offset),
-                        };
+                        audio.engine != nullptr &&
+                        translated_schedule.has_value()) {
+                        const QuantizedSchedule schedule = *translated_schedule;
+                        mesh_transport_applied_target_frame =
+                            schedule.target_raw_frame;
                         bool scheduled = false;
                         if (transport.action == jam2::EngineTransportAction::TrackRestart ||
                             transport.action == jam2::EngineTransportAction::RecordStart) {
@@ -3451,7 +3748,9 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                     ++peer.ignored_packets;
                 }
             } catch (const std::exception&) {
-                ++peer.ignored_packets;
+                if (attributed_peer != nullptr) {
+                    ++attributed_peer->ignored_packets;
+                }
             }
         }
         mesh_receive_batch_max = std::max<std::uint64_t>(

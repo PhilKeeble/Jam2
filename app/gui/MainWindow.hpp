@@ -49,9 +49,11 @@
 #include <QWidget>
 
 #include <array>
+#include <condition_variable>
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <vector>
 
@@ -146,12 +148,14 @@ private:
         QString& error);
     bool automationShareTracks(QString& error);
     bool automationArmTransferPause(
-        const QString& point,
-        int milliseconds,
-        QString& error);
+        const QString& point, QString& error);
+    bool automationReleaseTransferPause(QString& error);
     bool automationDropOutgoingAssetStarts(int count, QString& error);
-    bool automationSetAssetRequestStartTimeout(int milliseconds, QString& error);
-    bool automationHoldFileWorkers(int milliseconds, QString& error);
+    bool automationExpireAssetRequestStart(QString& error);
+    bool automationHoldFileWorkers(QString& error);
+    bool automationReleaseFileWorkers(QString& error);
+    bool automationArmCompletionGate(const QString& target, QString& error);
+    bool automationReleaseCompletionGate(const QString& target, QString& error);
     QJsonObject automationTransferSnapshot() const;
     void clearAutomationTransferPause();
     void showLocalPerformSetup();
@@ -209,6 +213,7 @@ private:
     void sendJamSyncPolicy(const QString& targetPeerToken = {});
     void showJamSyncDialog();
     void updateJamSyncPresentation();
+    bool leaderAudioModeActive() const noexcept;
     bool jamSyncAllowsControlMessage(const QJsonObject& message) const;
     bool syncedRecordingsEnabled() const noexcept;
     bool automaticWavSharingEnabled() const noexcept;
@@ -393,6 +398,7 @@ private:
     void startTrackMetronome();
     void stopTrackMetronome();
     void tapTrackMetronomeTempo();
+    void applyTapTrackMetronomeTempoAt(std::int64_t elapsedMs);
     void updateTrackMetronomeInterval();
     void rebuildMetronomePattern(bool resetToDivisionDefault = false);
     jam2::metronome::PatternSnapshot currentMetronomePattern() const;
@@ -426,6 +432,12 @@ private:
     void retryOrFailIncomingAsset(
         const QString& hash,
         const QString& failedSourcePeerToken);
+    void handleAssetRequestStartTimeout(
+        TrackWorkspaceController::IncomingAssetWorkflow workflow,
+        const QString& hash,
+        const QString& source,
+        std::uint64_t requestGeneration,
+        int timeoutMilliseconds);
     void releaseHeldTrackSnapshotIfReady();
     void requestNextPendingAsset();
     void applyPendingTrackContributions();
@@ -556,6 +568,8 @@ private:
     std::vector<std::shared_ptr<MidiPluginSource>> retiredMidiSources_;
     std::shared_ptr<jam2::application::MidiInputBackend> midiInputBackend_;
     std::shared_ptr<jam2::application::InputPluginBackend> inputPluginBackend_;
+    std::uint64_t automationMidiDiscoveryCompletions_ = 0;
+    std::uint64_t automationInputPluginLoadCompletions_ = 0;
     jam2::audio::InputSourceRouter* attachedInputRouter_ = nullptr;
     std::optional<std::size_t> recordingInputSourceSlot_;
 
@@ -887,9 +901,13 @@ private:
     bool automationSuppressDialogs_ = false;
     bool automationOfferPauseArmed_ = false;
     bool automationOfferPauseActive_ = false;
-    int automationOfferPauseMilliseconds_ = 0;
     quint64 automationOfferPauseGeneration_ = 0;
-    int automationAssetRequestStartTimeoutMilliseconds_ = 0;
+    struct AutomationFileWorkerGate {
+        std::mutex mutex;
+        std::condition_variable releasedCondition;
+        bool released = false;
+    };
+    std::shared_ptr<AutomationFileWorkerGate> automationFileWorkerGate_;
     bool pendingMeshInvitePopup_ = false;
     bool jamStartupPending_ = false;
     bool jamStartupCreating_ = false;

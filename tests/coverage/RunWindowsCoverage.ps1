@@ -112,6 +112,16 @@ $ctestArguments = @(
     '--test-dir', $buildPath,
     '--output-on-failure',
     '--output-log', $ctestLog)
+$parallelLevel = [Math]::Max(1, [Math]::Min(8, [Environment]::ProcessorCount - 1))
+if (-not [string]::IsNullOrWhiteSpace($env:JAM2_TEST_JOBS)) {
+    $parsedParallelLevel = 0
+    if (-not [int]::TryParse($env:JAM2_TEST_JOBS, [ref]$parsedParallelLevel) -or
+        $parsedParallelLevel -lt 1) {
+        throw 'JAM2_TEST_JOBS must be a positive integer.'
+    }
+    $parallelLevel = $parsedParallelLevel
+}
+$ctestArguments += @('--parallel', $parallelLevel.ToString())
 if (-not [string]::IsNullOrWhiteSpace($TestName)) {
     $ctestArguments += @('--no-tests=error', '-R', ('^' + [regex]::Escape($TestName) + '$'))
 }
@@ -128,9 +138,9 @@ $testExit = $LASTEXITCODE
     [Text.UTF8Encoding]::new($false))
 if ($testExit -ne 0) {
     Write-Warning (
-        "Instrumented CTest returned $testExit. Coverage instrumentation changes " +
-        "real-time timing, so the optimized Release pass remains the behavioral " +
-        "authority. Coverage export and the maintained-function audit will continue.")
+        "Instrumented CTest returned $testExit. Coverage export and the " +
+        "maintained-function audit will continue for diagnostics, but the full " +
+        "native gate will fail.")
 }
 
 Write-Host "Exporting native coverage XML..."
@@ -150,4 +160,8 @@ if ($analysisExit -ne 0) {
     -CoverageXml $xmlCoverage `
     -ManifestPath $manifest `
     -ReportDirectory $reportPath
-exit $LASTEXITCODE
+$coverageAuditExit = $LASTEXITCODE
+if ($testExit -ne 0) {
+    exit $testExit
+}
+exit $coverageAuditExit
