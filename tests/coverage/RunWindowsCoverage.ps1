@@ -199,7 +199,8 @@ if ($analysisExit -ne 0) {
     -ManifestPath $manifest `
     -ReportDirectory $reportPath `
     -HardwareProfileConfigured:$hardwareProfileConfigured `
-    -MidiInstrumentProfileConfigured:$midiInstrumentProfileConfigured
+    -MidiInstrumentProfileConfigured:$midiInstrumentProfileConfigured `
+    -ReportOnly:$focused
 $coverageAuditExit = $LASTEXITCODE
 if ($testExit -ne 0) {
     exit $testExit

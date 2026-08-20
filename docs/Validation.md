@@ -52,8 +52,10 @@ does not rerun the optimized catalogue; use `--tests-full` for that behavioral
 gate. Because instrumentation replaces the staged executable while collecting,
 the command restores a normal `/O2` `release/jam2.exe` before returning, even
 when collection or the audit fails. `--test-name` can focus collection for
-diagnosis, and `--hardware-profile` makes the explicitly profiled hardware and
-plugin coverage mandatory.
+diagnosis; it writes a report and requires that test to pass, but only an
+unfocused `--coverage` run enforces the complete maintained-source inventory.
+`--hardware-profile` makes the explicitly profiled hardware and plugin coverage
+mandatory during the full audit.
 
 ## macOS commands
 

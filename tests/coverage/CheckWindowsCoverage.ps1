@@ -13,7 +13,9 @@ param(
 
     [switch]$HardwareProfileConfigured,
 
-    [switch]$MidiInstrumentProfileConfigured
+    [switch]$MidiInstrumentProfileConfigured,
+
+    [switch]$ReportOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -409,10 +411,21 @@ if ($functionRows.Count -eq 0) {
 if ($missingFiles.Count -gt 0 -or
     $uncoveredFunctions.Count -gt 0 -or
     $unreviewedSkipped.Count -gt 0) {
+    if ($ReportOnly) {
+        Write-Host (
+            "Focused coverage report completed with expected catalogue gaps. " +
+            "Run compile.cmd --coverage without --test-name for the strict full audit.")
+        exit 0
+    }
     Write-Error (
         "Coverage has unreviewed gaps. Inspect reports under " + $reportPath)
     exit 1
 }
 
-Write-Host "Windows maintained-source/function coverage gate passed."
+if ($ReportOnly) {
+    Write-Host "Focused Windows maintained-source/function coverage report completed."
+}
+else {
+    Write-Host "Windows maintained-source/function coverage gate passed."
+}
 exit 0

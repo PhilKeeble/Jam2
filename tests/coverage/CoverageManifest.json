@@ -126,6 +126,16 @@
       "reason": "MSVC native coverage reports instrumentation_failure; the four-peer network, security, WAV, and complete impairment matrices exercise authenticated packet transmission."
     },
     {
+      "path": "app/cli/NetworkRuntime.cpp",
+      "functionPattern": "mix_leader_click_into_packet\\(",
+      "reason": "This packet mixer is entered only by the seven required leader-audio four-peer modes. Microsoft.CodeCoverage instrumentation cannot preserve their real-time tone/click evidence, so the coverage-only catalogue excludes those modes while the optimized Release full-test gate keeps every leader-audio impairment case mandatory."
+    },
+    {
+      "path": "libs/jam2-core/src/metronome.cpp",
+      "function": "jam2::metronome::mix_pcm24",
+      "reason": "This PCM24 mixer is reached by the required leader-audio packet path. Microsoft.CodeCoverage instrumentation cannot preserve that path's real-time tone/click evidence, so the optimized Release full-test gate remains the behavioral authority for all seven leader-audio impairment cases."
+    },
+    {
       "function": "pathCaseSensitivity()",
       "reason": "The collector skips this compile-time platform helper as too_small; path ownership units exercise the resulting Windows case-insensitive comparisons."
     },
