@@ -1,0 +1,7 @@
+<Project>
+  <PropertyGroup>
+    <!-- NuGet consumes MSBuildProjectExtensionsPath before the project body. -->
+    <BaseIntermediateOutputPath>$(MSBuildThisFileDirectory)..\..\build\coverage\tools-obj\</BaseIntermediateOutputPath>
+    <MSBuildProjectExtensionsPath>$(BaseIntermediateOutputPath)</MSBuildProjectExtensionsPath>
+  </PropertyGroup>
+</Project>
