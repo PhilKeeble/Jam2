@@ -99,6 +99,9 @@ struct PeerStreamStats {
     std::uint64_t rtt_max_us = 0;
     std::uint64_t rtt_samples = 0;
     bool drift_valid = false;
+    bool drift_baseline_calibrating = false;
+    std::uint64_t drift_baseline_calibration_packets = 0;
+    std::uint64_t drift_baseline_delay_improvement_us = 0;
     double raw_drift_ppm = 0.0;
     double drift_ppm = 0.0;
     double resampler_ratio = 1.0;

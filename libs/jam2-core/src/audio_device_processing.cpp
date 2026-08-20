@@ -9,6 +9,8 @@
 namespace jam2::audio::device_processing {
 namespace {
 
+constexpr std::uint32_t kPlaybackUnderrunFadeFrames = 32;
+
 constexpr double kPi = 3.14159265358979323846;
 
 bool valid_render_sample_rate(double sampleRate) noexcept
@@ -66,11 +68,30 @@ void atomic_update_min(
     }
 }
 
-std::int32_t pop_one_frame(MonoRingBuffer& ring) noexcept
+std::int32_t pop_one_frame(
+    MonoRingBuffer& ring,
+    PlaybackResamplerState& state,
+    std::int32_t continuity_fallback) noexcept
 {
     std::array<std::int32_t, 1> frame{};
-    (void)ring.pop(frame, false);
-    return frame[0];
+    if (ring.pop(frame, false) == 1) {
+        state.underrunConcealmentOrigin = 0;
+        state.underrunConcealmentFrames = 0;
+        return frame[0];
+    }
+    if (state.underrunConcealmentFrames == 0) {
+        state.underrunConcealmentOrigin = continuity_fallback;
+    }
+    if (state.underrunConcealmentFrames >= kPlaybackUnderrunFadeFrames) {
+        return 0;
+    }
+    const std::uint32_t remaining =
+        kPlaybackUnderrunFadeFrames - state.underrunConcealmentFrames;
+    ++state.underrunConcealmentFrames;
+    return static_cast<std::int32_t>(
+        static_cast<std::int64_t>(state.underrunConcealmentOrigin) *
+        static_cast<std::int64_t>(remaining) /
+        static_cast<std::int64_t>(kPlaybackUnderrunFadeFrames));
 }
 
 } // namespace
@@ -82,6 +103,8 @@ void PlaybackResamplerState::reset() noexcept
     hasCurrent = false;
     hasNext = false;
     phase = 0.0;
+    underrunConcealmentOrigin = 0;
+    underrunConcealmentFrames = 0;
     ratioSmoother.reset();
 }
 
@@ -367,11 +390,11 @@ void pop_resampled_playback(
         return;
     }
     if (!state.hasCurrent) {
-        state.current = pop_one_frame(*playback);
+        state.current = pop_one_frame(*playback, state, 0);
         state.hasCurrent = true;
     }
     if (!state.hasNext) {
-        state.next = pop_one_frame(*playback);
+        state.next = pop_one_frame(*playback, state, state.current);
         state.hasNext = true;
     }
     for (std::int32_t& sample : output) {
@@ -385,7 +408,11 @@ void pop_resampled_playback(
         while (state.phase >= 1.0) {
             state.phase -= 1.0;
             state.current = state.next;
-            state.next = pop_one_frame(*playback);
+            // Preserve the last real sample for an isolated shortage. A
+            // literal zero here creates a full-scale discontinuity at a
+            // non-unity playback ratio even when the producer refills the
+            // ring one frame later. The ring still records the exact underrun.
+            state.next = pop_one_frame(*playback, state, state.current);
         }
     }
     control->playback_ratio_applied_ppm.store(

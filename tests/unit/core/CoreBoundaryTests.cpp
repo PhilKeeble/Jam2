@@ -245,6 +245,91 @@ void testProtocolPeerAndMixerBoundaries()
         "peer-mixer move assignment preserves owned slots");
 }
 
+void testPeerStreamDriftCalibrationRejectsDequeuedBurst()
+{
+    BufferSink sink;
+    jam2::PeerStreamConfig config = peerConfig();
+    config.sample_time_playout = false;
+    config.playback_max_frames = 0;
+    config.stats_warmup_us = 3000000;
+    config.drift_smoothing = 1.0;
+    config.drift_deadband_ppm = 25;
+    config.drift_max_correction_ppm = 500;
+    jam2::PeerStream stream(config, 0, &sink);
+
+    std::array<std::uint8_t, 128> payload{};
+    auto receive = [&](std::uint32_t sequence, std::uint64_t receiveTimeUs) {
+        const jam2::protocol::Header header{
+            jam2::protocol::PacketType::Audio,
+            1,
+            sequence,
+            static_cast<std::uint64_t>(sequence) * 64ULL,
+            static_cast<std::uint16_t>(payload.size()),
+            0,
+        };
+        expect(stream.receiveAudio(header, payload, receiveTimeUs) ==
+                jam2::PeerAudioResult::Accepted,
+            "drift calibration accepts each contiguous audio packet");
+    };
+    auto nominalReceiveTime = [](std::uint32_t sequence) {
+        return 1000ULL + static_cast<std::uint64_t>(sequence) * 64ULL *
+            1000000ULL / 48000ULL;
+    };
+
+    for (std::uint32_t sequence = 0; sequence < 2250; ++sequence) {
+        receive(sequence, nominalReceiveTime(sequence));
+    }
+    // The first post-warmup packet waited 90 ms in the socket queue. The rest
+    // of the queued packets are then timestamped within microseconds while the
+    // receiver drains them, matching the runtime's bounded UDP receive loop.
+    for (std::uint32_t sequence = 2250; sequence < 2318; ++sequence) {
+        receive(sequence, 3090000ULL + static_cast<std::uint64_t>(sequence - 2250));
+    }
+    for (std::uint32_t sequence = 2318; sequence < 6000; ++sequence) {
+        receive(sequence, nominalReceiveTime(sequence));
+    }
+
+    const auto& stats = stream.stats();
+    expect(stats.drift_valid,
+        "drift calibration becomes valid after the dequeued burst");
+    expect(std::abs(stats.raw_drift_ppm) < 100.0,
+        "dequeued startup burst does not become permanent remote clock drift");
+    expect(stats.resampler_ratio > 0.9999 && stats.resampler_ratio < 1.0001,
+        "dequeued startup burst does not pin peer resampling at its correction limit");
+    expect(!stats.drift_baseline_calibrating &&
+            stats.drift_baseline_calibration_packets > 68 &&
+            stats.drift_baseline_delay_improvement_us > 80000,
+        "drift diagnostics expose the bounded baseline calibration and burst delay");
+
+    BufferSink driftingSink;
+    config.stats_warmup_us = 0;
+    jam2::PeerStream drifting(config, 0, &driftingSink);
+    for (std::uint32_t sequence = 0; sequence < 4000; ++sequence) {
+        const long double remoteTimeUs =
+            static_cast<long double>(sequence) * 64.0L * 1000000.0L / 48000.0L;
+        const std::uint64_t receiveTimeUs = 1000ULL +
+            static_cast<std::uint64_t>(std::llround(remoteTimeUs / 1.0002L));
+        const jam2::protocol::Header header{
+            jam2::protocol::PacketType::Audio,
+            1,
+            sequence,
+            static_cast<std::uint64_t>(sequence) * 64ULL,
+            static_cast<std::uint16_t>(payload.size()),
+            0,
+        };
+        expect(drifting.receiveAudio(header, payload, receiveTimeUs) ==
+                jam2::PeerAudioResult::Accepted,
+            "drift calibration accepts genuine clock-drift packets");
+    }
+    const auto& driftingStats = drifting.stats();
+    expect(driftingStats.raw_drift_ppm > 150.0 &&
+            driftingStats.raw_drift_ppm < 250.0,
+        "baseline calibration preserves genuine positive remote clock drift");
+    expect(driftingStats.resampler_ratio > 1.00015 &&
+            driftingStats.resampler_ratio < 1.00025,
+        "genuine clock drift still drives proportional peer resampling");
+}
+
 void testUdpStunAndSessionBoundaries()
 {
     jam2::NetworkRuntime networkRuntime;
@@ -453,6 +538,7 @@ int main()
         testRingMidiAndDownmixBoundaries();
         testPreparedAndRecorderBoundaries();
         testProtocolPeerAndMixerBoundaries();
+        testPeerStreamDriftCalibrationRejectsDequeuedBurst();
         testUdpStunAndSessionBoundaries();
         testSmallDiagnosticBoundaries();
     } catch (const std::exception& exception) {

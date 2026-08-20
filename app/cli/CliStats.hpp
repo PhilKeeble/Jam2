@@ -249,6 +249,9 @@ struct AudioPacketStats {
     std::uint64_t rtt_sum_us = 0;
     std::uint64_t rtt_max_us = 0;
     bool drift_valid = false;
+    bool drift_baseline_calibrating = false;
+    std::uint64_t drift_baseline_calibration_packets = 0;
+    std::uint64_t drift_baseline_delay_improvement_us = 0;
     double raw_drift_ppm = 0.0;
     double drift_ppm = 0.0;
     double resampler_ratio = 1.0;
@@ -577,7 +580,8 @@ public:
                 "input_downmix_channel_1_noise_floor,input_downmix_channel_2_noise_floor,"
                 "input_downmix_channel_3_noise_floor,input_downmix_channel_4_noise_floor,"
                 "metronome_pattern_origin_frame,metronome_pattern_origin_valid,"
-                "metronome_pattern_source_start_frame\n";
+                "metronome_pattern_source_start_frame,drift_baseline_calibrating,"
+                "drift_baseline_calibration_packets,drift_baseline_delay_improvement_us\n";
     }
 
     explicit operator bool() const { return out_.is_open(); }
@@ -1009,7 +1013,10 @@ public:
              << static_cast<double>(audio.input_downmix.channel_noise_floor_ppm[3]) / 1000000.0 << ','
              << audio.metronome_pattern_origin_frame << ','
              << (audio.metronome_pattern_origin_valid ? "yes" : "no") << ','
-             << audio.metronome_pattern_source_start_frame;
+             << audio.metronome_pattern_source_start_frame << ','
+             << (stats.drift_baseline_calibrating ? "yes" : "no") << ','
+             << stats.drift_baseline_calibration_packets << ','
+             << stats.drift_baseline_delay_improvement_us;
         out_ << '\n';
         if (row_type == "final") {
             out_.flush();
@@ -1025,7 +1032,7 @@ public:
         if (!out_) {
             return;
         }
-        std::vector<std::string> fields(395);
+        std::vector<std::string> fields(398);
         auto set = [&](std::size_t index, auto value) {
             std::ostringstream text;
             text << value;
@@ -1386,6 +1393,9 @@ public:
         set(392, audio.metronome_pattern_origin_frame);
         fields[393] = audio.metronome_pattern_origin_valid ? "yes" : "no";
         set(394, audio.metronome_pattern_source_start_frame);
+        fields[395] = stats.drift_baseline_calibrating ? "yes" : "no";
+        set(396, stats.drift_baseline_calibration_packets);
+        set(397, stats.drift_baseline_delay_improvement_us);
 
         for (std::size_t i = 0; i < fields.size(); ++i) {
             if (i != 0) {

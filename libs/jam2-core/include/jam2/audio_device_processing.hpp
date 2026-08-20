@@ -16,6 +16,8 @@ struct PlaybackResamplerState {
     bool hasCurrent = false;
     bool hasNext = false;
     double phase = 0.0;
+    std::int32_t underrunConcealmentOrigin = 0;
+    std::uint32_t underrunConcealmentFrames = 0;
     PlaybackRatioSmoother ratioSmoother;
 
     void reset() noexcept;

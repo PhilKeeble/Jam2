@@ -13,6 +13,9 @@ namespace jam2 {
 
 namespace {
 
+constexpr std::uint64_t kDriftBaselineCalibrationUs = 250000;
+constexpr std::uint64_t kDriftMinimumObservationUs = 250000;
+
 void observe_timing(
     std::uint64_t value,
     std::uint64_t& minimum,
@@ -106,12 +109,18 @@ struct PeerStream::Impl {
     bool playout_sample_time_initialized = false;
     std::uint64_t next_playout_remote_sample_time = 0;
     bool drift_started = false;
+    bool drift_calibrating = false;
     bool drift_smoothed = false;
     double smoothed_drift_ppm = 0.0;
     double previous_resampler_ratio = 1.0;
     std::uint64_t previous_resampler_ratio_time_us = 0;
     std::uint64_t first_remote_sample_time = 0;
     std::uint64_t first_receive_time_us = 0;
+    std::uint64_t drift_calibration_start_receive_time_us = 0;
+    std::uint64_t drift_calibration_best_remote_sample_time = 0;
+    std::uint64_t drift_calibration_best_receive_time_us = 0;
+    long double drift_calibration_first_offset_us = 0.0L;
+    long double drift_calibration_best_offset_us = 0.0L;
     std::uint64_t last_audio_receive_us = 0;
     std::uint64_t last_audio_gap_receive_us = 0;
     std::uint64_t adaptive_target_frames = 0;
@@ -402,11 +411,53 @@ struct PeerStream::Impl {
         }
 
         if (past_warmup) {
+            const long double remote_time_us =
+                static_cast<long double>(packet.sample_time) * 1000000.0L /
+                static_cast<long double>(config.sample_rate);
+            const long double arrival_offset_us =
+                static_cast<long double>(packet.receive_time) - remote_time_us;
             if (!drift_started) {
-                drift_started = true;
-                first_remote_sample_time = packet.sample_time;
-                first_receive_time_us = packet.receive_time;
-            } else if (packet.receive_time > first_receive_time_us && packet.sample_time > first_remote_sample_time) {
+                if (!drift_calibrating) {
+                    drift_calibrating = true;
+                    stats.drift_baseline_calibrating = true;
+                    drift_calibration_start_receive_time_us = packet.receive_time;
+                    drift_calibration_best_remote_sample_time = packet.sample_time;
+                    drift_calibration_best_receive_time_us = packet.receive_time;
+                    drift_calibration_first_offset_us = arrival_offset_us;
+                    drift_calibration_best_offset_us = arrival_offset_us;
+                }
+                ++stats.drift_baseline_calibration_packets;
+                if (arrival_offset_us < drift_calibration_best_offset_us) {
+                    drift_calibration_best_offset_us = arrival_offset_us;
+                    drift_calibration_best_remote_sample_time = packet.sample_time;
+                    drift_calibration_best_receive_time_us = packet.receive_time;
+                    const long double improvement =
+                        drift_calibration_first_offset_us - drift_calibration_best_offset_us;
+                    stats.drift_baseline_delay_improvement_us =
+                        static_cast<std::uint64_t>(std::max(0.0L, improvement));
+                }
+                if (packet.receive_time >= drift_calibration_start_receive_time_us &&
+                    packet.receive_time - drift_calibration_start_receive_time_us >=
+                        kDriftBaselineCalibrationUs) {
+                    // Socket dequeue time includes any delay accumulated before
+                    // the network worker reads a packet. Select the lowest-delay
+                    // point from a short bounded calibration window so a queued
+                    // burst at the stats warmup boundary cannot become the
+                    // lifetime clock baseline.
+                    drift_started = true;
+                    drift_calibrating = false;
+                    stats.drift_baseline_calibrating = false;
+                    first_remote_sample_time =
+                        drift_calibration_best_remote_sample_time;
+                    first_receive_time_us =
+                        drift_calibration_best_receive_time_us;
+                }
+            }
+            if (drift_started &&
+                packet.receive_time > first_receive_time_us &&
+                packet.sample_time > first_remote_sample_time &&
+                packet.receive_time - first_receive_time_us >=
+                    kDriftMinimumObservationUs) {
                 const double remote_elapsed_samples = static_cast<double>(packet.sample_time - first_remote_sample_time);
                 const double remote_elapsed_us = remote_elapsed_samples * 1000000.0 /
                     static_cast<double>(config.sample_rate);

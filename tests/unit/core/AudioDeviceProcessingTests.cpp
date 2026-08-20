@@ -269,9 +269,44 @@ void testPlaybackResampler()
     expect(control.playback_ratio_applied_ppm.load() == 2000000 &&
             !control.playback_ratio_ramping.load(),
         "playback-ratio ramp reaches and publishes its exact target");
+
+    jam2::audio::MonoRingBuffer isolatedUnderrunRing(8);
+    isolatedUnderrunRing.set_diagnostics_enabled(true);
+    const std::array<std::int32_t, 2> steadyInput{1000000, 1000000};
+    isolatedUnderrunRing.push(steadyInput);
+    control.playback_ratio_ppm.store(1005000);
+    control.playback_ratio_ramp_frames.store(0);
+    state.reset();
+    std::array<std::int32_t, 1> beforeRefill{};
+    processing::pop_resampled_playback(
+        &isolatedUnderrunRing, &control, state, beforeRefill);
+    expect(isolatedUnderrunRing.stats().underruns == 1,
+        "playback resampler fixture produces one isolated source underrun");
+    const std::array<std::int32_t, 4> refill{1000000, 1000000, 1000000, 1000000};
+    isolatedUnderrunRing.push(refill);
+    std::array<std::int32_t, 4> afterRefill{};
+    processing::pop_resampled_playback(
+        &isolatedUnderrunRing, &control, state, afterRefill);
+    expect(std::all_of(afterRefill.begin(), afterRefill.end(), [](std::int32_t sample) {
+               return sample == 1000000;
+           }),
+        "isolated resampler underrun holds continuity instead of injecting a zero click");
+
+    jam2::audio::MonoRingBuffer sustainedUnderrunRing(8);
+    sustainedUnderrunRing.push(steadyInput);
+    state.reset();
+    std::array<std::int32_t, 40> sustainedUnderrunOutput{};
+    processing::pop_resampled_playback(
+        &sustainedUnderrunRing, &control, state, sustainedUnderrunOutput);
+    expect(sustainedUnderrunOutput.front() == 1000000 &&
+            sustainedUnderrunOutput.back() == 0,
+        "sustained resampler underrun fades to silence instead of holding DC");
+
     state.reset();
     expect(!state.hasCurrent && !state.hasNext && state.phase == 0.0 &&
-            state.current == 0 && state.next == 0,
+            state.current == 0 && state.next == 0 &&
+            state.underrunConcealmentOrigin == 0 &&
+            state.underrunConcealmentFrames == 0,
         "resampler reset discards all interpolation history");
 }
 

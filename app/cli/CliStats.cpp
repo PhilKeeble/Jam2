@@ -121,6 +121,9 @@ void copy_peer_stream_stats(
     JAM2_COPY_PEER_STAT(rtt_sum_us);
     JAM2_COPY_PEER_STAT(rtt_max_us);
     JAM2_COPY_PEER_STAT(drift_valid);
+    JAM2_COPY_PEER_STAT(drift_baseline_calibrating);
+    JAM2_COPY_PEER_STAT(drift_baseline_calibration_packets);
+    JAM2_COPY_PEER_STAT(drift_baseline_delay_improvement_us);
     JAM2_COPY_PEER_STAT(raw_drift_ppm);
     JAM2_COPY_PEER_STAT(drift_ppm);
     JAM2_COPY_PEER_STAT(resampler_ratio);
@@ -228,6 +231,13 @@ void add_peer_stream_stats(
         target.drift_ppm = source.drift_ppm;
         target.resampler_ratio = source.resampler_ratio;
     }
+    target.drift_baseline_calibrating =
+        target.drift_baseline_calibrating || source.drift_baseline_calibrating;
+    target.drift_baseline_calibration_packets +=
+        source.drift_baseline_calibration_packets;
+    target.drift_baseline_delay_improvement_us = std::max(
+        target.drift_baseline_delay_improvement_us,
+        source.drift_baseline_delay_improvement_us);
     if (source.resampler_ratio_samples > 0) {
         if (target.resampler_ratio_samples == 0 ||
             source.resampler_ratio_min < target.resampler_ratio_min) {
