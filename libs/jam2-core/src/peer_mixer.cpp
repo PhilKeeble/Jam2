@@ -635,10 +635,21 @@ struct PeerMixer::Impl {
             }
             updateOccupancy();
         }
-        // During an actual gap, padding may protect the device from underrun.
-        // Once real peer audio is queued it always gets playback capacity first.
-        if (!anyContributorReady()) {
-            ensureAdaptiveCushion();
+        // A release ratio above unity deliberately drains excess device-ring
+        // depth. Replacing those drained frames with silence creates a closed
+        // feedback loop: playback stays fast, the ring never reaches its stop
+        // band, and small zero-filled gaps are injected indefinitely. Real
+        // audio released during this advance must likewise remain ahead of
+        // any cushion recovery. Only an otherwise-idle advance may pad, and
+        // an observed device underrun first cancels release and raises the
+        // bounded adaptive target.
+        if (!anyContributorReady() && work == 0) {
+            if (output_underrun_observed) {
+                updateAdaptiveTarget(now_us, true);
+            }
+            if (!adaptive_release_active) {
+                ensureAdaptiveCushion();
+            }
         }
         if (work == config.max_blocks_per_advance &&
             (allContributorsReady() || now_us >= next_deadline_us)) {

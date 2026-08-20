@@ -2840,8 +2840,6 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
             mesh_playback.detach();
             timed_stream_audio_detached = true;
         }
-        network_session.advance(now);
-
         int sends_this_loop = 0;
         while (now >= packet_schedule.nextAudioSendUs() &&
                packet_schedule.nextAudioSendUs() < receive_deadline &&
@@ -3774,6 +3772,12 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
         if (mesh_datagrams_this_wake == 64) {
             ++mesh_work_budget_yields;
         }
+        // Ingest everything already available (including the packet obtained
+        // during the bounded first wait) before the mixer decides that every
+        // contributor is empty. Advancing first can mistake normal packet
+        // cadence for a source gap and place adaptive silence immediately in
+        // front of audio received later in the same wake.
+        network_session.advance(jam2::monotonic_us());
     }
 
     const std::uint64_t now = jam2::monotonic_us();

@@ -1542,6 +1542,7 @@ AttemptResult runAttempt(
                  QStringLiteral("mix_missing_peer_frames"),
                  QStringLiteral("mix_late_after_release_frames"),
                  QStringLiteral("mix_capacity_drops"),
+                 QStringLiteral("adaptive_playback_padding_frames"),
                  QStringLiteral("sequence_lost"),
                  QStringLiteral("sequence_duplicate"),
                  QStringLiteral("sequence_late"),
@@ -1640,6 +1641,12 @@ AttemptResult runAttempt(
             final, QStringLiteral("mix_capacity_dropped_frames"), -1.0);
         const double mixOutputFrames = peer.csv.number(
             final, QStringLiteral("mix_output_frames"), -1.0);
+        const double adaptivePaddingGrowth = peer.csv.number(
+            final, QStringLiteral("adaptive_playback_padding_frames"), -1.0) -
+            peer.csv.number(
+                initial, QStringLiteral("adaptive_playback_padding_frames"), -1.0);
+        const bool adaptivePaddingHealthy = adaptivePaddingGrowth >= 0.0 &&
+            (condition != NetworkCondition::Clean || adaptivePaddingGrowth == 0.0);
         constexpr double kMaximumImpairedMixDropRatio = 0.05;
         const double maximumMixCapacityDrops =
             condition == NetworkCondition::Clean
@@ -1658,7 +1665,7 @@ AttemptResult runAttempt(
             finalEpoch == initialEpoch ||
             mappedEpoch <= 0 || std::abs(mappingError) > 1024.0 ||
             sentPackets <= 0.0 || receivedPackets <= 0.0 || callbacks <= 0.0 ||
-            !mixCapacityHealthy ||
+            !mixCapacityHealthy || !adaptivePaddingHealthy ||
             (condition != NetworkCondition::Security &&
              authenticationFailures != 0.0)) {
             return die(QStringLiteral(
@@ -1666,7 +1673,8 @@ AttemptResult runAttempt(
                 "authority=%2/%3 expected=%4/%5 revision=%6/%7 mode=%8/%9 "
                 "aligned=%10 beat_delta=%11 epochs=%12->%13 mapped=%14 "
                 "mapping_error=%15 sent=%16 recv=%17 callbacks=%18 "
-                "mix_capacity_drops=%19/%20 output_frames=%21 auth_failures=%22")
+                "mix_capacity_drops=%19/%20 output_frames=%21 "
+                "adaptive_padding_growth=%22 auth_failures=%23")
                 .arg(index + 1)
                 .arg(initialAuthority).arg(finalAuthority)
                 .arg(creatorId).arg(expectedFinalAuthority)
@@ -1676,7 +1684,8 @@ AttemptResult runAttempt(
                 .arg(initialEpoch).arg(finalEpoch).arg(mappedEpoch)
                 .arg(mappingError).arg(sentPackets).arg(receivedPackets)
                 .arg(callbacks).arg(mixCapacityDrops).arg(maximumMixCapacityDrops)
-                .arg(mixOutputFrames).arg(authenticationFailures));
+                .arg(mixOutputFrames).arg(adaptivePaddingGrowth)
+                .arg(authenticationFailures));
         }
         if (!initialAuthorityEpoch) initialAuthorityEpoch = initialEpoch;
         if (!finalAuthorityEpoch) finalAuthorityEpoch = finalEpoch;

@@ -84,7 +84,10 @@ public:
     {
         depth -= std::min(depth, frames);
     }
-    void setResamplerRatio(double) noexcept override {}
+    void setResamplerRatio(double ratio) noexcept override
+    {
+        resamplerRatio = ratio;
+    }
 
     void consume(std::size_t frames) noexcept
     {
@@ -98,6 +101,7 @@ public:
 
     std::size_t depth = 0;
     std::uint64_t underruns = 0;
+    double resamplerRatio = 1.0;
 };
 
 void test_midi_queue()
@@ -595,6 +599,57 @@ void test_peer_mixer_adapts_to_device_ring_underrun()
         "device-facing ring underrun raises the bounded adaptive cushion");
 }
 
+void test_peer_mixer_release_does_not_replace_drained_audio_with_silence()
+{
+    MixerSink sink;
+    jam2::PeerMixerConfig config;
+    config.sample_rate = 48000;
+    config.frames_per_block = 64;
+    config.deadline_frames = 1024;
+    config.output_max_frames = 1536;
+    config.max_blocks_per_advance = 64;
+    config.adaptive_playback_cushion = true;
+    config.adaptive_target_frames = 256;
+    config.adaptive_min_frames = 256;
+    config.adaptive_max_frames = 1536;
+    config.adaptive_release_ppm = 5000;
+    jam2::PeerMixer mixer(config, &sink);
+    auto* peer = mixer.addPeer(101, 4096);
+    expect(peer != nullptr && mixer.setPeerActive(101, true),
+        "adaptive-release mixer creates its active source");
+
+    const std::array<std::int32_t, 64> block{};
+    peer->pushFrames(block);
+    mixer.advance(0);
+    const std::array<std::int32_t, 1024> burst{};
+    peer->pushFrames(burst);
+    mixer.advance(1000);
+    expect(sink.resamplerRatio > 1.0049,
+        "excess playback depth activates the bounded release ratio");
+
+    const std::uint64_t paddingBeforeRelease =
+        mixer.stats().adaptive_padding_frames;
+    sink.consume(sink.depth - 96);
+    mixer.advance(2000);
+    expect(mixer.stats().adaptive_padding_frames == paddingBeforeRelease,
+        "active depth release does not replace deliberately drained frames with silence");
+
+    peer->pushFrames(block);
+    mixer.advance(3000);
+    expect(mixer.stats().adaptive_padding_frames == paddingBeforeRelease,
+        "a newly received real block is not followed by synthetic cushion silence");
+    expect(sink.resamplerRatio == 1.0,
+        "release returns to unity once real playback depth reaches its stop band");
+
+    sink.consume(sink.depth + 64);
+    mixer.advance(4000);
+    expect(mixer.stats().adaptive_target_frames == 320 &&
+            mixer.stats().adaptive_raise_events == 1,
+        "an actual device underrun still raises the adaptive target");
+    expect(mixer.stats().adaptive_padding_frames > paddingBeforeRelease,
+        "an actual device underrun still permits bounded recovery padding");
+}
+
 } // namespace
 
 int main()
@@ -613,6 +668,7 @@ int main()
     test_peer_mixer_recovery_rebases_every_source();
     test_peer_mixer_global_gap_preserves_lossless_timeline();
     test_peer_mixer_adapts_to_device_ring_underrun();
+    test_peer_mixer_release_does_not_replace_drained_audio_with_silence();
     if (failures == 0) std::cout << "Jam2 core input tests passed\n";
     return failures == 0 ? 0 : 1;
 }
