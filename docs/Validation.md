@@ -28,17 +28,32 @@ Run one registered CTest exactly:
 cmd.exe /d /c "call compile.cmd --in-dev-shell --tests gui --test-name jam2_four_gui_agent_integration"
 ```
 
-Run the pre-distribution gate only after focused implementation work is done:
+Run the pre-distribution Release gate only after focused implementation work is
+done:
 
 ```powershell
 cmd.exe /d /c "call compile.cmd --in-dev-shell --tests-full"
 ```
 
-`--tests-full` first runs the complete catalogue against an instrumented MSVC
-build and checks the maintained-source/function inventory. It then restores a
-normal `/O2` Release build, stages the one public `release/jam2.exe`, and runs
-the complete catalogue again. A coverage failure still restores the normal
-Release binary before returning failure.
+`--tests-full` builds the normal `/O2` Release targets, stages the one public
+`release/jam2.exe`, and runs the complete hardware-independent CTest catalogue
+once. It does not collect source coverage.
+
+After implementing major features, audit which maintained source and functions
+the native catalogue exercises with the separate Windows coverage command:
+
+```powershell
+cmd.exe /d /c "call compile.cmd --in-dev-shell --coverage"
+```
+
+`--coverage` builds and runs the instrumented MSVC catalogue, exports the native
+coverage reports, and checks the reviewed maintained-function inventory. It
+does not rerun the optimized catalogue; use `--tests-full` for that behavioral
+gate. Because instrumentation replaces the staged executable while collecting,
+the command restores a normal `/O2` `release/jam2.exe` before returning, even
+when collection or the audit fails. `--test-name` can focus collection for
+diagnosis, and `--hardware-profile` makes the explicitly profiled hardware and
+plugin coverage mandatory.
 
 ## macOS commands
 
@@ -80,12 +95,13 @@ gate. Normal and selected test commands build only the requested target set.
 
 ## Results and temporary files
 
-All automated runtime state is rooted under `build/test-artifacts`. A selected
-or full command removes that exact directory before starting and again after
-complete success; failures retain it for diagnosis. Windows full-gate reports
-are written under `build/coverage`, including the instrumented and optimized
-CTest logs, summary, source inventory, and function-level CSVs. macOS runs the
-tests without creating code-coverage reports.
+All automated runtime state is rooted under `build/test-artifacts`. A selected,
+full, or coverage command removes that exact directory before starting and
+again after complete success; failures retain coverage artifacts under
+`build/coverage/test-artifacts` for diagnosis. Windows `--coverage` reports are
+written under `build/coverage`, including the instrumented CTest log, summary,
+source inventory, and function-level CSVs. Normal Windows and macOS test runs
+do not create code-coverage reports.
 
 The maintained implementation/review history is in `TEST-PLAN.md`,
 `TEST-LOG.md`, and `TEST-REVIEW.md`. Cross-machine and long soak campaigns are

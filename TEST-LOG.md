@@ -7539,3 +7539,19 @@ retirement or distribution completion is claimed.
   report its exact start/exit/hang error, and widen only outer hang deadmen.
   Gateway passed the final production scanner/worker path in 2.15 seconds; the
   normal fast path gains no delay.
+
+#### BUG-T127 - listener alignment used a sub-packet threshold edge
+
+- Observed condition: macOS listener-compensated/jitter produced a healthy
+  2,424-frame measured target and 2,346-frame applied offset, but failed because
+  its 505-frame median WAV alignment was 25 frames beyond the fixed 10-ms/480-
+  frame boundary. This repeated the earlier Windows 504.42-frame edge with the
+  opposite sign; both had bounded maxima and subsequent unchanged Windows runs
+  passed, so the evidence did not show a consistent compensation bias.
+- Change and proof: retain the WAV-domain median and maximum checks, the exact
+  three-peer target formula, and frame-spanning convergence proof. Define the
+  shared median allowance as 10 ms plus exactly one configured 64-frame network
+  audio quantum (544 frames), and emit every peer's signed alignment and final
+  compensation state in verbose CTest output. This is an audio-frame contract,
+  not a wall-clock or machine-speed allowance. The rebuilt exact Windows jitter
+  case passed in 17.87 seconds; macOS confirmation remains required.

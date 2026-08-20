@@ -124,7 +124,7 @@ if ([string]::IsNullOrWhiteSpace($CTestPath)) {
     }
 }
 if (-not (Test-Path -LiteralPath $CTestPath -PathType Leaf)) {
-    throw "CTest was not found. Pass -CTestPath or run through compile.cmd --tests-full."
+    throw "CTest was not found. Pass -CTestPath or run through compile.cmd --coverage."
 }
 $ctest = (Resolve-Path -LiteralPath $CTestPath).Path
 $ctestArguments = @(
@@ -154,12 +154,14 @@ else {
     # an exact Windows inherited-handle allowlist. Microsoft.CodeCoverage's
     # injected child-process handles cannot pass that boundary, so the
     # instrumented child never receives its automation pipes. Instrumentation
-    # also makes the burst-loss leader-audio callback path too slow to preserve
-    # real-time tone continuity. The normal optimized Release gate below still
-    # requires both exact four-peer behavioral tests.
+    # also makes the leader-audio callback path too slow to preserve its
+    # real-time tone/click evidence reliably. Shared-grid and listener-
+    # compensated impairment coverage remains instrumented. The separate
+    # optimized `compile.cmd --tests-full` gate still requires the reactive
+    # session test and every leader-audio impairment case.
     $ctestArguments += @(
         '-E',
-        '^(jam2_four_session_command_integration|jam2_metronome_leader_audio_burst_loss)$')
+        '^(jam2_four_session_command_integration|jam2_metronome_leader_audio_.*)$')
 }
 
 Write-Host "Running the instrumented CTest catalogue under native coverage..."

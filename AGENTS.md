@@ -48,7 +48,7 @@ These rules apply to all implementation work in this repository.
 - Test behavior at the lowest useful ownership boundary and add integration coverage wherever components interact. Cover successful behavior, meaningful invalid/error paths, cancellation or rollback, ownership and cleanup, and observable state transitions. GUI work must cover the real control/action, its typed state, modal or asynchronous boundary, and relevant view state rather than only calling an underlying helper.
 - Network, synchronization, shared-content/WAV, peer-interaction, and metronome/epoch changes must retain or extend the exactly-four-peer CTest workflows. Exercise relevant ordering and network-impairment cases with deterministic fake audio or injection; use explicitly profiled hardware tests only for behavior that genuinely requires a real device.
 - Prefer deterministic production seams and fake backends over test-only reimplementations of product behavior. Tests must exercise the same owned production code used by `release/jam2.exe`.
-- Before treating feature work as complete, run its focused CTest cases. Before distribution, run the Windows `--tests-full` coverage and optimized-Release gate; macOS `--tests-full` runs the normal Release tests without source coverage.
+- Before treating feature work as complete, run its focused CTest cases. Before distribution, run `--tests-full` against the normal optimized Release build on both Windows and macOS. On Windows, run the separate `--coverage` audit after implementing major features or when reviewing whether maintained behavior needs additional native tests; coverage is not part of the baseline full-test command.
 
 ## Efficiency Rules
 

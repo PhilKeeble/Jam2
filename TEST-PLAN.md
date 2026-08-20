@@ -908,6 +908,7 @@ compile.cmd --tests <suite> --test-name <exact-ctest-name>
 compile.sh --tests <suite> --test-name <exact-ctest-name>
 compile.cmd --tests-full [--show-gui] [--hardware-profile <path>]
 compile.sh --tests-full [--show-gui] [--hardware-profile <path>]
+compile.cmd --coverage [--test-name <exact-ctest-name>] [--hardware-profile <path>]
 ```
 
 Implemented suite names are `unit`, `plugin`, `gui`, `jam-sync`,
@@ -922,25 +923,25 @@ explicit profile is supplied.
 
 ## Coverage and completion
 
-The replacement full Windows gate will run one instrumented pass and then rebuild and
-rerun against the normal staged Release executable. Maintained functions,
-controls, actions, views, messages, and critical transitions must be covered or
-appear in an explicitly reviewed exemption. Every uncovered item is emitted
-for review; new unreviewed gaps fail the gate. Run from the repository root:
+The Windows coverage audit is separate from the optimized full-test gate.
+Maintained functions, controls, actions, views, messages, and critical
+transitions must be covered or appear in an explicitly reviewed exemption.
+Every uncovered item is emitted for review; new unreviewed gaps fail the audit.
+Run it from the repository root after implementing major features:
 
 ```text
-compile.cmd --in-dev-shell --tests-full --hardware-profile build\hardware-profile.json
+compile.cmd --in-dev-shell --coverage --hardware-profile build\hardware-profile.json
 ```
 
-Its reports supersede the 172-uncovered/42-skipped baseline. A passing gate
-must report zero unreviewed missing sources, wholly uncovered functions, and
-collector-skipped functions, then pass the optimized Release catalogue with
-the same hardware profile.
+Its reports supersede the 172-uncovered/42-skipped baseline. A passing coverage
+audit must report zero unreviewed missing sources, wholly uncovered functions,
+and collector-skipped functions. Run `--tests-full` separately to pass the
+optimized Release catalogue with the same hardware profile.
 
 Windows completion does not claim macOS completion. The exact later macOS work
-is maintained in `TEST-MACOS.md`. Source coverage is a Windows-only
-distribution gate: macOS `compile.sh --tests-full` runs the normal Release test
-catalogue without PowerShell, instrumentation, or an Apple coverage substitute.
+is maintained in `TEST-MACOS.md`. Source coverage is a Windows-only optional
+audit: macOS `compile.sh --tests-full` runs the normal Release test catalogue
+without PowerShell, instrumentation, or an Apple coverage substitute.
 
 ## Iteration 48 overview
 

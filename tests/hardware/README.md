@@ -23,9 +23,11 @@ compile.cmd --tests hardware --hardware-profile build/hardware-profile.json
 ```
 
 Supplying the same option to `--tests-full` includes the hardware extension in
-both Windows passes. A missing profile, plugin, or device is a failure rather
-than an automatic pass. Device IDs are the numeric IDs printed by Jam2's audio
-device listing command; input channels are one-based.
+the normal Release test pass. Supplying it to the separate Windows `--coverage`
+command also makes the profiled hardware and plugin coverage mandatory. A
+missing profile, plugin, or device is a failure rather than an automatic pass.
+Device IDs are the numeric IDs printed by Jam2's audio device listing command;
+input channels are one-based.
 
 The macOS profile uses the same schema, with a `.vst3` bundle path and the
 CoreAudio device ID required by the Apple implementation. Complete and verify

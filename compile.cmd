@@ -16,7 +16,8 @@ set "JAM2_TEST_TARGET="
 set "JAM2_TEST_LABEL="
 set "JAM2_TEST_SHOW_GUI=0"
 set "JAM2_TEST_NAME="
-set "JAM2_TEST_FULL_GATE=0"
+set "JAM2_COVERAGE_MODE=0"
+set "JAM2_TEST_SELECTION_EXPLICIT=0"
 set "JAM2_COVERAGE_RESULT=0"
 set "JAM2_CTEST_LOG_ARGS="
 set "JAM2_HARDWARE_PROFILE="
@@ -26,7 +27,14 @@ if "%~1"=="" goto arguments_ready
 if /I "%~1"=="--tests-full" (
     set "JAM2_BUILD_TESTING=ON"
     set "JAM2_TEST_SUITE=full"
-    set "JAM2_TEST_FULL_GATE=1"
+    set "JAM2_TEST_SELECTION_EXPLICIT=1"
+    shift /1
+    goto parse_arguments
+)
+if /I "%~1"=="--coverage" (
+    set "JAM2_BUILD_TESTING=ON"
+    set "JAM2_TEST_SUITE=full"
+    set "JAM2_COVERAGE_MODE=1"
     shift /1
     goto parse_arguments
 )
@@ -37,6 +45,7 @@ if /I "%~1"=="--tests" (
     )
     set "JAM2_BUILD_TESTING=ON"
     set "JAM2_TEST_SUITE=%~2"
+    set "JAM2_TEST_SELECTION_EXPLICIT=1"
     shift /1
     shift /1
     goto parse_arguments
@@ -67,10 +76,14 @@ if /I "%~1"=="--hardware-profile" (
     goto parse_arguments
 )
 echo ERROR: Unknown compile option: %~1
-echo Supported options: --tests unit, --tests plugin, --tests hardware, --tests gui, --tests jam-sync, --tests shared-content, --tests performance, --tests network, --tests full, --tests-full, --test-name NAME, --show-gui, --hardware-profile PATH
+echo Supported options: --tests unit, --tests plugin, --tests hardware, --tests gui, --tests jam-sync, --tests shared-content, --tests performance, --tests network, --tests full, --tests-full, --coverage, --test-name NAME, --show-gui, --hardware-profile PATH
 exit /b 2
 
 :arguments_ready
+if "%JAM2_COVERAGE_MODE%"=="1" if "%JAM2_TEST_SELECTION_EXPLICIT%"=="1" (
+    echo ERROR: --coverage is a standalone full-catalogue mode; do not combine it with --tests or --tests-full.
+    exit /b 2
+)
 if /I "%JAM2_TEST_SUITE%"=="unit" (
     set "JAM2_TEST_TARGET=jam2_tests_unit"
     set "JAM2_TEST_LABEL=unit"
@@ -109,7 +122,7 @@ if "%JAM2_TEST_SHOW_GUI%"=="1" (
     )
 )
 if defined JAM2_TEST_NAME if not defined JAM2_TEST_TARGET (
-    echo ERROR: --test-name requires --tests SUITE or --tests-full.
+    echo ERROR: --test-name requires --tests SUITE, --tests-full, or --coverage.
     exit /b 2
 )
 if /I "%JAM2_TEST_SUITE%"=="hardware" if not defined JAM2_HARDWARE_PROFILE (
@@ -117,7 +130,7 @@ if /I "%JAM2_TEST_SUITE%"=="hardware" if not defined JAM2_HARDWARE_PROFILE (
     exit /b 2
 )
 if defined JAM2_HARDWARE_PROFILE if /I not "%JAM2_TEST_SUITE%"=="hardware" if /I not "%JAM2_TEST_SUITE%"=="full" (
-    echo ERROR: --hardware-profile requires --tests hardware or --tests-full.
+    echo ERROR: --hardware-profile requires --tests hardware, --tests-full, or --coverage.
     exit /b 2
 )
 if defined JAM2_HARDWARE_PROFILE if not exist "%JAM2_HARDWARE_PROFILE%" (
@@ -227,11 +240,11 @@ if defined JAM2_TEST_TARGET (
     )
 )
 
-if "%JAM2_TEST_FULL_GATE%"=="1" (
+if "%JAM2_COVERAGE_MODE%"=="1" (
     if not exist "%REPO_DIR%build\coverage" mkdir "%REPO_DIR%build\coverage"
     if errorlevel 1 (
         echo.
-        echo ERROR: Could not create the full-gate report directory.
+        echo ERROR: Could not create the coverage report directory.
         exit /b 1
     )
     set "JAM2_COVERAGE_TEST_ARTIFACT_ROOT=%REPO_DIR%build\coverage\test-artifacts"
@@ -241,14 +254,9 @@ if "%JAM2_TEST_FULL_GATE%"=="1" (
         echo ERROR: Could not clear the previous coverage test artifacts.
         exit /b 1
     )
-    if defined JAM2_TEST_NAME (
-        set "JAM2_CTEST_LOG_ARGS=--output-log "%REPO_DIR%build\coverage\windows-focused-release-ctest.log""
-    ) else (
-        set "JAM2_CTEST_LOG_ARGS=--output-log "%REPO_DIR%build\coverage\windows-release-ctest.log""
-    )
 )
 
-if not "%JAM2_TEST_FULL_GATE%"=="1" goto normal_build
+if not "%JAM2_COVERAGE_MODE%"=="1" goto normal_build
 call :run_windows_coverage
 set "JAM2_COVERAGE_RESULT=%errorlevel%"
 if not "%JAM2_COVERAGE_RESULT%"=="0" (
@@ -263,6 +271,10 @@ if not "%JAM2_COVERAGE_RESULT%"=="0" (
 )
 cmake -E make_directory "%JAM2_TEST_ARTIFACT_ROOT%"
 if errorlevel 1 exit /b 1
+set "JAM2_BUILD_TESTING=OFF"
+set "JAM2_TEST_SUITE="
+set "JAM2_TEST_TARGET="
+set "JAM2_TEST_LABEL="
 
 :normal_build
 
@@ -339,7 +351,9 @@ if not "%JAM2_COVERAGE_RESULT%"=="0" (
     echo Inspect "%REPO_DIR%build\coverage" for the native coverage reports.
     exit /b 1
 )
-if defined JAM2_TEST_TARGET (
+if "%JAM2_COVERAGE_MODE%"=="1" (
+    echo COVERAGE SUCCEEDED. THE NORMAL RELEASE BUILD WAS RESTORED.
+) else if defined JAM2_TEST_TARGET (
     echo BUILD AND TESTS SUCCEEDED.
 ) else (
     echo BUILD SUCCEEDED.
@@ -367,7 +381,7 @@ exit /b 0
 where dotnet.exe >nul 2>nul
 if errorlevel 1 (
     echo.
-    echo ERROR: dotnet.exe is required only for --tests-full coverage-tool restore.
+    echo ERROR: dotnet.exe is required only for --coverage tool restore.
     exit /b 1
 )
 

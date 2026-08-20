@@ -23,9 +23,10 @@ bash ./compile.sh --tests shared-content
 ```
 
 Use `--test-name <registered-name>` after a suite to isolate one CTest while
-developing. On Windows, use `--tests-full` only for the final instrumented and
-optimized distribution gate. On macOS, `--tests-full` runs the normal Release
-test catalogue once and does not collect source coverage.
+developing. On both platforms, `--tests-full` runs the complete normal Release
+test catalogue once. Windows source coverage is the separate, optional
+`--coverage` audit used after major feature work; it is not part of the baseline
+full-test command.
 
 ## What the native stress matrix proves
 
