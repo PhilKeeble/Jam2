@@ -219,6 +219,49 @@ void testOptionAndStatsContracts()
             copied.adaptive_playback_burst_events == 7,
         "CLI diagnostics copy the complete peer-stream snapshot categories");
 
+    jam2::PeerStreamStats firstGap;
+    firstGap.audio_packet_gap_min_us = 1200;
+    firstGap.audio_packet_gap_sum_us = 4000;
+    firstGap.audio_packet_gap_max_us = 2800;
+    firstGap.audio_packet_gap_samples = 2;
+    firstGap.audio_packet_gap_over_2x_count = 1;
+    jam2::PeerStreamStats secondGap;
+    secondGap.audio_packet_gap_min_us = 900;
+    secondGap.audio_packet_gap_sum_us = 5900;
+    secondGap.audio_packet_gap_max_us = 5000;
+    secondGap.audio_packet_gap_samples = 2;
+    secondGap.audio_packet_gap_over_2x_count = 1;
+    secondGap.audio_packet_gap_over_4x_count = 1;
+    jam2::cli::stats::AudioPacketStats aggregated;
+    jam2::cli::stats::add_peer_stream_stats(aggregated, firstGap);
+    jam2::cli::stats::add_peer_stream_stats(aggregated, secondGap);
+    expect(aggregated.audio_packet_gap_min_us == 900 &&
+            aggregated.audio_packet_gap_sum_us == 9900 &&
+            aggregated.audio_packet_gap_max_us == 5000 &&
+            aggregated.audio_packet_gap_samples == 4 &&
+            aggregated.audio_packet_gap_over_2x_count == 2 &&
+            aggregated.audio_packet_gap_over_4x_count == 1,
+        "mesh diagnostics aggregate exact packet-gap timing across peers");
+
+    jam2::cli::stats::ReceiveLoopDiagnostics receiveLoop;
+    receiveLoop.beginWake(1000);
+    receiveLoop.finishWake(0);
+    receiveLoop.beginWake(2200);
+    receiveLoop.finishWake(7);
+    receiveLoop.beginWake(7200);
+    receiveLoop.finishWake(64);
+    jam2::cli::stats::AudioPacketStats receiveLoopStats;
+    receiveLoop.applyTo(receiveLoopStats);
+    expect(receiveLoopStats.receive_loop_gap_min_us == 1200 &&
+            receiveLoopStats.receive_loop_gap_sum_us == 6200 &&
+            receiveLoopStats.receive_loop_gap_max_us == 5000 &&
+            receiveLoopStats.receive_loop_gap_samples == 2 &&
+            receiveLoopStats.recv_loop_iterations == 3 &&
+            receiveLoopStats.recv_loop_idle_count == 1 &&
+            receiveLoopStats.recv_loop_batch_sum == 71 &&
+            receiveLoopStats.recv_loop_batch_max == 64,
+        "receive-loop diagnostics expose scheduling gaps and bounded drain batches");
+
     Jam2RuntimeOptions statsOptions;
     statsOptions.sample_rate = 48000;
     statsOptions.frame_size = 64;

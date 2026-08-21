@@ -321,6 +321,24 @@ struct AudioPacketStats {
     OsSchedulingStatus os_scheduling;
 };
 
+class ReceiveLoopDiagnostics final {
+public:
+    void beginWake(std::uint64_t now_us) noexcept;
+    void finishWake(std::size_t received_packets) noexcept;
+    void applyTo(AudioPacketStats& target) const noexcept;
+
+private:
+    std::uint64_t last_wake_us_ = 0;
+    std::uint64_t gap_min_us_ = 0;
+    std::uint64_t gap_sum_us_ = 0;
+    std::uint64_t gap_max_us_ = 0;
+    std::uint64_t gap_samples_ = 0;
+    std::uint64_t iterations_ = 0;
+    std::uint64_t idle_count_ = 0;
+    std::uint64_t batch_sum_ = 0;
+    std::uint64_t batch_max_ = 0;
+};
+
 void print_udp_parse_stats(const UdpParseStats& stats, std::ostream& out = std::cout);
 void copy_peer_stream_stats(AudioPacketStats& target, const jam2::PeerStreamStats& source);
 void add_peer_stream_stats(AudioPacketStats& target, const jam2::PeerStreamStats& source);

@@ -15,6 +15,8 @@ namespace {
 
 constexpr std::uint64_t kDriftBaselineCalibrationUs = 250000;
 constexpr std::uint64_t kDriftMinimumObservationUs = 250000;
+constexpr std::uint64_t kDriftObservationWindowUs = 250000;
+constexpr double kDriftRatioSlewPpmPerSecond = 100.0;
 
 void observe_timing(
     std::uint64_t value,
@@ -121,6 +123,12 @@ struct PeerStream::Impl {
     std::uint64_t drift_calibration_best_receive_time_us = 0;
     long double drift_calibration_first_offset_us = 0.0L;
     long double drift_calibration_best_offset_us = 0.0L;
+    bool drift_observation_active = false;
+    std::uint64_t drift_observation_start_receive_time_us = 0;
+    std::uint64_t drift_observation_best_remote_sample_time = 0;
+    std::uint64_t drift_observation_best_receive_time_us = 0;
+    long double drift_observation_best_offset_us = 0.0L;
+    std::uint64_t drift_observation_packets = 0;
     std::uint64_t last_audio_receive_us = 0;
     std::uint64_t last_audio_gap_receive_us = 0;
     std::uint64_t adaptive_target_frames = 0;
@@ -229,6 +237,136 @@ struct PeerStream::Impl {
     {
         std::uint64_t unused_total = 0;
         observe_duration(below, now_us, tracker, event_count, unused_total, longest_us);
+    }
+
+    void beginDriftObservation(
+        const PendingAudioPacket& packet,
+        long double arrival_offset_us) noexcept
+    {
+        drift_observation_active = true;
+        drift_observation_start_receive_time_us = packet.receive_time;
+        drift_observation_best_remote_sample_time = packet.sample_time;
+        drift_observation_best_receive_time_us = packet.receive_time;
+        drift_observation_best_offset_us = arrival_offset_us;
+        drift_observation_packets = 1;
+    }
+
+    void applyDriftObservation() noexcept
+    {
+        if (!drift_observation_active ||
+            drift_observation_best_receive_time_us <= first_receive_time_us ||
+            drift_observation_best_remote_sample_time <= first_remote_sample_time ||
+            drift_observation_best_receive_time_us - first_receive_time_us <
+                kDriftMinimumObservationUs) {
+            return;
+        }
+        const double remote_elapsed_samples = static_cast<double>(
+            drift_observation_best_remote_sample_time - first_remote_sample_time);
+        const double remote_elapsed_us = remote_elapsed_samples * 1000000.0 /
+            static_cast<double>(config.sample_rate);
+        const double local_elapsed_us = static_cast<double>(
+            drift_observation_best_receive_time_us - first_receive_time_us);
+        stats.raw_drift_ppm =
+            ((remote_elapsed_us / local_elapsed_us) - 1.0) * 1000000.0;
+        if (!drift_smoothed || config.drift_smoothing >= 1.0) {
+            smoothed_drift_ppm = stats.raw_drift_ppm;
+            drift_smoothed = true;
+        } else if (config.drift_smoothing > 0.0) {
+            // The public smoothing control historically described a
+            // per-packet alpha. Apply the equivalent accumulated alpha to one
+            // low-delay observation per window so changing packet size does
+            // not change its time response.
+            const double retained = std::pow(
+                1.0 - config.drift_smoothing,
+                static_cast<double>(drift_observation_packets));
+            const double alpha = 1.0 - retained;
+            smoothed_drift_ppm +=
+                (stats.raw_drift_ppm - smoothed_drift_ppm) * alpha;
+        }
+        stats.drift_ppm = smoothed_drift_ppm;
+
+        const double max_ratio_delta =
+            static_cast<double>(config.drift_max_correction_ppm) / 1000000.0;
+        const bool inside_deadband =
+            std::abs(stats.drift_ppm) <= static_cast<double>(config.drift_deadband_ppm);
+        const double requested_ratio = config.drift_correction && !inside_deadband
+            ? 1.0 + stats.drift_ppm / 1000000.0
+            : 1.0;
+        const double bounded_ratio = std::clamp(
+            requested_ratio, 1.0 - max_ratio_delta, 1.0 + max_ratio_delta);
+        const bool correction_clamped = config.drift_correction && !inside_deadband &&
+            bounded_ratio != requested_ratio;
+
+        double applied_ratio = bounded_ratio;
+        if (previous_resampler_ratio_time_us != 0 &&
+            drift_observation_best_receive_time_us > previous_resampler_ratio_time_us) {
+            const double elapsed_seconds = static_cast<double>(
+                drift_observation_best_receive_time_us - previous_resampler_ratio_time_us) /
+                1000000.0;
+            const double maximum_change =
+                kDriftRatioSlewPpmPerSecond * elapsed_seconds / 1000000.0;
+            applied_ratio = std::clamp(
+                bounded_ratio,
+                previous_resampler_ratio - maximum_change,
+                previous_resampler_ratio + maximum_change);
+            if (elapsed_seconds > 0.0) {
+                const double change_ppm =
+                    std::abs(applied_ratio - previous_resampler_ratio) * 1000000.0;
+                stats.resampler_ratio_change_max_ppm_per_second = std::max(
+                    stats.resampler_ratio_change_max_ppm_per_second,
+                    change_ppm / elapsed_seconds);
+            }
+        }
+        stats.resampler_ratio = applied_ratio;
+        if (config.collect_diagnostics) {
+            if (stats.resampler_ratio_samples == 0) {
+                stats.resampler_ratio_min = applied_ratio;
+                stats.resampler_ratio_max = applied_ratio;
+            } else {
+                stats.resampler_ratio_min = std::min(
+                    stats.resampler_ratio_min, applied_ratio);
+                stats.resampler_ratio_max = std::max(
+                    stats.resampler_ratio_max, applied_ratio);
+            }
+            stats.resampler_ratio_sum += applied_ratio;
+            ++stats.resampler_ratio_samples;
+            if (applied_ratio != 1.0) {
+                ++stats.drift_correction_active_samples;
+            }
+            if (correction_clamped) {
+                ++stats.drift_correction_clamped_samples;
+            }
+        }
+        previous_resampler_ratio = applied_ratio;
+        previous_resampler_ratio_time_us =
+            drift_observation_best_receive_time_us;
+        if (playback != nullptr) {
+            playback->setResamplerRatio(applied_ratio);
+        }
+        stats.drift_valid = true;
+    }
+
+    void observeDriftWindow(
+        const PendingAudioPacket& packet,
+        long double arrival_offset_us) noexcept
+    {
+        if (!drift_observation_active) {
+            beginDriftObservation(packet, arrival_offset_us);
+            return;
+        }
+        if (packet.receive_time >= drift_observation_start_receive_time_us &&
+            packet.receive_time - drift_observation_start_receive_time_us >=
+                kDriftObservationWindowUs) {
+            applyDriftObservation();
+            beginDriftObservation(packet, arrival_offset_us);
+            return;
+        }
+        ++drift_observation_packets;
+        if (arrival_offset_us < drift_observation_best_offset_us) {
+            drift_observation_best_offset_us = arrival_offset_us;
+            drift_observation_best_remote_sample_time = packet.sample_time;
+            drift_observation_best_receive_time_us = packet.receive_time;
+        }
     }
 
     void processPacket(const PendingAudioPacket& packet) noexcept
@@ -451,69 +589,16 @@ struct PeerStream::Impl {
                         drift_calibration_best_remote_sample_time;
                     first_receive_time_us =
                         drift_calibration_best_receive_time_us;
+                    previous_resampler_ratio = 1.0;
+                    previous_resampler_ratio_time_us = first_receive_time_us;
                 }
             }
-            if (drift_started &&
-                packet.receive_time > first_receive_time_us &&
-                packet.sample_time > first_remote_sample_time &&
-                packet.receive_time - first_receive_time_us >=
-                    kDriftMinimumObservationUs) {
-                const double remote_elapsed_samples = static_cast<double>(packet.sample_time - first_remote_sample_time);
-                const double remote_elapsed_us = remote_elapsed_samples * 1000000.0 /
-                    static_cast<double>(config.sample_rate);
-                const double local_elapsed_us = static_cast<double>(packet.receive_time - first_receive_time_us);
-                stats.raw_drift_ppm = ((remote_elapsed_us / local_elapsed_us) - 1.0) * 1000000.0;
-                if (!drift_smoothed || config.drift_smoothing >= 1.0) {
-                    smoothed_drift_ppm = stats.raw_drift_ppm;
-                    drift_smoothed = true;
-                } else if (config.drift_smoothing > 0.0) {
-                    smoothed_drift_ppm +=
-                        (stats.raw_drift_ppm - smoothed_drift_ppm) * config.drift_smoothing;
-                }
-                stats.drift_ppm = smoothed_drift_ppm;
-                const double max_ratio_delta = static_cast<double>(config.drift_max_correction_ppm) / 1000000.0;
-                const double raw_ratio = 1.0 + stats.drift_ppm / 1000000.0;
-                const bool inside_deadband =
-                    std::abs(stats.drift_ppm) <= static_cast<double>(config.drift_deadband_ppm);
-                stats.resampler_ratio = config.drift_correction && !inside_deadband
-                    ? std::clamp(raw_ratio, 1.0 - max_ratio_delta, 1.0 + max_ratio_delta)
-                    : 1.0;
-                if (config.collect_diagnostics) {
-                    if (stats.resampler_ratio_samples == 0) {
-                        stats.resampler_ratio_min = stats.resampler_ratio;
-                        stats.resampler_ratio_max = stats.resampler_ratio;
-                    } else {
-                        stats.resampler_ratio_min = std::min(stats.resampler_ratio_min, stats.resampler_ratio);
-                        stats.resampler_ratio_max = std::max(stats.resampler_ratio_max, stats.resampler_ratio);
-                    }
-                    stats.resampler_ratio_sum += stats.resampler_ratio;
-                    ++stats.resampler_ratio_samples;
-                    if (stats.resampler_ratio != 1.0) {
-                        ++stats.drift_correction_active_samples;
-                    }
-                    if (config.drift_correction && !inside_deadband &&
-                        (stats.resampler_ratio == 1.0 - max_ratio_delta ||
-                         stats.resampler_ratio == 1.0 + max_ratio_delta)) {
-                        ++stats.drift_correction_clamped_samples;
-                    }
-                    if (previous_resampler_ratio_time_us != 0 && packet.receive_time > previous_resampler_ratio_time_us) {
-                        const double delta_ppm =
-                            std::abs(stats.resampler_ratio - previous_resampler_ratio) * 1000000.0;
-                        const double delta_seconds =
-                            static_cast<double>(packet.receive_time - previous_resampler_ratio_time_us) / 1000000.0;
-                        if (delta_seconds > 0.0) {
-                            stats.resampler_ratio_change_max_ppm_per_second = std::max(
-                                stats.resampler_ratio_change_max_ppm_per_second,
-                                delta_ppm / delta_seconds);
-                        }
-                    }
-                    previous_resampler_ratio = stats.resampler_ratio;
-                    previous_resampler_ratio_time_us = packet.receive_time;
-                }
-                if (playback != nullptr) {
-                    playback->setResamplerRatio(stats.resampler_ratio);
-                }
-                stats.drift_valid = true;
+            if (drift_started) {
+                // Socket dequeue time includes network and scheduler delay.
+                // Feed the estimator only the lowest-delay packet in each
+                // bounded window so a queued burst cannot be interpreted as
+                // an oscillator-rate change.
+                observeDriftWindow(packet, arrival_offset_us);
             }
         }
 

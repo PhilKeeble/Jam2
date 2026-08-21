@@ -365,6 +365,55 @@ struct PeerMixer::Impl {
         }
     }
 
+    void updateAdaptiveReleaseState(
+        bool missing,
+        bool allow_start,
+        bool source_ready) noexcept
+    {
+        if (!config.adaptive_playback_cushion || output == nullptr) {
+            if (missing) {
+                adaptive_release_active = false;
+            }
+            return;
+        }
+        const int effective_release_ppm = config.adaptive_release_ppm;
+        const std::uint64_t actual_depth = output->depthFrames();
+        const std::uint64_t release_stop_tolerance =
+            static_cast<std::uint64_t>(config.frames_per_block) * 4ULL;
+        const std::uint64_t release_start_tolerance =
+            static_cast<std::uint64_t>(config.frames_per_block) * 7ULL;
+        const bool actual_depth_above_start =
+            actual_depth > adaptive_target_frames &&
+            actual_depth - adaptive_target_frames > release_start_tolerance;
+        const bool actual_depth_at_stop =
+            actual_depth <= adaptive_target_frames ||
+            actual_depth - adaptive_target_frames <= release_stop_tolerance;
+
+        const bool recovery_cushion_active =
+            adaptive_target_frames > config.adaptive_min_frames;
+        if (missing || !source_ready || !recovery_cushion_active) {
+            adaptive_release_active = false;
+        } else {
+            // Output depth changes in the device callback even when no peer
+            // block is ready. Stop release as soon as the peer runway is gone,
+            // and never use ordinary packet batching at the minimum target as
+            // a reason to accelerate playback. Only cushion explicitly raised
+            // after an underrun may be retired at a non-unity ratio.
+            if (adaptive_release_active && actual_depth_at_stop) {
+                adaptive_release_active = false;
+            }
+            if (!adaptive_release_active && allow_start &&
+                effective_release_ppm > 0 && actual_depth_above_start) {
+                adaptive_release_active = true;
+            }
+        }
+        const bool releasing = !missing && source_ready &&
+            recovery_cushion_active && effective_release_ppm > 0 &&
+            adaptive_release_active;
+        output->setResamplerRatio(
+            releasing ? 1.0 + static_cast<double>(effective_release_ppm) / 1000000.0 : 1.0);
+    }
+
     void updateAdaptiveTarget(std::uint64_t now_us, bool missing) noexcept
     {
         if (!config.adaptive_playback_cushion) {
@@ -404,39 +453,7 @@ struct PeerMixer::Impl {
                 ++stats.adaptive_release_events;
             }
         }
-        if (output != nullptr) {
-            const int effective_release_ppm = config.adaptive_release_ppm;
-            const std::uint64_t actual_depth = output->depthFrames();
-            const std::uint64_t release_stop_tolerance =
-                static_cast<std::uint64_t>(config.frames_per_block) * 4ULL;
-            const std::uint64_t release_start_tolerance =
-                static_cast<std::uint64_t>(config.frames_per_block) * 7ULL;
-            const bool actual_depth_above_start =
-                actual_depth > adaptive_target_frames &&
-                actual_depth - adaptive_target_frames > release_start_tolerance;
-            const bool actual_depth_at_stop =
-                actual_depth <= adaptive_target_frames ||
-                actual_depth - adaptive_target_frames <= release_stop_tolerance;
-            // Keep draining the real device ring after the target counter reaches
-            // its minimum. Otherwise a burst can leave a permanent latency tail
-            // even though the diagnostic target appears to have recovered. The
-            // separate start/stop bands prevent normal callback-scale depth
-            // movement from repeatedly restarting the audible ratio ramp.
-            if (!missing && effective_release_ppm > 0 &&
-                (adaptive_target_frames > config.adaptive_min_frames ||
-                 actual_depth_above_start)) {
-                adaptive_release_active = true;
-            }
-            if (adaptive_release_active &&
-                adaptive_target_frames == config.adaptive_min_frames &&
-                actual_depth_at_stop) {
-                adaptive_release_active = false;
-            }
-            const bool releasing = !missing && effective_release_ppm > 0 &&
-                adaptive_release_active;
-            output->setResamplerRatio(
-                releasing ? 1.0 + static_cast<double>(effective_release_ppm) / 1000000.0 : 1.0);
-        }
+        updateAdaptiveReleaseState(missing, true, anyContributorReady());
         adaptive_last_update_us = now_us;
         stats.adaptive_target_frames = adaptive_target_frames;
     }
@@ -581,6 +598,8 @@ struct PeerMixer::Impl {
         bool output_underrun_observed =
             output_underrun_frames > observed_output_underrun_frames;
         observed_output_underrun_frames = output_underrun_frames;
+        updateAdaptiveReleaseState(
+            output_underrun_observed, false, anyContributorReady());
         std::size_t work = 0;
         while (work < config.max_blocks_per_advance) {
             if (outputAtLimit()) {
@@ -635,21 +654,15 @@ struct PeerMixer::Impl {
             }
             updateOccupancy();
         }
-        // A release ratio above unity deliberately drains excess device-ring
-        // depth. Replacing those drained frames with silence creates a closed
-        // feedback loop: playback stays fast, the ring never reaches its stop
-        // band, and small zero-filled gaps are injected indefinitely. Real
-        // audio released during this advance must likewise remain ahead of
-        // any cushion recovery. Only an otherwise-idle advance may pad, and
-        // an observed device underrun first cancels release and raises the
-        // bounded adaptive target.
-        if (!anyContributorReady() && work == 0) {
-            if (output_underrun_observed) {
-                updateAdaptiveTarget(now_us, true);
-            }
-            if (!adaptive_release_active) {
-                ensureAdaptiveCushion();
-            }
+        // Initial prefill owns proactive cushion silence. After playback has
+        // started, an empty packet queue is only a transient scheduling state;
+        // padding it recreates the exact speed-up/silence feedback loop that
+        // release is meant to remove. Recovery padding is therefore permitted
+        // only after the device reports a real underrun and no real block was
+        // available during this advance.
+        if (!anyContributorReady() && work == 0 && output_underrun_observed) {
+            updateAdaptiveTarget(now_us, true);
+            ensureAdaptiveCushion();
         }
         if (work == config.max_blocks_per_advance &&
             (allContributorsReady() || now_us >= next_deadline_us)) {

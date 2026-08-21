@@ -328,6 +328,44 @@ void testPeerStreamDriftCalibrationRejectsDequeuedBurst()
     expect(driftingStats.resampler_ratio > 1.00015 &&
             driftingStats.resampler_ratio < 1.00025,
         "genuine clock drift still drives proportional peer resampling");
+
+    BufferSink recurringBurstSink;
+    config.stats_warmup_us = 0;
+    config.drift_smoothing = 0.02;
+    config.collect_diagnostics = true;
+    jam2::PeerStream recurringBursts(config, 0, &recurringBurstSink);
+    for (std::uint32_t sequence = 0; sequence < 12000; ++sequence) {
+        const std::uint64_t nominal = nominalReceiveTime(sequence);
+        const std::uint32_t position = sequence % 750U;
+        const std::uint64_t secondStart = nominalReceiveTime(sequence - position);
+        const std::uint64_t receiveTimeUs = position < 68U
+            ? secondStart + 90000ULL + static_cast<std::uint64_t>(position)
+            : nominal;
+        const jam2::protocol::Header header{
+            jam2::protocol::PacketType::Audio,
+            1,
+            sequence,
+            static_cast<std::uint64_t>(sequence) * 64ULL,
+            static_cast<std::uint16_t>(payload.size()),
+            0,
+        };
+        expect(recurringBursts.receiveAudio(header, payload, receiveTimeUs) ==
+                jam2::PeerAudioResult::Accepted,
+            "drift estimator accepts recurring lossless dequeue bursts");
+    }
+    const auto& recurringStats = recurringBursts.stats();
+    const double recurringAverageRatio = recurringStats.resampler_ratio_samples > 0
+        ? recurringStats.resampler_ratio_sum /
+            static_cast<double>(recurringStats.resampler_ratio_samples)
+        : 0.0;
+    expect(std::abs(recurringStats.raw_drift_ppm) < 25.0 &&
+            std::abs(recurringStats.drift_ppm) < 25.0,
+        "recurring dequeue bursts do not masquerade as clock drift");
+    expect(recurringStats.drift_correction_clamped_samples == 0 &&
+            recurringAverageRatio > 0.999975 && recurringAverageRatio < 1.000025,
+        "recurring dequeue bursts neither clamp nor bias peer resampling");
+    expect(recurringStats.resampler_ratio_change_max_ppm_per_second <= 101.0,
+        "peer drift correction obeys its bounded ratio slew");
 }
 
 void testUdpStunAndSessionBoundaries()

@@ -16,6 +16,45 @@
 
 namespace jam2::cli::stats {
 
+void ReceiveLoopDiagnostics::beginWake(std::uint64_t now_us) noexcept
+{
+    if (last_wake_us_ != 0 && now_us >= last_wake_us_) {
+        const std::uint64_t gap = now_us - last_wake_us_;
+        if (gap_samples_ == 0 || gap < gap_min_us_) {
+            gap_min_us_ = gap;
+        }
+        gap_sum_us_ += gap;
+        gap_max_us_ = std::max(gap_max_us_, gap);
+        ++gap_samples_;
+    }
+    last_wake_us_ = now_us;
+    ++iterations_;
+}
+
+void ReceiveLoopDiagnostics::finishWake(std::size_t received_packets) noexcept
+{
+    const std::uint64_t batch = static_cast<std::uint64_t>(received_packets);
+    batch_sum_ += batch;
+    batch_max_ = std::max(batch_max_, batch);
+    if (batch == 0) {
+        ++idle_count_;
+    }
+}
+
+void ReceiveLoopDiagnostics::applyTo(AudioPacketStats& target) const noexcept
+{
+    target.receive_loop_gap_min_us = gap_min_us_;
+    target.receive_loop_gap_sum_us = gap_sum_us_;
+    target.receive_loop_gap_max_us = gap_max_us_;
+    target.receive_loop_gap_samples = gap_samples_;
+    target.receive_burst_packets_max = batch_max_;
+    target.receive_packets_per_loop_max = batch_max_;
+    target.recv_loop_iterations = iterations_;
+    target.recv_loop_idle_count = idle_count_;
+    target.recv_loop_batch_sum = batch_sum_;
+    target.recv_loop_batch_max = batch_max_;
+}
+
 double unit_from_ppm(int value)
 {
     return static_cast<double>(std::clamp(value, 0, 1000000)) / 1000000.0;
@@ -218,6 +257,21 @@ void add_peer_stream_stats(
         target.jitter_max_us = std::max(target.jitter_max_us, source.jitter_max_us);
         target.jitter_samples += source.jitter_samples;
     }
+    if (source.audio_packet_gap_samples > 0) {
+        if (target.audio_packet_gap_samples == 0 ||
+            source.audio_packet_gap_min_us < target.audio_packet_gap_min_us) {
+            target.audio_packet_gap_min_us = source.audio_packet_gap_min_us;
+        }
+        target.audio_packet_gap_sum_us += source.audio_packet_gap_sum_us;
+        target.audio_packet_gap_max_us = std::max(
+            target.audio_packet_gap_max_us,
+            source.audio_packet_gap_max_us);
+        target.audio_packet_gap_samples += source.audio_packet_gap_samples;
+    }
+    target.audio_packet_gap_over_2x_count +=
+        source.audio_packet_gap_over_2x_count;
+    target.audio_packet_gap_over_4x_count +=
+        source.audio_packet_gap_over_4x_count;
     if (source.rtt_samples > 0) {
         if (target.recv_pongs == 0 || source.rtt_min_us < target.rtt_min_us) {
             target.rtt_min_us = source.rtt_min_us;

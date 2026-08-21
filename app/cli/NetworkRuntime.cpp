@@ -1766,6 +1766,7 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
     std::vector<std::uint8_t> packed_audio_payload(audio_payload_size);
     std::uint64_t mesh_work_budget_yields = 0;
     std::uint64_t mesh_receive_batch_max = 0;
+    jam2::cli::stats::ReceiveLoopDiagnostics mesh_receive_loop_diagnostics;
     std::uint64_t last_local_grid_request_sequence =
         commands.state.grid_request_sequence.load(std::memory_order_acquire);
     std::optional<jam2::GridProposal> pending_local_grid_proposal;
@@ -2151,6 +2152,7 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
         stats.jitter_buffer_max_frames = static_cast<std::uint64_t>(options.jitter_buffer_max_frames);
         stats.udp_work_budget_yields = mesh_work_budget_yields;
         stats.udp_receive_batch_max = mesh_receive_batch_max;
+        mesh_receive_loop_diagnostics.applyTo(stats);
         for (const auto& entry : peers) {
             const auto& peer = entry.second;
             stats.sent_packets += peer.sent_packets;
@@ -2660,14 +2662,6 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                 if (runtime_host.log) runtime_host.log(line);
             }
         }
-        if (now >= next_operational_snapshot) {
-            publish_operational_snapshot();
-            next_operational_snapshot = now + 100000ULL;
-        }
-        if (next_connection_diagnostics != 0 && now >= next_connection_diagnostics) {
-            publish_connection_diagnostics(now);
-            next_connection_diagnostics = now + 2000000ULL;
-        }
         if (!timed_stream_clock_armed && options.stream_ms > 0 && network_session.activePeerCount() > 0) {
             send_deadline = now + static_cast<std::uint64_t>(options.stream_ms) * 1000ULL;
             receive_deadline = send_deadline +
@@ -3152,21 +3146,8 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
             next_transport_send = now + 20000ULL;
         }
 
-        if (commands.state.print_stats.exchange(false, std::memory_order_relaxed) ||
-            commands.state.print_status.exchange(false, std::memory_order_relaxed)) {
-            print_mesh_stats(now);
-        }
-        if (next_stats != 0 && now >= next_stats) {
-            if (csv_log) {
-                csv_log->write_periodic(
-                    (now - start_time) / 1000ULL,
-                    aggregate_stats(),
-                    options,
-                    make_audio_snapshot(audio.engine.get()));
-            }
-            next_stats += static_cast<std::uint64_t>(options.stats_interval_ms) * 1000ULL;
-        }
-
+        const std::uint64_t receive_loop_start_us = jam2::monotonic_us();
+        mesh_receive_loop_diagnostics.beginWake(receive_loop_start_us);
         bool received_any = false;
         std::size_t mesh_datagrams_this_wake = 0;
         while (mesh_datagrams_this_wake < 64) {
@@ -3769,6 +3750,7 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
         mesh_receive_batch_max = std::max<std::uint64_t>(
             mesh_receive_batch_max,
             static_cast<std::uint64_t>(mesh_datagrams_this_wake));
+        mesh_receive_loop_diagnostics.finishWake(mesh_datagrams_this_wake);
         if (mesh_datagrams_this_wake == 64) {
             ++mesh_work_budget_yields;
         }
@@ -3778,6 +3760,30 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
         // cadence for a source gap and place adaptive silence immediately in
         // front of audio received later in the same wake.
         network_session.advance(jam2::monotonic_us());
+        const std::uint64_t stats_now = jam2::monotonic_us();
+        if (stats_now >= next_operational_snapshot) {
+            publish_operational_snapshot();
+            next_operational_snapshot = stats_now + 100000ULL;
+        }
+        if (next_connection_diagnostics != 0 &&
+            stats_now >= next_connection_diagnostics) {
+            publish_connection_diagnostics(stats_now);
+            next_connection_diagnostics = stats_now + 2000000ULL;
+        }
+        if (commands.state.print_stats.exchange(false, std::memory_order_relaxed) ||
+            commands.state.print_status.exchange(false, std::memory_order_relaxed)) {
+            print_mesh_stats(stats_now);
+        }
+        if (next_stats != 0 && stats_now >= next_stats) {
+            if (csv_log) {
+                csv_log->write_periodic(
+                    (stats_now - start_time) / 1000ULL,
+                    aggregate_stats(),
+                    options,
+                    make_audio_snapshot(audio.engine.get()));
+            }
+            next_stats += static_cast<std::uint64_t>(options.stats_interval_ms) * 1000ULL;
+        }
     }
 
     const std::uint64_t now = jam2::monotonic_us();
