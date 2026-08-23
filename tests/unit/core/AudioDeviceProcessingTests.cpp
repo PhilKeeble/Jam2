@@ -1,10 +1,14 @@
 #include "audio_device_processing.hpp"
 #include "engine.hpp"
+#if defined(JAM2_PLATFORM_MACOS)
+#include "coreaudio_buffer_processing.hpp"
+#endif
 
 #include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cstddef>
 #include <cmath>
 #include <cstdint>
 #include <iostream>
@@ -16,6 +20,9 @@
 namespace {
 
 namespace processing = jam2::audio::device_processing;
+#if defined(JAM2_PLATFORM_MACOS)
+namespace coreaudio = jam2::audio::coreaudio_processing;
+#endif
 
 int failures = 0;
 
@@ -139,6 +146,112 @@ void testOptionalDriverOutputReadyState()
                 unsupported.status)) == "unsupported",
         "an unsupported output-ready probe remains a non-error no-op");
 }
+
+#if defined(JAM2_PLATFORM_MACOS)
+template <std::size_t BufferCount>
+struct AudioBufferListStorage {
+    alignas(AudioBufferList) std::array<std::byte,
+        offsetof(AudioBufferList, mBuffers) + BufferCount * sizeof(AudioBuffer)> bytes{};
+
+    AudioBufferList* get()
+    {
+        auto* list = reinterpret_cast<AudioBufferList*>(bytes.data());
+        list->mNumberBuffers = static_cast<UInt32>(BufferCount);
+        return list;
+    }
+};
+
+void testCoreAudioBufferProcessing()
+{
+    std::array<float, 6> interleaved{
+        -1.0F, 0.25F,
+        0.0F, 0.5F,
+        1.0F, -0.25F,
+    };
+    AudioBufferListStorage<1> interleavedStorage;
+    AudioBufferList* interleavedList = interleavedStorage.get();
+    interleavedList->mBuffers[0] = AudioBuffer{
+        2,
+        static_cast<UInt32>(interleaved.size() * sizeof(float)),
+        interleaved.data(),
+    };
+    const coreaudio::ConstFloatChannelView right =
+        coreaudio::input_channel(interleavedList, 1);
+    std::array<std::int32_t, 3> converted{};
+    coreaudio::copy_input_channel(right, converted);
+    expect(coreaudio::buffer_frames(interleavedList) == 3 &&
+            right.available() && right.stride == 2 && right.frames == 3 &&
+            converted[0] == 536870911 &&
+            converted[1] == 1073741823 &&
+            converted[2] == -536870911,
+        "CoreAudio interleaved input resolves once and converts the selected strided channel");
+
+    std::array<float, 3> leftOutput{9.0F, 9.0F, 9.0F};
+    std::array<float, 3> rightOutput{8.0F, 8.0F, 8.0F};
+    AudioBufferListStorage<2> planarStorage;
+    AudioBufferList* planarList = planarStorage.get();
+    planarList->mBuffers[0] = AudioBuffer{
+        1,
+        static_cast<UInt32>(leftOutput.size() * sizeof(float)),
+        leftOutput.data(),
+    };
+    planarList->mBuffers[1] = AudioBuffer{
+        1,
+        static_cast<UInt32>(rightOutput.size() * sizeof(float)),
+        rightOutput.data(),
+    };
+    const std::array<coreaudio::FloatChannelView, 2> outputs{
+        coreaudio::output_channel(planarList, 0),
+        coreaudio::output_channel(planarList, 1),
+    };
+    const std::array<std::int32_t, 3> mono{
+        (std::numeric_limits<std::int32_t>::min)(),
+        0,
+        (std::numeric_limits<std::int32_t>::max)(),
+    };
+    coreaudio::write_mono_output(mono, outputs);
+    expect(outputs[0].available() && outputs[1].available() &&
+            outputs[0].stride == 1 && outputs[1].stride == 1 &&
+            leftOutput[0] == -1.0F && rightOutput[0] == -1.0F &&
+            leftOutput[1] == 0.0F && rightOutput[1] == 0.0F &&
+            leftOutput[2] > 0.999999F && rightOutput[2] == leftOutput[2],
+        "CoreAudio planar output converts mono once per frame and fans out to selected channels");
+
+    std::array<float, 4> enabledStream{0.1F, 0.2F, 0.3F, 0.4F};
+    AudioBufferListStorage<2> disabledStorage;
+    AudioBufferList* disabledList = disabledStorage.get();
+    disabledList->mBuffers[0] = AudioBuffer{
+        2,
+        static_cast<UInt32>(4 * 2 * sizeof(float)),
+        nullptr,
+    };
+    disabledList->mBuffers[1] = AudioBuffer{
+        1,
+        static_cast<UInt32>(enabledStream.size() * sizeof(float)),
+        enabledStream.data(),
+    };
+    const coreaudio::ConstFloatChannelView disabled =
+        coreaudio::input_channel(disabledList, 0);
+    const coreaudio::ConstFloatChannelView enabled =
+        coreaudio::input_channel(disabledList, 2);
+    std::array<std::int32_t, 4> disabledSamples{1, 2, 3, 4};
+    coreaudio::copy_input_channel(disabled, disabledSamples);
+    expect(coreaudio::buffer_frames(disabledList) == 4 &&
+            !disabled.available() && enabled.available() &&
+            enabled.samples[0] == 0.1F &&
+            std::all_of(disabledSamples.begin(), disabledSamples.end(),
+                [](std::int32_t sample) { return sample == 0; }),
+        "CoreAudio disabled streams retain global channel numbering and render selected null input as silence");
+
+    expect(coreaudio::float_to_i32(-2.0F) == -2147483647 &&
+            coreaudio::float_to_i32(-1.0F) == -2147483647 &&
+            coreaudio::float_to_i32(0.0F) == 0 &&
+            coreaudio::float_to_i32(1.0F) == 2147483647 &&
+            coreaudio::float_to_i32(2.0F) == 2147483647 &&
+            coreaudio::i32_to_float((std::numeric_limits<std::int32_t>::min)()) == -1.0F,
+        "CoreAudio Float32 and Q31 conversion preserves silence, clipping, and rail behavior");
+}
+#endif
 
 void testNetworkPlaybackTimelineCoherence()
 {
@@ -789,6 +902,9 @@ int main()
 {
     testCallbackTiming();
     testOptionalDriverOutputReadyState();
+#if defined(JAM2_PLATFORM_MACOS)
+    testCoreAudioBufferProcessing();
+#endif
     testNetworkPlaybackTimelineCoherence();
     testPeakGainAndMixing();
     testPlaybackResampler();

@@ -826,6 +826,18 @@ void print_periodic_stream_stats(
               << audio.driver_output_ready_error
               << " driver_output_ready_latency_reduction_frames="
               << audio.driver_output_ready_latency_reduction_frames
+              << " audio_callback_frames_min="
+              << audio.callback_timing.frame_min
+              << " audio_callback_frames_max="
+              << audio.callback_timing.frame_max
+              << " audio_callback_frame_capacity_exceeded="
+              << audio.callback_timing.frame_capacity_exceeded
+              << " coreaudio_processor_overloads="
+              << audio.callback_timing.processor_overloads
+              << " coreaudio_abnormal_stops="
+              << audio.callback_timing.abnormal_stops
+              << " coreaudio_cycle_jitter_max_us="
+              << static_cast<double>(audio.callback_timing.cycle_jitter_max_ns) / 1000.0
               << " input_downmix_selected_channels=" << audio.input_downmix.selected_channels
               << " input_downmix_effective_weight="
               << static_cast<double>(audio.input_downmix.effective_weight_ppm) / 1000000.0

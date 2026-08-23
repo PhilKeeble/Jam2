@@ -327,6 +327,17 @@ void testOptionAndStatsContracts()
     audio.driver_output_ready_status =
         jam2::audio::DriverOutputReadyStatus::Active;
     audio.driver_output_ready_latency_reduction_frames = 32;
+    audio.stream.maximum_callback_frames = 64;
+    audio.stream.variable_callback_frames = true;
+    audio.stream.input_device_latency_frames = 8;
+    audio.stream.input_safety_offset_frames = 24;
+    audio.stream.input_stream_latency_frames = 4;
+    audio.callback_timing.frame_min = 32;
+    audio.callback_timing.frame_max = 64;
+    audio.callback_timing.frame_samples = 10;
+    audio.callback_timing.processor_overloads = 2;
+    audio.callback_timing.cycle_jitter_max_ns = 125000;
+    audio.callback_timing.cycle_jitter_samples = 9;
     QTemporaryDir statsRoot;
     expect(statsRoot.isValid(), "CLI stats test creates a temporary artifact root");
     std::filesystem::path statsCsvPath;
@@ -362,8 +373,8 @@ void testOptionAndStatsContracts()
         };
         const bool schemaMatches = opened && lines.size() == 2 &&
                 csvFieldCount(header) == csvFieldCount(finalRow) &&
-                header.endsWith("capture_clock_packet_pacing_active") &&
-                finalRow.endsWith(",yes");
+                header.endsWith("coreaudio_cycle_jitter_samples") &&
+                finalRow.endsWith(",9");
         expect(schemaMatches,
             "final CSV preserves the capture-clock pacing field and schema width");
     }
@@ -391,6 +402,12 @@ void testOptionAndStatsContracts()
                 std::string::npos &&
             capture.output.str().find(
                 "driver_output_ready_latency_reduction_frames=32") !=
+                std::string::npos &&
+            capture.output.str().find("audio_callback_frames_max=64") !=
+                std::string::npos &&
+            capture.output.str().find("coreaudio_processor_overloads=2") !=
+                std::string::npos &&
+            capture.output.str().find("coreaudio_cycle_jitter_max_us=125") !=
                 std::string::npos,
         "periodic CLI diagnostics emit exact raw stream counters");
 

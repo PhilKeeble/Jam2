@@ -673,7 +673,26 @@ public:
                 "driver_input_latency_frames,driver_output_latency_frames,"
                 "driver_output_ready_status,driver_output_ready_error,"
                 "driver_output_ready_latency_reduction_frames,"
-                "capture_clock_packet_pacing_active\n";
+                "capture_clock_packet_pacing_active,"
+                "maximum_audio_callback_frames,variable_audio_callback_frames,"
+                "actual_audio_callback_frames_min,actual_audio_callback_frames_max,"
+                "actual_audio_callback_frames_samples,audio_callback_frame_capacity_exceeded,"
+                "coreaudio_input_device_latency_frames,coreaudio_input_safety_offset_frames,"
+                "coreaudio_input_stream_latency_frames,coreaudio_output_device_latency_frames,"
+                "coreaudio_output_safety_offset_frames,coreaudio_output_stream_latency_frames,"
+                "coreaudio_input_stream_count,coreaudio_output_stream_count,"
+                "coreaudio_overload_listener_active,coreaudio_overload_listener_error,"
+                "coreaudio_abnormal_stop_listener_active,coreaudio_abnormal_stop_listener_error,"
+                "coreaudio_processor_overloads,coreaudio_abnormal_stops,"
+                "coreaudio_timestamp_callbacks,coreaudio_timestamp_invalid_callbacks,"
+                "coreaudio_cycle_to_callback_min_us,coreaudio_cycle_to_callback_avg_us,"
+                "coreaudio_cycle_to_callback_max_us,coreaudio_cycle_to_callback_samples,"
+                "coreaudio_input_to_cycle_min_us,coreaudio_input_to_cycle_avg_us,"
+                "coreaudio_input_to_cycle_max_us,coreaudio_input_to_cycle_samples,"
+                "coreaudio_cycle_to_output_min_us,coreaudio_cycle_to_output_avg_us,"
+                "coreaudio_cycle_to_output_max_us,coreaudio_cycle_to_output_samples,"
+                "coreaudio_cycle_jitter_min_us,coreaudio_cycle_jitter_avg_us,"
+                "coreaudio_cycle_jitter_max_us,coreaudio_cycle_jitter_samples\n";
     }
 
     explicit operator bool() const { return out_.is_open(); }
@@ -1168,7 +1187,53 @@ public:
                     audio.driver_output_ready_status)) << ','
              << audio.driver_output_ready_error << ','
              << audio.driver_output_ready_latency_reduction_frames << ','
-             << (stats.capture_clock_packet_pacing_active ? "yes" : "no");
+             << (stats.capture_clock_packet_pacing_active ? "yes" : "no") << ','
+             << audio.stream.maximum_callback_frames << ','
+             << (audio.stream.variable_callback_frames ? "yes" : "no") << ','
+             << audio.callback_timing.frame_min << ','
+             << audio.callback_timing.frame_max << ','
+             << audio.callback_timing.frame_samples << ','
+             << audio.callback_timing.frame_capacity_exceeded << ','
+             << audio.stream.input_device_latency_frames << ','
+             << audio.stream.input_safety_offset_frames << ','
+             << audio.stream.input_stream_latency_frames << ','
+             << audio.stream.output_device_latency_frames << ','
+             << audio.stream.output_safety_offset_frames << ','
+             << audio.stream.output_stream_latency_frames << ','
+             << audio.stream.input_stream_count << ','
+             << audio.stream.output_stream_count << ','
+             << (audio.stream.processor_overload_listener_active ? "yes" : "no") << ','
+             << audio.stream.processor_overload_listener_error << ','
+             << (audio.stream.abnormal_stop_listener_active ? "yes" : "no") << ','
+             << audio.stream.abnormal_stop_listener_error << ','
+             << audio.callback_timing.processor_overloads << ','
+             << audio.callback_timing.abnormal_stops << ','
+             << audio.callback_timing.timestamp_callbacks << ','
+             << audio.callback_timing.timestamp_invalid_callbacks << ','
+             << static_cast<double>(audio.callback_timing.cycle_to_callback_min_ns) / 1000.0 << ','
+             << static_cast<double>(avg_u64(
+                    audio.callback_timing.cycle_to_callback_sum_ns,
+                    audio.callback_timing.cycle_to_callback_samples)) / 1000.0 << ','
+             << static_cast<double>(audio.callback_timing.cycle_to_callback_max_ns) / 1000.0 << ','
+             << audio.callback_timing.cycle_to_callback_samples << ','
+             << static_cast<double>(audio.callback_timing.input_to_cycle_min_ns) / 1000.0 << ','
+             << static_cast<double>(avg_u64(
+                    audio.callback_timing.input_to_cycle_sum_ns,
+                    audio.callback_timing.input_to_cycle_samples)) / 1000.0 << ','
+             << static_cast<double>(audio.callback_timing.input_to_cycle_max_ns) / 1000.0 << ','
+             << audio.callback_timing.input_to_cycle_samples << ','
+             << static_cast<double>(audio.callback_timing.cycle_to_output_min_ns) / 1000.0 << ','
+             << static_cast<double>(avg_u64(
+                    audio.callback_timing.cycle_to_output_sum_ns,
+                    audio.callback_timing.cycle_to_output_samples)) / 1000.0 << ','
+             << static_cast<double>(audio.callback_timing.cycle_to_output_max_ns) / 1000.0 << ','
+             << audio.callback_timing.cycle_to_output_samples << ','
+             << static_cast<double>(audio.callback_timing.cycle_jitter_min_ns) / 1000.0 << ','
+             << static_cast<double>(avg_u64(
+                    audio.callback_timing.cycle_jitter_sum_ns,
+                    audio.callback_timing.cycle_jitter_samples)) / 1000.0 << ','
+             << static_cast<double>(audio.callback_timing.cycle_jitter_max_ns) / 1000.0 << ','
+             << audio.callback_timing.cycle_jitter_samples;
         out_ << '\n';
         if (row_type == "final") {
             out_.flush();
@@ -1184,7 +1249,7 @@ public:
         if (!out_) {
             return;
         }
-        std::vector<std::string> fields(450);
+        std::vector<std::string> fields(488);
         auto set = [&](std::size_t index, auto value) {
             std::ostringstream text;
             text << value;
@@ -1607,6 +1672,52 @@ public:
         set(447, audio.driver_output_ready_error);
         set(448, audio.driver_output_ready_latency_reduction_frames);
         fields[449] = stats.capture_clock_packet_pacing_active ? "yes" : "no";
+        set(450, audio.stream.maximum_callback_frames);
+        fields[451] = audio.stream.variable_callback_frames ? "yes" : "no";
+        set(452, audio.callback_timing.frame_min);
+        set(453, audio.callback_timing.frame_max);
+        set(454, audio.callback_timing.frame_samples);
+        set(455, audio.callback_timing.frame_capacity_exceeded);
+        set(456, audio.stream.input_device_latency_frames);
+        set(457, audio.stream.input_safety_offset_frames);
+        set(458, audio.stream.input_stream_latency_frames);
+        set(459, audio.stream.output_device_latency_frames);
+        set(460, audio.stream.output_safety_offset_frames);
+        set(461, audio.stream.output_stream_latency_frames);
+        set(462, audio.stream.input_stream_count);
+        set(463, audio.stream.output_stream_count);
+        fields[464] = audio.stream.processor_overload_listener_active ? "yes" : "no";
+        set(465, audio.stream.processor_overload_listener_error);
+        fields[466] = audio.stream.abnormal_stop_listener_active ? "yes" : "no";
+        set(467, audio.stream.abnormal_stop_listener_error);
+        set(468, audio.callback_timing.processor_overloads);
+        set(469, audio.callback_timing.abnormal_stops);
+        set(470, audio.callback_timing.timestamp_callbacks);
+        set(471, audio.callback_timing.timestamp_invalid_callbacks);
+        set(472, static_cast<double>(audio.callback_timing.cycle_to_callback_min_ns) / 1000.0);
+        set(473, static_cast<double>(avg_u64(
+            audio.callback_timing.cycle_to_callback_sum_ns,
+            audio.callback_timing.cycle_to_callback_samples)) / 1000.0);
+        set(474, static_cast<double>(audio.callback_timing.cycle_to_callback_max_ns) / 1000.0);
+        set(475, audio.callback_timing.cycle_to_callback_samples);
+        set(476, static_cast<double>(audio.callback_timing.input_to_cycle_min_ns) / 1000.0);
+        set(477, static_cast<double>(avg_u64(
+            audio.callback_timing.input_to_cycle_sum_ns,
+            audio.callback_timing.input_to_cycle_samples)) / 1000.0);
+        set(478, static_cast<double>(audio.callback_timing.input_to_cycle_max_ns) / 1000.0);
+        set(479, audio.callback_timing.input_to_cycle_samples);
+        set(480, static_cast<double>(audio.callback_timing.cycle_to_output_min_ns) / 1000.0);
+        set(481, static_cast<double>(avg_u64(
+            audio.callback_timing.cycle_to_output_sum_ns,
+            audio.callback_timing.cycle_to_output_samples)) / 1000.0);
+        set(482, static_cast<double>(audio.callback_timing.cycle_to_output_max_ns) / 1000.0);
+        set(483, audio.callback_timing.cycle_to_output_samples);
+        set(484, static_cast<double>(audio.callback_timing.cycle_jitter_min_ns) / 1000.0);
+        set(485, static_cast<double>(avg_u64(
+            audio.callback_timing.cycle_jitter_sum_ns,
+            audio.callback_timing.cycle_jitter_samples)) / 1000.0);
+        set(486, static_cast<double>(audio.callback_timing.cycle_jitter_max_ns) / 1000.0);
+        set(487, audio.callback_timing.cycle_jitter_samples);
 
         for (std::size_t i = 0; i < fields.size(); ++i) {
             if (i != 0) {

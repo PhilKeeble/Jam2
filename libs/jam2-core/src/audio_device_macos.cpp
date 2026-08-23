@@ -1,5 +1,6 @@
 #include "audio_device.hpp"
 #include "audio_device_processing.hpp"
+#include "coreaudio_buffer_processing.hpp"
 
 #include <CoreAudio/CoreAudio.h>
 #include <CoreFoundation/CoreFoundation.h>
@@ -9,7 +10,6 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
-#include <cstring>
 #include <limits>
 #include <sstream>
 #include <span>
@@ -23,11 +23,17 @@ namespace jam2::audio {
 namespace {
 
 namespace processing = device_processing;
+namespace coreaudio = coreaudio_processing;
 
 constexpr AudioObjectPropertyElement kMainElement = kAudioObjectPropertyElementMain;
 constexpr double kSampleRateToleranceHz = 1.0;
 constexpr auto kDeviceConfigurationPollInterval = std::chrono::milliseconds(10);
 constexpr auto kDeviceConfigurationTimeout = std::chrono::milliseconds(3000);
+// CoreAudio timestamps are stable across adjacent device cycles. Keep exact
+// valid/invalid counts and callback-gap/fault counters, but sample the more
+// expensive host-time conversion aggregates often enough for tuning without
+// paying for four conversions on every sub-millisecond callback.
+constexpr std::uint64_t kTimestampTimingSampleMask = 0x0f;
 
 std::string osstatus_text(OSStatus status)
 {
@@ -130,6 +136,27 @@ std::vector<AudioObjectID> get_device_ids()
             "AudioObjectGetPropertyData devices");
     }
     return devices;
+}
+
+std::vector<AudioObjectID> get_object_ids(
+    AudioObjectID object,
+    AudioObjectPropertySelector selector,
+    AudioObjectPropertyScope scope)
+{
+    auto property = address(selector, scope);
+    if (!has_property(object, property)) {
+        return {};
+    }
+    const UInt32 size = property_size(object, property);
+    std::vector<AudioObjectID> objects(size / sizeof(AudioObjectID));
+    if (!objects.empty()) {
+        UInt32 mutable_size = size;
+        require_ok(
+            AudioObjectGetPropertyData(
+                object, &property, 0, nullptr, &mutable_size, objects.data()),
+            "AudioObjectGetPropertyData object list");
+    }
+    return objects;
 }
 
 std::string cf_string_to_string(CFStringRef value)
@@ -267,20 +294,37 @@ std::string format_flags(UInt32 flags)
     return out;
 }
 
-std::string format_description(AudioObjectID device, AudioObjectPropertyScope scope)
+std::string stream_format_description(
+    AudioObjectID stream,
+    std::size_t stream_index)
 {
     AudioStreamBasicDescription desc{};
-    if (!try_get_property(device, address(kAudioDevicePropertyStreamFormat, scope), desc)) {
-        return "format=unknown";
+    if (!try_get_property(
+            stream,
+            address(kAudioStreamPropertyVirtualFormat),
+            desc)) {
+        return "stream" + std::to_string(stream_index) + "_format=unknown";
     }
     std::ostringstream out;
-    out << "format_id=" << desc.mFormatID
+    out << "stream" << stream_index
+        << "_format_id=" << desc.mFormatID
         << " rate=" << desc.mSampleRate
         << " channels_per_frame=" << desc.mChannelsPerFrame
         << " bits_per_channel=" << desc.mBitsPerChannel
         << " bytes_per_frame=" << desc.mBytesPerFrame
         << " frames_per_packet=" << desc.mFramesPerPacket
         << " flags=" << format_flags(desc.mFormatFlags);
+    return out.str();
+}
+
+std::string format_description(AudioObjectID device, AudioObjectPropertyScope scope)
+{
+    const auto streams = get_object_ids(device, kAudioDevicePropertyStreams, scope);
+    std::ostringstream out;
+    out << "streams=" << streams.size();
+    for (std::size_t stream_index = 0; stream_index < streams.size(); ++stream_index) {
+        out << " " << stream_format_description(streams[stream_index], stream_index);
+    }
     return out.str();
 }
 
@@ -400,22 +444,6 @@ SelectedDevice select_device(int id)
     return SelectedDevice{make_device_info(id, devices[static_cast<std::size_t>(id)]), devices[static_cast<std::size_t>(id)]};
 }
 
-std::size_t buffer_frames(const AudioBufferList* buffers);
-float read_float_channel(const AudioBufferList* buffers, std::size_t frame, UInt32 channel);
-void write_float_channel(AudioBufferList* buffers, std::size_t frame, UInt32 channel, float value);
-std::int32_t float_to_i32(float sample);
-float i32_to_float(std::int32_t sample);
-
-void clear_output(AudioBufferList* output)
-{
-    if (output == nullptr) {
-        return;
-    }
-    for (UInt32 i = 0; i < output->mNumberBuffers; ++i) {
-        std::memset(output->mBuffers[i].mData, 0, output->mBuffers[i].mDataByteSize);
-    }
-}
-
 void configure_device(AudioObjectID device, double requested_sample_rate, long requested_buffer_size)
 {
     if (requested_sample_rate > 0.0) {
@@ -442,87 +470,84 @@ void configure_device(AudioObjectID device, double requested_sample_rate, long r
 
 bool is_supported_float32_format(AudioObjectID device, AudioObjectPropertyScope scope)
 {
-    AudioStreamBasicDescription desc{};
-    if (!try_get_property(device, address(kAudioDevicePropertyStreamFormat, scope), desc)) {
+    const auto streams = get_object_ids(device, kAudioDevicePropertyStreams, scope);
+    if (streams.empty()) {
         return false;
     }
-    return desc.mFormatID == kAudioFormatLinearPCM &&
-        (desc.mFormatFlags & kAudioFormatFlagIsFloat) != 0 &&
-        desc.mBitsPerChannel == 32 &&
-        desc.mBytesPerFrame >= sizeof(float) &&
-        desc.mFramesPerPacket == 1;
+    return std::all_of(streams.begin(), streams.end(), [](AudioObjectID stream) {
+        AudioStreamBasicDescription desc{};
+        if (!try_get_property(
+                stream,
+                address(kAudioStreamPropertyVirtualFormat),
+                desc)) {
+            return false;
+        }
+        const bool non_interleaved =
+            (desc.mFormatFlags & kAudioFormatFlagIsNonInterleaved) != 0;
+        const UInt32 expected_bytes_per_frame = static_cast<UInt32>(sizeof(float)) *
+            (non_interleaved ? 1U : desc.mChannelsPerFrame);
+        return desc.mFormatID == kAudioFormatLinearPCM &&
+            (desc.mFormatFlags & kAudioFormatFlagIsFloat) != 0 &&
+            (desc.mFormatFlags & kAudioFormatFlagIsPacked) != 0 &&
+            desc.mBitsPerChannel == 32 &&
+            desc.mChannelsPerFrame > 0 &&
+            desc.mBytesPerFrame == expected_bytes_per_frame &&
+            desc.mFramesPerPacket == 1 &&
+            desc.mBytesPerPacket == expected_bytes_per_frame;
+    });
 }
 
-std::size_t buffer_frames(const AudioBufferList* buffers)
+long maximum_stream_latency_frames(
+    AudioObjectID device,
+    AudioObjectPropertyScope scope)
 {
-    if (buffers == nullptr || buffers->mNumberBuffers == 0) {
-        return 0;
+    const auto streams = get_object_ids(device, kAudioDevicePropertyStreams, scope);
+    UInt32 maximum = 0;
+    for (AudioObjectID stream : streams) {
+        maximum = std::max(
+            maximum,
+            get_u32_property_or_zero(stream, kAudioStreamPropertyLatency));
     }
-    std::size_t frames = static_cast<std::size_t>(-1);
-    for (UInt32 i = 0; i < buffers->mNumberBuffers; ++i) {
-        const AudioBuffer& buffer = buffers->mBuffers[i];
-        if (buffer.mData == nullptr || buffer.mNumberChannels == 0) {
-            return 0;
-        }
-        frames = std::min(
-            frames,
-            static_cast<std::size_t>(buffer.mDataByteSize) /
-                (sizeof(float) * static_cast<std::size_t>(buffer.mNumberChannels)));
-    }
-    return frames == static_cast<std::size_t>(-1) ? 0 : frames;
+    return static_cast<long>(maximum);
 }
 
-float read_float_channel(const AudioBufferList* buffers, std::size_t frame, UInt32 channel)
+struct AtomicTimingAggregate {
+    std::atomic<std::uint64_t> minimum{
+        (std::numeric_limits<std::uint64_t>::max)()};
+    std::atomic<std::uint64_t> sum{0};
+    std::atomic<std::uint64_t> maximum{0};
+    std::atomic<std::uint64_t> samples{0};
+};
+
+void observe_timing(AtomicTimingAggregate& state, std::uint64_t nanoseconds) noexcept
 {
-    if (buffers == nullptr) {
-        return 0.0F;
+    const std::uint64_t minimum = state.minimum.load(std::memory_order_relaxed);
+    if (nanoseconds < minimum) {
+        state.minimum.store(nanoseconds, std::memory_order_relaxed);
     }
-    UInt32 base_channel = 0;
-    for (UInt32 buffer_index = 0; buffer_index < buffers->mNumberBuffers; ++buffer_index) {
-        const AudioBuffer& buffer = buffers->mBuffers[buffer_index];
-        if (buffer.mData == nullptr || buffer.mNumberChannels == 0) {
-            continue;
-        }
-        if (channel >= base_channel && channel < base_channel + buffer.mNumberChannels) {
-            const UInt32 local_channel = channel - base_channel;
-            const auto* samples = static_cast<const float*>(buffer.mData);
-            return samples[(frame * static_cast<std::size_t>(buffer.mNumberChannels)) + local_channel];
-        }
-        base_channel += buffer.mNumberChannels;
+    const std::uint64_t maximum = state.maximum.load(std::memory_order_relaxed);
+    if (nanoseconds > maximum) {
+        state.maximum.store(nanoseconds, std::memory_order_relaxed);
     }
-    return 0.0F;
+    state.sum.store(
+        state.sum.load(std::memory_order_relaxed) + nanoseconds,
+        std::memory_order_relaxed);
+    state.samples.store(
+        state.samples.load(std::memory_order_relaxed) + 1,
+        std::memory_order_relaxed);
 }
 
-void write_float_channel(AudioBufferList* buffers, std::size_t frame, UInt32 channel, float value)
+std::uint64_t host_time_delta_ns(
+    std::uint64_t later,
+    std::uint64_t earlier) noexcept
 {
-    if (buffers == nullptr) {
-        return;
-    }
-    UInt32 base_channel = 0;
-    for (UInt32 buffer_index = 0; buffer_index < buffers->mNumberBuffers; ++buffer_index) {
-        AudioBuffer& buffer = buffers->mBuffers[buffer_index];
-        if (buffer.mData == nullptr || buffer.mNumberChannels == 0) {
-            continue;
-        }
-        if (channel >= base_channel && channel < base_channel + buffer.mNumberChannels) {
-            const UInt32 local_channel = channel - base_channel;
-            auto* samples = static_cast<float*>(buffer.mData);
-            samples[(frame * static_cast<std::size_t>(buffer.mNumberChannels)) + local_channel] = value;
-            return;
-        }
-        base_channel += buffer.mNumberChannels;
-    }
+    return later >= earlier ? AudioConvertHostTimeToNanos(later - earlier) : 0;
 }
 
-std::int32_t float_to_i32(float sample)
+bool has_host_time(const AudioTimeStamp* timestamp) noexcept
 {
-    const double clamped = std::clamp(static_cast<double>(sample), -1.0, 1.0);
-    return static_cast<std::int32_t>(clamped * 2147483647.0);
-}
-
-float i32_to_float(std::int32_t sample)
-{
-    return static_cast<float>(std::clamp(static_cast<double>(sample) / 2147483648.0, -1.0, 1.0));
+    return timestamp != nullptr &&
+        (timestamp->mFlags & kAudioTimeStampHostTimeValid) != 0;
 }
 
 struct CoreAudioDuplexContext {
@@ -537,6 +562,8 @@ struct CoreAudioDuplexContext {
     std::vector<std::int32_t> capture_scratch;
     std::vector<std::int32_t> physical_input_scratch;
     std::vector<const std::int32_t*> input_source_pointers;
+    std::vector<coreaudio::ConstFloatChannelView> input_channel_views;
+    std::vector<coreaudio::FloatChannelView> output_channel_views;
     std::vector<double> input_peak_scratch;
     SmoothedMonoDownmix input_downmix;
     std::vector<std::int32_t> playback_scratch;
@@ -555,32 +582,142 @@ struct CoreAudioDuplexContext {
     std::atomic<long> callbacks{0};
     std::atomic<bool> playback_prefilled{false};
     processing::CallbackIntervalState callback_intervals;
+    std::atomic<std::uint64_t> callback_frame_min{
+        (std::numeric_limits<std::uint64_t>::max)()};
+    std::atomic<std::uint64_t> callback_frame_max{0};
+    std::atomic<std::uint64_t> callback_frame_samples{0};
+    std::atomic<std::uint64_t> callback_frame_capacity_exceeded{0};
+    std::atomic<std::uint64_t> processor_overloads{0};
+    std::atomic<std::uint64_t> abnormal_stops{0};
+    std::atomic<std::uint64_t> timestamp_callbacks{0};
+    std::atomic<std::uint64_t> timestamp_invalid_callbacks{0};
+    AtomicTimingAggregate cycle_to_callback;
+    AtomicTimingAggregate input_to_cycle;
+    AtomicTimingAggregate cycle_to_output;
+    AtomicTimingAggregate cycle_jitter;
+    std::uint64_t last_cycle_host_time = 0;
+    std::size_t last_cycle_frames = 0;
     std::uint64_t callback_generation = 0;
     processing::MetronomeWaveBank metronome_wave_bank;
 };
 
+OSStatus device_property_listener(
+    AudioObjectID,
+    UInt32 address_count,
+    const AudioObjectPropertyAddress addresses[],
+    void* client_data)
+{
+    auto* context = static_cast<CoreAudioDuplexContext*>(client_data);
+    if (context == nullptr || addresses == nullptr) {
+        return noErr;
+    }
+    for (UInt32 index = 0; index < address_count; ++index) {
+        if (addresses[index].mSelector == kAudioDeviceProcessorOverload) {
+            context->processor_overloads.fetch_add(1, std::memory_order_relaxed);
+        } else if (addresses[index].mSelector == kAudioDevicePropertyIOStoppedAbnormally) {
+            context->abnormal_stops.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+    return noErr;
+}
+
 OSStatus duplex_io_proc(
     AudioObjectID,
-    const AudioTimeStamp*,
+    const AudioTimeStamp* now,
     const AudioBufferList* input,
-    const AudioTimeStamp*,
+    const AudioTimeStamp* input_time,
     AudioBufferList* output,
-    const AudioTimeStamp*,
+    const AudioTimeStamp* output_time,
     void* client_data)
 {
     auto* context = static_cast<CoreAudioDuplexContext*>(client_data);
     if (context == nullptr || context->capture == nullptr || context->playback == nullptr) {
-        clear_output(output);
         return noErr;
     }
     const std::uint64_t callback_start_us = processing::callback_now_us();
+    const std::size_t input_buffer_frames = coreaudio::buffer_frames(input);
+    const std::size_t output_buffer_frames = coreaudio::buffer_frames(output);
+    const std::size_t callback_frames = std::max(input_buffer_frames, output_buffer_frames);
+    if (has_host_time(now)) {
+        const std::uint64_t timestamp_callbacks =
+            context->timestamp_callbacks.load(std::memory_order_relaxed) + 1;
+        context->timestamp_callbacks.store(
+            timestamp_callbacks,
+            std::memory_order_relaxed);
+        const bool sample_timing =
+            (timestamp_callbacks & kTimestampTimingSampleMask) == 1;
+        if (sample_timing) {
+            const std::uint64_t callback_host_time = AudioGetCurrentHostTime();
+            observe_timing(
+                context->cycle_to_callback,
+                host_time_delta_ns(callback_host_time, now->mHostTime));
+            if (has_host_time(input_time)) {
+                observe_timing(
+                    context->input_to_cycle,
+                    host_time_delta_ns(now->mHostTime, input_time->mHostTime));
+            }
+            if (has_host_time(output_time)) {
+                observe_timing(
+                    context->cycle_to_output,
+                    host_time_delta_ns(output_time->mHostTime, now->mHostTime));
+            }
+        }
+        if (sample_timing &&
+            context->last_cycle_host_time != 0 &&
+            context->last_cycle_frames > 0 &&
+            context->sample_rate > 0.0 &&
+            now->mHostTime >= context->last_cycle_host_time) {
+            const std::uint64_t actual_ns = host_time_delta_ns(
+                now->mHostTime, context->last_cycle_host_time);
+            const std::uint64_t expected_ns = static_cast<std::uint64_t>(std::llround(
+                static_cast<double>(context->last_cycle_frames) * 1000000000.0 /
+                context->sample_rate));
+            observe_timing(
+                context->cycle_jitter,
+                actual_ns >= expected_ns
+                    ? actual_ns - expected_ns
+                    : expected_ns - actual_ns);
+        }
+        context->last_cycle_host_time = now->mHostTime;
+        context->last_cycle_frames = callback_frames;
+    } else {
+        context->timestamp_invalid_callbacks.store(
+            context->timestamp_invalid_callbacks.load(std::memory_order_relaxed) + 1,
+            std::memory_order_relaxed);
+    }
+    if (callback_frames > 0) {
+        const std::uint64_t minimum =
+            context->callback_frame_min.load(std::memory_order_relaxed);
+        if (callback_frames < minimum) {
+            context->callback_frame_min.store(
+                static_cast<std::uint64_t>(callback_frames),
+                std::memory_order_relaxed);
+        }
+        const std::uint64_t maximum =
+            context->callback_frame_max.load(std::memory_order_relaxed);
+        if (callback_frames > maximum) {
+            context->callback_frame_max.store(
+                static_cast<std::uint64_t>(callback_frames),
+                std::memory_order_relaxed);
+        }
+        context->callback_frame_samples.store(
+            context->callback_frame_samples.load(std::memory_order_relaxed) + 1,
+            std::memory_order_relaxed);
+        if (callback_frames > context->capture_scratch.size() ||
+            callback_frames > context->playback_scratch.size()) {
+            context->callback_frame_capacity_exceeded.store(
+                context->callback_frame_capacity_exceeded.load(
+                    std::memory_order_relaxed) + 1,
+                std::memory_order_relaxed);
+        }
+    }
     processing::publish_callback_begin(
         context->control,
         context->callback_generation);
     processing::observe_callback_interval(
         context->callback_intervals,
         callback_start_us,
-        context->playback_scratch.size(),
+        callback_frames,
         context->sample_rate);
     const bool network_capture_enabled = context->control != nullptr &&
         prepare_network_capture_callback(
@@ -604,7 +741,8 @@ OSStatus duplex_io_proc(
         (current_jam_take &&
          (track_take_options & kTrackTakeIncludeMetronome) != 0);
     const bool recording_scratch_required = track_take_armed || jam_recording_active;
-    const std::size_t output_frames_for_input = std::min(buffer_frames(output), context->recorder_my_input_scratch.size());
+    const std::size_t output_frames_for_input = std::min(
+        output_buffer_frames, context->recorder_my_input_scratch.size());
     if (recording_scratch_required && output_frames_for_input > 0) {
         std::fill(
             context->recorder_my_input_scratch.begin(),
@@ -615,9 +753,10 @@ OSStatus duplex_io_proc(
     const int test_input_mode = context->control != nullptr ?
         context->control->test_input_mode.load(std::memory_order_relaxed) :
         0;
-    const std::size_t input_frames = std::min(buffer_frames(input), context->capture_scratch.size());
+    const std::size_t input_frames = std::min(input_buffer_frames, context->capture_scratch.size());
     if (test_input_mode != 0 && !context->capture_scratch.empty()) {
-        const std::size_t generated_frames = std::min(buffer_frames(output), context->capture_scratch.size());
+        const std::size_t generated_frames = std::min(
+            output_buffer_frames, context->capture_scratch.size());
         auto generated = std::span<std::int32_t>(context->capture_scratch.data(), generated_frames);
         processing::fill_test_input(
             context->control,
@@ -661,17 +800,19 @@ OSStatus duplex_io_proc(
             std::copy(generated.begin(), generated.end(), context->recorder_my_input_scratch.begin());
         }
     } else if (input_frames > 0) {
+        for (std::size_t selected = 0; selected < context->channels.input.size(); ++selected) {
+            context->input_channel_views[selected] = coreaudio::input_channel(
+                input, static_cast<UInt32>(context->channels.input[selected]));
+        }
         auto* source_router = context->control != nullptr ?
             context->control->input_source_router : nullptr;
         if (source_router != nullptr) {
             for (std::size_t selected = 0; selected < context->channels.input.size(); ++selected) {
                 auto* destination = context->physical_input_scratch.data() + selected * context->capture_scratch.size();
                 context->input_source_pointers[selected] = destination;
-                const int channel = context->channels.input[selected];
-                for (std::size_t frame = 0; frame < input_frames; ++frame) {
-                    destination[frame] = float_to_i32(read_float_channel(
-                        input, frame, static_cast<UInt32>(channel)));
-                }
+                coreaudio::copy_input_channel(
+                    context->input_channel_views[selected],
+                    std::span<std::int32_t>(destination, input_frames));
             }
             const bool routed = source_router->process(
                 std::span<const std::int32_t* const>(context->input_source_pointers.data(),
@@ -690,15 +831,15 @@ OSStatus duplex_io_proc(
              selected < context->channels.input.size();
              ++selected) {
             double peak = 0.0;
-            const int channel = context->channels.input[selected];
+            const coreaudio::ConstFloatChannelView source =
+                context->input_channel_views[selected];
             for (std::size_t frame = 0; frame < input_frames; ++frame) {
+                const float sample = source.available() && frame < source.frames
+                    ? source.samples[frame * source.stride]
+                    : 0.0F;
                 peak = std::max(
                     peak,
-                    std::abs(static_cast<double>(
-                        read_float_channel(
-                            input,
-                            frame,
-                            static_cast<UInt32>(channel)))));
+                    std::abs(static_cast<double>(sample)));
             }
             context->input_peak_scratch[selected] = peak;
         }
@@ -715,14 +856,16 @@ OSStatus duplex_io_proc(
             for (std::size_t selected = 0;
                  selected < context->channels.input.size();
                  ++selected) {
-                sum += static_cast<double>(read_float_channel(
-                           input,
-                           frame,
-                           static_cast<UInt32>(context->channels.input[selected]))) *
+                const coreaudio::ConstFloatChannelView source =
+                    context->input_channel_views[selected];
+                const float sample = source.available() && frame < source.frames
+                    ? source.samples[frame * source.stride]
+                    : 0.0F;
+                sum += static_cast<double>(sample) *
                     context->input_downmix.weightAt(selected, frame);
             }
             const double mixed = sum * context->input_downmix.normalizationAt(frame);
-            context->capture_scratch[frame] = float_to_i32(
+            context->capture_scratch[frame] = coreaudio::float_to_i32(
                 static_cast<float>(std::clamp(mixed, -1.0, 1.0)));
         }
         }
@@ -764,7 +907,8 @@ OSStatus duplex_io_proc(
         }
     }
 
-    const std::size_t output_frames = std::min(buffer_frames(output), context->playback_scratch.size());
+    const std::size_t output_frames = std::min(
+        output_buffer_frames, context->playback_scratch.size());
     if (output_frames > 0) {
         auto playback = std::span<std::int32_t>(context->playback_scratch.data(), output_frames);
         const bool network_playback_enabled = context->control != nullptr &&
@@ -901,15 +1045,13 @@ OSStatus duplex_io_proc(
                 std::span<const std::int32_t>(context->recorder_metronome_scratch.data(), playback.size()),
             });
         }
-        for (std::size_t frame = 0; frame < output_frames; ++frame) {
-            const float sample = i32_to_float(context->playback_scratch[frame]);
-            for (int channel : context->channels.output) {
-                write_float_channel(output, frame, static_cast<UInt32>(channel), sample);
-            }
+        for (std::size_t selected = 0; selected < context->channels.output.size(); ++selected) {
+            context->output_channel_views[selected] = coreaudio::output_channel(
+                output, static_cast<UInt32>(context->channels.output[selected]));
         }
+        coreaudio::write_mono_output(playback, context->output_channel_views);
     }
 
-    const std::size_t callback_frames = std::max(buffer_frames(input), buffer_frames(output));
     context->engine_frame_counter += static_cast<std::uint64_t>(callback_frames);
     if (context->control != nullptr) {
         context->control->engine_frame_counter.store(context->engine_frame_counter, std::memory_order_release);
@@ -917,7 +1059,9 @@ OSStatus duplex_io_proc(
     processing::publish_callback_end(
         context->control,
         context->callback_generation);
-    context->callbacks.fetch_add(1, std::memory_order_relaxed);
+    context->callbacks.store(
+        context->callbacks.load(std::memory_order_relaxed) + 1,
+        std::memory_order_relaxed);
     processing::observe_callback_work(
         context->callback_intervals,
         callback_start_us,
@@ -931,6 +1075,8 @@ public:
         AudioObjectID device,
         DeviceInfo info,
         long buffer_size,
+        long maximum_callback_frames,
+        bool variable_callback_frames,
         InputChannels input_channels,
         ChannelSelection channels,
         MonoRingBuffer& capture_ring,
@@ -944,6 +1090,8 @@ public:
         : device_(device),
           info_(std::move(info)),
           buffer_size_(buffer_size),
+          maximum_callback_frames_(maximum_callback_frames),
+          variable_callback_frames_(variable_callback_frames),
           input_channels_(input_channels),
           channels_(channels),
           sample_rate_(sample_rate)
@@ -956,32 +1104,45 @@ public:
         context_.control = &control;
         context_.recorder = recorder;
         context_.track_take_recorder = track_take_recorder;
-        context_.capture_scratch.resize(static_cast<std::size_t>(buffer_size));
+        const std::size_t scratch_frames = static_cast<std::size_t>(maximum_callback_frames);
+        context_.capture_scratch.resize(scratch_frames);
         context_.physical_input_scratch.resize(
-            channels.input.size() * static_cast<std::size_t>(buffer_size));
+            channels.input.size() * scratch_frames);
         context_.input_source_pointers.resize(channels.input.size());
+        context_.input_channel_views.resize(channels.input.size());
+        context_.output_channel_views.resize(channels.output.size());
         context_.input_peak_scratch.resize(channels.input.size());
         context_.input_downmix.configure(
-            channels.input.size(), sample_rate, static_cast<std::size_t>(buffer_size));
+            channels.input.size(), sample_rate, scratch_frames);
         control.input_downmix_selected_channels.store(
             static_cast<int>(channels.input.size()), std::memory_order_relaxed);
-        context_.playback_scratch.resize(static_cast<std::size_t>(buffer_size));
+        context_.playback_scratch.resize(scratch_frames);
         context_.playback_resampler_scratch.resize(
-            static_cast<std::size_t>(buffer_size) * 2U + 2U);
-        context_.recorder_my_input_scratch.resize(static_cast<std::size_t>(buffer_size));
-        context_.recorder_their_input_scratch.resize(static_cast<std::size_t>(buffer_size));
-        context_.recorder_inputs_mix_scratch.resize(static_cast<std::size_t>(buffer_size));
-        context_.recorder_metronome_scratch.resize(static_cast<std::size_t>(buffer_size));
-        context_.recorder_prepared_scratch.resize(static_cast<std::size_t>(buffer_size));
+            scratch_frames * 2U + 2U);
+        context_.recorder_my_input_scratch.resize(scratch_frames);
+        context_.recorder_their_input_scratch.resize(scratch_frames);
+        context_.recorder_inputs_mix_scratch.resize(scratch_frames);
+        context_.recorder_metronome_scratch.resize(scratch_frames);
+        context_.recorder_prepared_scratch.resize(scratch_frames);
         context_.playback_prefill_frames = playback_prefill_frames;
         context_.sample_rate = sample_rate;
         context_.metronome_wave_bank.prepare(sample_rate);
-        input_latency_frames_ = static_cast<long>(
-            get_u32_property_or_zero(device_, kAudioDevicePropertyLatency, kAudioDevicePropertyScopeInput) +
-            get_u32_property_or_zero(device_, kAudioDevicePropertySafetyOffset, kAudioDevicePropertyScopeInput));
-        output_latency_frames_ = channels_.output.empty() ? 0L : static_cast<long>(
-            get_u32_property_or_zero(device_, kAudioDevicePropertyLatency, kAudioDevicePropertyScopeOutput) +
-            get_u32_property_or_zero(device_, kAudioDevicePropertySafetyOffset, kAudioDevicePropertyScopeOutput));
+        input_device_latency_frames_ = static_cast<long>(get_u32_property_or_zero(
+            device_, kAudioDevicePropertyLatency, kAudioDevicePropertyScopeInput));
+        input_safety_offset_frames_ = static_cast<long>(get_u32_property_or_zero(
+            device_, kAudioDevicePropertySafetyOffset, kAudioDevicePropertyScopeInput));
+        input_stream_latency_frames_ = maximum_stream_latency_frames(
+            device_, kAudioDevicePropertyScopeInput);
+        output_device_latency_frames_ = channels_.output.empty() ? 0L : static_cast<long>(
+            get_u32_property_or_zero(
+                device_, kAudioDevicePropertyLatency, kAudioDevicePropertyScopeOutput));
+        output_safety_offset_frames_ = channels_.output.empty() ? 0L : static_cast<long>(
+            get_u32_property_or_zero(
+                device_, kAudioDevicePropertySafetyOffset, kAudioDevicePropertyScopeOutput));
+        output_stream_latency_frames_ = channels_.output.empty() ? 0L :
+            maximum_stream_latency_frames(device_, kAudioDevicePropertyScopeOutput);
+        input_latency_frames_ = input_device_latency_frames_ + input_safety_offset_frames_;
+        output_latency_frames_ = output_device_latency_frames_ + output_safety_offset_frames_;
         control.input_latency_frames.store(
             static_cast<std::uint32_t>(std::max(0L, input_latency_frames_)),
             std::memory_order_relaxed);
@@ -996,6 +1157,14 @@ public:
         require_ok(
             AudioDeviceCreateIOProcID(device_, duplex_io_proc, &context_, &proc_id_),
             "AudioDeviceCreateIOProcID");
+        register_property_listener(
+            kAudioDeviceProcessorOverload,
+            processor_overload_listener_active_,
+            processor_overload_listener_error_);
+        register_property_listener(
+            kAudioDevicePropertyIOStoppedAbnormally,
+            abnormal_stop_listener_active_,
+            abnormal_stop_listener_error_);
     }
 
     ~CoreAudioDeviceStream() override
@@ -1004,6 +1173,12 @@ public:
             if (started_) {
                 (void)AudioDeviceStop(device_, proc_id_);
             }
+            remove_property_listener(
+                kAudioDeviceProcessorOverload,
+                processor_overload_listener_active_);
+            remove_property_listener(
+                kAudioDevicePropertyIOStoppedAbnormally,
+                abnormal_stop_listener_active_);
             (void)AudioDeviceDestroyIOProcID(device_, proc_id_);
         }
     }
@@ -1033,8 +1208,26 @@ public:
         result.device = info_;
         result.sample_rate = sample_rate_;
         result.buffer_size = buffer_size_;
+        result.maximum_callback_frames = maximum_callback_frames_;
+        result.variable_callback_frames = variable_callback_frames_;
         result.input_latency_frames = input_latency_frames_;
         result.output_latency_frames = output_latency_frames_;
+        result.input_device_latency_frames = input_device_latency_frames_;
+        result.input_safety_offset_frames = input_safety_offset_frames_;
+        result.input_stream_latency_frames = input_stream_latency_frames_;
+        result.output_device_latency_frames = output_device_latency_frames_;
+        result.output_safety_offset_frames = output_safety_offset_frames_;
+        result.output_stream_latency_frames = output_stream_latency_frames_;
+        result.input_stream_count = get_object_ids(
+            device_, kAudioDevicePropertyStreams, kAudioDevicePropertyScopeInput).size();
+        result.output_stream_count = get_object_ids(
+            device_, kAudioDevicePropertyStreams, kAudioDevicePropertyScopeOutput).size();
+        result.processor_overload_listener_active =
+            processor_overload_listener_active_;
+        result.processor_overload_listener_error =
+            processor_overload_listener_error_;
+        result.abnormal_stop_listener_active = abnormal_stop_listener_active_;
+        result.abnormal_stop_listener_error = abnormal_stop_listener_error_;
         result.input_channels = input_channels_;
         result.channels = channels_;
         result.sample_format = "CoreAudio Float32 packed";
@@ -1043,7 +1236,7 @@ public:
 
     CallbackTimingStats callback_timing_stats() const override
     {
-        return CallbackTimingStats{
+        CallbackTimingStats result{
             context_.callback_intervals.minimumUs.load(std::memory_order_relaxed),
             context_.callback_intervals.sumUs.load(std::memory_order_relaxed),
             context_.callback_intervals.maximumUs.load(std::memory_order_relaxed),
@@ -1056,16 +1249,110 @@ public:
             context_.callback_intervals.workMaximumUs.load(std::memory_order_relaxed),
             context_.callback_intervals.workSamples.load(std::memory_order_relaxed),
         };
+        const std::uint64_t frame_samples =
+            context_.callback_frame_samples.load(std::memory_order_relaxed);
+        result.frame_min = frame_samples > 0
+            ? context_.callback_frame_min.load(std::memory_order_relaxed)
+            : 0;
+        result.frame_max = context_.callback_frame_max.load(std::memory_order_relaxed);
+        result.frame_samples = frame_samples;
+        result.frame_capacity_exceeded =
+            context_.callback_frame_capacity_exceeded.load(std::memory_order_relaxed);
+        result.processor_overloads =
+            context_.processor_overloads.load(std::memory_order_relaxed);
+        result.abnormal_stops =
+            context_.abnormal_stops.load(std::memory_order_relaxed);
+        result.timestamp_callbacks =
+            context_.timestamp_callbacks.load(std::memory_order_relaxed);
+        result.timestamp_invalid_callbacks =
+            context_.timestamp_invalid_callbacks.load(std::memory_order_relaxed);
+        copy_timing(context_.cycle_to_callback,
+            result.cycle_to_callback_min_ns,
+            result.cycle_to_callback_sum_ns,
+            result.cycle_to_callback_max_ns,
+            result.cycle_to_callback_samples);
+        copy_timing(context_.input_to_cycle,
+            result.input_to_cycle_min_ns,
+            result.input_to_cycle_sum_ns,
+            result.input_to_cycle_max_ns,
+            result.input_to_cycle_samples);
+        copy_timing(context_.cycle_to_output,
+            result.cycle_to_output_min_ns,
+            result.cycle_to_output_sum_ns,
+            result.cycle_to_output_max_ns,
+            result.cycle_to_output_samples);
+        copy_timing(context_.cycle_jitter,
+            result.cycle_jitter_min_ns,
+            result.cycle_jitter_sum_ns,
+            result.cycle_jitter_max_ns,
+            result.cycle_jitter_samples);
+        return result;
     }
 
 private:
+    static void copy_timing(
+        const AtomicTimingAggregate& source,
+        std::uint64_t& minimum,
+        std::uint64_t& sum,
+        std::uint64_t& maximum,
+        std::uint64_t& samples)
+    {
+        samples = source.samples.load(std::memory_order_relaxed);
+        minimum = samples > 0
+            ? source.minimum.load(std::memory_order_relaxed)
+            : 0;
+        sum = source.sum.load(std::memory_order_relaxed);
+        maximum = source.maximum.load(std::memory_order_relaxed);
+    }
+
+    void register_property_listener(
+        AudioObjectPropertySelector selector,
+        bool& active,
+        long& error)
+    {
+        const auto property = address(selector);
+        if (!has_property(device_, property)) {
+            active = false;
+            error = 0;
+            return;
+        }
+        const OSStatus status = AudioObjectAddPropertyListener(
+            device_, &property, device_property_listener, &context_);
+        active = status == noErr;
+        error = static_cast<long>(status);
+    }
+
+    void remove_property_listener(
+        AudioObjectPropertySelector selector,
+        bool active) noexcept
+    {
+        if (!active) {
+            return;
+        }
+        const auto property = address(selector);
+        (void)AudioObjectRemovePropertyListener(
+            device_, &property, device_property_listener, &context_);
+    }
+
     AudioObjectID device_ = kAudioObjectUnknown;
     DeviceInfo info_;
     AudioDeviceIOProcID proc_id_ = nullptr;
     bool started_ = false;
     long buffer_size_ = 0;
+    long maximum_callback_frames_ = 0;
+    bool variable_callback_frames_ = false;
+    bool processor_overload_listener_active_ = false;
+    long processor_overload_listener_error_ = 0;
+    bool abnormal_stop_listener_active_ = false;
+    long abnormal_stop_listener_error_ = 0;
     long input_latency_frames_ = 0;
     long output_latency_frames_ = 0;
+    long input_device_latency_frames_ = 0;
+    long input_safety_offset_frames_ = 0;
+    long input_stream_latency_frames_ = 0;
+    long output_device_latency_frames_ = 0;
+    long output_safety_offset_frames_ = 0;
+    long output_stream_latency_frames_ = 0;
     InputChannels input_channels_ = InputChannels::Mono;
     ChannelSelection channels_;
     double sample_rate_ = 0.0;
@@ -1152,12 +1439,18 @@ std::unique_ptr<DeviceStream> start_duplex_stream(
     if (playback_prefill_frames > playback_ring.capacity()) {
         throw std::runtime_error("playback prefill must fit within playback ring capacity");
     }
+    const long variable_buffer_max = static_cast<long>(get_u32_property_or_zero(
+        selected.object, kAudioDevicePropertyUsesVariableBufferFrameSizes));
+    const bool variable_callback_frames = variable_buffer_max > buffer_size;
+    const long maximum_callback_frames = std::max(buffer_size, variable_buffer_max);
 
     const double sample_rate = get_double_property_or_zero(selected.object, kAudioDevicePropertyNominalSampleRate);
     auto stream = std::make_unique<CoreAudioDeviceStream>(
         selected.object,
         selected.info,
         buffer_size,
+        maximum_callback_frames,
+        variable_callback_frames,
         requested_input_channels,
         channels,
         capture_ring,

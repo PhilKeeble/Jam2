@@ -1348,3 +1348,248 @@ The GUI log also records the separate known bug `internal loopback recording is 
 - No retained optimization introduces sequence loss, capture/playback faults, jitter drops, mixer deadlines, recording drops, clipped samples, new internal zero spans, pops, or material tone/RMS change.
 - Any claimed latency reduction is tied to fewer resident frames or a CoreAudio/hardware timestamp/loopback measurement; pure CPU savings are reported as CPU savings.
 - Larger ideas such as a separate packet real-time worker, new mixer path, protocol change, aggregate-device architecture, or wholesale callback ownership change remain documented for review instead of being implemented without evidence.
+
+## 2026-08-23 macOS CoreAudio implementation and validation
+
+This pass used the public Fast profile throughout. No Fast or Moderate profile
+number was changed and no profile sweep was performed. All comparative device
+runs were local direct-mesh sessions at 48 kHz, 64-frame PCM24 packets and a
+requested 32-frame callback. One peer opened the real CoreAudio device while a
+local headless peer supplied a deterministic 440 Hz tone. Five-stem recording
+was enabled so callback-work comparisons include the recording workload and so
+the delivered waveform can be checked independently of the counters.
+
+### Real Wi-Fi Fast jam retained as a separate profile baseline
+
+The user-reported artifact run is
+`release/logs/jam2_stats_20260823_180836_757_pid52098.csv`, with lifecycle
+context in `release/logs/jam2_gui_20260823_170736_918_pid52098.log`. It used the
+Aggregate Device, 48 kHz, a requested and active 32-frame callback, 64-frame
+PCM16 packets, and the current Fast 64-frame prefill/playout/jitter/adaptive
+floor with 512-frame maxima. The active CSV covers 61.577 seconds.
+
+- CoreAudio cadence was healthy: 0.666760 ms callback average, 1.894 ms
+  maximum, nine callbacks over 1.5x, and 1.301 us average callback work.
+- Sequence loss was zero, but packet delivery was bursty: packet-gap average
+  1.3334 ms, maximum 96.36 ms, 4,123 gaps over 2x, jitter average 1.284 ms and
+  jitter maximum 95.027 ms.
+- The mixer released 4,143 deadlines with 264,834 missing peer frames
+  (5.517 seconds of absent peer contribution). The playback ring reported
+  151,777 underrun frames in 4,771 events (3.162 seconds).
+- Adaptive playback reached 415 frames in the final row after 240 raises,
+  12,005 releases and 1,356 inserted padding frames. The periodic playback
+  depth frequently held hundreds of frames even while isolated deadlines and
+  drains continued.
+
+This is consistent with the severe, persistent artifacts reported for that
+Wi-Fi jam. It is not evidence of slow Float32 conversion or a late CoreAudio
+IOProc: device cadence and callback work were healthy while network arrival
+had repeated roughly 95 ms stalls. It remains the real-connection baseline for
+the later Moderate-profile tuning. Per instruction, Fast remains the proven
+Ethernet profile and this CoreAudio pass does not try to make Fast absorb Wi-Fi
+burst loss.
+
+### Current device inventory and unchanged baselines
+
+The attached devices used for this pass were:
+
+| Device | Current topology at 48 kHz/32 frames | Selected channels |
+|---|---|---|
+| Focusrite Scarlett 2i2 USB | one two-channel packed/interleaved Float32 input stream and one two-channel packed/interleaved Float32 output stream | input 1,2; output 1,2 |
+| Aggregate Device (`~:AMS2_Aggregate:0`) | one mono packed Float32 input stream and one stereo packed/interleaved Float32 output stream | input 1; output 1,2 |
+
+Both devices accepted 32, 64, 128 and 256 frames in the device diagnostic.
+Both reported a fixed 32-frame callback during the actual runs. The Aggregate
+Device available for this pass exposes only one input, so it cannot reproduce
+the historical four-input Axe-Fx downmix workload.
+
+Unchanged Release baselines were captured before editing:
+
+| Baseline artifact | Device-side callback result | Fault result |
+|---|---|---|
+| `latency-runs/20260823-coreaudio-headless-baseline/` | synthetic 32-frame callback averaged 0.666669 ms; 4.081 us work; 0.844 ms maximum interval | zero loss/deadlines/missing frames; one 32-frame startup drain |
+| `latency-runs/20260823-coreaudio-hardware-baseline/focusrite/` | Focusrite live-window work 4.842 us; 0.666665 ms interval average; 0.744 ms maximum | no callback deadlines or missing frames; isolated 64 startup/low-floor underrun frames |
+| `latency-runs/20260823-coreaudio-hardware-baseline/aggregate/` | Aggregate live-window work 4.162 us; 0.666665 ms interval average; 0.793 ms maximum | no callback deadlines, loss or missing frames |
+
+The headless figure is a shared-engine regression reference, not a measurement
+of CoreAudio conversion. Its run-to-run microsecond work value moves with host
+scheduling and was never used to claim a CoreAudio saving.
+
+### Retained CoreAudio changes
+
+1. `AudioBufferList` channel resolution now happens once per selected channel
+   per callback. Allocation-free typed views retain the real interleaved or
+   noninterleaved stride and frame limit. The input peak/downmix passes and
+   output fan-out then perform direct strided access instead of rescanning the
+   buffer list for every sample. The Q31-to-Float32 conversion is also done
+   once per source frame before writing all selected outputs.
+2. Input and output callback frame counts are each scanned once at callback
+   entry and reused. Null data for a disabled CoreAudio stream no longer
+   collapses the entire callback to zero frames or shifts later global channel
+   numbers. Unselected output memory is left alone because the CoreAudio
+   `AudioDeviceIOProc` contract explicitly supplies zeroed output memory.
+3. Format validation and device descriptions enumerate every device stream and
+   query each stream's virtual format. Jam2 now rejects layouts that are not
+   exact packed Float32 in the shape the callback understands instead of
+   consulting only the deprecated device-level first-stream property.
+4. `kAudioDevicePropertyUsesVariableBufferFrameSizes` is read before stream
+   construction. Every callback scratch buffer is allocated to the reported
+   maximum rather than only the nominal minimum. Structured statistics expose
+   nominal/maximum/variable frames, actual callback min/max/sample count and
+   any callback that exceeds scratch capacity.
+5. Device latency, safety offset and maximum stream latency are published as
+   separate raw input/output fields. The existing driver-latency estimate
+   remains device latency plus safety offset; stream latency is deliberately
+   not silently added because the physical overlap has not been established.
+6. The IOProc uses the supplied CoreAudio host timestamps to expose sampled
+   cycle-to-callback-entry delay, input-to-cycle offset, cycle-to-output offset
+   and absolute cycle-interval jitter. Valid/invalid timestamp counts,
+   callback-size observations, callback gaps and fault counts are exact. The
+   conversion-heavy timestamp aggregates sample one callback in 16 (about
+   94 samples/second at 32 frames); their CSV sample counts make this explicit.
+7. A minimal property listener counts `kAudioDeviceProcessorOverload` and,
+   when the property exists, abnormal IO stops. The listener only performs a
+   relaxed atomic increment and is removed after the device is stopped and
+   before the IOProc is destroyed. No callback path allocates, locks, logs,
+   throws or blocks.
+8. CoreAudio timing aggregation and callback-owned counters use the existing
+   Jam2 single-writer relaxed load/store pattern rather than locked atomic
+   read-modify-write operations. This recovered the telemetry overhead seen in
+   the first instrumented repeat while preserving exact counter values.
+
+The CSV schema now has 488 consistently shaped columns in periodic and final
+rows. The new CoreAudio fields include raw latency terms, stream counts,
+listener registration/error state, fault counts, actual frame bounds and
+capacity faults, timestamp validity, timing min/sum/max/sample counts, and the
+equivalent human final summary.
+
+### Iterations and callback-work evidence
+
+`latency-runs/20260823-coreaudio-channel-views-headless/` confirmed that the
+shared headless path remained functional after extracting the typed helper.
+Because it does not execute the CoreAudio helper, its 4.433 us work result is
+host noise rather than an A/B value. The matching first Focusrite hardware run,
+`latency-runs/20260823-coreaudio-channel-views-focusrite/`, measured 4.594 us
+live-window callback work versus the 4.842 us unchanged baseline (5.1% lower),
+with the same fixed 32-frame cadence and no callback gaps or missing frames.
+
+The fully instrumented repeats showed enough normal variation that a larger
+claim would not be defensible: Focusrite live-window results ranged from about
+3.8 to 4.84 us before telemetry was tightened. The final retained build gave:
+
+| Final artifact and active window | Callback work | Cadence/fault result | CoreAudio timestamp averages |
+|---|---:|---|---|
+| `latency-runs/20260823-coreaudio-telemetry-sampled-focusrite/`, 16.504-27.477 s | 4.739 us across 16,460 callbacks; 2.1% below the unchanged 4.842 us run | fixed 32 frames; zero live underruns, callback gaps over 1.1x, overloads, abnormal stops, invalid timestamps, capacity faults, missing frames or deadlines | callback entry 28.815 us; input-to-cycle 2,199.121 us; cycle-to-output 967.556 us; absolute cycle jitter 4.660 us (1,029 timing samples) |
+| `latency-runs/20260823-coreaudio-final-aggregate/`, 12.983-23.454 s | 3.866 us across 15,706 callbacks; 7.1% below the unchanged 4.162 us run | fixed 32 frames; zero post-startup underruns, gaps over 1.5x, overloads, abnormal stops, invalid timestamps, capacity faults, missing frames or deadlines | callback entry 27.942 us; input-to-cycle 1,551.876 us; cycle-to-output 2,906.476 us; absolute cycle jitter 5.758 us (about 1,000 timing samples) |
+
+The final cumulative interval averages were 0.666666 ms on both devices. Their
+maximum callback intervals were 0.718 ms on Focusrite and 0.785 ms on the
+Aggregate Device. CPU savings are therefore reported only as a small backend
+work reduction: no resident frame or physical latency reduction is claimed.
+The callback used less than 1% of its 666.7 us period in these recorded local
+sessions.
+
+The raw latency ledgers explain why CoreAudio properties must remain separate:
+
+| Device | Input device + safety + stream | Output device + safety + stream | Timestamp observation |
+|---|---:|---:|---|
+| Focusrite | 74 + 74 + 0 frames | 14 + 14 + 0 frames | input-to-cycle about 2.20 ms; cycle-to-output about 0.97 ms |
+| Aggregate | 14 + 43 + 2,399 frames | 1 + 107 + 556 frames | input-to-cycle about 1.55 ms; cycle-to-output about 2.91 ms |
+
+The Aggregate stream properties would imply roughly 50.0 ms input and 11.6 ms
+output stream latency by themselves, which plainly does not match the IOProc
+timestamp offsets. Those properties likely represent aggregate/subdevice HAL
+compensation or overlapping pipeline terms. They are useful raw diagnostics,
+but must not be summed into `estimated_one_way_ms` without an electrical or
+acoustic loopback measurement.
+
+### Waveform and shared-path checks
+
+The final Focusrite and Aggregate recordings had zero recorder drops, writer
+errors, clipped frames or pop detections. Their deterministic local/headless
+440 Hz stems measured 440.367 Hz with the expected 0.125 peak. All long silence
+spans were at session start or after peer teardown. The Aggregate hardware
+input's short approximately 131 ms startup silence and the remote stems'
+approximately 101 ms teardown tails were boundary conditions, not internal
+live gaps.
+
+A final two-headless-peer regression is retained at
+`latency-runs/20260823-coreaudio-final-headless/`. It had zero sequence loss,
+missing-frame insertion, late drops or mixer deadlines, and the recorded tones
+had zero clipping/pops and no internal silence span of 2,048 frames or more.
+The joiner nevertheless drained four isolated 32-frame playback blocks and
+both synthetic callbacks had several scheduling gaps over 2x. This matches the
+general Fast-floor sensitivity and the user's Wi-Fi observation; it is not a
+CoreAudio regression and is intentionally left for the subsequent Moderate
+profile exercise.
+
+Capture-clock packet pacing was active throughout the real-device sessions.
+The current local runs did not reproduce the historical multi-thousand-frame
+capture backlog, persistent playback backlog, packet loss or missing-frame
+behavior from the old Axe-Fx sessions.
+
+### Candidates measured and not retained
+
+- Float32-to-Q31 alternatives were slower when exact existing rail/truncation
+  behavior was preserved: 1.377 ns/sample versus 0.793 ns/sample for the
+  current conversion in an optimized isolated benchmark. A bit-identical
+  Q31-to-Float32 power-of-two form measured 0.265 ns/sample versus
+  0.603 ns/sample, but saves only about 11 ns for a 32-frame mono callback
+  (approximately 0.24% of measured callback work). Neither change is material
+  enough to justify a new numerical path.
+- Both current devices expose exactly one input and one output stream. IOProc
+  stream-usage restriction therefore cannot save work; it would only matter on
+  a future device with multiple independent streams and would not disable
+  unused channels inside one interleaved stream.
+- No Audio Workgroup or whole-process scheduling change is justified. The
+  IOProc had zero processor-overload notifications and tens-of-microseconds
+  entry delay against a 666.7 us period. The packet worker remains the separate
+  place to investigate only if future macOS capture-dispatch evidence is poor.
+- No `kAudioDevicePropertyIOCycleUsage`, hog mode, aggregate-device ownership,
+  protocol, mixer, or profile change was made. There is no measured latency or
+  reliability evidence for those expansions in this local pass.
+
+### Validation and remaining reconciliation notes
+
+The optimized public app built successfully with Apple tooling, and the built
+and released executables had the same SHA-256
+`6902b0fc40bc0ea869220daa8cd44e0b60de4988e1cd5532a78afea9d81702fd`.
+Focused native validation passed:
+
+- `jam2_audio_device_processing_units`: packed/interleaved and planar channel
+  views, null disabled-stream numbering, selected-channel conversion, silence,
+  Float32/Q31 rails and duplicated output fan-out;
+- `jam2_cli_boundary_units`: the 488-column final/periodic schema and new
+  CoreAudio values.
+
+No new CTest executable was added; the lowest-owned existing tests were
+extended. The broader `jam2_core_boundary_units` executable was also tried
+outside the sandbox. It still fails its pre-existing simultaneous pipe-wake/
+UDP-readiness assertion; that first timing race leaves its datagram queued and
+cascades into the following zero-timeout ordering assertion. No UDP source was
+changed in this pass. The full suite was not run, as requested.
+
+The following non-CoreAudio-path items should be reconciled later rather than
+folded into this optimization:
+
+- `jam2 local --log-stats` accepts the option but the local-only runtime does
+  not currently produce the same CSV artifact as a network session. Hardware
+  tuning therefore used a real device peer against a headless local peer.
+- Periodic CSV rows retain blanks for some cold device/session context columns
+  that are populated in the final row. The new callback/latency fields are
+  present and row width is consistent, but repeating immutable context would
+  make ad-hoc interval analysis easier. This is a cross-platform reporting
+  cleanup, not an audio-path optimization.
+- The GUI still reports that internal loopback recording is Windows-only on
+  macOS. That remains the separate `PLAN.md` feature and was not confused with
+  the working five-stem Jam recording used here.
+- A future four-input CoreAudio device should rerun the channel-view workload
+  because the current Aggregate exposes only one input. The deterministic
+  native layouts already cover arbitrary selected-channel mapping until that
+  hardware is available.
+
+CoreAudio-specific work is complete for the available hardware: the callback
+boundary is allocation-free, fixed-shape for the observed devices, measured,
+fault-visible, comfortably inside its deadline and no longer performs
+per-sample buffer-list discovery. The next phase is the explicitly separate
+Moderate-profile Wi-Fi tuning using the retained real-connection baseline.

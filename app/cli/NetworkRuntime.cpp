@@ -1208,6 +1208,16 @@ void print_optional_audio_stats(const OptionalAudioStream& audio, const Options&
                         static_cast<double>(callback_stats.work_samples) << "\n";
         std::cout << "Audio callback work us max: " << callback_stats.work_max_us << "\n";
     }
+    if (callback_stats.frame_samples > 0) {
+        std::cout << "Actual audio callback frames min: "
+                  << callback_stats.frame_min << "\n";
+        std::cout << "Actual audio callback frames max: "
+                  << callback_stats.frame_max << "\n";
+        std::cout << "Actual audio callback frame samples: "
+                  << callback_stats.frame_samples << "\n";
+    }
+    std::cout << "Audio callback frame capacity exceeded: "
+              << callback_stats.frame_capacity_exceeded << "\n";
     if (options.audio_device_id) {
         std::cout << "Audio device id: " << *options.audio_device_id << "\n";
     }
@@ -1221,6 +1231,10 @@ void print_optional_audio_stats(const OptionalAudioStream& audio, const Options&
     std::cout << "Active audio buffer size ms: "
               << frames_to_ms(static_cast<std::size_t>(stream_info.buffer_size > 0 ? stream_info.buffer_size : 0), stream_info.sample_rate)
               << "\n";
+    std::cout << "Maximum audio callback frames: "
+              << stream_info.maximum_callback_frames << "\n";
+    std::cout << "Variable audio callback frames: "
+              << (stream_info.variable_callback_frames ? "yes" : "no") << "\n";
     std::cout << "Driver output-ready status: "
               << jam2::audio::driver_output_ready_status_text(
                      engine_snapshot.driver_output_ready_status) << "\n";
@@ -1250,6 +1264,74 @@ void print_optional_audio_stats(const OptionalAudioStream& audio, const Options&
                      static_cast<std::size_t>((std::max)(
                          0L, engine_snapshot.output_latency_frames)),
                      stream_info.sample_rate) << "\n";
+    if (stream_info.device.backend == "CoreAudio") {
+        std::cout << "CoreAudio input device latency frames: "
+                  << stream_info.input_device_latency_frames << "\n";
+        std::cout << "CoreAudio input safety offset frames: "
+                  << stream_info.input_safety_offset_frames << "\n";
+        std::cout << "CoreAudio input stream latency frames: "
+                  << stream_info.input_stream_latency_frames << "\n";
+        std::cout << "CoreAudio output device latency frames: "
+                  << stream_info.output_device_latency_frames << "\n";
+        std::cout << "CoreAudio output safety offset frames: "
+                  << stream_info.output_safety_offset_frames << "\n";
+        std::cout << "CoreAudio output stream latency frames: "
+                  << stream_info.output_stream_latency_frames << "\n";
+        std::cout << "CoreAudio input/output stream counts: "
+                  << stream_info.input_stream_count << "/"
+                  << stream_info.output_stream_count << "\n";
+        std::cout << "CoreAudio overload listener active/error: "
+                  << (stream_info.processor_overload_listener_active ? "yes" : "no")
+                  << "/" << stream_info.processor_overload_listener_error << "\n";
+        std::cout << "CoreAudio abnormal-stop listener active/error: "
+                  << (stream_info.abnormal_stop_listener_active ? "yes" : "no")
+                  << "/" << stream_info.abnormal_stop_listener_error << "\n";
+        std::cout << "CoreAudio processor overloads: "
+                  << callback_stats.processor_overloads << "\n";
+        std::cout << "CoreAudio abnormal stops: "
+                  << callback_stats.abnormal_stops << "\n";
+        std::cout << "CoreAudio timestamp callbacks/invalid: "
+                  << callback_stats.timestamp_callbacks << "/"
+                  << callback_stats.timestamp_invalid_callbacks << "\n";
+        const auto print_timing = [](const char* label,
+                                      std::uint64_t minimum_ns,
+                                      std::uint64_t sum_ns,
+                                      std::uint64_t maximum_ns,
+                                      std::uint64_t samples) {
+            if (samples == 0) {
+                return;
+            }
+            std::cout << label << " us min/avg/max: "
+                      << static_cast<double>(minimum_ns) / 1000.0 << "/"
+                      << static_cast<double>(sum_ns) /
+                            static_cast<double>(samples) / 1000.0 << "/"
+                      << static_cast<double>(maximum_ns) / 1000.0 << "\n";
+        };
+        print_timing(
+            "CoreAudio cycle-to-callback",
+            callback_stats.cycle_to_callback_min_ns,
+            callback_stats.cycle_to_callback_sum_ns,
+            callback_stats.cycle_to_callback_max_ns,
+            callback_stats.cycle_to_callback_samples);
+        print_timing(
+            "CoreAudio input-to-cycle",
+            callback_stats.input_to_cycle_min_ns,
+            callback_stats.input_to_cycle_sum_ns,
+            callback_stats.input_to_cycle_max_ns,
+            callback_stats.input_to_cycle_samples);
+        print_timing(
+            "CoreAudio cycle-to-output",
+            callback_stats.cycle_to_output_min_ns,
+            callback_stats.cycle_to_output_sum_ns,
+            callback_stats.cycle_to_output_max_ns,
+            callback_stats.cycle_to_output_samples);
+        print_timing(
+            "CoreAudio cycle jitter",
+            callback_stats.cycle_jitter_min_ns,
+            callback_stats.cycle_jitter_sum_ns,
+            callback_stats.cycle_jitter_max_ns,
+            callback_stats.cycle_jitter_samples);
+    }
     std::cout << "Requested input mix: " << mono_mix_mode_text(options.channel_selection.input.size()) << "\n";
     std::cout << "Active input mix: " << mono_mix_mode_text(stream_info.channels.input.size()) << "\n";
     std::cout << "Requested audio channels: " << channel_selection_text(options.channel_selection) << "\n";
