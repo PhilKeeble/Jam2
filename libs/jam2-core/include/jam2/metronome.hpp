@@ -54,6 +54,25 @@ std::uint64_t step_interval_samples(
     int bpm,
     int division,
     int tempo_pulse_units = 1);
+std::uint64_t click_duration_samples(
+    double sample_rate,
+    bool accent,
+    ClickVoice voice,
+    ClickSound sound);
+double render_click_tone_sample(
+    std::uint64_t step_offset,
+    double sample_rate,
+    bool accent,
+    ClickVoice voice,
+    ClickSound sound);
+double render_pattern_step_sample(
+    const PatternSnapshot& pattern,
+    int pattern_step,
+    std::uint64_t step_offset,
+    double sample_rate,
+    double level,
+    ClickVoice voice,
+    ClickSound sound);
 AuthorityClockMapping map_authority_clock(
     std::uint64_t authority_epoch_sample_time,
     std::uint64_t projected_authority_sample_time,

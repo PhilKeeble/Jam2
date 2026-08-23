@@ -28,6 +28,8 @@ look into what python is left, cpp might still be calling some like the fuzzer
 
 need to make it fit better on smaller screens like the macbook neo
 
+in a jam it shows RTT but that is not actually taht useful, show the estimate time for instrument -> peer instead 
+- maybe have data show the breakdown of each part as well from data so people can see which settings are causing timing adds with real metrics
 
 ## Bugs
 
@@ -42,7 +44,10 @@ need to make it more efficient for small screen
 
 Generate wav is saying 12 sections - Sections A-D, confusing 
 
+Update.sh wasnt being clear that it was failing, make it easy for the user 
 
+stereo wav gets imported but cant be analysed
+loopback recording doesnt work on mac 
 
 
 ## jamtaster

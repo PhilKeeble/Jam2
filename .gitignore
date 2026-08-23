@@ -37,6 +37,7 @@ Testing/
 !/libs/third_party/onnxruntime/macos-x64/lib/*.dylib
 __pycache__/
 *.pyc
+/latency-runs/
 
 # Editor/OS noise
 .vs/

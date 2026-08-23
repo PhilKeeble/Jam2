@@ -15,6 +15,8 @@
 
 namespace jam2 {
 
+class RealtimeWakeSignal;
+
 enum class EngineLifecycle : std::uint8_t {
     Stopped,
     Starting,
@@ -269,6 +271,10 @@ struct EngineSnapshot {
     long callbacks = 0;
     long input_latency_frames = 0;
     long output_latency_frames = 0;
+    audio::DriverOutputReadyStatus driver_output_ready_status =
+        audio::DriverOutputReadyStatus::NotApplicable;
+    long driver_output_ready_error = 0;
+    long driver_output_ready_latency_reduction_frames = 0;
     std::int64_t recording_latency_adjustment_frames = 0;
     std::uint64_t recording_source_latency_frames = 0;
     std::uint64_t recording_latency_compensation_frames = 0;
@@ -406,6 +412,9 @@ public:
     void join() noexcept;
 
     bool submit(const EngineCommand& command) noexcept;
+    // Lightweight timeline query for non-real-time scheduling paths that do
+    // not need the full diagnostic snapshot or its scheduled-command lock.
+    std::uint64_t currentFrame() const noexcept;
     EngineSnapshot snapshot() const noexcept;
     EngineGuiPeakSnapshot consumeGuiPeaks() noexcept;
     EngineColdSnapshot coldSnapshot() const;
@@ -415,9 +424,12 @@ public:
     // Wait for networkCaptureReady before popping, stop the consumer before
     // detaching, and use CapturedAudioBlock::first_frame as the local engine
     // timeline tag rather than as a wire/session timestamp.
-    NetworkCaptureAttachment attachNetworkCapture() noexcept;
+    NetworkCaptureAttachment attachNetworkCapture(
+        RealtimeWakeSignal* wake_signal = nullptr,
+        std::size_t wake_frames = 0) noexcept;
     void detachNetworkCapture(NetworkCaptureAttachment attachment) noexcept;
     bool networkCaptureReady(NetworkCaptureAttachment attachment) const noexcept;
+    std::size_t networkCaptureDepth(NetworkCaptureAttachment attachment) const noexcept;
     CapturedAudioBlock popNetworkCapture(
         NetworkCaptureAttachment attachment,
         std::span<std::int32_t> output) noexcept;

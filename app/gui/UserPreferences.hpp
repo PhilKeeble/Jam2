@@ -16,7 +16,7 @@ struct LocalTuningPreference {
     QString profile = QStringLiteral("fast");
     int bufferSize = 32;
     int frameSize = 64;
-    int prefillFrames = 256;
+    int prefillFrames = 64;
     int playbackMaxFrames = 1536;
     int captureRingFrames = 4096;
     int playbackRingFrames = 4096;
@@ -25,13 +25,13 @@ struct LocalTuningPreference {
     int driftDeadbandPpm = 25;
     int driftMaxCorrectionPpm = 500;
     bool sampleTimePlayout = true;
-    int playoutDelayFrames = 256;
-    int jitterBufferFrames = 512;
-    int jitterBufferMaxFrames = 1024;
+    int playoutDelayFrames = 64;
+    int jitterBufferFrames = 64;
+    int jitterBufferMaxFrames = 512;
     bool adaptiveCushion = true;
-    int adaptiveTargetFrames = 256;
-    int adaptiveMinFrames = 256;
-    int adaptiveMaxFrames = 1536;
+    int adaptiveTargetFrames = 64;
+    int adaptiveMinFrames = 64;
+    int adaptiveMaxFrames = 512;
     int adaptiveReleasePpm = 5000;
     int adaptiveRatioRampMs = 250;
 };
@@ -197,7 +197,7 @@ struct SyncPreference {
 };
 
 struct UserPreferences {
-    static constexpr int kSchemaVersion = 5;
+    static constexpr int kSchemaVersion = 7;
     AudioDevicePreference localAudio;
     AudioDevicePreference networkAudio;
     bool splitNetworkAudioByRole = false;

@@ -46,6 +46,9 @@ public:
 
     std::size_t push(std::span<const std::int32_t> frames);
     std::size_t pop(std::span<std::int32_t> frames, bool observe_depth = true);
+    // Fixed-packet consumer operation. If the complete span is unavailable,
+    // it leaves both the ring and caller buffer untouched.
+    std::size_t pop_exact(std::span<std::int32_t> frames);
     void request_drop_oldest(std::size_t frames);
     void set_depth_bucket_thresholds(double sample_rate);
     void set_diagnostics_enabled(bool enabled);

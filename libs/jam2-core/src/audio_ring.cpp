@@ -113,6 +113,43 @@ std::size_t MonoRingBuffer::pop(std::span<std::int32_t> frames, bool observe_dep
     return count;
 }
 
+std::size_t MonoRingBuffer::pop_exact(std::span<std::int32_t> frames)
+{
+    if (frames.empty()) {
+        return 0;
+    }
+    std::uint64_t read = read_.load(std::memory_order_relaxed);
+    const std::uint64_t write = write_.load(std::memory_order_acquire);
+    const std::size_t dropped = apply_requested_drop(read, write);
+    read += dropped;
+    const std::size_t readable = static_cast<std::size_t>(write - read);
+    if (readable < frames.size()) {
+        if (dropped > 0) {
+            read_.store(read, std::memory_order_release);
+        }
+        return 0;
+    }
+    const std::size_t read_offset = static_cast<std::size_t>(read % capacity_);
+    const std::size_t first_count = std::min(frames.size(), capacity_ - read_offset);
+    std::memcpy(
+        frames.data(),
+        buffer_.data() + read_offset,
+        first_count * sizeof(std::int32_t));
+    const std::size_t second_count = frames.size() - first_count;
+    if (second_count > 0) {
+        std::memcpy(
+            frames.data() + first_count,
+            buffer_.data(),
+            second_count * sizeof(std::int32_t));
+    }
+    if (diagnostics_enabled_.load(std::memory_order_relaxed)) {
+        observe_depth_for_pop(readable, frames.size());
+        underrun_burst_current_frames_.store(0, std::memory_order_relaxed);
+    }
+    read_.store(read + frames.size(), std::memory_order_release);
+    return frames.size();
+}
+
 void MonoRingBuffer::request_drop_oldest(std::size_t frames)
 {
     if (frames == 0) {

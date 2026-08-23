@@ -11,6 +11,7 @@
 #include <cerrno>
 #include <cstring>
 #include <netdb.h>
+#include <fcntl.h>
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/uio.h>
@@ -150,11 +151,41 @@ UdpSocket::UdpSocket()
 #endif
         throw std::runtime_error("failed to create UDP socket: " + socket_error_text());
     }
+#if defined(_WIN32)
+    u_long enabled = 1;
+    if (ioctlsocket(handle_, FIONBIO, &enabled) != 0) {
+        const std::string error = socket_error_text();
+        closesocket(handle_);
+        handle_ = INVALID_SOCKET;
+        throw std::runtime_error("failed to make UDP socket nonblocking: " + error);
+    }
+    receive_event_ = WSACreateEvent();
+    if (receive_event_ == WSA_INVALID_EVENT ||
+        WSAEventSelect(handle_, receive_event_, FD_READ | FD_CLOSE) != 0) {
+        const std::string error = socket_error_text();
+        if (receive_event_ != WSA_INVALID_EVENT) WSACloseEvent(receive_event_);
+        closesocket(handle_);
+        receive_event_ = WSA_INVALID_EVENT;
+        handle_ = INVALID_SOCKET;
+        throw std::runtime_error("failed to create UDP receive event: " + error);
+    }
+#else
+    const int flags = fcntl(handle_, F_GETFL, 0);
+    if (flags < 0 || fcntl(handle_, F_SETFL, flags | O_NONBLOCK) != 0) {
+        const std::string error = socket_error_text();
+        close(handle_);
+        handle_ = -1;
+        throw std::runtime_error("failed to make UDP socket nonblocking: " + error);
+    }
+#endif
 }
 
 UdpSocket::~UdpSocket()
 {
 #if defined(_WIN32)
+    if (receive_event_ != WSA_INVALID_EVENT) {
+        WSACloseEvent(receive_event_);
+    }
     if (handle_ != INVALID_SOCKET) {
         closesocket(handle_);
     }
@@ -165,10 +196,15 @@ UdpSocket::~UdpSocket()
 #endif
 }
 
-UdpSocket::UdpSocket(UdpSocket&& other) noexcept : handle_(other.handle_)
+UdpSocket::UdpSocket(UdpSocket&& other) noexcept
+    : handle_(other.handle_)
+#if defined(_WIN32)
+    , receive_event_(other.receive_event_)
+#endif
 {
 #if defined(_WIN32)
     other.handle_ = INVALID_SOCKET;
+    other.receive_event_ = WSA_INVALID_EVENT;
 #else
     other.handle_ = -1;
 #endif
@@ -178,6 +214,9 @@ UdpSocket& UdpSocket::operator=(UdpSocket&& other) noexcept
 {
     if (this != &other) {
 #if defined(_WIN32)
+        if (receive_event_ != WSA_INVALID_EVENT) {
+            WSACloseEvent(receive_event_);
+        }
         if (handle_ != INVALID_SOCKET) {
             closesocket(handle_);
         }
@@ -188,7 +227,9 @@ UdpSocket& UdpSocket::operator=(UdpSocket&& other) noexcept
 #endif
         handle_ = other.handle_;
 #if defined(_WIN32)
+        receive_event_ = other.receive_event_;
         other.handle_ = INVALID_SOCKET;
+        other.receive_event_ = WSA_INVALID_EVENT;
 #else
         other.handle_ = -1;
 #endif
@@ -276,6 +317,128 @@ UdpSendResult UdpSocket::send_to(
     return {};
 }
 
+RealtimeWakeSignal::RealtimeWakeSignal()
+{
+#if defined(_WIN32)
+    event_ = WSACreateEvent();
+    if (event_ == WSA_INVALID_EVENT) {
+        throw std::runtime_error("failed to create real-time wake event: " + socket_error_text());
+    }
+#else
+    int handles[2]{-1, -1};
+    if (pipe(handles) != 0) {
+        throw std::runtime_error("failed to create real-time wake pipe: " + socket_error_text());
+    }
+    read_handle_ = handles[0];
+    write_handle_ = handles[1];
+    const int read_flags = fcntl(read_handle_, F_GETFL, 0);
+    const int write_flags = fcntl(write_handle_, F_GETFL, 0);
+    const int read_descriptor_flags = fcntl(read_handle_, F_GETFD, 0);
+    const int write_descriptor_flags = fcntl(write_handle_, F_GETFD, 0);
+    if (read_flags < 0 || write_flags < 0 ||
+        read_descriptor_flags < 0 || write_descriptor_flags < 0 ||
+        fcntl(read_handle_, F_SETFL, read_flags | O_NONBLOCK) != 0 ||
+        fcntl(write_handle_, F_SETFL, write_flags | O_NONBLOCK) != 0 ||
+        fcntl(read_handle_, F_SETFD, read_descriptor_flags | FD_CLOEXEC) != 0 ||
+        fcntl(write_handle_, F_SETFD, write_descriptor_flags | FD_CLOEXEC) != 0) {
+        const std::string error = socket_error_text();
+        close(read_handle_);
+        close(write_handle_);
+        read_handle_ = -1;
+        write_handle_ = -1;
+        throw std::runtime_error("failed to configure real-time wake pipe: " + error);
+    }
+#endif
+}
+
+RealtimeWakeSignal::~RealtimeWakeSignal()
+{
+#if defined(_WIN32)
+    if (event_ != WSA_INVALID_EVENT) {
+        WSACloseEvent(event_);
+    }
+#else
+    if (read_handle_ >= 0) close(read_handle_);
+    if (write_handle_ >= 0) close(write_handle_);
+#endif
+}
+
+void RealtimeWakeSignal::signalNative() noexcept
+{
+#if defined(_WIN32)
+    (void)WSASetEvent(event_);
+#else
+    constexpr std::uint8_t value = 1;
+    (void)write(write_handle_, &value, sizeof(value));
+#endif
+}
+
+void RealtimeWakeSignal::requestWake() noexcept
+{
+    wake_requested_.store(true, std::memory_order_release);
+}
+
+void RealtimeWakeSignal::cancelWakeRequest() noexcept
+{
+    wake_requested_.store(false, std::memory_order_release);
+    if (pending_.load(std::memory_order_acquire)) {
+        consume();
+    }
+}
+
+void RealtimeWakeSignal::signal(std::uint64_t ready_time_us) noexcept
+{
+    if (!wake_requested_.load(std::memory_order_acquire)) {
+        return;
+    }
+    request_generation_.fetch_add(1, std::memory_order_release);
+    if (pending_.exchange(true, std::memory_order_acq_rel)) {
+        return;
+    }
+    last_signal_time_us_.store(ready_time_us, std::memory_order_relaxed);
+    signal_count_.fetch_add(1, std::memory_order_release);
+    signalNative();
+}
+
+void RealtimeWakeSignal::consume() noexcept
+{
+    const std::uint64_t generation_before =
+        request_generation_.load(std::memory_order_acquire);
+#if defined(_WIN32)
+    (void)WSAResetEvent(event_);
+#else
+    std::array<std::uint8_t, 64> drain{};
+    while (read(read_handle_, drain.data(), drain.size()) > 0) {
+    }
+#endif
+    pending_.store(false, std::memory_order_release);
+    consumption_count_.fetch_add(1, std::memory_order_relaxed);
+
+    // If the callback tried to signal while the old notification was being
+    // consumed, re-arm it here. A callback racing after pending_ is cleared
+    // performs the normal transition itself.
+    if (request_generation_.load(std::memory_order_acquire) != generation_before &&
+        wake_requested_.load(std::memory_order_acquire) &&
+        !pending_.exchange(true, std::memory_order_acq_rel)) {
+        signalNative();
+    }
+}
+
+std::uint64_t RealtimeWakeSignal::signalCount() const noexcept
+{
+    return signal_count_.load(std::memory_order_acquire);
+}
+
+std::uint64_t RealtimeWakeSignal::consumptionCount() const noexcept
+{
+    return consumption_count_.load(std::memory_order_relaxed);
+}
+
+std::uint64_t RealtimeWakeSignal::lastSignalTimeUs() const noexcept
+{
+    return last_signal_time_us_.load(std::memory_order_relaxed);
+}
+
 std::optional<UdpSocket::ReceivedDatagram> UdpSocket::recv_from(
     std::span<std::uint8_t> buffer,
     int timeout_ms) const
@@ -288,31 +451,106 @@ std::optional<UdpSocket::ReceivedDatagram> UdpSocket::recv_from(
 
 std::optional<UdpSocket::ReceivedDatagram> UdpSocket::recv_from_for(
     std::span<std::uint8_t> buffer,
-    std::uint64_t timeout_us) const
+    std::uint64_t timeout_us,
+    RealtimeWakeSignal* wake_signal) const
 {
-    constexpr std::uint64_t kMaxSelectTimeoutUs = 24ULL * 60ULL * 60ULL * 1000000ULL;
-    timeout_us = (std::min)(timeout_us, kMaxSelectTimeoutUs);
-    fd_set read_set;
-    FD_ZERO(&read_set);
-    FD_SET(handle_, &read_set);
-    timeval timeout{};
-    timeout.tv_sec = static_cast<long>(timeout_us / 1000000ULL);
-    timeout.tv_usec = static_cast<long>(timeout_us % 1000000ULL);
-    const int ready = select(static_cast<int>(handle_ + 1), &read_set, nullptr, nullptr, &timeout);
-    if (ready < 0) {
+    if (timeout_us > 0) {
+        constexpr std::uint64_t kMaxSelectTimeoutUs =
+            24ULL * 60ULL * 60ULL * 1000000ULL;
+        timeout_us = (std::min)(timeout_us, kMaxSelectTimeoutUs);
+        int ready = 0;
+        bool socket_ready = false;
 #if defined(_WIN32)
-        if (WSAGetLastError() == WSAEINTR) {
-            return std::nullopt;
+        if (wake_signal != nullptr) {
+            fd_set immediate_read_set;
+            FD_ZERO(&immediate_read_set);
+            FD_SET(handle_, &immediate_read_set);
+            timeval immediate_timeout{};
+            ready = select(
+                static_cast<int>(handle_ + 1),
+                &immediate_read_set,
+                nullptr,
+                nullptr,
+                &immediate_timeout);
+            socket_ready = ready > 0 && FD_ISSET(handle_, &immediate_read_set);
+            if (!socket_ready && ready >= 0) {
+                WSANETWORKEVENTS pending_events{};
+                if (WSAEnumNetworkEvents(handle_, receive_event_, &pending_events) != 0) {
+                    throw std::runtime_error("UDP event query failed: " + socket_error_text());
+                }
+                socket_ready = (pending_events.lNetworkEvents & FD_READ) != 0;
+            }
+            if (!socket_ready && ready >= 0) {
+                const DWORD timeout_ms = static_cast<DWORD>(
+                    (timeout_us + 999ULL) / 1000ULL);
+                const WSAEVENT events[2]{
+                    receive_event_,
+                    wake_signal->event_,
+                };
+                const DWORD wait_result = WSAWaitForMultipleEvents(
+                    2, events, FALSE, timeout_ms, FALSE);
+                if (wait_result == WSA_WAIT_FAILED) {
+                    throw std::runtime_error(
+                        "UDP/wake wait failed: " + socket_error_text());
+                }
+                if (wait_result == WSA_WAIT_TIMEOUT) return std::nullopt;
+                socket_ready = wait_result == WSA_WAIT_EVENT_0;
+                if (socket_ready) {
+                    WSANETWORKEVENTS received_events{};
+                    if (WSAEnumNetworkEvents(
+                            handle_, receive_event_, &received_events) != 0) {
+                        throw std::runtime_error(
+                            "UDP event query failed: " + socket_error_text());
+                    }
+                    socket_ready = (received_events.lNetworkEvents & FD_READ) != 0;
+                }
+            }
+            if (WSAWaitForMultipleEvents(
+                    1, &wake_signal->event_, FALSE, 0, FALSE) ==
+                WSA_WAIT_EVENT_0) {
+                wake_signal->consume();
+            }
+            if (!socket_ready) return std::nullopt;
+        } else {
+            fd_set read_set;
+            FD_ZERO(&read_set);
+            FD_SET(handle_, &read_set);
+            timeval timeout{};
+            timeout.tv_sec = static_cast<long>(timeout_us / 1000000ULL);
+            timeout.tv_usec = static_cast<long>(timeout_us % 1000000ULL);
+            ready = select(
+                static_cast<int>(handle_ + 1), &read_set, nullptr, nullptr, &timeout);
+            socket_ready = ready > 0 && FD_ISSET(handle_, &read_set);
         }
 #else
-        if (errno == EINTR) {
-            return std::nullopt;
+        fd_set read_set;
+        FD_ZERO(&read_set);
+        FD_SET(handle_, &read_set);
+        int maximum_handle = handle_;
+        if (wake_signal != nullptr) {
+            FD_SET(wake_signal->read_handle_, &read_set);
+            maximum_handle = (std::max)(maximum_handle, wake_signal->read_handle_);
+        }
+        timeval timeout{};
+        timeout.tv_sec = static_cast<long>(timeout_us / 1000000ULL);
+        timeout.tv_usec = static_cast<long>(timeout_us % 1000000ULL);
+        ready = select(maximum_handle + 1, &read_set, nullptr, nullptr, &timeout);
+        socket_ready = ready > 0 && FD_ISSET(handle_, &read_set);
+        if (ready > 0 && wake_signal != nullptr &&
+            FD_ISSET(wake_signal->read_handle_, &read_set)) {
+            wake_signal->consume();
         }
 #endif
-        throw std::runtime_error("UDP select failed: " + socket_error_text());
-    }
-    if (ready == 0) {
-        return std::nullopt;
+        if (ready < 0) {
+#if defined(_WIN32)
+            if (WSAGetLastError() == WSAEINTR) return std::nullopt;
+#else
+            if (errno == EINTR) return std::nullopt;
+#endif
+            throw std::runtime_error("UDP select failed: " + socket_error_text());
+        }
+        if (ready == 0) return std::nullopt;
+        if (!socket_ready) return std::nullopt;
     }
 
     sockaddr_in from{};

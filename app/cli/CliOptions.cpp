@@ -146,7 +146,7 @@ Runtime, diagnostics, and artifacts:
   --stats-warmup-ms <ms>              Exclude startup packets from measurements
   --log-stats <folder>                Write the exact emitted CSV path there
   --record-jam-folder <folder>        Record local jam stems
-  --os-priority <off|high|realtime>   Process/UDP worker scheduling request
+  --os-priority <off|high>            Process/UDP worker scheduling (default high)
 )";
 }
 
@@ -440,8 +440,32 @@ std::string_view os_priority_text(OsPriorityMode mode)
         return "off";
     case OsPriorityMode::High:
         return "high";
-    case OsPriorityMode::Realtime:
-        return "realtime";
+    }
+    return "unknown";
+}
+
+WindowsSchedulingRequest windows_scheduling_request(OsPriorityMode mode) noexcept
+{
+    switch (mode) {
+    case OsPriorityMode::Off:
+        return {};
+    case OsPriorityMode::High:
+        return {
+            WindowsProcessPriorityRequest::High,
+            WindowsThreadPriorityRequest::Highest,
+            WindowsMmcssPriorityRequest::High,
+        };
+    }
+    return {};
+}
+
+std::string_view windows_mmcss_priority_text(WindowsMmcssPriorityRequest priority) noexcept
+{
+    switch (priority) {
+    case WindowsMmcssPriorityRequest::Off:
+        return "off";
+    case WindowsMmcssPriorityRequest::High:
+        return "high";
     }
     return "unknown";
 }
@@ -455,10 +479,7 @@ OsPriorityMode parse_os_priority(std::string_view value)
     if (value == "high") {
         return OsPriorityMode::High;
     }
-    if (value == "realtime") {
-        return OsPriorityMode::Realtime;
-    }
-    throw std::runtime_error("--os-priority must be off, high, or realtime");
+    throw std::runtime_error("--os-priority must be off or high");
 }
 
 Options parse_options(

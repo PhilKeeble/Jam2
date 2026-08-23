@@ -10,6 +10,7 @@
 #include <iostream>
 #include <limits>
 #include <span>
+#include <string_view>
 #include <thread>
 
 namespace {
@@ -57,15 +58,25 @@ void testCallbackTiming()
     processing::observe_callback_interval(state, 23000, 480, 48000.0);
     processing::observe_callback_interval(state, 39000, 480, 48000.0);
     processing::observe_callback_interval(state, 61000, 480, 48000.0);
-    expect(state.minimumUs.load() == 10000 &&
+    expect(state.lastCallbackUs == 61000 &&
+            state.minimumUs.load() == 10000 &&
             state.sumUs.load() == 60000 &&
             state.maximumUs.load() == 22000 &&
             state.samples.load() == 4,
-        "callback timing records exact interval aggregates");
+        "single-writer callback timing records exact interval aggregates");
     expect(state.gapsOver1_1x.load() == 3 &&
             state.gapsOver1_5x.load() == 2 &&
             state.gapsOver2x.load() == 1,
         "callback timing classifies all strict gap thresholds");
+    processing::observe_callback_work(state, 100, 107);
+    processing::observe_callback_work(state, 200, 211);
+    processing::observe_callback_work(state, 300, 305);
+    processing::observe_callback_work(state, 400, 399);
+    expect(state.workMinimumUs.load() == 5 &&
+            state.workSumUs.load() == 23 &&
+            state.workMaximumUs.load() == 11 &&
+            state.workSamples.load() == 3,
+        "callback timing records execution work and rejects backwards clocks");
 
     processing::CallbackIntervalState invalid;
     processing::observe_callback_interval(invalid, 1000, 480, 48000.0);
@@ -94,9 +105,53 @@ void testCallbackTiming()
         "callback clock publishes a monotonic-clock timestamp");
 }
 
+void testOptionalDriverOutputReadyState()
+{
+    processing::DriverOutputReadyState supported;
+    expect(!supported.shouldNotify() &&
+            supported.status ==
+                jam2::audio::DriverOutputReadyStatus::NotApplicable,
+        "optional output-ready notifications begin disabled");
+    supported.observe(processing::DriverOutputReadyObservation::Accepted);
+    expect(supported.shouldNotify() &&
+            supported.status == jam2::audio::DriverOutputReadyStatus::Active &&
+            supported.error == 0 &&
+            processing::driver_output_ready_latency_reduction(
+                supported, 181, 149) == 32 &&
+            processing::driver_output_ready_latency_reduction(
+                supported, 149, 181) == 0,
+        "an accepted output-ready probe enables callback notifications");
+    supported.observe(processing::DriverOutputReadyObservation::Error, -1001);
+    expect(!supported.shouldNotify() &&
+            supported.status == jam2::audio::DriverOutputReadyStatus::Error &&
+            supported.error == -1001,
+        "an output-ready callback failure disables the optional driver path");
+
+    processing::DriverOutputReadyState unsupported;
+    unsupported.observe(processing::DriverOutputReadyObservation::Unsupported, -1000);
+    expect(!unsupported.shouldNotify() &&
+            unsupported.status ==
+                jam2::audio::DriverOutputReadyStatus::Unsupported &&
+            unsupported.error == 0 &&
+            processing::driver_output_ready_latency_reduction(
+                unsupported, 181, 149) == 0 &&
+            std::string_view(jam2::audio::driver_output_ready_status_text(
+                unsupported.status)) == "unsupported",
+        "an unsupported output-ready probe remains a non-error no-op");
+}
+
 void testNetworkPlaybackTimelineCoherence()
 {
     jam2::audio::StreamControl control;
+    std::uint64_t callbackGeneration = 0;
+    processing::publish_callback_begin(&control, callbackGeneration);
+    expect(callbackGeneration == 1 &&
+            control.audio_callback_generation.load(std::memory_order_acquire) == 1,
+        "single callback writer publishes an odd in-progress generation");
+    processing::publish_callback_end(&control, callbackGeneration);
+    expect(callbackGeneration == 2 &&
+            control.audio_callback_generation.load(std::memory_order_acquire) == 2,
+        "single callback writer publishes the following even completed generation");
     jam2::audio::MonoRingBuffer playback(32);
     const std::array<std::int32_t, 7> frames{};
     (void)playback.push(frames);
@@ -131,6 +186,12 @@ void testPeakGainAndMixing()
     processing::update_peak(peak, 50);
     processing::update_peak(peak, 200);
     expect(peak.load() == 200, "peak publication retains the interval maximum");
+    std::atomic<int> sharedCurrent{0};
+    std::atomic<int> sharedInterval{0};
+    processing::observe_shared_peak(sharedCurrent, sharedInterval, extremes);
+    expect(sharedCurrent.load() == 1000000 &&
+            sharedInterval.load() == 1000000,
+        "shared peak observation publishes one scan to both consumers");
     expect(processing::scale_i32_sample(1000, 0.5) == 500 &&
             processing::scale_i32_sample(
                 1000, (std::numeric_limits<double>::quiet_NaN)()) == 0 &&
@@ -191,6 +252,17 @@ void testPeakGainAndMixing()
             control.monitor_peak_ppm.load() > 0 &&
             control.gui_monitor_peak_ppm.load() == control.monitor_peak_ppm.load(),
         "monitoring mixes the shared frame range and publishes its peak");
+    std::array<std::int32_t, 2> unityMonitoredOutput{17, -29};
+    const std::array<std::int32_t, 2> unityMonitorInput{
+        123456789, -987654321};
+    control.local_monitor_level_ppm.store(1000000);
+    processing::mix_local_monitor(
+        &control, unityMonitoredOutput, unityMonitorInput);
+    expect(unityMonitoredOutput == std::array<std::int32_t, 2>{
+                123456806, -987654350} &&
+            control.monitor_peak_ppm.load() ==
+                processing::i32_peak_ppm(unityMonitorInput),
+        "unity monitoring preserves exact integer samples and peak metering");
     control.local_monitor_level_ppm.store(0);
     processing::mix_local_monitor(&control, monitoredOutput, input);
     expect(control.monitor_peak_ppm.load() == 0,
@@ -215,14 +287,16 @@ void testPlaybackResampler()
 {
     jam2::audio::StreamControl control;
     processing::PlaybackResamplerState state;
+    std::array<std::int32_t, 128> sourceScratch{};
     std::array<std::int32_t, 4> output{9, 9, 9, 9};
-    processing::pop_resampled_playback(nullptr, &control, state, output);
+    processing::pop_resampled_playback(
+        nullptr, &control, state, sourceScratch, output);
     expect(output == std::array<std::int32_t, 4>{0, 0, 0, 0},
         "missing playback source produces deterministic silence");
     output.fill(9);
     jam2::audio::MonoRingBuffer missingControlRing(8);
     processing::pop_resampled_playback(
-        &missingControlRing, nullptr, state, output);
+        &missingControlRing, nullptr, state, sourceScratch, output);
     expect(output == std::array<std::int32_t, 4>{0, 0, 0, 0},
         "missing playback control also produces deterministic silence");
 
@@ -230,7 +304,8 @@ void testPlaybackResampler()
     const std::array<std::int32_t, 3> unityInput{10, 20, 30};
     unityRing.push(unityInput);
     output.fill(-1);
-    processing::pop_resampled_playback(&unityRing, &control, state, output);
+    processing::pop_resampled_playback(
+        &unityRing, &control, state, sourceScratch, output);
     expect(output == std::array<std::int32_t, 4>{10, 20, 30, 0} &&
             control.playback_ratio_applied_ppm.load() == 1000000 &&
             !control.playback_ratio_ramping.load(),
@@ -244,7 +319,8 @@ void testPlaybackResampler()
     control.playback_ratio_ppm.store(500000);
     state.reset();
     std::array<std::int32_t, 3> halfOutput{};
-    processing::pop_resampled_playback(&halfRing, &control, state, halfOutput);
+    processing::pop_resampled_playback(
+        &halfRing, &control, state, sourceScratch, halfOutput);
     expect(halfOutput == std::array<std::int32_t, 3>{minimum, 0, maximum},
         "half-rate interpolation crosses both integer rails without overflow");
 
@@ -254,7 +330,8 @@ void testPlaybackResampler()
     control.playback_ratio_ppm.store(2000000);
     state.reset();
     std::array<std::int32_t, 2> doubleOutput{};
-    processing::pop_resampled_playback(&doubleRing, &control, state, doubleOutput);
+    processing::pop_resampled_playback(
+        &doubleRing, &control, state, sourceScratch, doubleOutput);
     expect(doubleOutput == std::array<std::int32_t, 2>{10, 30},
         "double-rate playback consumes two source frames per output frame");
 
@@ -265,7 +342,8 @@ void testPlaybackResampler()
     control.playback_ratio_ramp_frames.store(2);
     state.reset();
     std::array<std::int32_t, 2> rampOutput{};
-    processing::pop_resampled_playback(&rampRing, &control, state, rampOutput);
+    processing::pop_resampled_playback(
+        &rampRing, &control, state, sourceScratch, rampOutput);
     expect(control.playback_ratio_applied_ppm.load() == 2000000 &&
             !control.playback_ratio_ramping.load(),
         "playback-ratio ramp reaches and publishes its exact target");
@@ -279,14 +357,14 @@ void testPlaybackResampler()
     state.reset();
     std::array<std::int32_t, 1> beforeRefill{};
     processing::pop_resampled_playback(
-        &isolatedUnderrunRing, &control, state, beforeRefill);
+        &isolatedUnderrunRing, &control, state, sourceScratch, beforeRefill);
     expect(isolatedUnderrunRing.stats().underruns == 1,
         "playback resampler fixture produces one isolated source underrun");
     const std::array<std::int32_t, 4> refill{1000000, 1000000, 1000000, 1000000};
     isolatedUnderrunRing.push(refill);
     std::array<std::int32_t, 4> afterRefill{};
     processing::pop_resampled_playback(
-        &isolatedUnderrunRing, &control, state, afterRefill);
+        &isolatedUnderrunRing, &control, state, sourceScratch, afterRefill);
     expect(std::all_of(afterRefill.begin(), afterRefill.end(), [](std::int32_t sample) {
                return sample == 1000000;
            }),
@@ -297,10 +375,11 @@ void testPlaybackResampler()
     state.reset();
     std::array<std::int32_t, 40> sustainedUnderrunOutput{};
     processing::pop_resampled_playback(
-        &sustainedUnderrunRing, &control, state, sustainedUnderrunOutput);
+        &sustainedUnderrunRing, &control, state, sourceScratch, sustainedUnderrunOutput);
     expect(sustainedUnderrunOutput.front() == 1000000 &&
-            sustainedUnderrunOutput.back() == 0,
-        "sustained resampler underrun fades to silence instead of holding DC");
+            sustainedUnderrunOutput.back() == 0 &&
+            sustainedUnderrunRing.stats().underrun_events == 1,
+        "batched resampler underrun fades to silence with one callback-level ring event");
 
     state.reset();
     expect(!state.hasCurrent && !state.hasNext && state.phase == 0.0 &&
@@ -322,6 +401,8 @@ void testPreparedSourceMixing()
         "missing prepared source leaves output untouched and clears its live peak");
 
     jam2::audio::PreparedTrackSource source(16);
+    expect(!source.needsProcessing(),
+        "idle prepared source advertises no callback work");
     const int slot = source.claimLoadingSlot();
     auto* data = source.loadingData(slot);
     expect(slot >= 0 && data != nullptr, "prepared-source fixture claims storage");
@@ -343,6 +424,8 @@ void testPreparedSourceMixing()
     const std::array commands{swap, play};
     expect(source.enqueueBatch(commands),
         "prepared-source fixture queues one atomic swap/play transition");
+    expect(source.needsProcessing(),
+        "queued prepared commands keep future callback processing active");
     control.prepared_source = &source;
     output.fill(0);
     stem.fill(1);
@@ -359,6 +442,14 @@ void testPreparedSourceMixing()
             control.prepared_source_actual_start_frame.load() == 10 &&
             control.prepared_source_underruns.load() == source.underruns(),
         "prepared source publishes complete callback diagnostics");
+    expect(!source.needsProcessing(),
+        "completed non-looping prepared source returns to the idle fast path");
+    const auto completedOutput = output;
+    stem.fill(7);
+    processing::mix_prepared_source(&control, output, 14, stem);
+    expect(output == completedOutput && !anyNonzero(stem) &&
+            control.prepared_track_peak_ppm.load() == 0,
+        "idle prepared source clears a requested recording stem without mixing");
     processing::mix_prepared_source(nullptr, output, 10, stem);
 }
 
@@ -473,8 +564,49 @@ void testMetronomeOutput()
     configureMetronome(control);
     processing::mix_metronome_click(
         &control, 48000.0, 0, beatIndex, output, stem);
-    expect(anyNonzero(output) && output == stem && beatIndex == 1,
-        "enabled metronome renders the shared-grid click and recorder stem");
+    expect(anyNonzero(output) && output == stem && beatIndex == 1 &&
+            control.metronome_peak_ppm.load() > 0 &&
+            control.gui_metronome_peak_ppm.load() ==
+                control.metronome_peak_ppm.load(),
+        "enabled metronome renders and meters the shared-grid click and recorder stem");
+
+    const auto uncachedOutput = output;
+    const auto uncachedStem = stem;
+    processing::MetronomeWaveBank waveBank(48000.0);
+    output.fill(0);
+    stem.fill(0);
+    std::uint64_t cachedBeatIndex = 0;
+    processing::mix_metronome_click(
+        &control,
+        48000.0,
+        0,
+        cachedBeatIndex,
+        output,
+        stem,
+        &waveBank);
+    expect(waveBank.preparedFor(48000.0) &&
+            output == uncachedOutput && stem == uncachedStem &&
+            cachedBeatIndex == beatIndex,
+        "prepared block metronome rendering is sample-exact with direct synthesis");
+
+    output.fill(0);
+    stem.fill(0);
+    control.metronome_pattern_origin_valid.store(false);
+    control.metronome_pattern_scheduled_origin_raw_frame.store(32);
+    processing::mix_metronome_click(
+        &control, 48000.0, 0, beatIndex, output, stem);
+    const bool clickBeforeReset = std::any_of(
+        output.begin(), output.begin() + 32,
+        [](std::int32_t sample) { return sample != 0; });
+    const bool clickAfterReset = std::any_of(
+        output.begin() + 32, output.end(),
+        [](std::int32_t sample) { return sample != 0; });
+    expect(clickBeforeReset && clickAfterReset && output == stem &&
+            control.metronome_pattern_origin_valid.load() &&
+            control.metronome_pattern_origin_frame.load() == 32 &&
+            control.metronome_pattern_scheduled_origin_raw_frame.load() == 0,
+        "scheduled metronome origin resets within a rendered callback block");
+    jam2::audio::reset_metronome_pattern_origin(control);
 
     output.fill(0);
     stem.fill(7);
@@ -656,6 +788,7 @@ void testHeadlessUsesSharedPipeline()
 int main()
 {
     testCallbackTiming();
+    testOptionalDriverOutputReadyState();
     testNetworkPlaybackTimelineCoherence();
     testPeakGainAndMixing();
     testPlaybackResampler();

@@ -60,6 +60,37 @@ void loadTuning(QSettings& s, LocalTuningPreference& v)
     v.adaptiveRatioRampMs = s.value(QStringLiteral("adaptive_ratio_ramp_ms"), v.adaptiveRatioRampMs).toInt();
 }
 
+void migrateSchemaFiveFastJitter(LocalTuningPreference& value)
+{
+    // Schema 5 labelled the old 512-frame jitter preset as "fast". The
+    // optimized core preset now uses 64 frames. Migrate only that exact old
+    // value so other explicit numeric tuning remains under user control.
+    if (value.profile == QStringLiteral("fast") && value.jitterBufferFrames == 512) {
+        value.jitterBufferFrames = 64;
+    }
+}
+
+void migrateLegacyFastPlaybackDefaults(LocalTuningPreference& value)
+{
+    // Migrate only the exact latency fields from the former Fast preset. A
+    // different value in any changed field is an explicit user tuning choice.
+    if (value.profile == QStringLiteral("fast") &&
+        value.prefillFrames == 256 &&
+        value.playoutDelayFrames == 256 &&
+        value.jitterBufferFrames == 64 &&
+        value.jitterBufferMaxFrames == 1024 &&
+        value.adaptiveTargetFrames == 256 &&
+        value.adaptiveMinFrames == 256 &&
+        value.adaptiveMaxFrames == 1536) {
+        value.prefillFrames = 64;
+        value.playoutDelayFrames = 64;
+        value.jitterBufferMaxFrames = 512;
+        value.adaptiveTargetFrames = 64;
+        value.adaptiveMinFrames = 64;
+        value.adaptiveMaxFrames = 512;
+    }
+}
+
 void saveTuning(QSettings& s, const LocalTuningPreference& v)
 {
     s.setValue(QStringLiteral("profile"), v.profile);
@@ -91,6 +122,9 @@ void loadRuntime(QSettings& s, RuntimePreference& v)
     v.diagnosticsWarmupMs = s.value(QStringLiteral("diagnostics_warmup_ms"), v.diagnosticsWarmupMs).toInt();
     v.logStatsFolder = s.value(QStringLiteral("log_stats_folder"), v.logStatsFolder).toString();
     v.osPriority = s.value(QStringLiteral("os_priority"), v.osPriority).toString();
+    if (v.osPriority != QStringLiteral("off") && v.osPriority != QStringLiteral("high")) {
+        v.osPriority = QStringLiteral("high");
+    }
     v.waitMs = s.value(QStringLiteral("wait_ms"), v.waitMs).toInt();
     v.streamMs = s.value(QStringLiteral("stream_ms"), v.streamMs).toInt();
     v.streamLingerMs = s.value(QStringLiteral("stream_linger_ms"), v.streamLingerMs).toInt();
@@ -253,6 +287,14 @@ UserPreferences UserPreferencesStore::load()
     settings.beginGroup(QStringLiteral("tuning")); loadTuning(settings, out.join.tuning); settings.endGroup();
     settings.beginGroup(QStringLiteral("runtime")); loadRuntime(settings, out.join.runtime); settings.endGroup();
     settings.endGroup();
+    if (schemaVersion < 6) {
+        migrateSchemaFiveFastJitter(out.create.tuning);
+        migrateSchemaFiveFastJitter(out.join.tuning);
+    }
+    if (schemaVersion < 7) {
+        migrateLegacyFastPlaybackDefaults(out.create.tuning);
+        migrateLegacyFastPlaybackDefaults(out.join.tuning);
+    }
     if (schemaVersion >= 2) {
         settings.beginGroup(QStringLiteral("logging"));
         out.logging.folder = settings.value(QStringLiteral("folder"), out.logging.folder).toString();

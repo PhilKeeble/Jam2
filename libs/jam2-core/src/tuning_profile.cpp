@@ -7,9 +7,9 @@ namespace {
 
 constexpr std::array<JoinProfile, 3> kJoinProfiles{{
     {
-        "fast", "Fast", 32, 256, 4096, 1536, 4096,
-        true, 0.02, 25, 500, true, 256, 512, 1024,
-        true, 256, 256, 1536, 5000, 250,
+        "fast", "Fast", 32, 64, 4096, 1536, 4096,
+        true, 0.02, 25, 500, true, 64, 64, 512,
+        true, 64, 64, 512, 5000, 250,
     },
     {
         "moderate", "Moderate", 64, 512, 8192, 4096, 4096,

@@ -126,20 +126,21 @@ bool InputSourceRouter::process(
             source.topology_revision.load(std::memory_order_acquire);
         if ((revision & 1U) != 0U) continue;
         const bool configured = source.configured.load(std::memory_order_acquire);
+        if (!configured) continue;
         const InputSourceKind kind = source.kind.load(std::memory_order_relaxed);
         const bool included = source.enabled.load(std::memory_order_acquire);
-        const std::size_t first = source.first_channel.load(std::memory_order_relaxed);
-        const std::size_t second = source.second_channel.load(std::memory_order_relaxed);
-        InputSourceRenderer* renderer = source.renderer.load(std::memory_order_acquire);
-        const std::int64_t level = std::clamp(
-            source.level_ppm.load(std::memory_order_relaxed), 0, 4000000);
-        if (source.topology_revision.load(std::memory_order_acquire) != revision ||
-            !configured) continue;
         // MIDI renderers must continue draining timestamped controller events
         // while excluded from My Send, otherwise mute/send-off fills the queue
         // and replays stale notes when the source is enabled again.
         if (!included && slot_index != recording_slot &&
             kind != InputSourceKind::MidiInstrument) continue;
+        const std::size_t first = source.first_channel.load(std::memory_order_relaxed);
+        const std::size_t second = source.second_channel.load(std::memory_order_relaxed);
+        InputSourceRenderer* renderer = source.renderer.load(std::memory_order_acquire);
+        const std::int64_t level = std::clamp(
+            source.level_ppm.load(std::memory_order_relaxed), 0, 4000000);
+        if (source.topology_revision.load(std::memory_order_acquire) != revision)
+            continue;
         std::array<const std::int32_t*, kMaximumSourceInputChannels> inputs{};
         std::size_t input_channels = 0;
         if (kind == InputSourceKind::Audio) {
@@ -151,6 +152,7 @@ bool InputSourceRouter::process(
         }
 
         bool rendered = false;
+        const std::int32_t* sourceSamples = source_scratch_.data();
         const std::size_t source_latency = renderer != nullptr
             ? renderer->latency_frames(frames)
             : 0;
@@ -167,7 +169,7 @@ bool InputSourceRouter::process(
             if (kind == InputSourceKind::MidiInstrument) {
                 std::fill(source_scratch_.begin(), source_scratch_.begin() + frames, 0);
             } else if (input_channels == 1 && inputs[0] != nullptr) {
-                std::copy(inputs[0], inputs[0] + frames, source_scratch_.begin());
+                sourceSamples = inputs[0];
             } else if (input_channels == 2 && inputs[0] != nullptr && inputs[1] != nullptr) {
                 for (std::size_t frame = 0; frame < frames; ++frame) {
                     source_scratch_[frame] = static_cast<std::int32_t>(
@@ -178,14 +180,24 @@ bool InputSourceRouter::process(
                 std::fill(source_scratch_.begin(), source_scratch_.begin() + frames, 0);
             }
         }
-        for (std::size_t frame = 0; frame < frames; ++frame) {
-            const std::int64_t levelled =
-                static_cast<std::int64_t>(source_scratch_[frame]) * level / 1000000LL;
-            if (included) mix_scratch_[frame] += levelled;
-            if (slot_index == recording_slot) {
-                recording_scratch_[frame] = static_cast<std::int32_t>(std::clamp<std::int64_t>(
-                    levelled, std::numeric_limits<std::int32_t>::min(),
-                    std::numeric_limits<std::int32_t>::max()));
+        if (level == 1000000LL) {
+            for (std::size_t frame = 0; frame < frames; ++frame) {
+                const std::int32_t sample = sourceSamples[frame];
+                if (included) mix_scratch_[frame] += sample;
+                if (slot_index == recording_slot) recording_scratch_[frame] = sample;
+            }
+        } else {
+            for (std::size_t frame = 0; frame < frames; ++frame) {
+                const std::int64_t levelled =
+                    static_cast<std::int64_t>(sourceSamples[frame]) * level / 1000000LL;
+                if (included) mix_scratch_[frame] += levelled;
+                if (slot_index == recording_slot) {
+                    recording_scratch_[frame] = static_cast<std::int32_t>(
+                        std::clamp<std::int64_t>(
+                            levelled,
+                            std::numeric_limits<std::int32_t>::min(),
+                            std::numeric_limits<std::int32_t>::max()));
+                }
             }
         }
         if (slot_index == recording_slot)
@@ -204,9 +216,12 @@ bool InputSourceRouter::process(
         std::memory_order_relaxed);
 
     std::uint64_t absolute_peak = 0;
-    const std::int64_t divisor = static_cast<std::int64_t>(std::max<std::size_t>(1, rendered_sources));
+    const std::int64_t divisor = static_cast<std::int64_t>(
+        std::max<std::size_t>(1, rendered_sources));
     for (std::size_t frame = 0; frame < frames; ++frame) {
-        const std::int64_t mixed = mix_scratch_[frame] / divisor;
+        const std::int64_t mixed = rendered_sources <= 1
+            ? mix_scratch_[frame]
+            : mix_scratch_[frame] / divisor;
         const auto sample = static_cast<std::int32_t>(std::clamp<std::int64_t>(
             mixed,
             std::numeric_limits<std::int32_t>::min(),

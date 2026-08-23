@@ -37,9 +37,6 @@
 #include <mmsystem.h>
 #elif defined(__APPLE__)
 #include <arpa/inet.h>
-#include <mach/mach.h>
-#include <mach/mach_time.h>
-#include <mach/thread_policy.h>
 #include <netdb.h>
 #include <pthread.h>
 #include <pthread/qos.h>
@@ -389,7 +386,7 @@ void sync_engine_control(
 
 std::uint64_t current_engine_frame(const jam2::Engine* engine)
 {
-    return engine != nullptr ? engine->snapshot().engine_frame : 0ULL;
+    return engine != nullptr ? engine->currentFrame() : 0ULL;
 }
 
 void hold_shared_grid_at_start(
@@ -439,6 +436,7 @@ std::uint64_t publish_transport_schedule(
 
 void commit_due_transport(RuntimeState& state, const jam2::Engine* engine)
 {
+    if (!state.transport_pending.load(std::memory_order_acquire)) return;
     std::lock_guard<std::mutex> lock(state.transport_mutex);
     if (!state.transport_pending.load(std::memory_order_acquire) ||
         current_engine_frame(engine) < state.transport_target_raw_frame.load(std::memory_order_relaxed)) {
@@ -677,6 +675,21 @@ std::string win_thread_priority_text(int value)
     default: return std::to_string(value);
     }
 }
+
+DWORD win_process_priority_class(WindowsProcessPriorityRequest)
+{
+    return HIGH_PRIORITY_CLASS;
+}
+
+int win_thread_priority(WindowsThreadPriorityRequest)
+{
+    return THREAD_PRIORITY_HIGHEST;
+}
+
+AVRT_PRIORITY win_mmcss_priority(WindowsMmcssPriorityRequest)
+{
+    return AVRT_PRIORITY_HIGH;
+}
 #endif
 
 #if defined(__APPLE__)
@@ -693,14 +706,6 @@ std::string mac_qos_text(qos_class_t value)
     }
 }
 
-std::uint64_t ns_to_mach_absolute(std::uint64_t ns)
-{
-    mach_timebase_info_data_t info{};
-    if (mach_timebase_info(&info) != KERN_SUCCESS || info.numer == 0) {
-        return ns;
-    }
-    return (ns * static_cast<std::uint64_t>(info.denom)) / static_cast<std::uint64_t>(info.numer);
-}
 #endif
 
 class OsPriorityScope {
@@ -721,6 +726,9 @@ public:
         }
         if (original_thread_priority_ != THREAD_PRIORITY_ERROR_RETURN) {
             (void)SetThreadPriority(GetCurrentThread(), original_thread_priority_);
+        }
+        if (process_priority_changed_ && original_process_priority_ != 0) {
+            (void)SetPriorityClass(GetCurrentProcess(), original_process_priority_);
         }
         if (timer_resolution_active_) {
             (void)timeEndPeriod(1);
@@ -750,30 +758,37 @@ private:
 #if defined(_WIN32)
     void apply_windows(const Options& options)
     {
-        status_.process_priority = win_priority_class_text(GetPriorityClass(GetCurrentProcess()));
+        original_process_priority_ = GetPriorityClass(GetCurrentProcess());
+        status_.process_priority = win_priority_class_text(original_process_priority_);
         original_thread_priority_ = GetThreadPriority(GetCurrentThread());
         status_.thread_priority = win_thread_priority_text(original_thread_priority_);
         status_.mmcss_requested = "off";
         status_.mmcss_active = "off";
+        status_.mmcss_priority_requested = "off";
+        status_.mmcss_priority_active = "off";
         status_.timer_resolution_requested = "off";
         status_.timer_resolution_active = "off";
         if (options.os_priority == OsPriorityMode::Off) {
             return;
         }
 
-        // Keep the whole application at high priority. Realtime is restricted
-        // to this packet worker (plus MMCSS) so Qt/file/control workers cannot
-        // starve the OS if a GUI task misbehaves.
-        const DWORD priority_class = HIGH_PRIORITY_CLASS;
+        const WindowsSchedulingRequest request =
+            windows_scheduling_request(options.os_priority);
+        const DWORD priority_class = win_process_priority_class(request.process);
         if (!SetPriorityClass(GetCurrentProcess(), priority_class)) {
-            status_.process_priority = "request-failed:" + os_error_text(GetLastError());
+            status_.process_priority_error = os_error_text(GetLastError());
         } else {
-            status_.process_priority = win_priority_class_text(GetPriorityClass(GetCurrentProcess()));
+            process_priority_changed_ = true;
+            const DWORD active_priority_class = GetPriorityClass(GetCurrentProcess());
+            status_.process_priority = win_priority_class_text(active_priority_class);
+            if (active_priority_class != priority_class) {
+                status_.process_priority_error =
+                    "requested-" + win_priority_class_text(priority_class) +
+                    "-active-" + win_priority_class_text(active_priority_class);
+            }
         }
 
-        const int thread_priority = options.os_priority == OsPriorityMode::Realtime ?
-            THREAD_PRIORITY_TIME_CRITICAL :
-            THREAD_PRIORITY_HIGHEST;
+        const int thread_priority = win_thread_priority(request.thread);
         if (!SetThreadPriority(GetCurrentThread(), thread_priority)) {
             status_.thread_priority = "request-failed:" + os_error_text(GetLastError());
         } else {
@@ -791,6 +806,8 @@ private:
         }
 
         status_.mmcss_requested = "Pro Audio";
+        status_.mmcss_priority_requested =
+            std::string(windows_mmcss_priority_text(request.mmcss));
         DWORD task_index = 0;
         mmcss_handle_ = AvSetMmThreadCharacteristicsA("Pro Audio", &task_index);
         if (mmcss_handle_ == nullptr) {
@@ -810,6 +827,14 @@ private:
             status_.mmcss_active = "on";
             status_.mmcss_profile = "Pro Audio";
         }
+        if (mmcss_handle_ != nullptr) {
+            if (AvSetMmThreadPriority(mmcss_handle_, win_mmcss_priority(request.mmcss))) {
+                status_.mmcss_priority_active = status_.mmcss_priority_requested;
+            } else {
+                status_.mmcss_priority_active = "off";
+                status_.mmcss_priority_error = os_error_text(GetLastError());
+            }
+        }
     }
 #endif
 
@@ -819,8 +844,6 @@ private:
         status_.process_priority = "unchanged";
         status_.qos_requested = "off";
         status_.qos_active = "off";
-        status_.realtime_requested = "off";
-        status_.realtime_active = "off";
         qos_class_t active_qos = QOS_CLASS_UNSPECIFIED;
         int relative_priority = 0;
         if (pthread_get_qos_class_np(pthread_self(), &active_qos, &relative_priority) != 0) {
@@ -830,45 +853,16 @@ private:
         if (options.os_priority == OsPriorityMode::Off) {
             return;
         }
-        if (options.os_priority == OsPriorityMode::High) {
-            status_.qos_requested = "user-interactive";
-            const int result = pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
-            if (result != 0) {
-                status_.qos_error = "error " + std::to_string(result);
-            }
-            if (pthread_get_qos_class_np(pthread_self(), &active_qos, &relative_priority) != 0) {
-                active_qos = QOS_CLASS_UNSPECIFIED;
-            }
-            status_.qos_active = mac_qos_text(active_qos);
-            status_.thread_priority = status_.qos_active;
-            return;
+        status_.qos_requested = "user-interactive";
+        const int result = pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+        if (result != 0) {
+            status_.qos_error = "error " + std::to_string(result);
         }
-
-        status_.realtime_requested = "thread-time-constraint";
-        const std::uint64_t packet_period_ns =
-            options.sample_rate > 0 && options.frame_size > 0 ?
-                (static_cast<std::uint64_t>(options.frame_size) * 1000000000ULL) /
-                    static_cast<std::uint64_t>(options.sample_rate) :
-                1000000ULL;
-        const std::uint64_t period = ns_to_mach_absolute(packet_period_ns);
-        thread_time_constraint_policy_data_t policy{};
-        policy.period = static_cast<std::uint32_t>(std::max<std::uint64_t>(period, 1));
-        policy.computation = static_cast<std::uint32_t>(std::max<std::uint64_t>(period / 4, 1));
-        policy.constraint = static_cast<std::uint32_t>(std::max<std::uint64_t>(period / 2, policy.computation + 1));
-        policy.preemptible = TRUE;
-        const kern_return_t result = thread_policy_set(
-            pthread_mach_thread_np(pthread_self()),
-            THREAD_TIME_CONSTRAINT_POLICY,
-            reinterpret_cast<thread_policy_t>(&policy),
-            THREAD_TIME_CONSTRAINT_POLICY_COUNT);
-        if (result == KERN_SUCCESS) {
-            status_.realtime_active = "on";
-            status_.thread_priority = "thread-time-constraint";
-        } else {
-            status_.realtime_active = "off";
-            status_.realtime_error = mach_error_string(result);
-
+        if (pthread_get_qos_class_np(pthread_self(), &active_qos, &relative_priority) != 0) {
+            active_qos = QOS_CLASS_UNSPECIFIED;
         }
+        status_.qos_active = mac_qos_text(active_qos);
+        status_.thread_priority = status_.qos_active;
     }
 #endif
 
@@ -876,6 +870,8 @@ private:
 #if defined(_WIN32)
     HANDLE mmcss_handle_ = nullptr;
     bool timer_resolution_active_ = false;
+    DWORD original_process_priority_ = 0;
+    bool process_priority_changed_ = false;
     int original_thread_priority_ = THREAD_PRIORITY_ERROR_RETURN;
 #endif
 };
@@ -1056,12 +1052,15 @@ OptionalAudioStream start_optional_audio(
 
 }
 
-void attach_network_capture(OptionalAudioStream& audio)
+void attach_network_capture(
+    OptionalAudioStream& audio,
+    jam2::RealtimeWakeSignal* wake_signal = nullptr,
+    std::size_t wake_frames = 0)
 {
     if (!audio.engine) {
         return;
     }
-    audio.network_capture = audio.engine->attachNetworkCapture();
+    audio.network_capture = audio.engine->attachNetworkCapture(wake_signal, wake_frames);
 
     if (audio.network_capture.generation == 0) {
         throw std::runtime_error("failed to attach the local engine capture tap");
@@ -1202,6 +1201,13 @@ void print_optional_audio_stats(const OptionalAudioStream& audio, const Options&
     std::cout << "Audio callback gaps over 1.1x: " << callback_stats.gap_over_1_1x_count << "\n";
     std::cout << "Audio callback gaps over 1.5x: " << callback_stats.gap_over_1_5x_count << "\n";
     std::cout << "Audio callback gaps over 2x: " << callback_stats.gap_over_2x_count << "\n";
+    if (callback_stats.work_samples > 0) {
+        std::cout << "Audio callback work us min: " << callback_stats.work_min_us << "\n";
+        std::cout << "Audio callback work us avg: "
+                  << static_cast<double>(callback_stats.work_sum_us) /
+                        static_cast<double>(callback_stats.work_samples) << "\n";
+        std::cout << "Audio callback work us max: " << callback_stats.work_max_us << "\n";
+    }
     if (options.audio_device_id) {
         std::cout << "Audio device id: " << *options.audio_device_id << "\n";
     }
@@ -1215,6 +1221,35 @@ void print_optional_audio_stats(const OptionalAudioStream& audio, const Options&
     std::cout << "Active audio buffer size ms: "
               << frames_to_ms(static_cast<std::size_t>(stream_info.buffer_size > 0 ? stream_info.buffer_size : 0), stream_info.sample_rate)
               << "\n";
+    std::cout << "Driver output-ready status: "
+              << jam2::audio::driver_output_ready_status_text(
+                     engine_snapshot.driver_output_ready_status) << "\n";
+    std::cout << "Driver output-ready error: "
+              << engine_snapshot.driver_output_ready_error << "\n";
+    std::cout << "Driver output-ready latency reduction frames: "
+              << engine_snapshot.driver_output_ready_latency_reduction_frames
+              << "\n";
+    std::cout << "Driver output-ready latency reduction ms: "
+              << frames_to_ms(
+                     static_cast<std::size_t>((std::max)(
+                         0L,
+                         engine_snapshot
+                             .driver_output_ready_latency_reduction_frames)),
+                     stream_info.sample_rate) << "\n";
+    std::cout << "Driver input latency frames: "
+              << engine_snapshot.input_latency_frames << "\n";
+    std::cout << "Driver input latency ms: "
+              << frames_to_ms(
+                     static_cast<std::size_t>((std::max)(
+                         0L, engine_snapshot.input_latency_frames)),
+                     stream_info.sample_rate) << "\n";
+    std::cout << "Driver output latency frames: "
+              << engine_snapshot.output_latency_frames << "\n";
+    std::cout << "Driver output latency ms: "
+              << frames_to_ms(
+                     static_cast<std::size_t>((std::max)(
+                         0L, engine_snapshot.output_latency_frames)),
+                     stream_info.sample_rate) << "\n";
     std::cout << "Requested input mix: " << mono_mix_mode_text(options.channel_selection.input.size()) << "\n";
     std::cout << "Active input mix: " << mono_mix_mode_text(stream_info.channels.input.size()) << "\n";
     std::cout << "Requested audio channels: " << channel_selection_text(options.channel_selection) << "\n";
@@ -1364,8 +1399,8 @@ int run_local(int argc, char** argv)
 int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
 {
     // This function is the universal direct-mesh UDP packet worker. Keep the
-    // process High but elevate only this thread to Time Critical/MMCSS when
-    // realtime was requested, leaving Qt and file workers out of realtime.
+    // selected process priority scoped to the active session and give this
+    // packet worker the matching thread/MMCSS priority.
     OsPriorityScope os_priority_scope(options);
     if (!options.session_id || !options.session_key) {
         throw std::runtime_error("network session requires --session-id and --session-key");
@@ -1425,8 +1460,19 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
         std::cout << "\n";
     }
     print_socket_options(socket);
+    // Constructed before the audio attachment so it remains alive until after
+    // that attachment has been detached and acknowledged by the callback.
+    jam2::RealtimeWakeSignal capture_ready_wake;
     auto audio = start_optional_audio(options, false, &runtime_host);
-    attach_network_capture(audio);
+    attach_network_capture(
+        audio,
+        &capture_ready_wake,
+        static_cast<std::size_t>(options.frame_size));
+    const jam2::NetworkAudioPacing attached_audio_pacing = audio.engine
+        ? jam2::capture_audio_pacing(
+              audio.engine->snapshot().audio_buffer_frames,
+              options.frame_size)
+        : jam2::NetworkAudioPacing::Scheduled;
     const int drained_startup_packets = drain_pending_udp(socket);
     if (drained_startup_packets > 0) {
         std::cout << "Drained startup UDP packets: " << drained_startup_packets << "\n";
@@ -1628,8 +1674,6 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
         std::uint64_t proof_unverified_drops = 0;
         std::uint64_t proof_unmatched_pongs = 0;
         std::uint64_t proof_challenge_overwrites = 0;
-        std::uint64_t sent_packets = 0;
-        std::uint64_t sent_bytes = 0;
         std::uint64_t recv_packets = 0;
         std::uint64_t recv_bytes = 0;
         std::uint64_t ignored_packets = 0;
@@ -1718,7 +1762,10 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
         peer_descriptors,
         peer_stream_config,
         audio.engine ? &mesh_playback : nullptr,
-        options.headless_clock_drift_ppm);
+        // Live packets are paced by the device-backed capture queue below.
+        // Keep the fallback silence clock on the host clock so synthetic
+        // device drift cannot mask a capture/sender ownership regression.
+        0);
     network_session_control = &network_session;
     auto& packet_schedule = network_session.schedule();
     auto peer_endpoint_state = [&](jam2::PeerId peer_id) {
@@ -1767,6 +1814,28 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
     std::uint64_t mesh_work_budget_yields = 0;
     std::uint64_t mesh_receive_batch_max = 0;
     jam2::cli::stats::ReceiveLoopDiagnostics mesh_receive_loop_diagnostics;
+    std::uint64_t mesh_ping_reply_turnaround_min_us = 0;
+    std::uint64_t mesh_ping_reply_turnaround_sum_us = 0;
+    std::uint64_t mesh_ping_reply_turnaround_max_us = 0;
+    std::uint64_t mesh_ping_reply_turnaround_samples = 0;
+    std::uint64_t mesh_pre_receive_work_min_us = 0;
+    std::uint64_t mesh_pre_receive_work_sum_us = 0;
+    std::uint64_t mesh_pre_receive_work_max_us = 0;
+    std::uint64_t mesh_pre_receive_work_samples = 0;
+    std::uint64_t mesh_pre_receive_advance_sum_us = 0;
+    std::uint64_t mesh_pre_receive_advance_max_us = 0;
+    std::uint64_t mesh_pre_receive_maintenance_sum_us = 0;
+    std::uint64_t mesh_pre_receive_maintenance_max_us = 0;
+    std::uint64_t mesh_pre_receive_send_sum_us = 0;
+    std::uint64_t mesh_pre_receive_send_max_us = 0;
+    std::uint64_t mesh_pre_receive_peak_advance_us = 0;
+    std::uint64_t mesh_pre_receive_peak_maintenance_us = 0;
+    std::uint64_t mesh_pre_receive_peak_send_us = 0;
+    std::uint64_t mesh_capture_ready_dispatch_min_us = 0;
+    std::uint64_t mesh_capture_ready_dispatch_sum_us = 0;
+    std::uint64_t mesh_capture_ready_dispatch_max_us = 0;
+    std::uint64_t mesh_capture_ready_dispatch_samples = 0;
+    std::uint64_t capture_ready_signal_observed = 0;
     std::uint64_t last_local_grid_request_sequence =
         commands.state.grid_request_sequence.load(std::memory_order_acquire);
     std::optional<jam2::GridProposal> pending_local_grid_proposal;
@@ -1774,6 +1843,10 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
     std::uint64_t next_grid_assignment_send_us = 0;
     std::uint64_t next_peer_phase_send_us = 0;
     std::uint64_t sending_transport_revision = 0;
+    std::uint64_t cached_transport_revision = 0;
+    std::uint64_t cached_transport_target = 0;
+    std::uint64_t cached_transport_countdown_start = 0;
+    int cached_transport_action = 0;
     std::uint64_t next_transport_send = 0;
     std::uint64_t transport_send_until_us = 0;
     bool sent_current_transport = false;
@@ -1838,10 +1911,16 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
     std::uint64_t mesh_compensation_average_latency_frames = 0;
     std::uint64_t mesh_compensation_peer_count = 0;
     bool timed_stream_audio_detached = false;
+    bool capture_deadline_override = audio.engine != nullptr;
+    jam2::NetworkCapturePacketPacer capture_packet_pacer(
+        attached_audio_pacing,
+        static_cast<std::size_t>(options.frame_size));
     std::int64_t mesh_grid_base_offset_frames = 0;
     std::int64_t mesh_grid_target_offset_frames = 0;
     bool mesh_grid_target_valid = false;
     std::uint64_t mesh_grid_last_update_us = 0;
+    std::uint64_t mesh_compensation_last_observation_us = 0;
+    std::uint64_t next_peer_liveness_check_us = start_time;
     jam2::NetworkPlaybackTimelineSnapshot mesh_playback_timeline;
 
     auto grid_mapping_error_frames = [&]() noexcept {
@@ -1983,6 +2062,7 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
         mesh_leader_audio_source_peer_id = 0;
         pending_local_grid_proposal.reset();
         mesh_grid_last_update_us = 0;
+        mesh_compensation_last_observation_us = 0;
         mesh_compensation_average_latency_frames = 0;
         mesh_compensation_peer_count = 0;
         mesh_compensation_was_clamped = false;
@@ -2152,11 +2232,34 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
         stats.jitter_buffer_max_frames = static_cast<std::uint64_t>(options.jitter_buffer_max_frames);
         stats.udp_work_budget_yields = mesh_work_budget_yields;
         stats.udp_receive_batch_max = mesh_receive_batch_max;
+        stats.ping_reply_turnaround_min_us = mesh_ping_reply_turnaround_min_us;
+        stats.ping_reply_turnaround_sum_us = mesh_ping_reply_turnaround_sum_us;
+        stats.ping_reply_turnaround_max_us = mesh_ping_reply_turnaround_max_us;
+        stats.ping_reply_turnaround_samples = mesh_ping_reply_turnaround_samples;
+        stats.pre_receive_work_min_us = mesh_pre_receive_work_min_us;
+        stats.pre_receive_work_sum_us = mesh_pre_receive_work_sum_us;
+        stats.pre_receive_work_max_us = mesh_pre_receive_work_max_us;
+        stats.pre_receive_work_samples = mesh_pre_receive_work_samples;
+        stats.pre_receive_advance_sum_us = mesh_pre_receive_advance_sum_us;
+        stats.pre_receive_advance_max_us = mesh_pre_receive_advance_max_us;
+        stats.pre_receive_maintenance_sum_us = mesh_pre_receive_maintenance_sum_us;
+        stats.pre_receive_maintenance_max_us = mesh_pre_receive_maintenance_max_us;
+        stats.pre_receive_send_sum_us = mesh_pre_receive_send_sum_us;
+        stats.pre_receive_send_max_us = mesh_pre_receive_send_max_us;
+        stats.pre_receive_peak_advance_us = mesh_pre_receive_peak_advance_us;
+        stats.pre_receive_peak_maintenance_us = mesh_pre_receive_peak_maintenance_us;
+        stats.pre_receive_peak_send_us = mesh_pre_receive_peak_send_us;
+        stats.capture_ready_wake_signals = capture_ready_wake.signalCount();
+        stats.capture_ready_wake_consumptions = capture_ready_wake.consumptionCount();
+        stats.capture_ready_dispatch_min_us = mesh_capture_ready_dispatch_min_us;
+        stats.capture_ready_dispatch_sum_us = mesh_capture_ready_dispatch_sum_us;
+        stats.capture_ready_dispatch_max_us = mesh_capture_ready_dispatch_max_us;
+        stats.capture_ready_dispatch_samples = mesh_capture_ready_dispatch_samples;
+        stats.capture_clock_packet_pacing_active =
+            attached_audio_pacing == jam2::NetworkAudioPacing::CaptureClock;
         mesh_receive_loop_diagnostics.applyTo(stats);
         for (const auto& entry : peers) {
             const auto& peer = entry.second;
-            stats.sent_packets += peer.sent_packets;
-            stats.sent_bytes += peer.sent_bytes;
             stats.recv_packets += peer.recv_packets;
             stats.recv_bytes += peer.recv_bytes;
             stats.ignored_packets += peer.ignored_packets;
@@ -2165,6 +2268,8 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
             stats.sent_pongs += peer.sent_pongs;
             stats.recv_pongs += peer.recv_pongs;
             if (const auto* send = network_session.peerSendStats(peer.peer_id)) {
+                stats.sent_packets += send->audio_sent_packets;
+                stats.sent_bytes += send->audio_sent_bytes;
                 stats.udp_send_would_block_drops += send->would_block_drops;
                 stats.udp_send_no_buffer_drops += send->no_buffer_drops;
                 stats.udp_send_unreachable_errors += send->unreachable_errors;
@@ -2175,7 +2280,19 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                     stats.udp_send_consecutive_path_errors_max,
                     send->consecutive_path_errors);
             }
-            add_peer_stream_stats(stats, network_session.peerStream(peer.peer_id).stats());
+            const auto& stream_stats = network_session.peerStream(peer.peer_id).stats();
+            add_peer_stream_stats(stats, stream_stats);
+            if (const auto* mix = network_session.peerMixStats(peer.peer_id)) {
+                stats.peer_playback_queue_current_frames = std::max(
+                    stats.peer_playback_queue_current_frames,
+                    mix->queue_depth_frames);
+                stats.peer_playback_queue_high_water_frames = std::max(
+                    stats.peer_playback_queue_high_water_frames,
+                    mix->queue_high_water_frames);
+                stats.peer_playback_path_current_frames = std::max(
+                    stats.peer_playback_path_current_frames,
+                    mix->queue_depth_frames + stream_stats.jitter_buffer_depth_frames);
+            }
         }
         const auto pattern = metronome_pattern_from_runtime(commands.state);
         const std::uint64_t beat_frames = jam2::metronome::step_interval_samples(
@@ -2310,7 +2427,8 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                           << " udp_send_refused=" << (send_stats != nullptr ? send_stats->refused_errors : 0ULL)
                           << " udp_send_reprobes=" << (send_stats != nullptr ? send_stats->path_reprobe_transitions : 0ULL)
                           << " udp_send_last_error=" << (send_stats != nullptr ? send_stats->last_error_code : 0)
-                          << " sent_packets=" << peer.sent_packets
+                          << " sent_packets=" <<
+                                (send_stats != nullptr ? send_stats->audio_sent_packets : 0ULL)
                           << " recv_packets=" << peer.recv_packets
                           << " ignored_packets=" << peer.ignored_packets
                           << " sequence_lost=" << peer_stats.sequence.lost
@@ -2526,8 +2644,6 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
             const auto wanted = desired.find(peer_id);
             if (wanted == desired.end()) {
                 const auto& retired = it->second;
-                retired_peer_stats.sent_packets += retired.sent_packets;
-                retired_peer_stats.sent_bytes += retired.sent_bytes;
                 retired_peer_stats.recv_packets += retired.recv_packets;
                 retired_peer_stats.recv_bytes += retired.recv_bytes;
                 retired_peer_stats.ignored_packets += retired.ignored_packets;
@@ -2537,6 +2653,8 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                 retired_peer_stats.sent_pongs += retired.sent_pongs;
                 retired_peer_stats.recv_pongs += retired.recv_pongs;
                 if (const auto* send = network_session.peerSendStats(retired.peer_id)) {
+                    retired_peer_stats.sent_packets += send->audio_sent_packets;
+                    retired_peer_stats.sent_bytes += send->audio_sent_bytes;
                     retired_peer_stats.udp_send_would_block_drops += send->would_block_drops;
                     retired_peer_stats.udp_send_no_buffer_drops += send->no_buffer_drops;
                     retired_peer_stats.udp_send_unreachable_errors += send->unreachable_errors;
@@ -2637,29 +2755,36 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
     while (jam2::monotonic_us() < receive_deadline &&
            !commands.state.quit.load(std::memory_order_relaxed) &&
            !runtime_host.stop_requested.load(std::memory_order_acquire)) {
-        apply_runtime_host_commands();
-        apply_membership_update();
-        apply_forced_reprobe();
         const std::uint64_t now = jam2::monotonic_us();
-        for (auto& entry : peers) {
-            auto& peer = entry.second;
-            if (peer_endpoint_state(peer.peer_id) != jam2::PeerEndpointState::Active ||
-                peer.last_authenticated_receive_us == 0 ||
-                now - peer.last_authenticated_receive_us <
-                    kAuthenticatedPeerLivenessTimeoutUs) {
-                continue;
-            }
-            const std::uint64_t silent_ms =
-                (now - peer.last_authenticated_receive_us) / 1000ULL;
-            if (reset_peer_proof(peer, true, false)) {
-                const std::string line =
-                    "UDP peer liveness expired: peer_id=" +
-                    std::to_string(peer.peer_id.value) +
-                    " authenticated_receive_silence_ms=" +
-                    std::to_string(silent_ms) +
-                    " action=reprobe";
-                std::cout << line << '\n';
-                if (runtime_host.log) runtime_host.log(line);
+        const std::uint64_t pre_receive_work_start_us = now;
+        // Expire overdue mixer slots before reading a queued catch-up batch.
+        // Otherwise audio that missed the live deadline is ingested first and
+        // can be replayed as permanent latency instead of being discarded.
+        network_session.advance(now);
+        const std::uint64_t pre_receive_advance_end_us = jam2::monotonic_us();
+        if (now >= next_peer_liveness_check_us) {
+            constexpr std::uint64_t kPeerLivenessCheckIntervalUs = 100000ULL;
+            next_peer_liveness_check_us = now + kPeerLivenessCheckIntervalUs;
+            for (auto& entry : peers) {
+                auto& peer = entry.second;
+                if (peer_endpoint_state(peer.peer_id) != jam2::PeerEndpointState::Active ||
+                    peer.last_authenticated_receive_us == 0 ||
+                    now - peer.last_authenticated_receive_us <
+                        kAuthenticatedPeerLivenessTimeoutUs) {
+                    continue;
+                }
+                const std::uint64_t silent_ms =
+                    (now - peer.last_authenticated_receive_us) / 1000ULL;
+                if (reset_peer_proof(peer, true, false)) {
+                    const std::string line =
+                        "UDP peer liveness expired: peer_id=" +
+                        std::to_string(peer.peer_id.value) +
+                        " authenticated_receive_silence_ms=" +
+                        std::to_string(silent_ms) +
+                        " action=reprobe";
+                    std::cout << line << '\n';
+                    if (runtime_host.log) runtime_host.log(line);
+                }
             }
         }
         if (!timed_stream_clock_armed && options.stream_ms > 0 && network_session.activePeerCount() > 0) {
@@ -2702,7 +2827,11 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
         const int grid_mode = commands.state.metronome_mode.load(std::memory_order_relaxed);
         const bool listener_compensated =
             grid_mode == metronome_mode_id(MetronomeMode::ListenerCompensated);
-        if (listener_compensated) {
+        const bool compensation_observation_due =
+            mesh_compensation_last_observation_us == 0 ||
+            now - mesh_compensation_last_observation_us >= 10000ULL;
+        if (listener_compensated && compensation_observation_due) {
+            mesh_compensation_last_observation_us = now;
             const auto observed_timeline = audio.engine != nullptr
                 ? audio.engine->networkPlaybackTimelineSnapshot()
                 : jam2::NetworkPlaybackTimelineSnapshot{};
@@ -2795,9 +2924,12 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                 mesh_compensation_was_stale = true;
             }
         } else {
-            mesh_compensation_average_latency_frames = 0;
-            mesh_compensation_peer_count = 0;
-            mesh_compensation_was_clamped = false;
+            if (!listener_compensated) {
+                mesh_compensation_last_observation_us = 0;
+                mesh_compensation_average_latency_frames = 0;
+                mesh_compensation_peer_count = 0;
+                mesh_compensation_was_clamped = false;
+            }
         }
         const bool correction_enabled = mesh_grid_target_valid &&
             (listener_compensated ||
@@ -2830,28 +2962,106 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
         commit_due_transport(commands.state, audio.engine.get());
         sync_engine_control(commands.state, audio.engine.get(), engine_control_mirror);
         if (!timed_stream_audio_detached && now >= send_deadline) {
+            capture_ready_wake.cancelWakeRequest();
             detach_network_capture(audio);
             mesh_playback.detach();
             timed_stream_audio_detached = true;
         }
+        const std::uint64_t pre_receive_send_start_us = jam2::monotonic_us();
         int sends_this_loop = 0;
-        while (now >= packet_schedule.nextAudioSendUs() &&
-               packet_schedule.nextAudioSendUs() < receive_deadline &&
+        bool audio_send_waiting_for_capture = false;
+        const jam2::NetworkAudioPacing audio_pacing =
+            audio.engine != nullptr && !timed_stream_audio_detached
+            ? attached_audio_pacing
+            : jam2::NetworkAudioPacing::Scheduled;
+        const bool capture_clock_packet_pacing =
+            capture_packet_pacer.captureClockActive() &&
+            audio_pacing == attached_audio_pacing;
+        const std::size_t packet_frames =
+            static_cast<std::size_t>(options.frame_size);
+        if (capture_clock_packet_pacing &&
+            !capture_packet_pacer.packetRequiresSpacing() &&
+            !capture_deadline_override) {
+            // A callback no larger than one packet can be the primary packet
+            // clock. Arm before inspecting depth so publication cannot be
+            // missed between the check and the socket wait.
+            capture_ready_wake.requestWake();
+            if (capture_packet_pacer.captureReady(
+                    audio.engine->networkCaptureDepth(audio.network_capture))) {
+                capture_ready_wake.cancelWakeRequest();
+                capture_deadline_override = true;
+            } else {
+                audio_send_waiting_for_capture = true;
+            }
+        }
+        while (packet_schedule.audioSendReady(
+                   now, audio_pacing, capture_deadline_override) &&
+               now < receive_deadline &&
                sends_this_loop < 8) {
             std::span<const std::uint8_t> payload = silence_payload;
             if (audio.engine != nullptr && !timed_stream_audio_detached) {
-                const auto captured = audio.engine->popNetworkCapture(audio.network_capture, asio_frames);
+                auto captured = audio.engine->popNetworkCapture(
+                    audio.network_capture, asio_frames);
                 if (captured.frames < static_cast<std::size_t>(options.frame_size)) {
-                    break;
+                    capture_deadline_override = true;
+                    // Arm before retrying so a callback publishing between the
+                    // failed pop and the blocking receive cannot be missed.
+                    capture_ready_wake.requestWake();
+                    captured = audio.engine->popNetworkCapture(
+                        audio.network_capture, asio_frames);
+                    if (captured.frames < static_cast<std::size_t>(options.frame_size)) {
+                        capture_deadline_override = true;
+                        audio_send_waiting_for_capture = true;
+                        break;
+                    }
                 }
-                for (std::size_t i = 0; i < asio_frames.size(); ++i) {
-                    network_frames[i] = asio_frames[i] / 256;
+                capture_ready_wake.cancelWakeRequest();
+                audio_send_waiting_for_capture = false;
+                if (capture_deadline_override) {
+                    // A callback, or an already excessive queue, owns this
+                    // deadline. Re-anchor the following packet interval to the
+                    // device publication instead of carrying wall-clock error.
+                    packet_schedule.resynchronizeAudioSend(jam2::monotonic_us());
                 }
-                apply_send_level(network_frames, commands.state.send_level_ppm.load(std::memory_order_relaxed));
-                if (commands.state.metronome_mode.load(std::memory_order_relaxed) ==
+                capture_deadline_override = false;
+                const std::uint64_t ready_signal = capture_ready_wake.signalCount();
+                if (ready_signal != capture_ready_signal_observed) {
+                    capture_ready_signal_observed = ready_signal;
+                    const std::uint64_t ready_time_us =
+                        capture_ready_wake.lastSignalTimeUs();
+                    const std::uint64_t dispatch_time_us = jam2::monotonic_us();
+                    if (ready_time_us > 0 && dispatch_time_us >= ready_time_us) {
+                        const std::uint64_t dispatch_us =
+                            dispatch_time_us - ready_time_us;
+                        if (mesh_capture_ready_dispatch_samples == 0 ||
+                            dispatch_us < mesh_capture_ready_dispatch_min_us) {
+                            mesh_capture_ready_dispatch_min_us = dispatch_us;
+                        }
+                        mesh_capture_ready_dispatch_sum_us += dispatch_us;
+                        mesh_capture_ready_dispatch_max_us = std::max(
+                            mesh_capture_ready_dispatch_max_us, dispatch_us);
+                        ++mesh_capture_ready_dispatch_samples;
+                    }
+                }
+                const int send_level_ppm = commands.state.send_level_ppm.load(
+                    std::memory_order_relaxed);
+                const bool inject_leader_click =
+                    commands.state.metronome_mode.load(std::memory_order_relaxed) ==
                         metronome_mode_id(MetronomeMode::LeaderAudio) &&
                     commands.state.leader_audio_local_click.load(std::memory_order_relaxed) &&
-                    commands.state.metronome.load(std::memory_order_relaxed)) {
+                    commands.state.metronome.load(std::memory_order_relaxed);
+                if (send_level_ppm == 1000000 && !inject_leader_click) {
+                    (void)jam2::protocol::pack_audio_q31_into(
+                        options.network_audio_format,
+                        asio_frames,
+                        packed_audio_payload);
+                } else {
+                    for (std::size_t i = 0; i < asio_frames.size(); ++i) {
+                        network_frames[i] = asio_frames[i] / 256;
+                    }
+                    apply_send_level(network_frames, send_level_ppm);
+                }
+                if (inject_leader_click) {
                     mix_leader_click_into_packet(
                         network_frames,
                         packet_schedule.sampleTime(),
@@ -2864,10 +3074,12 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                     mesh_leader_audio_source_peer_id = local_peer_id.value;
                     ++mesh_leader_audio_injected_packets;
                 }
-                (void)jam2::protocol::pack_audio_into(
-                    options.network_audio_format,
-                    network_frames,
-                    packed_audio_payload);
+                if (send_level_ppm != 1000000 || inject_leader_click) {
+                    (void)jam2::protocol::pack_audio_into(
+                        options.network_audio_format,
+                        network_frames,
+                        packed_audio_payload);
+                }
                 payload = packed_audio_payload;
             } else if (commands.state.metronome_mode.load(std::memory_order_relaxed) ==
                            metronome_mode_id(MetronomeMode::LeaderAudio) &&
@@ -2891,25 +3103,49 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                     packed_audio_payload);
                 payload = packed_audio_payload;
             }
-            const auto send_result = network_session.sendToActive(
+            (void)network_session.sendToActive(
                 jam2::protocol::PacketType::Audio,
                 packet_schedule.audioSequence(),
                 packet_schedule.sampleTime(),
                 payload);
-            for (auto& entry : peers) {
-                auto& peer = entry.second;
-                if (peer_endpoint_state(peer.peer_id) != jam2::PeerEndpointState::Active) {
-                    continue;
-                }
-                const auto* send_stats = network_session.peerSendStats(peer.peer_id);
-                if (send_stats != nullptr && send_stats->last_outcome == jam2::UdpSendOutcome::Sent) {
-                    ++peer.sent_packets;
-                    peer.sent_bytes += send_result.packet_size;
-                }
-            }
             packet_schedule.commitAudioPacket();
             ++sends_this_loop;
+            if (audio_pacing != jam2::NetworkAudioPacing::Scheduled) {
+                const std::size_t remaining_capture_frames =
+                    audio.engine->networkCaptureDepth(audio.network_capture);
+                // Catch up only while more than one complete packet remains.
+                // In capture-clock mode, an exactly-one-packet backlog is
+                // deliberately held for the next wall deadline so a delayed
+                // worker cannot turn multiple device callbacks into a burst.
+                capture_packet_pacer.observePacketSent(
+                    remaining_capture_frames);
+                capture_deadline_override =
+                    capture_packet_pacer.catchupReady(
+                        remaining_capture_frames);
+            }
         }
+        bool audio_send_retry_immediately = false;
+        if (capture_clock_packet_pacing &&
+            !capture_packet_pacer.packetRequiresSpacing() &&
+            !audio_send_waiting_for_capture &&
+            sends_this_loop < 8 && now < receive_deadline) {
+            // Leave the demand signal armed after draining the live packet.
+            // The retry closes the arm/publication race without polling from
+            // the callback or adding a permanent timeout delay.
+            capture_ready_wake.requestWake();
+            if (capture_packet_pacer.captureReady(
+                    audio.engine->networkCaptureDepth(audio.network_capture))) {
+                capture_ready_wake.cancelWakeRequest();
+                capture_deadline_override = true;
+                audio_send_retry_immediately = true;
+            } else {
+                audio_send_waiting_for_capture = true;
+            }
+        }
+        const bool audio_send_budget_exhausted =
+            sends_this_loop == 8 &&
+            packet_schedule.audioSendReady(
+                now, audio_pacing, capture_deadline_override);
 
         if (now >= packet_schedule.nextPingUs() && now < send_deadline) {
             for (auto& entry : peers) {
@@ -2951,7 +3187,6 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                 if (challenge.used) {
                     ++peer.proof_challenge_overwrites;
                 }
-                challenge = ProbeChallenge{control_sequence, now, true};
                 if (endpoint_state == jam2::PeerEndpointState::Probing) {
                     ++peer.proof_attempts;
                     if (peer.proof_attempts == 8) {
@@ -2961,13 +3196,18 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                 }
                 const bool proving =
                     endpoint_state != jam2::PeerEndpointState::Active;
+                // RTT begins at the actual per-peer send boundary. Reusing the
+                // loop-top timestamp includes unrelated capture, control and
+                // prior-peer work in every RTT sample.
+                const std::uint64_t ping_send_time_us = jam2::monotonic_us();
+                challenge = ProbeChallenge{control_sequence, ping_send_time_us, true};
                 if (network_session.sendToPeer(
                         peer.peer_id,
                         proving
                             ? jam2::protocol::PacketType::Hello
                             : jam2::protocol::PacketType::Ping,
                         control_sequence,
-                        now,
+                        ping_send_time_us,
                         proving
                             ? std::span<const std::uint8_t>(local_peer_identity)
                             : std::span<const std::uint8_t>{},
@@ -3074,19 +3314,24 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
             packet_schedule.scheduleNextGridState(now, 20000ULL);
         }
 
-        std::uint64_t network_transport_revision = 0;
-        std::uint64_t transport_target = 0;
-        std::uint64_t transport_countdown_start = 0;
-        int transport_action = 0;
-        {
+        const std::uint64_t observed_transport_revision =
+            commands.state.transport_network_revision.load(std::memory_order_acquire);
+        if (observed_transport_revision != cached_transport_revision) {
             std::lock_guard<std::mutex> lock(commands.state.transport_mutex);
-            network_transport_revision = commands.state.transport_network_revision.load(std::memory_order_relaxed);
-            transport_target = commands.state.transport_network_target_raw_frame.load(std::memory_order_relaxed);
-            transport_countdown_start =
+            cached_transport_revision =
+                commands.state.transport_network_revision.load(std::memory_order_relaxed);
+            cached_transport_target =
+                commands.state.transport_network_target_raw_frame.load(std::memory_order_relaxed);
+            cached_transport_countdown_start =
                 commands.state.transport_countdown_start_frame.load(
                     std::memory_order_relaxed);
-            transport_action = commands.state.transport_network_action.load(std::memory_order_relaxed);
+            cached_transport_action =
+                commands.state.transport_network_action.load(std::memory_order_relaxed);
         }
+        const std::uint64_t network_transport_revision = cached_transport_revision;
+        const std::uint64_t transport_target = cached_transport_target;
+        const std::uint64_t transport_countdown_start = cached_transport_countdown_start;
+        const int transport_action = cached_transport_action;
         if (network_transport_revision != sending_transport_revision) {
             sending_transport_revision = network_transport_revision;
             next_transport_send = 0;
@@ -3147,20 +3392,72 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
         }
 
         const std::uint64_t receive_loop_start_us = jam2::monotonic_us();
+        const std::uint64_t pre_receive_work_us =
+            receive_loop_start_us - pre_receive_work_start_us;
+        const std::uint64_t pre_receive_advance_us =
+            pre_receive_advance_end_us - pre_receive_work_start_us;
+        const std::uint64_t pre_receive_maintenance_us =
+            pre_receive_send_start_us - pre_receive_advance_end_us;
+        const std::uint64_t pre_receive_send_us =
+            receive_loop_start_us - pre_receive_send_start_us;
+        if (mesh_pre_receive_work_samples == 0 ||
+            pre_receive_work_us < mesh_pre_receive_work_min_us) {
+            mesh_pre_receive_work_min_us = pre_receive_work_us;
+        }
+        mesh_pre_receive_work_sum_us += pre_receive_work_us;
+        if (pre_receive_work_us > mesh_pre_receive_work_max_us) {
+            mesh_pre_receive_work_max_us = pre_receive_work_us;
+            mesh_pre_receive_peak_advance_us = pre_receive_advance_us;
+            mesh_pre_receive_peak_maintenance_us = pre_receive_maintenance_us;
+            mesh_pre_receive_peak_send_us = pre_receive_send_us;
+        }
+        mesh_pre_receive_advance_sum_us += pre_receive_advance_us;
+        mesh_pre_receive_advance_max_us = std::max(
+            mesh_pre_receive_advance_max_us,
+            pre_receive_advance_us);
+        mesh_pre_receive_maintenance_sum_us += pre_receive_maintenance_us;
+        mesh_pre_receive_maintenance_max_us = std::max(
+            mesh_pre_receive_maintenance_max_us,
+            pre_receive_maintenance_us);
+        mesh_pre_receive_send_sum_us += pre_receive_send_us;
+        mesh_pre_receive_send_max_us = std::max(
+            mesh_pre_receive_send_max_us,
+            pre_receive_send_us);
+        ++mesh_pre_receive_work_samples;
         mesh_receive_loop_diagnostics.beginWake(receive_loop_start_us);
         bool received_any = false;
         std::size_t mesh_datagrams_this_wake = 0;
+        std::uint64_t receive_processing_start_us = 0;
+        constexpr std::uint64_t kMaximumReceiveWaitUs = 1000ULL;
+        const std::uint64_t first_receive_wait_us =
+            audio_send_budget_exhausted || audio_send_retry_immediately
+            ? 0ULL
+            : audio_send_waiting_for_capture
+            ? kMaximumReceiveWaitUs
+            : packet_schedule.audioSendWaitBudgetUs(
+                  receive_loop_start_us, kMaximumReceiveWaitUs);
         while (mesh_datagrams_this_wake < 64) {
-            const auto received = network_session.receiveFor(received_any ? 0ULL : 1000ULL);
+            const auto received = network_session.receiveFor(
+                received_any ? 0ULL : first_receive_wait_us,
+                !received_any && audio_send_waiting_for_capture
+                    ? &capture_ready_wake
+                    : nullptr);
             if (!received) {
                 break;
+            }
+            const std::uint64_t datagram_receive_time_us = jam2::monotonic_us();
+            if (!received_any) {
+                receive_processing_start_us = datagram_receive_time_us;
             }
             ++mesh_datagrams_this_wake;
             received_any = true;
             const auto& from = received->endpoint;
             const std::span<const std::uint8_t> bytes = received->bytes;
-            const jam2::PeerId endpoint_peer_id =
-                network_session.peerIdForEndpoint(from);
+            const jam2::NetworkPeerAccess endpoint_access =
+                network_session.accessPeer(from);
+            const jam2::PeerId endpoint_peer_id = endpoint_access
+                ? endpoint_access.descriptor->peer_id
+                : jam2::PeerId{};
             const auto parsed = network_session.parse(bytes);
             if (!parsed) {
                 const auto known = peers.find(endpoint_peer_id.value);
@@ -3194,11 +3491,13 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                     }
                     auto& peer = claimed->second;
                     attributed_peer = &peer;
-                    const auto* descriptor = network_session.peer(peer.peer_id);
-                    if (descriptor == nullptr) {
+                    const jam2::NetworkPeerAccess claimed_access =
+                        network_session.accessPeer(peer.peer_id);
+                    if (!claimed_access) {
                         ++peer.ignored_packets;
                         continue;
                     }
+                    const auto* descriptor = claimed_access.descriptor;
                     const bool endpoint_changed = descriptor->endpoint != from;
                     if (endpoint_changed &&
                         descriptor->endpoint_state == jam2::PeerEndpointState::Active) {
@@ -3249,8 +3548,7 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                         if (runtime_host.log) runtime_host.log(line);
                     }
 
-                    const std::uint64_t receive_time = jam2::monotonic_us();
-                    peer.last_authenticated_receive_us = receive_time;
+                    peer.last_authenticated_receive_us = datagram_receive_time_us;
                     if (header.type == jam2::protocol::PacketType::Hello) {
                         if (network_session.sendToPeer(
                                 peer.peer_id,
@@ -3264,9 +3562,9 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                         continue;
                     }
 
-                    if (receive_time >= header.timing_value) {
-                        network_session.peerStream(peer.peer_id).observeRtt(
-                            receive_time - header.timing_value);
+                    if (datagram_receive_time_us >= header.timing_value) {
+                        claimed_access.stream->observeRtt(
+                            datagram_receive_time_us - header.timing_value);
                     }
                     network_session.setPeerEndpointState(
                         peer.peer_id,
@@ -3286,28 +3584,28 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                 }
                 auto& peer = peer_it->second;
                 attributed_peer = &peer;
+                auto& peer_stream = *endpoint_access.stream;
                 if (header.type != jam2::protocol::PacketType::Ping &&
                     header.type != jam2::protocol::PacketType::Pong &&
-                    (peer_endpoint_state(peer.peer_id) != jam2::PeerEndpointState::Active ||
-                     !network_session.acceptsEndpoint(from))) {
+                    endpoint_access.descriptor->endpoint_state !=
+                        jam2::PeerEndpointState::Active) {
                     ++peer.proof_unverified_drops;
                     ++peer.ignored_packets;
                     continue;
                 }
-                peer.last_authenticated_receive_us = jam2::monotonic_us();
+                peer.last_authenticated_receive_us = datagram_receive_time_us;
                 if (header.type == jam2::protocol::PacketType::Audio) {
                     if (header.payload_length != audio_payload_size) {
                         ++peer.ignored_packets;
                         continue;
                     }
-                    const std::uint64_t receive_time = jam2::monotonic_us();
                     const auto received_payload = std::span<const std::uint8_t>(
                         bytes.data() + jam2::protocol::kHeaderSize,
                         header.payload_length);
-                    const auto receive_result = network_session.peerStream(peer.peer_id).receiveAudio(
+                    const auto receive_result = peer_stream.receiveAudio(
                         header,
                         received_payload,
-                        receive_time);
+                        datagram_receive_time_us);
                     if (receive_result != jam2::PeerAudioResult::Accepted) {
                         ++peer.ignored_packets;
                         continue;
@@ -3315,7 +3613,7 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                     ++peer.recv_packets;
                     peer.recv_bytes += bytes.size();
                 } else if (header.type == jam2::protocol::PacketType::Ping) {
-                    auto& peer_stream = network_session.peerStream(peer.peer_id);
+                    const std::uint64_t reply_start_us = jam2::monotonic_us();
                     if (!peer_stream.acceptReplay(jam2::PeerReplayChannel::Ping, header.sequence)) {
                         ++peer.ignored_packets;
                         continue;
@@ -3329,6 +3627,17 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                         true) != 0) {
                         ++peer.sent_pongs;
                     }
+                    const std::uint64_t reply_end_us = jam2::monotonic_us();
+                    const std::uint64_t turnaround_us = reply_end_us - reply_start_us;
+                    if (mesh_ping_reply_turnaround_samples == 0 ||
+                        turnaround_us < mesh_ping_reply_turnaround_min_us) {
+                        mesh_ping_reply_turnaround_min_us = turnaround_us;
+                    }
+                    mesh_ping_reply_turnaround_sum_us += turnaround_us;
+                    mesh_ping_reply_turnaround_max_us = std::max(
+                        mesh_ping_reply_turnaround_max_us,
+                        turnaround_us);
+                    ++mesh_ping_reply_turnaround_samples;
                 } else if (header.type == jam2::protocol::PacketType::Pong) {
                     ProbeChallenge& challenge =
                         peer.probe_challenges[header.sequence % peer.probe_challenges.size()];
@@ -3340,12 +3649,12 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                         continue;
                     }
                     challenge.used = false;
-                    const std::uint64_t receive_time = jam2::monotonic_us();
-                    if (receive_time >= challenge.send_time_us) {
-                        network_session.peerStream(peer.peer_id).observeRtt(
-                            receive_time - challenge.send_time_us);
+                    if (datagram_receive_time_us >= challenge.send_time_us) {
+                        peer_stream.observeRtt(
+                            datagram_receive_time_us - challenge.send_time_us);
                     }
-                    if (peer_endpoint_state(peer.peer_id) != jam2::PeerEndpointState::Active) {
+                    if (endpoint_access.descriptor->endpoint_state !=
+                        jam2::PeerEndpointState::Active) {
                         network_session.setPeerEndpointState(
                             peer.peer_id,
                             jam2::PeerEndpointState::Active);
@@ -3359,7 +3668,6 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                     }
                     ++peer.recv_pongs;
                 } else if (header.type == jam2::protocol::PacketType::MetronomeState) {
-                    auto& peer_stream = network_session.peerStream(peer.peer_id);
                     if (!peer_stream.acceptReplay(
                             jam2::PeerReplayChannel::Metronome,
                             header.sequence)) {
@@ -3419,7 +3727,7 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                         }
                         peer.listener_epoch_frame = metronome.epoch_sample_time;
                         peer.listener_epoch_revision = metronome.revision_or_request;
-                        peer.listener_phase_received_us = jam2::monotonic_us();
+                        peer.listener_phase_received_us = datagram_receive_time_us;
                     } else if (metronome.kind == GridMessageKind::Proposal) {
 
                         if (metronome.epoch_sample_time > 0x03U) {
@@ -3484,7 +3792,7 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                                 std::memory_order_relaxed);
                             peer.listener_epoch_frame = metronome.epoch_sample_time;
                             peer.listener_epoch_revision = metronome.revision_or_request;
-                            peer.listener_phase_received_us = jam2::monotonic_us();
+                            peer.listener_phase_received_us = datagram_receive_time_us;
                             if (!commands.state.metronome_epoch_valid.load(std::memory_order_relaxed)) {
                                 (void)align_to_authority_clock(
                                     metronome,
@@ -3532,7 +3840,6 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                         }
                     }
                 } else if (header.type == jam2::protocol::PacketType::TransportState) {
-                    auto& peer_stream = network_session.peerStream(peer.peer_id);
                     if (!peer_stream.acceptReplay(
                             jam2::PeerReplayChannel::Transport,
                             header.sequence)) {
@@ -3727,7 +4034,7 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                         }
                     }
                 } else if (header.type == jam2::protocol::PacketType::Bye) {
-                    (void)network_session.peerStream(peer.peer_id).acceptReplay(
+                    (void)peer_stream.acceptReplay(
                         jam2::PeerReplayChannel::Bye,
                         header.sequence);
                     const bool departed_grid_authority =
@@ -3750,23 +4057,35 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
         mesh_receive_batch_max = std::max<std::uint64_t>(
             mesh_receive_batch_max,
             static_cast<std::uint64_t>(mesh_datagrams_this_wake));
-        mesh_receive_loop_diagnostics.finishWake(mesh_datagrams_this_wake);
+        mesh_receive_loop_diagnostics.finishWake(
+            mesh_datagrams_this_wake,
+            receive_processing_start_us,
+            jam2::monotonic_us());
         if (mesh_datagrams_this_wake == 64) {
             ++mesh_work_budget_yields;
         }
-        // Ingest everything already available (including the packet obtained
-        // during the bounded first wait) before the mixer decides that every
-        // contributor is empty. Advancing first can mistake normal packet
-        // cadence for a source gap and place adaptive silence immediately in
-        // front of audio received later in the same wake.
+        // Drain current packets immediately after the pre-receive deadline
+        // pass classified any queued catch-up audio as stale.
         network_session.advance(jam2::monotonic_us());
+        // Runtime/GUI commands and membership can tolerate one receive wake of
+        // delay. Apply them after audio so their locks and formatting cannot
+        // sit in front of an already queued packet batch.
+        apply_runtime_host_commands();
+        apply_membership_update();
+        apply_forced_reprobe();
         const std::uint64_t stats_now = jam2::monotonic_us();
-        if (stats_now >= next_operational_snapshot) {
+        const bool telemetry_idle = mesh_datagrams_this_wake == 0;
+        constexpr std::uint64_t kMaximumTelemetryDeferralUs = 10000ULL;
+        if (stats_now >= next_operational_snapshot &&
+            (telemetry_idle ||
+             stats_now - next_operational_snapshot >= kMaximumTelemetryDeferralUs)) {
             publish_operational_snapshot();
-            next_operational_snapshot = stats_now + 100000ULL;
+            next_operational_snapshot = stats_now + 200000ULL;
         }
         if (next_connection_diagnostics != 0 &&
-            stats_now >= next_connection_diagnostics) {
+            stats_now >= next_connection_diagnostics &&
+            (telemetry_idle ||
+             stats_now - next_connection_diagnostics >= kMaximumTelemetryDeferralUs)) {
             publish_connection_diagnostics(stats_now);
             next_connection_diagnostics = stats_now + 2000000ULL;
         }
@@ -3774,7 +4093,8 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
             commands.state.print_status.exchange(false, std::memory_order_relaxed)) {
             print_mesh_stats(stats_now);
         }
-        if (next_stats != 0 && stats_now >= next_stats) {
+        if (next_stats != 0 && stats_now >= next_stats &&
+            (telemetry_idle || stats_now - next_stats >= kMaximumTelemetryDeferralUs)) {
             if (csv_log) {
                 csv_log->write_periodic(
                     (stats_now - start_time) / 1000ULL,
@@ -3782,7 +4102,10 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                     options,
                     make_audio_snapshot(audio.engine.get()));
             }
-            next_stats += static_cast<std::uint64_t>(options.stats_interval_ms) * 1000ULL;
+            // Do not emit catch-up rows after a delayed diagnostic sample;
+            // elapsed time already exposes the gap and audio remains first.
+            next_stats = stats_now +
+                static_cast<std::uint64_t>(options.stats_interval_ms) * 1000ULL;
         }
     }
 
@@ -3790,6 +4113,7 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
     // Stop callback consumption before flushing final reorder/mix state. A
     // trailing partial mix block is diagnostic state, not live playback, and
     // must not manufacture a shutdown-only playback underrun.
+    capture_ready_wake.cancelWakeRequest();
     detach_network_capture(audio);
     network_session.finish(now);
     network_session.sendToActive(

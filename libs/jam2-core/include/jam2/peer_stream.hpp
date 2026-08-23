@@ -132,7 +132,10 @@ struct PeerStreamStats {
     std::uint64_t jitter_buffer_late_packets = 0;
     std::uint64_t jitter_buffer_dropped_packets = 0;
     std::uint64_t jitter_buffer_dropped_frames = 0;
+    std::uint64_t jitter_buffer_target_releases = 0;
+    std::uint64_t jitter_buffer_timeout_releases = 0;
     std::uint64_t jitter_buffer_forced_releases = 0;
+    std::uint64_t jitter_buffer_rebases = 0;
     bool adaptive_playback_cushion_enabled = false;
     std::uint64_t adaptive_playback_target_frames = 0;
     std::uint64_t adaptive_playback_min_frames = 0;

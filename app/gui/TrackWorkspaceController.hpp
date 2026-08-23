@@ -128,6 +128,7 @@ public:
     QMap<QString, QString> trackOfferAssetPaths;
     QMap<QString, QSet<QString>> outgoingTrackSharePendingPeers;
     QMap<QString, QSet<QString>> outgoingTrackShareBatchHashes;
+    QSet<QString> outgoingTrackShareUnappliedBatches;
     QMap<QString, qint64> outgoingTrackShareLastProgressMs;
     QMap<QString, qint64> incomingTrackShareLastProgressMs;
     QJsonObject heldTrackShareSongSet;

@@ -289,6 +289,75 @@ std::uint64_t step_interval_samples(
     return static_cast<std::uint64_t>(std::max(1.0, std::round(interval)));
 }
 
+std::uint64_t click_duration_samples(
+    double sample_rate,
+    bool accent,
+    ClickVoice voice,
+    ClickSound sound)
+{
+    if (sample_rate <= 0.0) {
+        return 0;
+    }
+    const bool count_in = voice == ClickVoice::CountIn;
+    double duration_seconds = 0.0;
+    switch (sound) {
+    case ClickSound::Classic:
+        duration_seconds = count_in
+            ? (accent ? 0.014 : 0.012)
+            : (accent ? 0.008 : 0.0065);
+        break;
+    case ClickSound::Woodblock:
+        duration_seconds = count_in
+            ? (accent ? 0.042 : 0.036)
+            : (accent ? 0.030 : 0.025);
+        break;
+    case ClickSound::RimClick:
+        duration_seconds = count_in ? 0.020 : (accent ? 0.014 : 0.011);
+        break;
+    case ClickSound::DigitalTick:
+        duration_seconds = count_in ? 0.012 : (accent ? 0.007 : 0.0055);
+        break;
+    }
+    return static_cast<std::uint64_t>(
+        std::max(1.0, std::round(sample_rate * duration_seconds)));
+}
+
+double render_click_tone_sample(
+    std::uint64_t step_offset,
+    double sample_rate,
+    bool accent,
+    ClickVoice voice,
+    ClickSound sound)
+{
+    return click_tone(step_offset, sample_rate, accent, voice, sound);
+}
+
+double render_pattern_step_sample(
+    const PatternSnapshot& pattern,
+    int pattern_step,
+    std::uint64_t step_offset,
+    double sample_rate,
+    double level,
+    ClickVoice voice,
+    ClickSound sound)
+{
+    if (pattern.step_count <= 0 || pattern_step < 0 ||
+        pattern_step >= pattern.step_count ||
+        !mask_enabled(pattern.play_mask_low, pattern.play_mask_high, pattern_step)) {
+        return 0.0;
+    }
+    const bool accent = mask_enabled(
+        pattern.accent_mask_low,
+        pattern.accent_mask_high,
+        pattern_step);
+    const double click_level = std::clamp(level, 0.0, 1.0) *
+        (accent ? 1.25 : 0.78);
+    return std::clamp(
+        click_tone(step_offset, sample_rate, accent, voice, sound) * click_level,
+        -1.0,
+        1.0);
+}
+
 AuthorityClockMapping map_authority_clock(
     std::uint64_t authority_epoch_sample_time,
     std::uint64_t projected_authority_sample_time,
@@ -348,15 +417,14 @@ double render_sample(
     const std::uint64_t step_index = grid_sample / interval;
     const std::uint64_t step_offset = grid_sample % interval;
     const int pattern_step = static_cast<int>(step_index % static_cast<std::uint64_t>(pattern.step_count));
-    if (!mask_enabled(pattern.play_mask_low, pattern.play_mask_high, pattern_step)) {
-        return 0.0;
-    }
-    const bool accent = mask_enabled(pattern.accent_mask_low, pattern.accent_mask_high, pattern_step);
-    const double click_level = std::clamp(level, 0.0, 1.0) * (accent ? 1.25 : 0.78);
-    return std::clamp(
-        click_tone(step_offset, sample_rate, accent, voice, sound) * click_level,
-        -1.0,
-        1.0);
+    return render_pattern_step_sample(
+        pattern,
+        pattern_step,
+        step_offset,
+        sample_rate,
+        level,
+        voice,
+        sound);
 }
 
 std::int32_t mix_i32(std::int32_t sample, double normalized_click)

@@ -257,6 +257,11 @@ void TrackTakeRecorder::cancel() noexcept
     writer_stop_.store(true, std::memory_order_release);
 }
 
+bool TrackTakeRecorder::armed() const noexcept
+{
+    return armed_.load(std::memory_order_acquire);
+}
+
 void TrackTakeRecorder::record(std::uint64_t audio_frame_start, std::span<const std::int32_t> input) noexcept
 {
     if (!armed_.load(std::memory_order_acquire) || input.empty() || !start_requested_.load(std::memory_order_acquire)) {

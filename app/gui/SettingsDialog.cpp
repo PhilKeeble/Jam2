@@ -131,7 +131,6 @@ std::optional<SettingsDialogResult> SettingsDialog::run(
     };
     auto makePriority = [&dialog](const QString& value) {
         auto* combo = new QComboBox(&dialog);
-        combo->addItem(QStringLiteral("Realtime"), QStringLiteral("realtime"));
         combo->addItem(QStringLiteral("High"), QStringLiteral("high"));
         combo->addItem(QStringLiteral("Off"), QStringLiteral("off"));
         combo->setCurrentIndex(qMax(0, combo->findData(value)));

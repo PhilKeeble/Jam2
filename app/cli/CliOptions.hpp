@@ -31,6 +31,30 @@ int test_input_mode_id(Jam2TestInputMode mode);
 std::string channel_selection_text(const jam2::audio::ChannelSelection& channels);
 std::string mono_mix_mode_text(std::size_t channel_count);
 std::string_view os_priority_text(Jam2OsPriorityMode mode);
+
+enum class WindowsProcessPriorityRequest {
+    Unchanged,
+    High,
+};
+
+enum class WindowsThreadPriorityRequest {
+    Unchanged,
+    Highest,
+};
+
+enum class WindowsMmcssPriorityRequest {
+    Off,
+    High,
+};
+
+struct WindowsSchedulingRequest {
+    WindowsProcessPriorityRequest process = WindowsProcessPriorityRequest::Unchanged;
+    WindowsThreadPriorityRequest thread = WindowsThreadPriorityRequest::Unchanged;
+    WindowsMmcssPriorityRequest mmcss = WindowsMmcssPriorityRequest::Off;
+};
+
+WindowsSchedulingRequest windows_scheduling_request(Jam2OsPriorityMode mode) noexcept;
+std::string_view windows_mmcss_priority_text(WindowsMmcssPriorityRequest priority) noexcept;
 Jam2RuntimeOptions parse_options(
     int argc,
     char** argv,

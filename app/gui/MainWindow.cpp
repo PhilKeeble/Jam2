@@ -4,6 +4,7 @@
 #include "AudioDeviceUiSupport.hpp"
 #include "TrackWidgets.hpp"
 #include "TrackAssetOwnership.hpp"
+#include "LooperAssetFiles.hpp"
 #include "TrackWorkspaceSupport.hpp"
 #include "JamTasterProjectSupport.hpp"
 #include "GuiPresentation.hpp"
@@ -1081,6 +1082,7 @@ MainWindow::MainWindow(
                 it = trackWorkspace_.outgoingTrackSharePendingPeers.erase(it);
                 trackWorkspace_.outgoingTrackShareBatchHashes.remove(batchId);
                 trackWorkspace_.outgoingTrackShareLastProgressMs.remove(batchId);
+                trackWorkspace_.outgoingTrackShareUnappliedBatches.remove(batchId);
             } else {
                 ++it;
             }
@@ -2176,6 +2178,7 @@ void MainWindow::resetTrackSyncSessionState()
     trackOfferAssetPaths_.clear();
     trackWorkspace_.outgoingTrackSharePendingPeers.clear();
     trackWorkspace_.outgoingTrackShareBatchHashes.clear();
+    trackWorkspace_.outgoingTrackShareUnappliedBatches.clear();
     trackWorkspace_.outgoingTrackShareLastProgressMs.clear();
     trackWorkspace_.incomingTrackShareLastProgressMs.clear();
     trackWorkspace_.authoritativeTrackHistory.clear();
@@ -2738,6 +2741,11 @@ QJsonObject MainWindow::automationContentSnapshot() const
             !laneRecordingState_.outputPath.isEmpty() &&
                 QFileInfo::exists(laneRecordingState_.outputPath)},
         {QStringLiteral("file_tasks_active"), fileWorkerTasksActive_},
+        {QStringLiteral("file_tasks_high_water"), fileWorkerTasksHighWater_},
+        {QStringLiteral("file_tasks_completed"), static_cast<qint64>(
+            fileWorkerTasksCompleted_)},
+        {QStringLiteral("file_tasks_rejected"), static_cast<qint64>(
+            fileWorkerTasksRejected_)},
         {QStringLiteral("transfer"), automationTransferSnapshot()},
     };
 }
@@ -12194,6 +12202,7 @@ void MainWindow::publishLocalTrackBatch(const QString& requestedBatchId)
     }
     trackWorkspace_.outgoingTrackSharePendingPeers.insert(batchId, recipients);
     trackWorkspace_.outgoingTrackShareBatchHashes.insert(batchId, batchHashes);
+    trackWorkspace_.outgoingTrackShareUnappliedBatches.remove(batchId);
     trackWorkspace_.outgoingTrackShareLastProgressMs.insert(
         batchId, QDateTime::currentMSecsSinceEpoch());
     scheduleOutgoingTrackBatchExpiry(batchId);
@@ -12271,6 +12280,7 @@ void MainWindow::handleTrackBatchOffer(
             {QStringLiteral("type"), QStringLiteral("looper.track.batch.complete")},
             {QStringLiteral("batch_id"), batchId},
             {QStringLiteral("tracks"), 0},
+            {QStringLiteral("applied"), true},
         });
         if (performanceHome_) performanceHome_->setTrackTransferStatus(QString{});
         return;
@@ -12295,6 +12305,7 @@ void MainWindow::handleTrackBatchOffer(
                 {QStringLiteral("type"), QStringLiteral("looper.track.batch.complete")},
                 {QStringLiteral("batch_id"), batchId},
                 {QStringLiteral("tracks"), tracks.size()},
+                {QStringLiteral("applied"), true},
             });
         } else {
             appendLog(QStringLiteral(
@@ -12406,6 +12417,15 @@ void MainWindow::handleTrackBatchComplete(
             .arg(batchId.left(8)));
         return;
     }
+    const bool applied = message.value(QStringLiteral("applied")).toBool(true);
+    if (!applied) {
+        trackWorkspace_.outgoingTrackShareUnappliedBatches.insert(batchId);
+        appendLog(QStringLiteral(
+            "Track Sync batch %1 was not applied by peer %2: %3")
+            .arg(batchId.left(8), sourcePeerToken.left(8),
+                message.value(QStringLiteral("reason")).toString(
+                    QStringLiteral("unspecified"))));
+    }
     pending->remove(sourcePeerToken);
     if (!pending->isEmpty()) {
         appendLog(QStringLiteral("Track Sync batch %1 is still pending for %2 peer(s)")
@@ -12416,51 +12436,59 @@ void MainWindow::handleTrackBatchComplete(
     trackWorkspace_.outgoingTrackShareBatchHashes.remove(batchId);
     trackWorkspace_.outgoingTrackShareLastProgressMs.remove(batchId);
     if (performanceHome_) performanceHome_->setTrackTransferStatus(QString{});
-    appendLog(QStringLiteral("Track Sync batch %1 completed with %2 track(s)")
-        .arg(message.value(QStringLiteral("batch_id")).toString().left(8))
-        .arg(message.value(QStringLiteral("tracks")).toInt()));
+    if (trackWorkspace_.outgoingTrackShareUnappliedBatches.remove(batchId)) {
+        appendLog(QStringLiteral(
+            "Track Sync batch %1 finished without being applied by every peer")
+            .arg(batchId.left(8)));
+    } else {
+        appendLog(QStringLiteral("Track Sync batch %1 completed with %2 track(s)")
+            .arg(message.value(QStringLiteral("batch_id")).toString().left(8))
+            .arg(message.value(QStringLiteral("tracks")).toInt()));
+    }
     releaseHeldTrackSnapshotIfReady();
 }
 
-void MainWindow::supersedePendingTrackBatches(const QString& sourcePeerToken)
+void MainWindow::supersedePendingTrackBatches(
+    const QString& sourcePeerToken,
+    const QSet<QString>& replacementArrangementHashes)
 {
-    QMap<QString, int> supersededBatchSizes;
-    QStringList supersededKeys;
-    QSet<QString> supersededHashes;
+    QList<jam2::gui::track_asset_ownership::Claim> claims;
+    claims.reserve(pendingTrackContributions_.size());
     for (auto it = pendingTrackContributions_.cbegin();
          it != pendingTrackContributions_.cend(); ++it) {
-        if (it->sourcePeerToken != sourcePeerToken) continue;
-        supersededKeys.append(it.key());
-        supersededHashes.insert(it->assetHash);
-        supersededBatchSizes[it->batchId] = qMax(
-            supersededBatchSizes.value(it->batchId), it->batchSize);
+        claims.append({it.key(), it->sourcePeerToken, it->batchId,
+            it->assetHash, it->batchSize});
     }
-    if (supersededKeys.isEmpty()) return;
-
-    const bool discardActiveRequest =
+    const bool supersededRequest =
         incomingAssetWorkflow_ == IncomingAssetWorkflow::TrackContribution &&
         incomingAssetSourcePeerToken_ == sourcePeerToken;
-    for (const QString& key : supersededKeys) {
+    const auto plan = jam2::gui::track_asset_ownership::planPeerSupersession(
+        claims,
+        sourcePeerToken,
+        supersededRequest,
+        incomingAssetHash_,
+        incomingAssetSourcePeerToken_,
+        replacementArrangementHashes);
+    if (!plan.found()) return;
+
+    for (const QString& key : plan.removedKeys) {
         pendingTrackContributions_.remove(key);
-        appliedTrackContributionIds_.insert(key);
     }
-    while (appliedTrackContributionIds_.size() > kMaxLooperTrackContributions * 2) {
-        appliedTrackContributionIds_.erase(appliedTrackContributionIds_.begin());
-    }
-    for (auto it = supersededBatchSizes.cbegin();
-         it != supersededBatchSizes.cend(); ++it) {
+    for (auto it = plan.batchSizes.cbegin(); it != plan.batchSizes.cend(); ++it) {
         trackWorkspace_.incomingTrackShareLastProgressMs.remove(
             sourcePeerToken + QLatin1Char(':') + it.key());
         sendControlTo(sourcePeerToken, QJsonObject{
             {QStringLiteral("type"), QStringLiteral("looper.track.batch.complete")},
             {QStringLiteral("batch_id"), it.key()},
             {QStringLiteral("tracks"), it.value()},
+            {QStringLiteral("applied"), false},
+            {QStringLiteral("reason"), QStringLiteral("superseded-by-arrangement")},
         });
         appendLog(QStringLiteral(
             "superseded pending Track Sync batch %1 with a newer arrangement from the same peer")
             .arg(it.key().left(8)));
     }
-    for (const QString& hash : supersededHashes) {
+    for (const QString& hash : plan.removedHashes) {
         bool stillExpectedByTrack = false;
         for (const PendingTrackContribution& contribution :
              pendingTrackContributions_) {
@@ -12477,12 +12505,20 @@ void MainWindow::supersedePendingTrackBatches(const QString& sourcePeerToken)
             }
         }
     }
-    if (discardActiveRequest) {
+    if (plan.preserveActiveTransfer) {
+        appendLog(QStringLiteral(
+            "preserved active WAV transfer %1 while its Track Sync batch was superseded")
+            .arg(incomingAssetHash_.left(12)));
+    } else if (supersededRequest) {
+        const QString obsoleteHash = incomingAssetHash_;
         ++trackWorkspace_.incomingAssetRequestGeneration;
         incomingAssetWorkflow_ = IncomingAssetWorkflow::None;
         incomingAssetHash_.clear();
         incomingAssetSourcePeerToken_.clear();
         assetTransfer_.discardIncoming();
+        appendLog(QStringLiteral(
+            "cancelled obsolete WAV transfer %1 after Track Sync supersession")
+            .arg(obsoleteHash.left(12)));
     }
     if (performanceHome_) performanceHome_->setTrackTransferStatus(QString{});
 }
@@ -12510,6 +12546,7 @@ void MainWindow::scheduleOutgoingTrackBatchExpiry(const QString& batchId)
             trackWorkspace_.outgoingTrackSharePendingPeers.remove(batchId);
             trackWorkspace_.outgoingTrackShareBatchHashes.remove(batchId);
             trackWorkspace_.outgoingTrackShareLastProgressMs.remove(batchId);
+            trackWorkspace_.outgoingTrackShareUnappliedBatches.remove(batchId);
             if (performanceHome_) performanceHome_->setTrackTransferStatus(QString{});
             appendLog(QStringLiteral(
                 "Track Sync batch %1 was idle for 30 seconds; released held arrangement updates")
@@ -12855,6 +12892,10 @@ void MainWindow::applyPendingTrackContributions()
 {
     if (automationOfferPauseActive_) return;
     if (laneRecordingIsolationActive()) return;
+    // The held authoritative snapshot may contain a newer bank topology than
+    // the currently displayed project. Applying its paired Track Sync batch
+    // against the old topology can merge only a prefix and strand the batch.
+    if (!trackWorkspace_.heldTrackShareSongSet.isEmpty()) return;
     if (pendingTrackContributions_.isEmpty()) {
         return;
     }
@@ -12900,6 +12941,44 @@ void MainWindow::applyPendingTrackContributions()
     const QString batchId = selected.batch;
     const QString sourcePeerToken = selected.source;
     const int expected = selected.expected;
+    QStringList selectedKeys;
+    QString topologyError;
+    for (auto it = pendingTrackContributions_.constBegin();
+         it != pendingTrackContributions_.constEnd(); ++it) {
+        const PendingTrackContribution& contribution = it.value();
+        if (contribution.batchId != batchId ||
+            contribution.sourcePeerToken != sourcePeerToken) {
+            continue;
+        }
+        selectedKeys.append(it.key());
+        if (contribution.bankIndex < 0 ||
+            contribution.bankIndex >= looperProject_.banks().size()) {
+            if (topologyError.isEmpty()) {
+                topologyError = QStringLiteral(
+                    "bank %1 is outside the current %2-bank arrangement")
+                    .arg(contribution.bankIndex + 1)
+                    .arg(looperProject_.banks().size());
+            }
+        }
+    }
+    if (!topologyError.isEmpty()) {
+        for (const QString& key : selectedKeys) pendingTrackContributions_.remove(key);
+        trackWorkspace_.incomingTrackShareLastProgressMs.remove(
+            sourcePeerToken + QLatin1Char(':') + batchId);
+        sendControlTo(sourcePeerToken, QJsonObject{
+            {QStringLiteral("type"), QStringLiteral("looper.track.batch.complete")},
+            {QStringLiteral("batch_id"), batchId},
+            {QStringLiteral("tracks"), expected},
+            {QStringLiteral("applied"), false},
+            {QStringLiteral("reason"), QStringLiteral("bank-topology-mismatch")},
+        });
+        appendLog(QStringLiteral(
+            "Track Sync batch %1 was not applied: %2; awaiting authoritative arrangement")
+            .arg(batchId.left(8), topologyError));
+        if (performanceHome_) performanceHome_->setTrackTransferStatus(QString{});
+        requestNextPendingAsset();
+        return;
+    }
     LooperProject stagedProject = looperProject_;
     QStringList completedIds;
     bool arrangementChanged = false;
@@ -13066,6 +13145,7 @@ void MainWindow::applyPendingTrackContributions()
         {QStringLiteral("type"), QStringLiteral("looper.track.batch.complete")},
         {QStringLiteral("batch_id"), batchId},
         {QStringLiteral("tracks"), expected},
+        {QStringLiteral("applied"), true},
     });
     if (performanceHome_) performanceHome_->setTrackTransferStatus(QString{});
     requestNextPendingAsset();
@@ -13218,7 +13298,20 @@ void MainWindow::handleSongSet(
         // Control messages from one peer are ordered. A track arrangement
         // accepted after that peer's batch offer supersedes the still-pending
         // batch snapshot and must release any asset request it made obsolete.
-        supersedePendingTrackBatches(sourcePeerToken);
+        QSet<QString> replacementArrangementHashes;
+        const QJsonArray replacementBanks = message.value(QStringLiteral("song"))
+            .toObject().value(QStringLiteral("looper")).toObject()
+            .value(QStringLiteral("banks")).toArray();
+        for (const QJsonValue& bankValue : replacementBanks) {
+            for (const QJsonValue& laneValue : bankValue.toObject()
+                     .value(QStringLiteral("lanes")).toArray()) {
+                const QString hash = laneValue.toObject()
+                    .value(QStringLiteral("asset_hash")).toString().toLower();
+                if (isSha256Hex(hash)) replacementArrangementHashes.insert(hash);
+            }
+        }
+        supersedePendingTrackBatches(
+            sourcePeerToken, replacementArrangementHashes);
     }
     QMap<QString, QString> localAssetCandidates;
     for (const LooperBank& bank : looperProject_.banks()) {
@@ -13435,27 +13528,25 @@ void MainWindow::handleSongSet(
         return;
     }
     const QJsonObject song = preserveLocalOnlyLanes(normalizedSong);
-    const QString assetFolder = QDir(projectPersistence_.workspaceFolder()).absoluteFilePath(QStringLiteral("wavs"));
+    const QString workspaceFolder = projectPersistence_.workspaceFolder();
+    const QString assetFolder = QDir(workspaceFolder).absoluteFilePath(QStringLiteral("wavs"));
     const std::uint64_t checkRevision = ++songAssetCheckRevision_;
     auto missing = std::make_shared<QStringList>();
     auto resolvedPaths = std::make_shared<QMap<QString, QString>>();
     auto assetFailure = std::make_shared<QString>();
     const int expectedSampleRate = sessionController_.snapshot().contract.sampleRate;
     const bool started = startFileWorkerTask(
-        [referencedHashes, assetFolder, localAssetCandidates, expectedSampleRate,
+        [referencedHashes, workspaceFolder, assetFolder, localAssetCandidates, expectedSampleRate,
          missing, resolvedPaths, assetFailure] {
             for (const QString& hash : referencedHashes) {
                 if (!isSha256Hex(hash)) {
                     missing->append(hash);
                     continue;
                 }
-                const QString canonicalPath =
-                    QDir(assetFolder).absoluteFilePath(hash + QStringLiteral(".wav"));
-                QStringList candidates{canonicalPath};
-                const QString localPath = localAssetCandidates.value(hash);
-                if (!localPath.isEmpty() && localPath != canonicalPath) {
-                    candidates.append(localPath);
-                }
+                const QStringList candidates =
+                    jam2::gui::looper_asset_files::validationCandidates(
+                        workspaceFolder, assetFolder, hash,
+                        localAssetCandidates.value(hash));
                 bool found = false;
                 for (const QString& path : candidates) {
                     if (!QFileInfo::exists(path)) continue;
@@ -14648,10 +14739,8 @@ Jam2RuntimeOptions MainWindow::runtimeOptions() const
     options.playback_max_frames =
         static_cast<std::size_t>(tuning.playbackMaxFrames);
     if (!automationHeadlessAudio_) {
-        options.os_priority = runtime.osPriority == QStringLiteral("realtime")
-            ? Jam2OsPriorityMode::Realtime
-            : runtime.osPriority == QStringLiteral("off")
-                ? Jam2OsPriorityMode::Off : Jam2OsPriorityMode::High;
+        options.os_priority = runtime.osPriority == QStringLiteral("off")
+            ? Jam2OsPriorityMode::Off : Jam2OsPriorityMode::High;
     }
     return options;
 }

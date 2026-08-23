@@ -149,6 +149,7 @@ public:
         const std::size_t frames = static_cast<std::size_t>(buffer_size_);
         capture_scratch_.resize(frames, 0);
         playback_scratch_.resize(frames, 0);
+        playback_resampler_scratch_.resize(frames * 2U + 2U, 0);
         output_scratch_.resize(frames, 0);
         inputs_mix_scratch_.resize(frames, 0);
         metronome_scratch_.resize(frames, 0);
@@ -156,6 +157,7 @@ public:
         physical_input_scratch_.resize(
             frames * info_.channels.input.size(), 0);
         input_source_pointers_.resize(info_.channels.input.size(), nullptr);
+        metronome_wave_bank_.prepare(sample_rate_);
         thread_ = std::thread([this] { run(); });
     }
 
@@ -181,11 +183,17 @@ public:
             callback_intervals_.gapsOver1_1x.load(std::memory_order_relaxed),
             callback_intervals_.gapsOver1_5x.load(std::memory_order_relaxed),
             callback_intervals_.gapsOver2x.load(std::memory_order_relaxed),
+            callback_intervals_.workMinimumUs.load(std::memory_order_relaxed),
+            callback_intervals_.workSumUs.load(std::memory_order_relaxed),
+            callback_intervals_.workMaximumUs.load(std::memory_order_relaxed),
+            callback_intervals_.workSamples.load(std::memory_order_relaxed),
         };
     }
 
 private:
-    void fill_capture(std::uint64_t callback_frame) noexcept
+    void fill_capture(
+        std::uint64_t callback_frame,
+        std::uint64_t callback_start_us) noexcept
     {
         processing::fill_test_input(
             &control_, sample_rate_, test_input_frame_, capture_scratch_);
@@ -210,14 +218,35 @@ private:
             }
         }
         if (audio::prepare_network_capture_callback(control_, capture_ring_, callback_frame)) {
-            capture_ring_.push(capture_scratch_);
+            audio::push_network_capture_callback(
+                control_, capture_ring_, capture_scratch_, callback_start_us);
         }
         audio::push_pitch_analysis_callback(control_, pitch_ring_, capture_scratch_);
-        processing::observe_input_peaks(&control_, capture_scratch_);
+        if (control_.input_source_router != nullptr) {
+            processing::observe_input_peak_value(
+                &control_, control_.input_source_router->last_peak_ppm());
+        } else {
+            processing::observe_input_peaks(&control_, capture_scratch_);
+        }
     }
 
     void render_output(std::uint64_t callback_frame) noexcept
     {
+        const bool track_take_armed =
+            track_take_recorder_ != nullptr && track_take_recorder_->armed();
+        const bool jam_recording_active = recorder_ != nullptr && recorder_->active();
+        const std::int32_t track_take_options = track_take_armed
+            ? control_.track_take_options.load(std::memory_order_relaxed)
+            : 0;
+        const auto track_take_source = static_cast<audio::TrackTakeSource>(
+            track_take_options & 0xff);
+        const bool current_jam_take = track_take_armed &&
+            track_take_source == audio::TrackTakeSource::CurrentJam;
+        const bool prepared_stem_required = current_jam_take &&
+            (track_take_options & audio::kTrackTakeIncludePrepared) != 0;
+        const bool metronome_stem_required = jam_recording_active ||
+            (current_jam_take &&
+             (track_take_options & audio::kTrackTakeIncludeMetronome) != 0);
         const bool network_playback = control_.network_playback_enabled.load(std::memory_order_acquire);
         if (!network_playback) {
             playback_prefilled_.store(false, std::memory_order_relaxed);
@@ -238,12 +267,15 @@ private:
                 &playback_ring_,
                 &control_,
                 playback_resampler_,
+                playback_resampler_scratch_,
                 playback_scratch_);
             processing::apply_remote_level(&control_, playback_scratch_);
         }
         control_.network_playback_enabled_applied.store(network_playback, std::memory_order_release);
-        processing::observe_peak(control_.remote_peak_ppm, playback_scratch_);
-        processing::observe_peak(control_.gui_remote_peak_ppm, playback_scratch_);
+        processing::observe_shared_peak(
+            control_.remote_peak_ppm,
+            control_.gui_remote_peak_ppm,
+            playback_scratch_);
 
         std::copy(
             playback_scratch_.cbegin(),
@@ -255,30 +287,30 @@ private:
             &control_,
             output_scratch_,
             callback_frame,
-            prepared_scratch_);
+            prepared_stem_required
+                ? std::span<std::int32_t>(prepared_scratch_)
+                : std::span<std::int32_t>{});
         processing::mix_metronome_click(
             &control_,
             sample_rate_,
             callback_frame,
             metronome_beat_index_,
             output_scratch_,
-            metronome_scratch_);
-        processing::observe_peak(control_.metronome_peak_ppm, metronome_scratch_);
-        processing::observe_peak(control_.gui_metronome_peak_ppm, metronome_scratch_);
+            metronome_stem_required
+                ? std::span<std::int32_t>(metronome_scratch_)
+                : std::span<std::int32_t>{},
+            &metronome_wave_bank_);
         processing::apply_output_level(&control_, output_scratch_);
-        if (track_take_recorder_ != nullptr) {
-            const std::int32_t options =
-                control_.track_take_options.load(std::memory_order_relaxed);
-            const auto source = static_cast<audio::TrackTakeSource>(options & 0xff);
-            if (source == audio::TrackTakeSource::CurrentJam) {
+        if (track_take_armed) {
+            if (track_take_source == audio::TrackTakeSource::CurrentJam) {
                 for (std::size_t index = 0; index < inputs_mix_scratch_.size(); ++index) {
                     std::int32_t sample = processing::mix_i32_samples(
                         capture_scratch_[index], playback_scratch_[index]);
-                    if ((options & audio::kTrackTakeIncludePrepared) != 0) {
+                    if ((track_take_options & audio::kTrackTakeIncludePrepared) != 0) {
                         sample = processing::mix_i32_samples(
                             sample, prepared_scratch_[index]);
                     }
-                    if ((options & audio::kTrackTakeIncludeMetronome) != 0) {
+                    if ((track_take_options & audio::kTrackTakeIncludeMetronome) != 0) {
                         sample = processing::mix_i32_samples(
                             sample, metronome_scratch_[index]);
                     }
@@ -299,7 +331,7 @@ private:
             }
         }
         processing::observe_output_peak(&control_, output_scratch_);
-        if (recorder_ != nullptr) {
+        if (jam_recording_active) {
             for (std::size_t index = 0; index < inputs_mix_scratch_.size(); ++index) {
                 inputs_mix_scratch_[index] = processing::mix_i32_samples(
                     capture_scratch_[index], playback_scratch_[index]);
@@ -322,19 +354,24 @@ private:
         const auto period = std::chrono::duration_cast<clock::duration>(
             std::chrono::duration<double>(static_cast<double>(buffer_size_) / clock_rate_));
         while (!stop_.load(std::memory_order_acquire)) {
-            control_.audio_callback_generation.fetch_add(1, std::memory_order_acq_rel);
+            const std::uint64_t callback_start_us = processing::callback_now_us();
+            processing::publish_callback_begin(&control_, callback_generation_);
             const std::uint64_t callback_frame = engine_frame_;
             processing::observe_callback_interval(
                 callback_intervals_,
-                monotonic_us(),
+                callback_start_us,
                 static_cast<std::size_t>(buffer_size_),
                 clock_rate_);
-            fill_capture(callback_frame);
+            fill_capture(callback_frame, callback_start_us);
             render_output(callback_frame);
             engine_frame_ += static_cast<std::uint64_t>(buffer_size_);
             control_.engine_frame_counter.store(engine_frame_, std::memory_order_release);
-            control_.audio_callback_generation.fetch_add(1, std::memory_order_release);
+            processing::publish_callback_end(&control_, callback_generation_);
             callbacks_.fetch_add(1, std::memory_order_relaxed);
+            processing::observe_callback_work(
+                callback_intervals_,
+                callback_start_us,
+                processing::callback_now_us());
             next += period;
             std::this_thread::sleep_until(next);
             if (next + period < clock::now()) {
@@ -361,6 +398,7 @@ private:
     audio::StreamInfo info_;
     std::vector<std::int32_t> capture_scratch_;
     std::vector<std::int32_t> playback_scratch_;
+    std::vector<std::int32_t> playback_resampler_scratch_;
     std::vector<std::int32_t> output_scratch_;
     std::vector<std::int32_t> inputs_mix_scratch_;
     std::vector<std::int32_t> metronome_scratch_;
@@ -372,8 +410,10 @@ private:
     std::atomic<long> callbacks_{0};
     std::atomic<bool> playback_prefilled_{false};
     processing::CallbackIntervalState callback_intervals_;
+    processing::MetronomeWaveBank metronome_wave_bank_;
     std::uint64_t test_input_frame_ = 0;
     std::uint64_t engine_frame_ = 0;
+    std::uint64_t callback_generation_ = 0;
     std::uint64_t metronome_beat_index_ = 0;
     processing::PlaybackResamplerState playback_resampler_;
 };
@@ -1141,6 +1181,8 @@ void Engine::start(const EngineConfig& requested)
         control.network_capture_generation_requested.store(0, std::memory_order_relaxed);
         control.network_capture_generation_applied.store(0, std::memory_order_relaxed);
         control.network_capture_epoch_frame.store(0, std::memory_order_relaxed);
+        control.network_capture_wake_signal.store(nullptr, std::memory_order_relaxed);
+        control.network_capture_wake_frames.store(0, std::memory_order_relaxed);
         control.network_playback_enabled.store(false, std::memory_order_relaxed);
         control.network_playback_enabled_applied.store(false, std::memory_order_relaxed);
         control.pitch_analysis_enabled.store(false, std::memory_order_relaxed);
@@ -1252,6 +1294,12 @@ bool Engine::submit(const EngineCommand& command) noexcept
         return false;
     }
     return impl_->commands.push(command);
+}
+
+std::uint64_t Engine::currentFrame() const noexcept
+{
+    if (impl_ == nullptr || impl_->control == nullptr) return 0;
+    return impl_->control->engine_frame_counter.load(std::memory_order_acquire);
 }
 
 EngineSnapshot Engine::snapshot() const noexcept
@@ -1415,6 +1463,14 @@ EngineSnapshot Engine::snapshot() const noexcept
         result.audio_buffer_frames = impl_->stream_info.buffer_size;
         result.input_latency_frames = impl_->stream_info.input_latency_frames;
         result.output_latency_frames = impl_->stream_info.output_latency_frames;
+        result.driver_output_ready_status =
+            static_cast<audio::DriverOutputReadyStatus>(
+                control.driver_output_ready_status.load(std::memory_order_acquire));
+        result.driver_output_ready_error =
+            control.driver_output_ready_error.load(std::memory_order_relaxed);
+        result.driver_output_ready_latency_reduction_frames =
+            control.driver_output_ready_latency_reduction_frames.load(
+                std::memory_order_relaxed);
         result.recording_latency_adjustment_frames =
             control.recording_latency_adjustment_frames.load(std::memory_order_relaxed);
         result.recording_source_latency_frames = impl_->config.input_source_router != nullptr
@@ -1500,7 +1556,9 @@ bool Engine::pollEvent(EngineEvent& event) noexcept
     return impl_ != nullptr && impl_->events.pop(event);
 }
 
-NetworkCaptureAttachment Engine::attachNetworkCapture() noexcept
+NetworkCaptureAttachment Engine::attachNetworkCapture(
+    RealtimeWakeSignal* wake_signal,
+    std::size_t wake_frames) noexcept
 {
     if (impl_ == nullptr ||
         impl_->lifecycle.load(std::memory_order_acquire) != EngineLifecycle::Local ||
@@ -1517,6 +1575,9 @@ NetworkCaptureAttachment Engine::attachNetworkCapture() noexcept
             std::memory_order_relaxed)) {
         return {impl_->active_attachment_generation.load(std::memory_order_acquire)};
     }
+    impl_->control->network_capture_wake_signal.store(wake_signal, std::memory_order_relaxed);
+    impl_->control->network_capture_wake_frames.store(
+        wake_signal != nullptr ? wake_frames : 0, std::memory_order_relaxed);
     impl_->control->network_capture_requested_enabled.store(true, std::memory_order_release);
     const std::uint64_t generation =
         impl_->control->network_capture_generation_requested.fetch_add(1, std::memory_order_acq_rel) + 1ULL;
@@ -1558,23 +1619,25 @@ CapturedAudioBlock Engine::popNetworkCapture(
     if (!networkCaptureReady(attachment) || impl_->capture_ring == nullptr || output.empty()) {
         return {};
     }
-    // Network packets are fixed-size blocks.  Consuming a partial device
-    // callback here loses those frames permanently when the device buffer is
-    // smaller than the packet size (for example 32-frame ASIO callbacks and
-    // 64-frame packets).  There is one capture consumer and the producer can
-    // only increase the readable depth, so this availability check is stable
-    // until the following pop.
-    if (impl_->capture_ring->available_read() < output.size()) {
-        return {};
-    }
-    const std::size_t frames = impl_->capture_ring->pop(output);
-    if (frames != output.size()) {
+    // Network packets are fixed-size blocks. One exact ring operation avoids
+    // consuming a partial device callback and avoids loading both indices
+    // twice on every send.
+    const std::size_t frames = impl_->capture_ring->pop_exact(output);
+    if (frames == 0) {
         return {};
     }
     const std::uint64_t offset = impl_->capture_frames_popped.fetch_add(frames, std::memory_order_relaxed);
     const std::uint64_t first =
         impl_->control->network_capture_epoch_frame.load(std::memory_order_acquire) + offset;
     return {first, frames};
+}
+
+std::size_t Engine::networkCaptureDepth(NetworkCaptureAttachment attachment) const noexcept
+{
+    if (!networkCaptureReady(attachment) || impl_->capture_ring == nullptr) {
+        return 0;
+    }
+    return impl_->capture_ring->available_read();
 }
 
 std::size_t Engine::networkPlaybackDepth() const noexcept

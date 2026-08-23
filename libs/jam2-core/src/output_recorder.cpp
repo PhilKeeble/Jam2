@@ -2,7 +2,9 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <chrono>
+#include <cstring>
 #include <fstream>
 #include <limits>
 #include <stdexcept>
@@ -49,8 +51,14 @@ struct OutputRecorder::StemQueue {
         const std::size_t used = write - read;
         const std::size_t available = samples.size() > used ? samples.size() - used : 0;
         const std::size_t count = std::min(available, input.size());
-        for (std::size_t i = 0; i < count; ++i) {
-            samples[(write + i) % samples.size()] = to_i16(input[i]);
+        const std::size_t write_offset = write % samples.size();
+        const std::size_t first_count = std::min(count, samples.size() - write_offset);
+        for (std::size_t i = 0; i < first_count; ++i) {
+            samples[write_offset + i] = to_i16(input[i]);
+        }
+        const std::size_t second_count = count - first_count;
+        for (std::size_t i = 0; i < second_count; ++i) {
+            samples[i] = to_i16(input[first_count + i]);
         }
         write_index.store(write + count, std::memory_order_release);
         return count;
@@ -61,8 +69,20 @@ struct OutputRecorder::StemQueue {
         const std::size_t write = write_index.load(std::memory_order_acquire);
         const std::size_t read = read_index.load(std::memory_order_relaxed);
         const std::size_t count = std::min(write - read, output.size());
-        for (std::size_t i = 0; i < count; ++i) {
-            output[i] = samples[(read + i) % samples.size()];
+        const std::size_t read_offset = read % samples.size();
+        const std::size_t first_count = std::min(count, samples.size() - read_offset);
+        if (first_count > 0) {
+            std::memcpy(
+                output.data(),
+                samples.data() + read_offset,
+                first_count * sizeof(std::int16_t));
+        }
+        const std::size_t second_count = count - first_count;
+        if (second_count > 0) {
+            std::memcpy(
+                output.data() + first_count,
+                samples.data(),
+                second_count * sizeof(std::int16_t));
         }
         read_index.store(read + count, std::memory_order_release);
         return count;
@@ -108,8 +128,14 @@ struct OutputRecorder::WavWriter {
 
     void write_samples(std::span<const std::int16_t> samples)
     {
-        for (const std::int16_t sample : samples) {
-            write_u16(out, static_cast<std::uint16_t>(sample));
+        if constexpr (std::endian::native == std::endian::little) {
+            out.write(
+                reinterpret_cast<const char*>(samples.data()),
+                static_cast<std::streamsize>(samples.size_bytes()));
+        } else {
+            for (const std::int16_t sample : samples) {
+                write_u16(out, static_cast<std::uint16_t>(sample));
+            }
         }
         frames += static_cast<std::uint64_t>(samples.size());
     }
@@ -235,6 +261,11 @@ bool OutputRecorder::stop(std::string& error)
     return true;
 }
 
+bool OutputRecorder::active() const noexcept
+{
+    return active_.load(std::memory_order_acquire);
+}
+
 void OutputRecorder::record(const RecordBlock& block) noexcept
 {
     if (!active_.load(std::memory_order_acquire) || block.mix.empty()) {
@@ -268,11 +299,6 @@ void OutputRecorder::record(const RecordBlock& block) noexcept
     }
     for (std::size_t i = 0; i < stems.size(); ++i) {
         pushed = std::min(pushed, queues_[i]->push(stems[i]));
-        const std::uint64_t signalFrames = static_cast<std::uint64_t>(
-            std::count_if(stems[i].begin(), stems[i].end(), [](std::int32_t sample) {
-                return to_i16(sample) != 0;
-            }));
-        stem_signal_frames_[i].fetch_add(signalFrames, std::memory_order_relaxed);
     }
     if (pushed < block.mix.size()) {
         dropped_frames_.fetch_add(block.mix.size() - pushed, std::memory_order_relaxed);
@@ -340,6 +366,14 @@ void OutputRecorder::writer_loop() noexcept
                 continue;
             }
             wrote_any = true;
+            const std::uint64_t signal_frames = static_cast<std::uint64_t>(
+                std::count_if(
+                    buffers[i].cbegin(),
+                    buffers[i].cbegin() + static_cast<std::ptrdiff_t>(count),
+                    [](std::int16_t sample) { return sample != 0; }));
+            stem_signal_frames_[i].fetch_add(
+                signal_frames,
+                std::memory_order_relaxed);
             try {
                 writers_[i]->write_samples(std::span<const std::int16_t>(buffers[i].data(), count));
             } catch (const std::exception& ex) {

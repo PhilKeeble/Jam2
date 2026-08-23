@@ -38,6 +38,12 @@ public:
     std::uint64_t scheduledStartFrame() const noexcept { return scheduledStartFrame_.load(std::memory_order_relaxed); }
     std::uint64_t actualStartFrame() const noexcept { return actualStartFrame_.load(std::memory_order_relaxed); }
     bool playing() const noexcept { return playingAtomic_.load(std::memory_order_relaxed); }
+    bool needsProcessing() const noexcept
+    {
+        return playingAtomic_.load(std::memory_order_acquire) ||
+            read_.load(std::memory_order_acquire) !=
+                write_.load(std::memory_order_acquire);
+    }
 private:
     struct Slot { std::vector<std::int16_t> samples; std::atomic<SlotState> state{SlotState::Free}; std::uint64_t frames = 0; int sampleRate = 0; };
     std::array<Slot, kSlots> slots_;

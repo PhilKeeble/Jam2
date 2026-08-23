@@ -250,6 +250,23 @@ QJsonObject scenario(
                 .arg(creatorPort)
                 .arg(sessionId, sessionKey));
     }
+    QJsonObject runtime{
+        {QStringLiteral("headless_audio"), true},
+        {QStringLiteral("sample_rate"), kSampleRate},
+        {QStringLiteral("audio_buffer_size"), kFrameSize},
+        {QStringLiteral("frame_size"), kFrameSize},
+        {QStringLiteral("network_audio_format"), QStringLiteral("pcm16")},
+        {QStringLiteral("stats"), true},
+        {QStringLiteral("stats_interval_ms"), 100},
+        {QStringLiteral("stream_ms"), 0},
+        {QStringLiteral("test_input"), QStringLiteral("silence")},
+        {QStringLiteral("metronome"), true},
+        {QStringLiteral("bpm"), 120},
+        {QStringLiteral("metronome_mode"), QStringLiteral("shared-grid")},
+    };
+    if (index == static_cast<int>(kPeerCount - 1)) {
+        runtime.insert(QStringLiteral("headless_clock_drift_ppm"), 200);
+    }
     return {
         {QStringLiteral("schema"), QStringLiteral("jam2-debug-scenario")},
         {QStringLiteral("run_id"),
@@ -258,20 +275,7 @@ QJsonObject scenario(
             ? QStringLiteral("network.create")
             : QStringLiteral("network.join")},
         {QStringLiteral("profile"), QStringLiteral("fast")},
-        {QStringLiteral("runtime"), QJsonObject{
-            {QStringLiteral("headless_audio"), true},
-            {QStringLiteral("sample_rate"), kSampleRate},
-            {QStringLiteral("audio_buffer_size"), kFrameSize},
-            {QStringLiteral("frame_size"), kFrameSize},
-            {QStringLiteral("network_audio_format"), QStringLiteral("pcm16")},
-            {QStringLiteral("stats"), true},
-            {QStringLiteral("stats_interval_ms"), 100},
-            {QStringLiteral("stream_ms"), 0},
-            {QStringLiteral("test_input"), QStringLiteral("silence")},
-            {QStringLiteral("metronome"), true},
-            {QStringLiteral("bpm"), 120},
-            {QStringLiteral("metronome_mode"), QStringLiteral("shared-grid")},
-        }},
+        {QStringLiteral("runtime"), runtime},
         {QStringLiteral("artifacts"), QJsonObject{
             {QStringLiteral("root"), artifactRoot}}},
         {QStringLiteral("network"), network},
@@ -717,6 +721,18 @@ int main(int argc, char* argv[])
             return fail(QStringLiteral("peer %1 active count-in: %2 snapshot=%3")
                 .arg(index + 1)
                 .arg(error)
+                .arg(QString::fromUtf8(QJsonDocument(activeSnapshot)
+                    .toJson(QJsonDocument::Compact))));
+        }
+        if (activeSnapshot
+                    .value(QStringLiteral("capture_ring_depth_frames"))
+                    .toInteger() > static_cast<qint64>(kFrameSize * 2) ||
+            activeSnapshot
+                    .value(QStringLiteral("capture_ring_overrun_frames"))
+                    .toInteger() != 0) {
+            return fail(QStringLiteral(
+                "peer %1 capture-driven sender did not remain at the live edge: snapshot=%2")
+                .arg(index + 1)
                 .arg(QString::fromUtf8(QJsonDocument(activeSnapshot)
                     .toJson(QJsonDocument::Compact))));
         }

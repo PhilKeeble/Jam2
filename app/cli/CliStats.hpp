@@ -35,11 +35,15 @@ struct OsSchedulingStatus {
     std::string platform;
     unsigned int cpu_count = 0;
     std::string process_priority;
+    std::string process_priority_error;
     std::string thread_priority;
     std::string mmcss_requested;
     std::string mmcss_active;
     std::string mmcss_profile;
     std::string mmcss_error;
+    std::string mmcss_priority_requested;
+    std::string mmcss_priority_active;
+    std::string mmcss_priority_error;
     std::string timer_resolution_requested;
     std::string timer_resolution_active;
 
@@ -47,9 +51,6 @@ struct OsSchedulingStatus {
     std::string qos_requested;
     std::string qos_active;
     std::string qos_error;
-    std::string realtime_requested;
-    std::string realtime_active;
-    std::string realtime_error;
 };
 
 struct UdpParseStats {
@@ -113,6 +114,12 @@ struct AudioPacketStats {
     std::uint64_t mix_missing_peer_contributions = 0;
     std::uint64_t mix_missing_peer_frames = 0;
     std::uint64_t mix_late_after_release_frames = 0;
+    std::uint64_t mix_live_tail_trim_events = 0;
+    std::uint64_t mix_live_tail_trimmed_frames = 0;
+    std::uint64_t mix_live_tail_trim_max_frames = 0;
+    std::uint64_t peer_playback_queue_current_frames = 0;
+    std::uint64_t peer_playback_queue_high_water_frames = 0;
+    std::uint64_t peer_playback_path_current_frames = 0;
     std::uint64_t mix_capacity_drops = 0;
     std::uint64_t mix_capacity_dropped_frames = 0;
     std::uint64_t mix_clipped_samples = 0;
@@ -230,6 +237,34 @@ struct AudioPacketStats {
     std::uint64_t receive_loop_gap_samples = 0;
     std::uint64_t receive_burst_packets_max = 0;
     std::uint64_t receive_packets_per_loop_max = 0;
+    std::uint64_t receive_processing_min_us = 0;
+    std::uint64_t receive_processing_sum_us = 0;
+    std::uint64_t receive_processing_max_us = 0;
+    std::uint64_t receive_processing_samples = 0;
+    std::uint64_t pre_receive_work_min_us = 0;
+    std::uint64_t pre_receive_work_sum_us = 0;
+    std::uint64_t pre_receive_work_max_us = 0;
+    std::uint64_t pre_receive_work_samples = 0;
+    std::uint64_t pre_receive_advance_sum_us = 0;
+    std::uint64_t pre_receive_advance_max_us = 0;
+    std::uint64_t pre_receive_maintenance_sum_us = 0;
+    std::uint64_t pre_receive_maintenance_max_us = 0;
+    std::uint64_t pre_receive_send_sum_us = 0;
+    std::uint64_t pre_receive_send_max_us = 0;
+    std::uint64_t pre_receive_peak_advance_us = 0;
+    std::uint64_t pre_receive_peak_maintenance_us = 0;
+    std::uint64_t pre_receive_peak_send_us = 0;
+    std::uint64_t capture_ready_wake_signals = 0;
+    std::uint64_t capture_ready_wake_consumptions = 0;
+    std::uint64_t capture_ready_dispatch_min_us = 0;
+    std::uint64_t capture_ready_dispatch_sum_us = 0;
+    std::uint64_t capture_ready_dispatch_max_us = 0;
+    std::uint64_t capture_ready_dispatch_samples = 0;
+    bool capture_clock_packet_pacing_active = false;
+    std::uint64_t ping_reply_turnaround_min_us = 0;
+    std::uint64_t ping_reply_turnaround_sum_us = 0;
+    std::uint64_t ping_reply_turnaround_max_us = 0;
+    std::uint64_t ping_reply_turnaround_samples = 0;
     std::uint64_t playback_push_min_frames = 0;
     std::uint64_t playback_push_sum_frames = 0;
 
@@ -285,7 +320,10 @@ struct AudioPacketStats {
     std::uint64_t jitter_buffer_late_packets = 0;
     std::uint64_t jitter_buffer_dropped_packets = 0;
     std::uint64_t jitter_buffer_dropped_frames = 0;
+    std::uint64_t jitter_buffer_target_releases = 0;
+    std::uint64_t jitter_buffer_timeout_releases = 0;
     std::uint64_t jitter_buffer_forced_releases = 0;
+    std::uint64_t jitter_buffer_rebases = 0;
     bool adaptive_playback_cushion_enabled = false;
     std::uint64_t adaptive_playback_target_frames = 0;
     std::uint64_t adaptive_playback_min_frames = 0;
@@ -324,7 +362,10 @@ struct AudioPacketStats {
 class ReceiveLoopDiagnostics final {
 public:
     void beginWake(std::uint64_t now_us) noexcept;
-    void finishWake(std::size_t received_packets) noexcept;
+    void finishWake(
+        std::size_t received_packets,
+        std::uint64_t processing_start_us,
+        std::uint64_t processing_end_us) noexcept;
     void applyTo(AudioPacketStats& target) const noexcept;
 
 private:
@@ -337,6 +378,10 @@ private:
     std::uint64_t idle_count_ = 0;
     std::uint64_t batch_sum_ = 0;
     std::uint64_t batch_max_ = 0;
+    std::uint64_t processing_min_us_ = 0;
+    std::uint64_t processing_sum_us_ = 0;
+    std::uint64_t processing_max_us_ = 0;
+    std::uint64_t processing_samples_ = 0;
 };
 
 void print_udp_parse_stats(const UdpParseStats& stats, std::ostream& out = std::cout);
@@ -411,6 +456,10 @@ public:
     struct AudioSnapshot {
         bool has_audio = false;
         jam2::audio::StreamInfo stream;
+        jam2::audio::DriverOutputReadyStatus driver_output_ready_status =
+            jam2::audio::DriverOutputReadyStatus::NotApplicable;
+        long driver_output_ready_error = 0;
+        long driver_output_ready_latency_reduction_frames = 0;
         long callbacks = 0;
         bool playback_prefilled = false;
         std::uint64_t capture_ring_overruns = 0;
@@ -599,7 +648,32 @@ public:
                 "input_downmix_channel_3_noise_floor,input_downmix_channel_4_noise_floor,"
                 "metronome_pattern_origin_frame,metronome_pattern_origin_valid,"
                 "metronome_pattern_source_start_frame,drift_baseline_calibrating,"
-                "drift_baseline_calibration_packets,drift_baseline_delay_improvement_us\n";
+                "drift_baseline_calibration_packets,drift_baseline_delay_improvement_us,"
+                "mix_live_tail_trim_events,mix_live_tail_trimmed_frames,mix_live_tail_trim_max_frames,"
+                "peer_playback_queue_current_frames,peer_playback_queue_high_water_frames,"
+                "peer_playback_path_current_frames,"
+                "receive_processing_min_us,receive_processing_avg_us,receive_processing_max_us,receive_processing_samples,"
+                "ping_reply_turnaround_min_us,ping_reply_turnaround_avg_us,ping_reply_turnaround_max_us,ping_reply_turnaround_samples,"
+                "jitter_buffer_target_releases,jitter_buffer_timeout_releases,jitter_buffer_rebases,"
+                "total_current_buffered_frames,total_current_buffered_ms,"
+                "audio_callback_work_min_us,audio_callback_work_avg_us,"
+                "audio_callback_work_max_us,audio_callback_work_samples,"
+                "pre_receive_work_min_us,pre_receive_work_avg_us,"
+                "pre_receive_work_max_us,pre_receive_work_samples,"
+                "pre_receive_advance_avg_us,pre_receive_advance_max_us,"
+                "pre_receive_maintenance_avg_us,pre_receive_maintenance_max_us,"
+                "pre_receive_send_avg_us,pre_receive_send_max_us,"
+                "pre_receive_peak_advance_us,pre_receive_peak_maintenance_us,"
+                "pre_receive_peak_send_us,"
+                "os_mmcss_priority_requested,os_mmcss_priority_active,"
+                "os_mmcss_priority_error,os_process_priority_error,"
+                "capture_ready_wake_signals,capture_ready_wake_consumptions,"
+                "capture_ready_dispatch_min_us,capture_ready_dispatch_avg_us,"
+                "capture_ready_dispatch_max_us,capture_ready_dispatch_samples,"
+                "driver_input_latency_frames,driver_output_latency_frames,"
+                "driver_output_ready_status,driver_output_ready_error,"
+                "driver_output_ready_latency_reduction_frames,"
+                "capture_clock_packet_pacing_active\n";
     }
 
     explicit operator bool() const { return out_.is_open(); }
@@ -1034,7 +1108,67 @@ public:
              << audio.metronome_pattern_source_start_frame << ','
              << (stats.drift_baseline_calibrating ? "yes" : "no") << ','
              << stats.drift_baseline_calibration_packets << ','
-             << stats.drift_baseline_delay_improvement_us;
+             << stats.drift_baseline_delay_improvement_us << ','
+             << stats.mix_live_tail_trim_events << ','
+             << stats.mix_live_tail_trimmed_frames << ','
+             << stats.mix_live_tail_trim_max_frames << ','
+             << stats.peer_playback_queue_current_frames << ','
+             << stats.peer_playback_queue_high_water_frames << ','
+             << stats.peer_playback_path_current_frames << ','
+             << stats.receive_processing_min_us << ','
+             << avg_u64(stats.receive_processing_sum_us, stats.receive_processing_samples) << ','
+             << stats.receive_processing_max_us << ','
+             << stats.receive_processing_samples << ','
+             << stats.ping_reply_turnaround_min_us << ','
+             << avg_u64(stats.ping_reply_turnaround_sum_us, stats.ping_reply_turnaround_samples) << ','
+             << stats.ping_reply_turnaround_max_us << ','
+             << stats.ping_reply_turnaround_samples << ','
+             << stats.jitter_buffer_target_releases << ','
+             << stats.jitter_buffer_timeout_releases << ','
+             << stats.jitter_buffer_rebases << ','
+             << (stats.peer_playback_path_current_frames + audio.playback_ring_readable) << ','
+             << frames_to_ms(
+                    static_cast<std::size_t>(
+                        stats.peer_playback_path_current_frames + audio.playback_ring_readable),
+                    active_sample_rate) << ','
+             << audio.callback_timing.work_min_us << ','
+             << avg_u64(
+                    audio.callback_timing.work_sum_us,
+                    audio.callback_timing.work_samples) << ','
+             << audio.callback_timing.work_max_us << ','
+             << audio.callback_timing.work_samples << ','
+             << stats.pre_receive_work_min_us << ','
+             << avg_u64(stats.pre_receive_work_sum_us, stats.pre_receive_work_samples) << ','
+             << stats.pre_receive_work_max_us << ','
+             << stats.pre_receive_work_samples << ','
+             << avg_u64(stats.pre_receive_advance_sum_us, stats.pre_receive_work_samples) << ','
+             << stats.pre_receive_advance_max_us << ','
+             << avg_u64(stats.pre_receive_maintenance_sum_us, stats.pre_receive_work_samples) << ','
+             << stats.pre_receive_maintenance_max_us << ','
+             << avg_u64(stats.pre_receive_send_sum_us, stats.pre_receive_work_samples) << ','
+             << stats.pre_receive_send_max_us << ','
+             << stats.pre_receive_peak_advance_us << ','
+             << stats.pre_receive_peak_maintenance_us << ','
+             << stats.pre_receive_peak_send_us << ','
+             << csv_escape(stats.os_scheduling.mmcss_priority_requested) << ','
+             << csv_escape(stats.os_scheduling.mmcss_priority_active) << ','
+             << csv_escape(stats.os_scheduling.mmcss_priority_error) << ','
+             << csv_escape(stats.os_scheduling.process_priority_error) << ','
+             << stats.capture_ready_wake_signals << ','
+             << stats.capture_ready_wake_consumptions << ','
+             << stats.capture_ready_dispatch_min_us << ','
+             << avg_u64(
+                    stats.capture_ready_dispatch_sum_us,
+                    stats.capture_ready_dispatch_samples) << ','
+             << stats.capture_ready_dispatch_max_us << ','
+             << stats.capture_ready_dispatch_samples << ','
+             << audio.stream.input_latency_frames << ','
+             << audio.stream.output_latency_frames << ','
+             << csv_escape(jam2::audio::driver_output_ready_status_text(
+                    audio.driver_output_ready_status)) << ','
+             << audio.driver_output_ready_error << ','
+             << audio.driver_output_ready_latency_reduction_frames << ','
+             << (stats.capture_clock_packet_pacing_active ? "yes" : "no");
         out_ << '\n';
         if (row_type == "final") {
             out_.flush();
@@ -1050,7 +1184,7 @@ public:
         if (!out_) {
             return;
         }
-        std::vector<std::string> fields(398);
+        std::vector<std::string> fields(450);
         auto set = [&](std::size_t index, auto value) {
             std::ostringstream text;
             text << value;
@@ -1250,9 +1384,6 @@ public:
         fields[236] = stats.os_scheduling.qos_requested;
         fields[237] = stats.os_scheduling.qos_active;
         fields[238] = stats.os_scheduling.qos_error;
-        fields[239] = stats.os_scheduling.realtime_requested;
-        fields[240] = stats.os_scheduling.realtime_active;
-        fields[241] = stats.os_scheduling.realtime_error;
         fields[242] = stats.metronome_compensation_active ? "yes" : "no";
         set(243, stats.metronome_compensation_offset_frames);
         set(244, signed_frames_to_ms(stats.metronome_compensation_offset_frames, options.sample_rate));
@@ -1414,6 +1545,68 @@ public:
         fields[395] = stats.drift_baseline_calibrating ? "yes" : "no";
         set(396, stats.drift_baseline_calibration_packets);
         set(397, stats.drift_baseline_delay_improvement_us);
+        set(398, stats.mix_live_tail_trim_events);
+        set(399, stats.mix_live_tail_trimmed_frames);
+        set(400, stats.mix_live_tail_trim_max_frames);
+        set(401, stats.peer_playback_queue_current_frames);
+        set(402, stats.peer_playback_queue_high_water_frames);
+        set(403, stats.peer_playback_path_current_frames);
+        set(404, stats.receive_processing_min_us);
+        set(405, avg_u64(stats.receive_processing_sum_us, stats.receive_processing_samples));
+        set(406, stats.receive_processing_max_us);
+        set(407, stats.receive_processing_samples);
+        set(408, stats.ping_reply_turnaround_min_us);
+        set(409, avg_u64(
+            stats.ping_reply_turnaround_sum_us,
+            stats.ping_reply_turnaround_samples));
+        set(410, stats.ping_reply_turnaround_max_us);
+        set(411, stats.ping_reply_turnaround_samples);
+        set(412, stats.jitter_buffer_target_releases);
+        set(413, stats.jitter_buffer_timeout_releases);
+        set(414, stats.jitter_buffer_rebases);
+        set(415, stats.peer_playback_path_current_frames + audio.playback_ring_readable);
+        set(416, frames_to_ms(
+            static_cast<std::size_t>(
+                stats.peer_playback_path_current_frames + audio.playback_ring_readable),
+            options.sample_rate));
+        set(417, audio.callback_timing.work_min_us);
+        set(418, avg_u64(
+            audio.callback_timing.work_sum_us,
+            audio.callback_timing.work_samples));
+        set(419, audio.callback_timing.work_max_us);
+        set(420, audio.callback_timing.work_samples);
+        set(421, stats.pre_receive_work_min_us);
+        set(422, avg_u64(stats.pre_receive_work_sum_us, stats.pre_receive_work_samples));
+        set(423, stats.pre_receive_work_max_us);
+        set(424, stats.pre_receive_work_samples);
+        set(425, avg_u64(stats.pre_receive_advance_sum_us, stats.pre_receive_work_samples));
+        set(426, stats.pre_receive_advance_max_us);
+        set(427, avg_u64(stats.pre_receive_maintenance_sum_us, stats.pre_receive_work_samples));
+        set(428, stats.pre_receive_maintenance_max_us);
+        set(429, avg_u64(stats.pre_receive_send_sum_us, stats.pre_receive_work_samples));
+        set(430, stats.pre_receive_send_max_us);
+        set(431, stats.pre_receive_peak_advance_us);
+        set(432, stats.pre_receive_peak_maintenance_us);
+        set(433, stats.pre_receive_peak_send_us);
+        fields[434] = stats.os_scheduling.mmcss_priority_requested;
+        fields[435] = stats.os_scheduling.mmcss_priority_active;
+        fields[436] = stats.os_scheduling.mmcss_priority_error;
+        fields[437] = stats.os_scheduling.process_priority_error;
+        set(438, stats.capture_ready_wake_signals);
+        set(439, stats.capture_ready_wake_consumptions);
+        set(440, stats.capture_ready_dispatch_min_us);
+        set(441, avg_u64(
+            stats.capture_ready_dispatch_sum_us,
+            stats.capture_ready_dispatch_samples));
+        set(442, stats.capture_ready_dispatch_max_us);
+        set(443, stats.capture_ready_dispatch_samples);
+        set(444, audio.stream.input_latency_frames);
+        set(445, audio.stream.output_latency_frames);
+        fields[446] = jam2::audio::driver_output_ready_status_text(
+            audio.driver_output_ready_status);
+        set(447, audio.driver_output_ready_error);
+        set(448, audio.driver_output_ready_latency_reduction_frames);
+        fields[449] = stats.capture_clock_packet_pacing_active ? "yes" : "no";
 
         for (std::size_t i = 0; i < fields.size(); ++i) {
             if (i != 0) {

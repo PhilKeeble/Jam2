@@ -36,7 +36,6 @@ enum class Jam2TestInputMode {
 enum class Jam2OsPriorityMode {
     Off,
     High,
-    Realtime,
 };
 
 enum class Jam2ProfileApplication {

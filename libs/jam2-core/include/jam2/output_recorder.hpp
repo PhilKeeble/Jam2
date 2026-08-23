@@ -74,6 +74,7 @@ public:
 
     bool start(const std::filesystem::path& folder, int sample_rate, std::string& error);
     bool stop(std::string& error);
+    bool active() const noexcept;
     void record(const RecordBlock& block) noexcept;
     OutputRecorderSnapshot snapshot() const noexcept;
     OutputRecorderStats stats() const;

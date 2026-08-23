@@ -83,6 +83,41 @@ struct PeerStream::Impl {
         PendingAudioPacket packet;
     };
 
+    static void transferPacket(
+        PendingAudioPacket& destination,
+        PendingAudioPacket&& source) noexcept
+    {
+        destination.sequence = source.sequence;
+        destination.sample_time = source.sample_time;
+        destination.receive_time = source.receive_time;
+        destination.reordered = source.reordered;
+        destination.sample_count = source.sample_count;
+        std::copy_n(
+            source.samples.data(),
+            source.sample_count,
+            destination.samples.data());
+    }
+
+    bool decodePacket(
+        PendingAudioPacket& packet,
+        const protocol::Header& header,
+        std::span<const std::uint8_t> payload,
+        std::uint64_t receive_time_us,
+        bool reordered,
+        std::size_t packet_frames) noexcept
+    {
+        packet.sequence = header.sequence;
+        packet.sample_time = header.timing_value;
+        packet.receive_time = receive_time_us;
+        packet.reordered = reordered;
+        packet.sample_count = packet_frames;
+        return protocol::unpack_audio_q31_into(
+            config.audio_format,
+            payload,
+            std::span<std::int32_t>(
+                packet.samples.data(), packet.sample_count));
+    }
+
     PeerStreamConfig config;
     PeerStreamPlayback* playback = nullptr;
     PeerStreamStats stats;
@@ -95,6 +130,8 @@ struct PeerStream::Impl {
     std::vector<PacketSlot> jitter_slots;
     std::size_t reorder_count = 0;
     std::size_t jitter_count = 0;
+    std::size_t jitter_read_index = 0;
+    std::size_t jitter_write_index = 0;
     bool expected_sequence_set = false;
     std::uint32_t expected_sequence = 0;
     std::uint32_t highest_sequence = 0;
@@ -105,9 +142,6 @@ struct PeerStream::Impl {
     std::uint32_t forward_gap_recovery_expected = 0;
     bool highest_remote_sample_time_set = false;
     std::uint64_t highest_remote_sample_time = 0;
-    bool jitter_time_initialized = false;
-    std::uint64_t jitter_base_sample_time = 0;
-    std::uint64_t jitter_base_receive_time_us = 0;
     bool playout_sample_time_initialized = false;
     std::uint64_t next_playout_remote_sample_time = 0;
     bool drift_started = false;
@@ -645,16 +679,17 @@ struct PeerStream::Impl {
         if (jitter_count == 0) {
             return 0;
         }
-        std::uint64_t first = (std::numeric_limits<std::uint64_t>::max)();
-        std::uint64_t last = 0;
-        for (const PacketSlot& slot : jitter_slots) {
-            if (!slot.occupied) {
-                continue;
-            }
-            first = std::min(first, slot.packet.sample_time);
-            last = std::max(last, slot.packet.sample_time + slot.packet.sample_count);
-        }
-        return last > first ? last - first : 0;
+        const PacketSlot& first = jitter_slots[jitter_read_index];
+        const std::size_t last_index =
+            (jitter_write_index + jitter_slots.size() - 1U) % jitter_slots.size();
+        const PacketSlot& last = jitter_slots[last_index];
+        const std::uint64_t last_end = last.packet.sample_time >
+                (std::numeric_limits<std::uint64_t>::max)() - last.packet.sample_count
+            ? (std::numeric_limits<std::uint64_t>::max)()
+            : last.packet.sample_time + last.packet.sample_count;
+        return last_end > first.packet.sample_time
+            ? last_end - first.packet.sample_time
+            : 0;
     }
 
     void updateJitterDepth() noexcept
@@ -665,28 +700,38 @@ struct PeerStream::Impl {
             stats.jitter_buffer_depth_frames);
     }
 
-    PacketSlot* earliestJitterSlot() noexcept
+    PacketSlot* oldestJitterSlot() noexcept
     {
-        PacketSlot* earliest = nullptr;
-        for (PacketSlot& slot : jitter_slots) {
-            if (slot.occupied &&
-                (earliest == nullptr || slot.packet.sample_time < earliest->packet.sample_time)) {
-                earliest = &slot;
-            }
-        }
-        return earliest;
+        return jitter_count > 0 ? &jitter_slots[jitter_read_index] : nullptr;
     }
 
-    std::uint64_t jitterDueTime(const PendingAudioPacket& packet) const noexcept
+    void releaseOldestJitterPacket() noexcept
     {
-        const std::uint64_t delta = packet.sample_time >= jitter_base_sample_time
-            ? packet.sample_time - jitter_base_sample_time
-            : 0;
-        const std::uint64_t playout_delta_us =
-            delta * 1000000ULL / static_cast<std::uint64_t>(config.sample_rate);
-        const std::uint64_t target_delay_us =
-            config.jitter_buffer_frames * 1000000ULL / static_cast<std::uint64_t>(config.sample_rate);
-        return jitter_base_receive_time_us + target_delay_us + playout_delta_us;
+        PacketSlot& oldest = jitter_slots[jitter_read_index];
+        oldest.occupied = false;
+        jitter_read_index = (jitter_read_index + 1U) % jitter_slots.size();
+        --jitter_count;
+        ++stats.jitter_buffer_released_packets;
+        processPacket(oldest.packet);
+    }
+
+    void resetJitterAfterDiscontinuity() noexcept
+    {
+        if (config.jitter_buffer_frames == 0) {
+            return;
+        }
+        while (jitter_count > 0) {
+            PacketSlot& slot = jitter_slots[jitter_read_index];
+            ++stats.jitter_buffer_dropped_packets;
+            stats.jitter_buffer_dropped_frames += slot.packet.sample_count;
+            slot.occupied = false;
+            jitter_read_index = (jitter_read_index + 1U) % jitter_slots.size();
+            --jitter_count;
+        }
+        jitter_read_index = 0;
+        jitter_write_index = 0;
+        stats.jitter_buffer_depth_frames = 0;
+        ++stats.jitter_buffer_rebases;
     }
 
     void drainJitter(std::uint64_t now_us) noexcept
@@ -694,71 +739,66 @@ struct PeerStream::Impl {
         if (config.jitter_buffer_frames == 0) {
             return;
         }
+        const std::uint64_t target_delay_us =
+            config.jitter_buffer_frames * 1000000ULL /
+            static_cast<std::uint64_t>(config.sample_rate);
         for (;;) {
             updateJitterDepth();
-            if (config.jitter_buffer_max_frames > 0 &&
-                stats.jitter_buffer_depth_frames > config.jitter_buffer_max_frames &&
-                jitter_count > 0) {
-                PacketSlot* oldest = earliestJitterSlot();
-                if (oldest == nullptr) {
-                    return;
-                }
-                PendingAudioPacket packet = std::move(oldest->packet);
-                oldest->occupied = false;
-                --jitter_count;
-                ++stats.jitter_buffer_released_packets;
+            PacketSlot* oldest = oldestJitterSlot();
+            if (oldest == nullptr) {
+                return;
+            }
+            const bool maximum_exceeded = config.jitter_buffer_max_frames > 0 &&
+                stats.jitter_buffer_depth_frames > config.jitter_buffer_max_frames;
+            const bool target_reached =
+                stats.jitter_buffer_depth_frames >= config.jitter_buffer_frames;
+            const bool residence_expired = now_us >= oldest->packet.receive_time &&
+                now_us - oldest->packet.receive_time >= target_delay_us;
+            if (!maximum_exceeded && !target_reached && !residence_expired) {
+                return;
+            }
+            if (maximum_exceeded) {
                 ++stats.jitter_buffer_forced_releases;
-                processPacket(packet);
-                continue;
-            }
-            PacketSlot* next = earliestJitterSlot();
-            if (next == nullptr) {
-                return;
-            }
-            const std::uint64_t due_us = jitterDueTime(next->packet);
-            if (due_us > now_us) {
-                return;
-            }
-            if (now_us > due_us) {
+            } else if (target_reached) {
+                ++stats.jitter_buffer_target_releases;
+            } else {
+                ++stats.jitter_buffer_timeout_releases;
                 ++stats.jitter_buffer_late_packets;
             }
-            PendingAudioPacket packet = std::move(next->packet);
-            next->occupied = false;
-            --jitter_count;
-            ++stats.jitter_buffer_released_packets;
-            processPacket(packet);
+            releaseOldestJitterPacket();
         }
     }
 
-    void queueOrProcess(PendingAudioPacket packet) noexcept
+    void queueOrProcess(PendingAudioPacket&& packet) noexcept
     {
         if (config.jitter_buffer_frames == 0) {
             processPacket(packet);
             return;
         }
-        if (!jitter_time_initialized) {
-            jitter_time_initialized = true;
-            jitter_base_sample_time = packet.sample_time;
-            jitter_base_receive_time_us = packet.receive_time;
-        }
-        const std::size_t slot_index = static_cast<std::size_t>(
-            (packet.sample_time / static_cast<std::uint64_t>(config.frames_per_packet)) % jitter_slots.size());
-        PacketSlot& slot = jitter_slots[slot_index];
-        if (slot.occupied) {
+        if (jitter_count >= jitter_slots.size()) {
             ++stats.jitter_capacity_drops;
             ++stats.jitter_buffer_dropped_packets;
             stats.jitter_buffer_dropped_frames += packet.sample_count;
             return;
         }
-        slot.packet = std::move(packet);
+        const std::uint64_t receive_time = packet.receive_time;
+        PacketSlot& slot = jitter_slots[jitter_write_index];
+        transferPacket(slot.packet, std::move(packet));
+        commitJitterSlot(receive_time);
+    }
+
+    void commitJitterSlot(std::uint64_t receive_time) noexcept
+    {
+        PacketSlot& slot = jitter_slots[jitter_write_index];
         slot.occupied = true;
+        jitter_write_index = (jitter_write_index + 1U) % jitter_slots.size();
         ++jitter_count;
         stats.jitter_pending_high_water = std::max<std::uint64_t>(
             stats.jitter_pending_high_water,
             jitter_count);
         ++stats.jitter_buffer_queued_packets;
         updateJitterDepth();
-        drainJitter(slot.packet.receive_time);
+        drainJitter(receive_time);
     }
 
     void drainReorder() noexcept
@@ -770,12 +810,11 @@ struct PeerStream::Impl {
                 if (next.packet.reordered) {
                     ++stats.reordered_recovered;
                 }
-                PendingAudioPacket packet = std::move(next.packet);
                 next.occupied = false;
                 --reorder_count;
                 ++expected_sequence;
                 ++work;
-                queueOrProcess(std::move(packet));
+                queueOrProcess(std::move(next.packet));
                 continue;
             }
             if (protocol::sequence_after(highest_sequence, expected_sequence) &&
@@ -871,6 +910,7 @@ struct PeerStream::Impl {
                     slot.occupied = false;
                 }
                 reorder_count = 0;
+                resetJitterAfterDiscontinuity();
                 expected_sequence = header.sequence;
                 highest_sequence = header.sequence;
                 forward_resync_candidate_set = false;
@@ -931,22 +971,36 @@ struct PeerStream::Impl {
             highest_remote_sample_time = std::max(highest_remote_sample_time, packet_end);
         }
 
-        PendingAudioPacket packet;
-        packet.sequence = header.sequence;
-        packet.sample_time = header.timing_value;
-        packet.receive_time = receive_time_us;
-        packet.reordered = reordered;
-        packet.sample_count = static_cast<std::size_t>(packet_frames);
-        std::span<std::int32_t> decoded(packet.samples.data(), packet.sample_count);
-        if (!protocol::unpack_audio_into(config.audio_format, payload, decoded)) {
-            return PeerAudioResult::InvalidPayload;
-        }
-        for (std::int32_t& sample : decoded) {
-            sample *= 256;
-        }
-
         if (header.sequence == expected_sequence) {
-            queueOrProcess(std::move(packet));
+            if (config.jitter_buffer_frames == 0) {
+                PendingAudioPacket packet;
+                if (!decodePacket(
+                        packet,
+                        header,
+                        payload,
+                        receive_time_us,
+                        reordered,
+                        static_cast<std::size_t>(packet_frames))) {
+                    return PeerAudioResult::InvalidPayload;
+                }
+                processPacket(packet);
+            } else if (jitter_count >= jitter_slots.size()) {
+                ++stats.jitter_capacity_drops;
+                ++stats.jitter_buffer_dropped_packets;
+                stats.jitter_buffer_dropped_frames += packet_frames;
+            } else {
+                PacketSlot& jitter_slot = jitter_slots[jitter_write_index];
+                if (!decodePacket(
+                        jitter_slot.packet,
+                        header,
+                        payload,
+                        receive_time_us,
+                        reordered,
+                        static_cast<std::size_t>(packet_frames))) {
+                    return PeerAudioResult::InvalidPayload;
+                }
+                commitJitterSlot(receive_time_us);
+            }
             ++expected_sequence;
             drainReorder();
             return PeerAudioResult::Accepted;
@@ -955,7 +1009,15 @@ struct PeerStream::Impl {
             ++stats.reorder_capacity_drops;
             return PeerAudioResult::ReorderCapacity;
         }
-        reorder_slot.packet = std::move(packet);
+        if (!decodePacket(
+                reorder_slot.packet,
+                header,
+                payload,
+                receive_time_us,
+                reordered,
+                static_cast<std::size_t>(packet_frames))) {
+            return PeerAudioResult::InvalidPayload;
+        }
         reorder_slot.occupied = true;
         ++reorder_count;
         stats.reorder_pending_high_water = std::max<std::uint64_t>(
@@ -1013,8 +1075,18 @@ PeerAudioResult PeerStream::receiveAudio(
 
 void PeerStream::advance(std::uint64_t now_us) noexcept
 {
-    impl_->drainReorder();
-    impl_->drainJitter(now_us);
+    const bool reorder_work_pending = impl_->reorder_count != 0 ||
+        (impl_->expected_sequence_set &&
+         protocol::sequence_after(impl_->highest_sequence, impl_->expected_sequence) &&
+         protocol::sequence_forward_distance(
+             impl_->highest_sequence,
+             impl_->expected_sequence) > impl_->reorder_window_packets);
+    if (reorder_work_pending) {
+        impl_->drainReorder();
+    }
+    if (impl_->jitter_count != 0) {
+        impl_->drainJitter(now_us);
+    }
 }
 
 void PeerStream::finish(std::uint64_t now_us) noexcept

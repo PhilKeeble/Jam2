@@ -1,6 +1,7 @@
 #include "AssetChunkProtocol.hpp"
 #include "AssetTransferService.hpp"
 #include "ContentLimits.hpp"
+#include "LooperAssetFiles.hpp"
 #include "TrackAssetOwnership.hpp"
 
 #include <QCoreApplication>
@@ -283,6 +284,39 @@ void test_chunk_sequence_rejects_duplicate_and_wrong_source()
     error.clear();
     expect(sequence.finish(hash, QStringLiteral("peer-a"), 1, error),
         "asset sequence completion preserves exact identity and count");
+}
+
+void test_arrangement_validation_reuses_received_assets(const QString& folder)
+{
+    const QString hash(64, QLatin1Char('a'));
+    const QString assetFolder = QDir(folder).absoluteFilePath(QStringLiteral("wavs"));
+    const QString localPath = QDir(folder).absoluteFilePath(QStringLiteral("local.wav"));
+    const QString received = jam2::gui::looper_asset_files::receivedPath(folder, hash);
+    const QStringList candidates =
+        jam2::gui::looper_asset_files::validationCandidates(
+            folder, assetFolder, hash, localPath);
+    expect(candidates == QStringList{
+            QDir(assetFolder).absoluteFilePath(hash + QStringLiteral(".wav")),
+            received,
+            localPath},
+        "arrangement validation includes the hash-addressed receive cache");
+    expect(jam2::gui::looper_asset_files::validationCandidates(
+               folder, assetFolder, hash, received).count(received) == 1,
+        "arrangement validation de-duplicates a received local candidate");
+}
+
+void test_chunk_without_active_transfer_has_a_reason(const QString& folder)
+{
+    const QByteArray wav = pcm16Wav(8, 1000);
+    DeferredContext context(folder);
+    AssetTransferService transfer(context);
+    transfer.receiveChunk(chunk(sha256(wav), wav), QStringLiteral("peer-a"));
+    expect(context.logs.size() == 1 &&
+            context.logs.constFirst().contains(
+                QStringLiteral("no incoming transfer is active")) &&
+            !context.logs.constFirst().endsWith(QStringLiteral(": ")) &&
+            context.abandoned == 0,
+        "unsolicited asset chunks are rejected with an actionable reason");
 }
 
 void test_cancelled_incoming_completion_stays_stale(const QString& folder)
@@ -964,6 +998,37 @@ void test_track_batch_expiry_preserves_same_hash_ownership()
         "unrelated batch expiry is a no-op");
 }
 
+void test_arrangement_supersession_preserves_the_active_wav()
+{
+    using jam2::gui::track_asset_ownership::Claim;
+    using jam2::gui::track_asset_ownership::planPeerSupersession;
+    const QString hash(64, QLatin1Char('b'));
+    const QList<Claim> claims{
+        {QStringLiteral("peer-a:batch-a:one"), QStringLiteral("peer-a"),
+            QStringLiteral("batch-a"), hash, 2},
+        {QStringLiteral("peer-a:batch-a:two"), QStringLiteral("peer-a"),
+            QStringLiteral("batch-a"), QString(64, QLatin1Char('c')), 2},
+        {QStringLiteral("peer-b:batch-b:one"), QStringLiteral("peer-b"),
+            QStringLiteral("batch-b"), hash, 1},
+    };
+    const auto plan = planPeerSupersession(
+        claims, QStringLiteral("peer-a"), true, hash, QStringLiteral("peer-a"),
+        QSet<QString>{hash});
+    expect(plan.removedKeys.size() == 2 && plan.removedHashes.size() == 2 &&
+            plan.batchSizes.value(QStringLiteral("batch-a")) == 2 &&
+            plan.preserveActiveTransfer,
+        "newer arrangement supersedes batch metadata but preserves its active WAV receive");
+    const auto unrelated = planPeerSupersession(
+        claims, QStringLiteral("peer-b"), true, hash, QStringLiteral("peer-a"),
+        QSet<QString>{hash});
+    expect(unrelated.removedKeys.size() == 1 && !unrelated.preserveActiveTransfer,
+        "supersession never preserves a transfer owned by another source");
+    const auto removed = planPeerSupersession(
+        claims, QStringLiteral("peer-a"), true, hash, QStringLiteral("peer-a"), {});
+    expect(removed.found() && !removed.preserveActiveTransfer,
+        "supersession cancels an active WAV omitted by the replacement arrangement");
+}
+
 void test_private_automation_gates_are_explicit_and_cancel_safe(const QString& folder)
 {
     const QByteArray wav = pcm16Wav(112, 2950);
@@ -1071,6 +1136,8 @@ int main(int argc, char* argv[])
     expect(folder.isValid(), "asset test folder is available");
     if (folder.isValid()) {
         test_chunk_sequence_rejects_duplicate_and_wrong_source();
+        test_arrangement_validation_reuses_received_assets(folder.path());
+        test_chunk_without_active_transfer_has_a_reason(folder.path());
         test_cancelled_incoming_completion_stays_stale(folder.path());
         test_superseded_incoming_completion_cannot_replace_current(folder.path());
         test_cancelled_outgoing_validation_cannot_send(folder.path());
@@ -1089,6 +1156,7 @@ int main(int argc, char* argv[])
         test_active_outgoing_rerequest_restarts_from_zero(folder.path());
         test_private_start_drop_is_one_shot_and_recoverable(folder.path());
         test_track_batch_expiry_preserves_same_hash_ownership();
+        test_arrangement_supersession_preserves_the_active_wav();
         test_private_automation_gates_are_explicit_and_cancel_safe(folder.path());
     }
     if (failures == 0) std::cout << "Asset transfer checks passed\n";

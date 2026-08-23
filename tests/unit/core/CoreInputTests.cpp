@@ -105,6 +105,36 @@ public:
     double resamplerRatio = 1.0;
 };
 
+class MarkerMixerSink final : public jam2::PeerStreamPlayback {
+public:
+    std::size_t depthFrames() const noexcept override { return depth; }
+    std::uint64_t underrunFrames() const noexcept override { return underruns; }
+    std::size_t pushFrames(std::span<const std::int32_t> frames) noexcept override
+    {
+        samples.insert(samples.end(), frames.begin(), frames.end());
+        depth += frames.size();
+        return frames.size();
+    }
+    void requestDropFrames(std::size_t frames) noexcept override
+    {
+        depth -= std::min(depth, frames);
+    }
+    void setResamplerRatio(double) noexcept override {}
+    void consume(std::size_t frames) noexcept
+    {
+        if (frames > depth) {
+            underruns += frames - depth;
+            depth = 0;
+            return;
+        }
+        depth -= frames;
+    }
+
+    std::size_t depth = 0;
+    std::uint64_t underruns = 0;
+    std::vector<std::int32_t> samples;
+};
+
 class ResampledMixerSink final : public jam2::PeerStreamPlayback {
 public:
     ResampledMixerSink()
@@ -138,12 +168,13 @@ public:
     void callback() noexcept
     {
         jam2::audio::device_processing::pop_resampled_playback(
-            &ring, &control, resampler, callbackOutput);
+            &ring, &control, resampler, resamplerSource, callbackOutput);
     }
 
     jam2::audio::MonoRingBuffer ring;
     jam2::audio::StreamControl control;
     jam2::audio::device_processing::PlaybackResamplerState resampler;
+    std::array<std::int32_t, 66> resamplerSource{};
     std::array<std::int32_t, 32> callbackOutput{};
 };
 
@@ -200,6 +231,8 @@ void test_source_router()
         "source router produces canonical mono");
     expect(output == std::array<std::int32_t, 4>{200, 300, 400, 500},
         "stereo input is deterministically downmixed");
+    expect(router.last_peak_ppm() == router.stats().peak_ppm,
+        "router publishes its already-computed callback peak for meter reuse");
     expect(router.recording_latency_frames() == 23,
         "combined recording exposes active renderer latency");
     expect(router.configure(0, {
@@ -287,6 +320,57 @@ void test_excluded_midi_source_keeps_draining()
         "excluded MIDI instrument still drains its real-time event path");
     expect(output == std::array<std::int32_t, 4>{0, 0, 0, 0},
         "excluded MIDI instrument does not leak audio");
+}
+
+void measure_single_source_router_cost()
+{
+    constexpr std::size_t kFrames = 128;
+    constexpr std::size_t kWarmupBlocks = 2000;
+    constexpr std::size_t kMeasuredBlocks = 200000;
+    std::array<std::int32_t, kFrames> input{};
+    for (std::size_t frame = 0; frame < input.size(); ++frame) {
+        input[frame] = static_cast<std::int32_t>(frame * 100003U);
+    }
+    const std::array<const std::int32_t*, 1> inputs{input.data()};
+    std::array<std::int32_t, kFrames> output{};
+    jam2::audio::InputSourceRouter router(kFrames, inputs.size());
+    expect(router.configure(0, {
+        jam2::audio::InputSourceKind::Audio,
+        0,
+        jam2::audio::kNoInputChannel,
+        1000000,
+        true,
+        nullptr}), "single-source router benchmark configures production path");
+
+    std::uint64_t engineFrame = 0;
+    for (std::size_t block = 0; block < kWarmupBlocks; ++block) {
+        (void)router.process(inputs, kFrames, engineFrame, 48000.0, output);
+        engineFrame += kFrames;
+    }
+    const auto started = std::chrono::steady_clock::now();
+    for (std::size_t block = 0; block < kMeasuredBlocks; ++block) {
+        (void)router.process(inputs, kFrames, engineFrame, 48000.0, output);
+        engineFrame += kFrames;
+    }
+    const auto elapsed = std::chrono::duration<double, std::micro>(
+        std::chrono::steady_clock::now() - started).count();
+    expect(output == input,
+        "single-source router benchmark preserves unity mono samples");
+    std::cout << "METRIC input_router_single_mono_us_per_128="
+              << elapsed / static_cast<double>(kMeasuredBlocks) << '\n';
+
+    jam2::audio::StreamControl control;
+    const auto callbackStarted = std::chrono::steady_clock::now();
+    for (std::size_t block = 0; block < kMeasuredBlocks; ++block) {
+        (void)router.process(inputs, kFrames, engineFrame, 48000.0, output);
+        jam2::audio::device_processing::observe_input_peak_value(
+            &control, router.last_peak_ppm());
+        engineFrame += kFrames;
+    }
+    const auto callbackElapsed = std::chrono::duration<double, std::micro>(
+        std::chrono::steady_clock::now() - callbackStarted).count();
+    std::cout << "METRIC input_router_with_peak_us_per_128="
+              << callbackElapsed / static_cast<double>(kMeasuredBlocks) << '\n';
 }
 
 void test_playback_count_in_commits_without_control_toggle()
@@ -409,6 +493,8 @@ void test_headless_injected_audio_uses_input_router()
     config.test_input = jam2::EngineTestInput::Tone440;
     config.test_input_level_ppm = 200000;
     config.input_source_router = &router;
+    expect(engine.currentFrame() == 0,
+        "lightweight engine frame query is zero before startup");
     engine.start(config);
 
     const auto waitForRouter = [&router](
@@ -443,6 +529,9 @@ void test_headless_injected_audio_uses_input_router()
         muted.rendered_blocks + 4, true);
     engine.requestStop();
     engine.join();
+    expect(engine.currentFrame() > 0 &&
+            engine.currentFrame() == engine.snapshot().engine_frame,
+        "lightweight engine frame query matches the stopped diagnostic snapshot");
     expect(resumed.rendered_blocks >= muted.rendered_blocks + 4 &&
             resumed.peak_ppm > 40000 && resumed.peak_ppm <= 100000,
         "resumed headless source applies its exact router gain");
@@ -475,6 +564,8 @@ void test_current_transport_packet_contract()
         "current 28-byte transport packet encodes and parses");
     expect(parsed.header.payload_length == payload.size(),
         "transport packet preserves the fixed payload size");
+    expect(parsed.header.auth_tag == 0xaf2b7d1a445b9350ULL,
+        "transport authentication retains the independent fixed SipHash vector");
 
     const std::array<std::uint8_t, 20> obsoletePayload{};
     std::array<std::uint8_t, jam2::protocol::kMaxDatagramSize> output{};
@@ -568,9 +659,9 @@ void test_peer_mixer_recovery_rebases_every_source()
         "all sources resume complete mixed blocks after partial-block recovery");
 }
 
-void test_peer_mixer_global_gap_preserves_lossless_timeline()
+void test_peer_mixer_global_gap_discards_obsolete_timeline()
 {
-    MixerSink sink;
+    MarkerMixerSink sink;
     jam2::PeerMixerConfig config;
     config.sample_rate = 48000;
     config.frames_per_block = 64;
@@ -584,34 +675,74 @@ void test_peer_mixer_global_gap_preserves_lossless_timeline()
     jam2::PeerMixer mixer(config, &sink);
     auto* peer = mixer.addPeer(81, 16384);
     expect(peer != nullptr && mixer.setPeerActive(81, true),
-        "lossless-gap mixer creates its active source");
+        "live-gap mixer creates its active source");
 
-    const std::array<std::int32_t, 64> block{};
+    std::array<std::int32_t, 64> block{};
+    block.fill(7);
     peer->pushFrames(block);
     mixer.advance(0);
 
-    // Reproduce a receive-thread stall substantially longer than the Fast
-    // profile's mixer deadline. The device continues consuming its local
-    // cushion, but no peer has audio ready. Advancing an all-empty source
-    // timeline here turns a lossless delay into silence followed by discarded
-    // late audio.
+    // Reproduce the 225 ms receive-thread stalls seen in the jam. The device
+    // continues consuming while the peer source is empty, so the shared live
+    // timeline must advance instead of preserving delayed audio for replay.
     for (std::uint64_t now = 1000; now <= 225000; now += 1000) {
         sink.consume(48);
         mixer.advance(now);
     }
-    expect(mixer.stats().deadline_slots == 0 &&
-            mixer.stats().missing_peer_frames == 0,
-        "global source gap does not manufacture deadline silence");
+    expect(mixer.stats().deadline_slots > 50 &&
+            mixer.stats().missing_peer_frames > 3200,
+        "global source gap advances the bounded live deadline");
 
-    for (std::uint64_t packet = 0; packet < 170; ++packet) {
-        peer->pushFrames(block);
-        sink.consume(64);
-        mixer.advance(226000 + packet * 1333);
+    std::vector<std::int32_t> catchup(170U * 64U, 1111);
+    std::fill(catchup.end() - 128, catchup.end(), 2222);
+    peer->pushFrames(catchup);
+    sink.consume(sink.depth);
+    sink.samples.clear();
+    mixer.advance(226000);
+
+    const auto* recovered = mixer.peerStats(81);
+    expect(mixer.stats().late_after_release_frames > 9000 &&
+            mixer.stats().live_tail_trimmed_frames > 0,
+        "global source recovery exposes discarded obsolete audio");
+    expect(recovered != nullptr && recovered->queue_depth_frames <= 128,
+        "global source recovery retains at most two current packet blocks");
+    expect(std::find(sink.samples.begin(), sink.samples.end(), 1111) == sink.samples.end() &&
+            std::find(sink.samples.begin(), sink.samples.end(), 2222) != sink.samples.end(),
+        "global source recovery emits fresh markers without replaying stale markers");
+}
+
+void test_peer_mixer_batches_wrapped_queue_operations()
+{
+    MarkerMixerSink sink;
+    jam2::PeerMixerConfig config;
+    config.sample_rate = 48000;
+    config.frames_per_block = 64;
+    config.deadline_frames = 64;
+    config.max_blocks_per_advance = 16;
+    jam2::PeerMixer mixer(config, &sink);
+    auto* peer = mixer.addPeer(82, 512);
+    expect(peer != nullptr && mixer.setPeerActive(82, true),
+        "batched mixer creates its bounded source queue");
+
+    std::vector<std::int32_t> burst(640);
+    for (std::size_t frame = 0; frame < burst.size(); ++frame) {
+        burst[frame] = static_cast<std::int32_t>(frame);
     }
-    expect(mixer.stats().late_after_release_frames == 0,
-        "lossless audio delayed by a global gap is not discarded as late");
-    expect(mixer.stats().complete_slots >= 171,
-        "lossless source resumes complete blocks after a global gap");
+    expect(peer->pushFrames(burst) == burst.size(),
+        "batched enqueue accepts every current frame in an oversized burst");
+    const auto* queued = mixer.peerStats(82);
+    expect(queued != nullptr && queued->queue_capacity_drops == 128 &&
+            queued->queue_capacity_dropped_frames == 128 &&
+            queued->queue_depth_frames == 512,
+        "batched enqueue reports the exact obsolete prefix discarded at capacity");
+
+    mixer.advance(0);
+    expect(sink.samples.size() == 512 && sink.samples.front() == 128 &&
+            sink.samples.back() == 639,
+        "batched wrapped dequeue preserves the newest source frames in order");
+    expect(mixer.stats().capacity_drops == 128 &&
+            mixer.stats().capacity_dropped_frames == 128,
+        "batched capacity accounting remains visible at mixer ownership");
 }
 
 void test_peer_mixer_adapts_to_device_ring_underrun()
@@ -762,12 +893,14 @@ int main()
     test_instrument_failure_is_silence();
     test_selected_recording_source_is_independent_of_send_mix();
     test_excluded_midi_source_keeps_draining();
+    measure_single_source_router_cost();
     test_playback_count_in_commits_without_control_toggle();
     test_headless_send_peak_follows_gain();
     test_headless_injected_audio_uses_input_router();
     test_current_transport_packet_contract();
     test_peer_mixer_recovery_rebases_every_source();
-    test_peer_mixer_global_gap_preserves_lossless_timeline();
+    test_peer_mixer_global_gap_discards_obsolete_timeline();
+    test_peer_mixer_batches_wrapped_queue_operations();
     test_peer_mixer_adapts_to_device_ring_underrun();
     test_peer_mixer_release_does_not_replace_drained_audio_with_silence();
     test_peer_mixer_periodic_batches_do_not_accelerate_into_underruns();

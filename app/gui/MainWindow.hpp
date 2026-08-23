@@ -419,7 +419,9 @@ private:
     void publishLocalTrackBatch(const QString& batchId);
     void handleTrackBatchOffer(const QJsonObject& message, const QString& sourcePeerToken);
     void handleTrackBatchComplete(const QJsonObject& message, const QString& sourcePeerToken);
-    void supersedePendingTrackBatches(const QString& sourcePeerToken);
+    void supersedePendingTrackBatches(
+        const QString& sourcePeerToken,
+        const QSet<QString>& replacementArrangementHashes);
     void expirePendingTrackBatch(const QString& sourcePeerToken, const QString& batchId);
     void scheduleOutgoingTrackBatchExpiry(const QString& batchId);
     void scheduleIncomingTrackBatchExpiry(

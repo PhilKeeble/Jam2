@@ -178,8 +178,29 @@ void testOptionAndStatsContracts()
         jam2::cli::parse_options(valid.count(), valid.data(), 2);
     expect(options.headless_audio && options.stream_ms == 1 &&
             options.channel_selection.input == std::vector<int>({0, 2}) &&
-            options.channel_selection.output == std::vector<int>({1}),
+            options.channel_selection.output == std::vector<int>({1}) &&
+            options.os_priority == Jam2OsPriorityMode::High,
         "channel-list parsing preserves unique one-based CLI selections as zero-based indices");
+
+    const auto offScheduling =
+        jam2::cli::windows_scheduling_request(Jam2OsPriorityMode::Off);
+    const auto highScheduling =
+        jam2::cli::windows_scheduling_request(Jam2OsPriorityMode::High);
+    expect(offScheduling.process == jam2::cli::WindowsProcessPriorityRequest::Unchanged &&
+            offScheduling.thread == jam2::cli::WindowsThreadPriorityRequest::Unchanged &&
+            offScheduling.mmcss == jam2::cli::WindowsMmcssPriorityRequest::Off &&
+            highScheduling.process == jam2::cli::WindowsProcessPriorityRequest::High &&
+            highScheduling.thread == jam2::cli::WindowsThreadPriorityRequest::Highest &&
+            highScheduling.mmcss == jam2::cli::WindowsMmcssPriorityRequest::High &&
+            jam2::cli::windows_mmcss_priority_text(highScheduling.mmcss) == "high",
+        "Windows scheduling modes map to explicit process, worker, and MMCSS priorities");
+
+    Arguments removedPriority{
+        "jam2", "local", "--headless-audio", "on", "--os-priority", "realtime"};
+    expectThrows([&] {
+        (void)jam2::cli::parse_options(
+            removedPriority.count(), removedPriority.data(), 2);
+    }, "removed realtime scheduling mode is rejected");
 
     for (const std::string_view invalid : {"1,", "1,1", "0", "one"}) {
         Arguments arguments{"jam2", "local", "--input-channels", invalid};
@@ -211,12 +232,18 @@ void testOptionAndStatsContracts()
     source.playback_depth_samples = 5;
     source.jitter_buffer_forced_releases = 6;
     source.adaptive_playback_burst_events = 7;
+    source.jitter_buffer_target_releases = 8;
+    source.jitter_buffer_timeout_releases = 9;
+    source.jitter_buffer_rebases = 10;
     jam2::cli::stats::AudioPacketStats copied;
     jam2::cli::stats::copy_peer_stream_stats(copied, source);
     expect(copied.udp_replay_rejects == 3 && copied.sequence.lost == 4 &&
             copied.playback_depth_samples == 5 &&
             copied.jitter_buffer_forced_releases == 6 &&
-            copied.adaptive_playback_burst_events == 7,
+            copied.adaptive_playback_burst_events == 7 &&
+            copied.jitter_buffer_target_releases == 8 &&
+            copied.jitter_buffer_timeout_releases == 9 &&
+            copied.jitter_buffer_rebases == 10,
         "CLI diagnostics copy the complete peer-stream snapshot categories");
 
     jam2::PeerStreamStats firstGap;
@@ -245,11 +272,11 @@ void testOptionAndStatsContracts()
 
     jam2::cli::stats::ReceiveLoopDiagnostics receiveLoop;
     receiveLoop.beginWake(1000);
-    receiveLoop.finishWake(0);
+    receiveLoop.finishWake(0, 0, 0);
     receiveLoop.beginWake(2200);
-    receiveLoop.finishWake(7);
+    receiveLoop.finishWake(7, 2300, 2600);
     receiveLoop.beginWake(7200);
-    receiveLoop.finishWake(64);
+    receiveLoop.finishWake(64, 7300, 8100);
     jam2::cli::stats::AudioPacketStats receiveLoopStats;
     receiveLoop.applyTo(receiveLoopStats);
     expect(receiveLoopStats.receive_loop_gap_min_us == 1200 &&
@@ -259,17 +286,112 @@ void testOptionAndStatsContracts()
             receiveLoopStats.recv_loop_iterations == 3 &&
             receiveLoopStats.recv_loop_idle_count == 1 &&
             receiveLoopStats.recv_loop_batch_sum == 71 &&
-            receiveLoopStats.recv_loop_batch_max == 64,
+            receiveLoopStats.recv_loop_batch_max == 64 &&
+            receiveLoopStats.receive_processing_min_us == 300 &&
+            receiveLoopStats.receive_processing_sum_us == 1100 &&
+            receiveLoopStats.receive_processing_max_us == 800 &&
+            receiveLoopStats.receive_processing_samples == 2,
         "receive-loop diagnostics expose scheduling gaps and bounded drain batches");
+
+    receiveLoopStats.pre_receive_work_samples = 4;
+    receiveLoopStats.pre_receive_advance_sum_us = 20;
+    receiveLoopStats.pre_receive_maintenance_sum_us = 40;
+    receiveLoopStats.pre_receive_send_sum_us = 60;
+    receiveLoopStats.pre_receive_peak_advance_us = 7;
+    receiveLoopStats.pre_receive_peak_maintenance_us = 11;
+    receiveLoopStats.pre_receive_peak_send_us = 13;
+    expect(receiveLoopStats.pre_receive_advance_sum_us /
+                receiveLoopStats.pre_receive_work_samples == 5 &&
+            receiveLoopStats.pre_receive_maintenance_sum_us /
+                receiveLoopStats.pre_receive_work_samples == 10 &&
+            receiveLoopStats.pre_receive_send_sum_us /
+                receiveLoopStats.pre_receive_work_samples == 15 &&
+            receiveLoopStats.pre_receive_peak_advance_us +
+                receiveLoopStats.pre_receive_peak_maintenance_us +
+                receiveLoopStats.pre_receive_peak_send_us == 31,
+        "pre-receive diagnostics retain stage averages and the exact peak decomposition");
 
     Jam2RuntimeOptions statsOptions;
     statsOptions.sample_rate = 48000;
     statsOptions.frame_size = 64;
+    copied.os_scheduling.process_priority_error = "priority-request-failed";
+    copied.os_scheduling.mmcss_priority_active = "high";
+    copied.capture_ready_wake_signals = 9;
+    copied.capture_ready_wake_consumptions = 8;
+    copied.capture_ready_dispatch_sum_us = 60;
+    copied.capture_ready_dispatch_samples = 3;
+    copied.capture_clock_packet_pacing_active = true;
     jam2::cli::stats::CsvStatsLog::AudioSnapshot audio;
+    audio.stream.input_latency_frames = 32;
+    audio.stream.output_latency_frames = 64;
+    audio.driver_output_ready_status =
+        jam2::audio::DriverOutputReadyStatus::Active;
+    audio.driver_output_ready_latency_reduction_frames = 32;
+    QTemporaryDir statsRoot;
+    expect(statsRoot.isValid(), "CLI stats test creates a temporary artifact root");
+    std::filesystem::path statsCsvPath;
+    if (statsRoot.isValid()) {
+        {
+            jam2::cli::stats::CsvStatsLog log(
+                std::filesystem::path(statsRoot.path().toStdString()), {});
+            statsCsvPath = log.path();
+            log.write("final", 25, copied, statsOptions, audio);
+        }
+        QFile statsCsv(QString::fromStdString(statsCsvPath.string()));
+        const bool opened = statsCsv.open(QIODevice::ReadOnly);
+        const QList<QByteArray> lines = opened
+            ? statsCsv.readAll().trimmed().split('\n')
+            : QList<QByteArray>{};
+        const QByteArray header = lines.size() == 2 ? lines[0].trimmed() : QByteArray{};
+        const QByteArray finalRow = lines.size() == 2 ? lines[1].trimmed() : QByteArray{};
+        const auto csvFieldCount = [](const QByteArray& row) {
+            int fields = 1;
+            bool quoted = false;
+            for (qsizetype index = 0; index < row.size(); ++index) {
+                if (row[index] == '"') {
+                    if (quoted && index + 1 < row.size() && row[index + 1] == '"') {
+                        ++index;
+                    } else {
+                        quoted = !quoted;
+                    }
+                } else if (row[index] == ',' && !quoted) {
+                    ++fields;
+                }
+            }
+            return fields;
+        };
+        const bool schemaMatches = opened && lines.size() == 2 &&
+                csvFieldCount(header) == csvFieldCount(finalRow) &&
+                header.endsWith("capture_clock_packet_pacing_active") &&
+                finalRow.endsWith(",yes");
+        expect(schemaMatches,
+            "final CSV preserves the capture-clock pacing field and schema width");
+    }
     CapturedStreams capture;
     jam2::cli::stats::print_periodic_stream_stats(copied, statsOptions, audio, 25);
     expect(capture.output.str().find("stats elapsed_ms=25") != std::string::npos &&
-            capture.output.str().find("sequence_lost=4") != std::string::npos,
+            capture.output.str().find("sequence_lost=4") != std::string::npos &&
+            capture.output.str().find(
+                "os_process_priority_error=priority-request-failed") !=
+                std::string::npos &&
+            capture.output.str().find("os_mmcss_priority_active=high") !=
+                std::string::npos &&
+            capture.output.str().find("capture_ready_wake_signals=9") !=
+                std::string::npos &&
+            capture.output.str().find("capture_ready_dispatch_avg_us=20") !=
+                std::string::npos &&
+            capture.output.str().find(
+                "capture_clock_packet_pacing_active=yes") !=
+                std::string::npos &&
+            capture.output.str().find("driver_output_ready=active") !=
+                std::string::npos &&
+            capture.output.str().find("driver_input_latency_frames=32") !=
+                std::string::npos &&
+            capture.output.str().find("driver_output_latency_frames=64") !=
+                std::string::npos &&
+            capture.output.str().find(
+                "driver_output_ready_latency_reduction_frames=32") !=
+                std::string::npos,
         "periodic CLI diagnostics emit exact raw stream counters");
 
     expect(jam2::cli::os_error_text(0).empty() &&

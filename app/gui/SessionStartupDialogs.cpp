@@ -395,7 +395,6 @@ StartJamDialog::StartJamDialog(
     socketReceiveBuffer_ = spin(
         content, 0, std::numeric_limits<int>::max(), initial.create.socketRecvBuffer);
     osPriority_ = new QComboBox(content);
-    osPriority_->addItem(QStringLiteral("Realtime"), QStringLiteral("realtime"));
     osPriority_->addItem(QStringLiteral("High"), QStringLiteral("high"));
     osPriority_->addItem(QStringLiteral("Off"), QStringLiteral("off"));
     selectData(osPriority_, initial.create.runtime.osPriority);
@@ -738,7 +737,6 @@ JoinJamDialog::JoinJamDialog(
         content, 0, 600000, initial.join.runtime.diagnosticsWarmupMs);
     diagnosticsFolder_ = new QLineEdit(initial.join.runtime.logStatsFolder, content);
     osPriority_ = new QComboBox(content);
-    osPriority_->addItem(QStringLiteral("Realtime"), QStringLiteral("realtime"));
     osPriority_->addItem(QStringLiteral("High"), QStringLiteral("high"));
     osPriority_->addItem(QStringLiteral("Off"), QStringLiteral("off"));
     selectData(osPriority_, initial.join.runtime.osPriority);

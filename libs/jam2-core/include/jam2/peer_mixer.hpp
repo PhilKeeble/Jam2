@@ -35,7 +35,11 @@ struct PeerMixerPeerStats {
     std::uint64_t queue_capacity_dropped_frames = 0;
     std::uint64_t requested_drop_frames = 0;
     std::uint64_t late_after_release_frames = 0;
+    std::uint64_t live_tail_trim_events = 0;
+    std::uint64_t live_tail_trimmed_frames = 0;
+    std::uint64_t live_tail_trim_max_frames = 0;
     std::uint64_t resampled_output_frames = 0;
+    std::uint64_t unity_resampler_fast_frames = 0;
     double resampler_ratio = 1.0;
 };
 
@@ -51,6 +55,9 @@ struct PeerMixerStats {
     std::uint64_t missing_peer_contributions = 0;
     std::uint64_t missing_peer_frames = 0;
     std::uint64_t late_after_release_frames = 0;
+    std::uint64_t live_tail_trim_events = 0;
+    std::uint64_t live_tail_trimmed_frames = 0;
+    std::uint64_t live_tail_trim_max_frames = 0;
     std::uint64_t capacity_drops = 0;
     std::uint64_t capacity_dropped_frames = 0;
     std::uint64_t clipped_samples = 0;

@@ -18,11 +18,22 @@ website and youtube videos
 discord server for community feedback / testing / logs etc?
 Make a jamjar collection repo to store full songs and jams 
 
+## macOS Follow-ups
+
+- Fix loopback recording on macOS. Validate the CoreAudio capture and permission paths, keep the UI action disabled when capture is unavailable, and add native CTest coverage plus a profiled hardware check on macOS.
+
 ## refinement pass
 
 look for redundant code and dependencies 
 look for old schema and backwards compatability
 look for places we can refactor to make code splits cleaner 
+
+## Deferred latency tuning
+
+- After the base audio/protocol code refinement sweep is complete, perform a measured jam-profile settings sweep. Keep user-facing numeric buffers/delays as the stability levers rather than hiding additional automatic latency.
+- Defer 32-frame network-packet experiments until that settings sweep; retain the current 64-frame protocol packet while code-path behavior is being established.
+- Defer recovery/reorder/jitter-threshold tuning until the settings sweep, with loss/reordering impairment evidence and audio-quality validation before changing it.
+- Keep the common full-mesh path for two peers. Later measure whether a special two-peer path would materially help before considering any implementation.
 
 ## Linux Audio Backend (never implement this without explicit approval)
 

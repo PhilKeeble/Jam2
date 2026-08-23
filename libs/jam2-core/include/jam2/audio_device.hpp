@@ -20,7 +20,11 @@
 #include "track_take_recorder.hpp"
 #include "transport_timing.hpp"
 
-namespace jam2::audio {
+namespace jam2 {
+
+class RealtimeWakeSignal;
+
+namespace audio {
 
 inline constexpr bool metronome_output_allowed(
     bool enabled,
@@ -316,6 +320,25 @@ struct DeviceTestResult {
 inline constexpr std::array<int, 2> kTestSampleRates{44100, 48000};
 inline constexpr std::array<long, 4> kTestBufferSizes{32, 64, 128, 256};
 
+enum class DriverOutputReadyStatus : int {
+    NotApplicable = 0,
+    Active = 1,
+    Unsupported = 2,
+    Error = 3,
+};
+
+inline constexpr const char* driver_output_ready_status_text(
+    DriverOutputReadyStatus status) noexcept
+{
+    switch (status) {
+    case DriverOutputReadyStatus::NotApplicable: return "not-applicable";
+    case DriverOutputReadyStatus::Active: return "active";
+    case DriverOutputReadyStatus::Unsupported: return "unsupported";
+    case DriverOutputReadyStatus::Error: return "error";
+    }
+    return "error";
+}
+
 struct MetronomeConfig {
     bool enabled = false;
     int bpm = 120;
@@ -381,11 +404,17 @@ struct StreamControl {
     std::atomic<std::uint64_t> network_capture_generation_applied{0};
     std::atomic<std::uint64_t> network_capture_epoch_frame{0};
     std::atomic<std::uint64_t> network_capture_stale_frames_discarded{0};
+    std::atomic<RealtimeWakeSignal*> network_capture_wake_signal{nullptr};
+    std::atomic<std::size_t> network_capture_wake_frames{0};
     std::atomic<bool> network_playback_enabled{false};
     std::atomic<bool> network_playback_enabled_applied{false};
     std::atomic<bool> pitch_analysis_enabled{false};
     std::atomic<std::uint32_t> input_latency_frames{0};
     std::atomic<std::uint32_t> output_latency_frames{0};
+    std::atomic<int> driver_output_ready_status{
+        static_cast<int>(DriverOutputReadyStatus::NotApplicable)};
+    std::atomic<long> driver_output_ready_error{0};
+    std::atomic<long> driver_output_ready_latency_reduction_frames{0};
     std::atomic<std::int64_t> recording_latency_adjustment_frames{0};
     std::atomic<std::uint64_t> recording_latency_compensation_frames{0};
     std::atomic<int> test_input_mode{0};
@@ -559,6 +588,10 @@ struct CallbackTimingStats {
     std::uint64_t gap_over_1_1x_count = 0;
     std::uint64_t gap_over_1_5x_count = 0;
     std::uint64_t gap_over_2x_count = 0;
+    std::uint64_t work_min_us = 0;
+    std::uint64_t work_sum_us = 0;
+    std::uint64_t work_max_us = 0;
+    std::uint64_t work_samples = 0;
 };
 
 class DeviceStream {
@@ -599,6 +632,12 @@ bool prepare_network_capture_callback(
     MonoRingBuffer& capture_ring,
     std::uint64_t callback_frame) noexcept;
 
+std::size_t push_network_capture_callback(
+    StreamControl& control,
+    MonoRingBuffer& capture_ring,
+    std::span<const std::int32_t> input,
+    std::uint64_t ready_time_us) noexcept;
+
 inline void push_pitch_analysis_callback(
     StreamControl& control,
     MonoRingBuffer& pitch_ring,
@@ -609,4 +648,5 @@ inline void push_pitch_analysis_callback(
     }
 }
 
-} // namespace jam2::audio
+} // namespace audio
+} // namespace jam2

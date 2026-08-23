@@ -29,6 +29,7 @@ struct PeerMixer::Impl {
         Impl* owner = nullptr;
         PeerMixerPeerStats stats;
         std::vector<std::int32_t> queue;
+        std::vector<std::int32_t> resample_scratch;
         std::size_t read_index = 0;
         std::size_t write_index = 0;
         std::size_t queued = 0;
@@ -40,7 +41,10 @@ struct PeerMixer::Impl {
 
         PeerSlot(Impl* mixer, std::uint64_t id, std::size_t capacity)
             : owner(mixer),
-              queue(capacity, 0)
+              queue(capacity, 0),
+              resample_scratch(std::max<std::size_t>(
+                  capacity,
+                  static_cast<std::size_t>(mixer->config.frames_per_block) * 2U + 2U), 0)
         {
             stats.peer_id = id;
             stats.queue_capacity_frames = capacity;
@@ -59,39 +63,71 @@ struct PeerMixer::Impl {
             stats.contributing = false;
             stats.queue_depth_frames = 0;
             stats.recent_peak_ppm = 0;
+            owner->occupancy_dirty = true;
         }
 
-        bool enqueue(std::int32_t sample) noexcept
+        std::size_t enqueueFrames(std::span<const std::int32_t> frames) noexcept
         {
-            if (owner->output != nullptr && !owner->output->acceptsFrames()) {
-                return false;
+            if (frames.empty() ||
+                (owner->output != nullptr && !owner->output->acceptsFrames())) {
+                return 0;
             }
-            if (late_frames_to_discard > 0) {
-                --late_frames_to_discard;
-                ++stats.late_after_release_frames;
-                ++owner->stats.late_after_release_frames;
-                return false;
+
+            const std::size_t late = std::min(late_frames_to_discard, frames.size());
+            late_frames_to_discard -= late;
+            stats.late_after_release_frames += late;
+            owner->stats.late_after_release_frames += late;
+            frames = frames.subspan(late);
+            if (frames.empty()) {
+                return 0;
             }
-            if (queued == queue.size()) {
+
+            const std::size_t accepted = frames.size();
+            const std::size_t capacity = queue.size();
+            const std::size_t dropped = queued + frames.size() > capacity
+                ? queued + frames.size() - capacity
+                : 0;
+            if (dropped > 0) {
                 // Keep the stream current after a burst. Retaining a full queue
                 // of stale audio while rejecting every new sample can leave the
                 // peer permanently behind real time.
-                read_index = (read_index + 1U) % queue.size();
-                --queued;
-                ++stats.queue_capacity_drops;
-                ++stats.queue_capacity_dropped_frames;
-                ++owner->stats.capacity_drops;
-                ++owner->stats.capacity_dropped_frames;
+                stats.queue_capacity_drops += dropped;
+                stats.queue_capacity_dropped_frames += dropped;
+                owner->stats.capacity_drops += dropped;
+                owner->stats.capacity_dropped_frames += dropped;
             }
-            queue[write_index] = sample;
-            write_index = (write_index + 1U) % queue.size();
-            ++queued;
+
+            if (frames.size() >= capacity) {
+                const std::size_t final_write = (write_index + frames.size()) % capacity;
+                frames = frames.last(capacity);
+                read_index = final_write;
+                write_index = final_write;
+                queued = capacity;
+            } else {
+                const std::size_t queued_to_drop = std::min(dropped, queued);
+                read_index = (read_index + queued_to_drop) % capacity;
+                queued -= queued_to_drop;
+            }
+
+            const std::size_t first = std::min(frames.size(), capacity - write_index);
+            std::copy_n(frames.data(), first, queue.data() + write_index);
+            const std::size_t second = frames.size() - first;
+            if (second > 0) {
+                std::copy_n(frames.data() + first, second, queue.data());
+            }
+            write_index = (write_index + frames.size()) % capacity;
+            if (frames.size() < capacity) {
+                queued += frames.size();
+            } else {
+                read_index = write_index;
+            }
             stats.contributing = true;
             stats.queue_depth_frames = queued;
             stats.queue_high_water_frames = std::max<std::uint64_t>(
                 stats.queue_high_water_frames,
                 queued);
-            return true;
+            owner->occupancy_dirty = true;
+            return accepted;
         }
 
         void noteMissingFrames(std::size_t frames) noexcept
@@ -102,14 +138,30 @@ struct PeerMixer::Impl {
             timeline_recovery_pending = true;
         }
 
-        void retainLiveTail(std::size_t retain_frames) noexcept
+        std::size_t retainLiveTail(std::size_t retain_frames) noexcept
         {
             const std::size_t dropped = queued > retain_frames ? queued - retain_frames : 0;
             read_index = (read_index + dropped) % queue.size();
             queued -= dropped;
             stats.late_after_release_frames += dropped;
             owner->stats.late_after_release_frames += dropped;
+            if (dropped > 0) {
+                ++stats.live_tail_trim_events;
+                stats.live_tail_trimmed_frames += dropped;
+                stats.live_tail_trim_max_frames = std::max<std::uint64_t>(
+                    stats.live_tail_trim_max_frames,
+                    dropped);
+                ++owner->stats.live_tail_trim_events;
+                owner->stats.live_tail_trimmed_frames += dropped;
+                owner->stats.live_tail_trim_max_frames = std::max<std::uint64_t>(
+                    owner->stats.live_tail_trim_max_frames,
+                    dropped);
+            }
             stats.queue_depth_frames = queued;
+            if (dropped > 0) {
+                owner->occupancy_dirty = true;
+            }
+            return dropped;
         }
 
         bool recoverTimeline(std::size_t retain_frames) noexcept
@@ -122,13 +174,28 @@ struct PeerMixer::Impl {
             return true;
         }
 
-        std::int32_t pop() noexcept
+        std::span<const std::int32_t> firstReadableSpan(std::size_t frames) const noexcept
         {
-            const std::int32_t sample = queue[read_index];
-            read_index = (read_index + 1U) % queue.size();
-            --queued;
+            const std::size_t count = std::min({frames, queued, queue.size() - read_index});
+            return std::span<const std::int32_t>(queue.data() + read_index, count);
+        }
+
+        std::span<const std::int32_t> secondReadableSpan(std::size_t frames) const noexcept
+        {
+            const std::size_t first = firstReadableSpan(frames).size();
+            const std::size_t count = std::min(frames, queued) - first;
+            return std::span<const std::int32_t>(queue.data(), count);
+        }
+
+        void consumeFrames(std::size_t frames) noexcept
+        {
+            const std::size_t consumed = std::min(frames, queued);
+            read_index = (read_index + consumed) % queue.size();
+            queued -= consumed;
             stats.queue_depth_frames = queued;
-            return sample;
+            if (consumed > 0) {
+                owner->occupancy_dirty = true;
+            }
         }
 
         std::size_t depthFrames() const noexcept override
@@ -141,17 +208,38 @@ struct PeerMixer::Impl {
             if (!stats.active || frames.empty()) {
                 return 0;
             }
-            std::size_t pushed = 0;
             const double ratio = std::clamp(stats.resampler_ratio, kMinimumRatio, kMaximumRatio);
+            const bool unity_aligned = ratio == 1.0 &&
+                (!has_previous_sample || next_output_phase == 1.0);
+            if (unity_aligned) {
+                const std::size_t pushed = enqueueFrames(frames);
+                has_previous_sample = true;
+                previous_sample = frames.back();
+                next_output_phase = 1.0;
+                stats.resampled_output_frames += frames.size();
+                stats.unity_resampler_fast_frames += frames.size();
+                return pushed;
+            }
+            std::size_t pushed = 0;
+            std::size_t rendered = 0;
+            auto flushRendered = [&]() noexcept {
+                pushed += enqueueFrames(std::span<const std::int32_t>(
+                    resample_scratch.data(), rendered));
+                rendered = 0;
+            };
+            auto appendRendered = [&](std::int32_t sample) noexcept {
+                resample_scratch[rendered++] = sample;
+                ++stats.resampled_output_frames;
+                if (rendered == resample_scratch.size()) {
+                    flushRendered();
+                }
+            };
             for (const std::int32_t sample : frames) {
                 if (!has_previous_sample) {
                     has_previous_sample = true;
                     previous_sample = sample;
                     next_output_phase = ratio;
-                    if (enqueue(sample)) {
-                        ++pushed;
-                    }
-                    ++stats.resampled_output_frames;
+                    appendRendered(sample);
                     continue;
                 }
                 while (next_output_phase <= 1.0) {
@@ -162,15 +250,13 @@ struct PeerMixer::Impl {
                         mixed,
                         static_cast<double>((std::numeric_limits<std::int32_t>::min)()),
                         static_cast<double>((std::numeric_limits<std::int32_t>::max)())));
-                    if (enqueue(output_sample)) {
-                        ++pushed;
-                    }
-                    ++stats.resampled_output_frames;
+                    appendRendered(output_sample);
                     next_output_phase += ratio;
                 }
                 next_output_phase -= 1.0;
                 previous_sample = sample;
             }
+            flushRendered();
             return pushed;
         }
 
@@ -181,6 +267,9 @@ struct PeerMixer::Impl {
             queued -= dropped;
             stats.requested_drop_frames += dropped;
             stats.queue_depth_frames = queued;
+            if (dropped > 0) {
+                owner->occupancy_dirty = true;
+            }
         }
 
         void setResamplerRatio(double ratio) noexcept override
@@ -210,8 +299,10 @@ struct PeerMixer::Impl {
     double adaptive_release_accumulator_frames = 0.0;
     bool adaptive_release_active = false;
     std::uint64_t consecutive_deadline_slots = 0;
-    bool waiting_for_any_contributor = false;
     std::uint64_t observed_output_underrun_frames = 0;
+    bool cached_all_ready = false;
+    bool cached_any_ready = false;
+    bool occupancy_dirty = true;
 
     Impl(const PeerMixerConfig& requested, PeerStreamPlayback* sink)
         : config(requested),
@@ -289,25 +380,35 @@ struct PeerMixer::Impl {
         return std::max<std::uint64_t>(1, delay);
     }
 
-    void updateOccupancy() noexcept
+    struct ContributorReadiness {
+        bool all_ready = false;
+        bool any_ready = false;
+    };
+
+    ContributorReadiness updateOccupancy() noexcept
     {
         std::uint64_t active = 0;
         std::uint64_t contributing = 0;
         std::uint64_t active_slots = 0;
         std::uint64_t max_slots = 0;
+        bool all_ready = true;
+        bool any_ready = false;
+        const std::size_t frames_per_block =
+            static_cast<std::size_t>(config.frames_per_block);
         for (auto& peer : peers) {
             if (peer->stats.active) {
                 ++active;
             }
             if (peer->stats.active && peer->stats.contributing) {
                 ++contributing;
+                const bool ready = peer->queued >= frames_per_block;
+                all_ready = all_ready && ready;
+                any_ready = any_ready || ready;
                 active_slots = std::max<std::uint64_t>(
                     active_slots,
-                    (peer->queued + static_cast<std::size_t>(config.frames_per_block) - 1U) /
-                        static_cast<std::size_t>(config.frames_per_block));
+                    (peer->queued + frames_per_block - 1U) / frames_per_block);
             }
-            max_slots += (peer->queue.size() + static_cast<std::size_t>(config.frames_per_block) - 1U) /
-                static_cast<std::size_t>(config.frames_per_block);
+            max_slots += (peer->queue.size() + frames_per_block - 1U) / frames_per_block;
             peer->stats.queue_depth_frames = peer->queued;
         }
         stats.active_peers = active;
@@ -315,6 +416,13 @@ struct PeerMixer::Impl {
         stats.active_slots = active_slots;
         stats.max_slots = max_slots;
         stats.active_slots_high_water = std::max(stats.active_slots_high_water, active_slots);
+        const ContributorReadiness readiness{
+            contributing != 0 && all_ready,
+            any_ready};
+        cached_all_ready = readiness.all_ready;
+        cached_any_ready = readiness.any_ready;
+        occupancy_dirty = false;
+        return readiness;
     }
 
     std::size_t pushOutput(std::span<const std::int32_t> frames) noexcept
@@ -414,7 +522,10 @@ struct PeerMixer::Impl {
             releasing ? 1.0 + static_cast<double>(effective_release_ppm) / 1000000.0 : 1.0);
     }
 
-    void updateAdaptiveTarget(std::uint64_t now_us, bool missing) noexcept
+    void updateAdaptiveTarget(
+        std::uint64_t now_us,
+        bool missing,
+        bool source_ready) noexcept
     {
         if (!config.adaptive_playback_cushion) {
             return;
@@ -453,35 +564,9 @@ struct PeerMixer::Impl {
                 ++stats.adaptive_release_events;
             }
         }
-        updateAdaptiveReleaseState(missing, true, anyContributorReady());
+        updateAdaptiveReleaseState(missing, true, source_ready);
         adaptive_last_update_us = now_us;
         stats.adaptive_target_frames = adaptive_target_frames;
-    }
-
-    bool allContributorsReady() const noexcept
-    {
-        bool any = false;
-        for (const auto& peer : peers) {
-            if (!peer->stats.active || !peer->stats.contributing) {
-                continue;
-            }
-            any = true;
-            if (peer->queued < static_cast<std::size_t>(config.frames_per_block)) {
-                return false;
-            }
-        }
-        return any;
-    }
-
-    bool anyContributorReady() const noexcept
-    {
-        for (const auto& peer : peers) {
-            if (peer->stats.active && peer->stats.contributing &&
-                peer->queued >= static_cast<std::size_t>(config.frames_per_block)) {
-                return true;
-            }
-        }
-        return false;
     }
 
     bool outputAtLimit() const noexcept
@@ -508,15 +593,27 @@ struct PeerMixer::Impl {
             }
             const int gain = peer->stats.muted ? 0 : peer->stats.gain_ppm;
             std::uint64_t block_peak = 0;
-            for (std::size_t frame = 0; frame < available; ++frame) {
-                const std::int64_t sample = peer->pop();
-                const std::int64_t contribution =
-                    sample * static_cast<std::int64_t>(gain) / 1000000LL;
-                accumulator[frame] += contribution;
-                const std::uint64_t magnitude = contribution < 0
-                    ? static_cast<std::uint64_t>(-contribution)
-                    : static_cast<std::uint64_t>(contribution);
-                block_peak = std::max(block_peak, magnitude);
+            if (gain == 0) {
+                peer->consumeFrames(available);
+            } else {
+                std::size_t frame_offset = 0;
+                auto mixSpan = [&](std::span<const std::int32_t> source) noexcept {
+                    for (std::size_t index = 0; index < source.size(); ++index) {
+                        const std::int64_t sample = source[index];
+                        const std::int64_t contribution = gain == 1000000
+                            ? sample
+                            : sample * static_cast<std::int64_t>(gain) / 1000000LL;
+                        accumulator[frame_offset + index] += contribution;
+                        const std::uint64_t magnitude = contribution < 0
+                            ? static_cast<std::uint64_t>(-contribution)
+                            : static_cast<std::uint64_t>(contribution);
+                        block_peak = std::max(block_peak, magnitude);
+                    }
+                    frame_offset += source.size();
+                };
+                mixSpan(peer->firstReadableSpan(available));
+                mixSpan(peer->secondReadableSpan(available));
+                peer->consumeFrames(available);
             }
             const int block_peak_ppm = static_cast<int>(std::min<std::uint64_t>(
                 1000000ULL,
@@ -547,6 +644,23 @@ struct PeerMixer::Impl {
         if (output != nullptr && !output->acceptsFrames()) {
             return;
         }
+        if (!occupancy_dirty && stats.contributing_peers == 0 &&
+            !adaptive_release_active) {
+            return;
+        }
+        const std::uint64_t output_underrun_frames = output != nullptr
+            ? output->underrunFrames()
+            : observed_output_underrun_frames;
+        const bool output_underrun_changed =
+            output_underrun_frames > observed_output_underrun_frames;
+        if (!occupancy_dirty && !adaptive_release_active &&
+            !output_underrun_changed) {
+            if (!cached_any_ready ||
+                (!cached_all_ready && now_us < next_deadline_us) ||
+                (cached_all_ready && outputAtLimit())) {
+                return;
+            }
+        }
         const std::size_t recovery_tail = static_cast<std::size_t>(config.frames_per_block) * 2U;
         bool timeline_recovered = false;
         for (auto& peer : peers) {
@@ -570,15 +684,15 @@ struct PeerMixer::Impl {
             // normal bounded prefill window before another incomplete release.
             next_deadline_us = now_us + deadlineDelay();
             consecutive_deadline_slots = 0;
-            waiting_for_any_contributor = false;
         }
-        updateOccupancy();
+        ContributorReadiness readiness = occupancy_dirty
+            ? updateOccupancy()
+            : ContributorReadiness{cached_all_ready, cached_any_ready};
         if (stats.contributing_peers == 0) {
             if (output != nullptr) {
                 output->setResamplerRatio(1.0);
             }
             adaptive_release_active = false;
-            waiting_for_any_contributor = false;
             return;
         }
         if (!started) {
@@ -592,47 +706,29 @@ struct PeerMixer::Impl {
             // first real block. Later padding must never outrank queued audio.
             ensureAdaptiveCushion();
         }
-        const std::uint64_t output_underrun_frames = output != nullptr
-            ? output->underrunFrames()
-            : observed_output_underrun_frames;
         bool output_underrun_observed =
             output_underrun_frames > observed_output_underrun_frames;
         observed_output_underrun_frames = output_underrun_frames;
         updateAdaptiveReleaseState(
-            output_underrun_observed, false, anyContributorReady());
+            output_underrun_observed, false, readiness.any_ready);
         std::size_t work = 0;
         while (work < config.max_blocks_per_advance) {
             if (outputAtLimit()) {
                 break;
             }
-            const bool complete = allContributorsReady();
+            const bool complete = readiness.all_ready;
             if (!complete) {
-                const bool any_ready = anyContributorReady();
-                if (!any_ready) {
-                    if (now_us >= next_deadline_us) {
-                        // A deadline only arbitrates between peers. Advancing
-                        // the shared timeline while every source is empty
-                        // manufactures silence and makes delayed lossless audio
-                        // obsolete. The device-facing cushion owns this common
-                        // gap until at least one contributor returns.
-                        waiting_for_any_contributor = true;
-                        consecutive_deadline_slots = 0;
-                    }
-                    break;
-                }
-                if (waiting_for_any_contributor) {
-                    // Give the remaining peers one normal bounded window after
-                    // the first source returns instead of reusing an already
-                    // expired deadline from the all-empty interval.
-                    waiting_for_any_contributor = false;
-                    next_deadline_us = now_us + deadlineDelay();
+                // A packet-batched source can briefly be empty while the
+                // device still has real audio runway. Preserve that future
+                // audio. Once the device actually underruns, however, the
+                // shared timeline must advance so delayed catch-up audio is
+                // classified as stale instead of becoming permanent latency.
+                if (!readiness.any_ready && !output_underrun_observed) {
                     break;
                 }
                 if (now_us < next_deadline_us) {
                     break;
                 }
-            } else {
-                waiting_for_any_contributor = false;
             }
             releaseSlot(complete);
             if (complete) {
@@ -640,19 +736,20 @@ struct PeerMixer::Impl {
             } else {
                 ++consecutive_deadline_slots;
             }
+            readiness = updateOccupancy();
             updateAdaptiveTarget(
                 now_us,
-                consecutive_deadline_slots >= 3 || output_underrun_observed);
+                consecutive_deadline_slots >= 3 || output_underrun_observed,
+                readiness.any_ready);
             output_underrun_observed = false;
             ++work;
             if (complete) {
-                if (!allContributorsReady()) {
+                if (!readiness.all_ready) {
                     next_deadline_us = now_us + deadlineDelay();
                 }
             } else {
                 next_deadline_us += deadlineStep();
             }
-            updateOccupancy();
         }
         // Initial prefill owns proactive cushion silence. After playback has
         // started, an empty packet queue is only a transient scheduling state;
@@ -660,12 +757,12 @@ struct PeerMixer::Impl {
         // release is meant to remove. Recovery padding is therefore permitted
         // only after the device reports a real underrun and no real block was
         // available during this advance.
-        if (!anyContributorReady() && work == 0 && output_underrun_observed) {
-            updateAdaptiveTarget(now_us, true);
+        if (!readiness.any_ready && work == 0 && output_underrun_observed) {
+            updateAdaptiveTarget(now_us, true, false);
             ensureAdaptiveCushion();
         }
         if (work == config.max_blocks_per_advance &&
-            (allContributorsReady() || now_us >= next_deadline_us)) {
+            (readiness.all_ready || now_us >= next_deadline_us)) {
             ++stats.work_budget_yields;
         }
     }

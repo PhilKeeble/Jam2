@@ -122,8 +122,8 @@ PipelineResult runPipeline(const PipelineOptions& options,PipelineProgress progr
 {
     if(options.input.empty()||options.projectRoot.empty()||options.modelsRoot.empty())throw std::runtime_error("taste requires input, project root and models root");
     if(options.name.empty()||options.name.size()>512)throw std::runtime_error("taste name must contain 1 to 512 characters");
-    requireModels(options);const auto pipelineStarted=Clock::now();const auto source=readWav(options.input);
-    if(source.channels!=1)throw std::runtime_error("JamTaster loopback input must be mono");
+    requireModels(options);const auto pipelineStarted=Clock::now();auto source=readWav(options.input);
+    if(source.channels!=1){source.samples=source.mono();source.channels=1;}
     const double duration=source.frames()/static_cast<double>(source.sampleRate);const std::string sourceHash=sha256File(options.input);
     const auto sourceRoot=options.projectRoot/"analysis"/"sources"/sourceHash;const std::string slug=portableSlug(options.name);
     const auto converted=sourceRoot/"converted"/slug;const auto finalJamjar=converted/(slug+".jamjar");

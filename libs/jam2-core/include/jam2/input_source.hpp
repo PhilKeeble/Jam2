@@ -86,6 +86,10 @@ public:
     {
         return recording_latency_frames_.load(std::memory_order_relaxed);
     }
+    int last_peak_ppm() const noexcept
+    {
+        return peak_ppm_.load(std::memory_order_relaxed);
+    }
 
     // physical_inputs contains one planar Int32LSB pointer for every selected
     // engine channel. Missing pointers are treated as silence. The result is

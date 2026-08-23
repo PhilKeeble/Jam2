@@ -90,6 +90,8 @@ endif()
 add_library(jam2_asset_transfer STATIC
     application/AssetChunkProtocol.cpp
     application/AssetChunkProtocol.hpp
+    gui/LooperAssetFiles.cpp
+    gui/LooperAssetFiles.hpp
     gui/TrackAssetOwnership.cpp
     gui/TrackAssetOwnership.hpp
     gui/AssetTransferService.cpp

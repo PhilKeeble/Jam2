@@ -794,8 +794,18 @@ void AssetTransferService::receiveChunk(const QByteArray& payload, const QString
             "ignored stale looper asset chunk while another asset is active"));
         return;
     }
-    if (!incomingWorkerState_ || incomingLooperAssetQueue_.size() >= kMaxIncomingAssetQueuedChunks ||
-        !incomingSequence_.accept(chunk, sourcePeerToken, error)) {
+    if (!incomingWorkerState_) {
+        context_.appendAssetLog(QStringLiteral(
+            "looper asset chunk rejected: no incoming transfer is active"));
+        return;
+    }
+    if (incomingLooperAssetQueue_.size() >= kMaxIncomingAssetQueuedChunks) {
+        context_.appendAssetLog(QStringLiteral(
+            "looper asset chunk rejected: incoming chunk queue is full"));
+        resetIncoming();
+        return;
+    }
+    if (!incomingSequence_.accept(chunk, sourcePeerToken, error)) {
         context_.appendAssetLog(QStringLiteral("looper asset chunk rejected: ") + error);
         resetIncoming();
         return;

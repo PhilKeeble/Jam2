@@ -13,6 +13,16 @@ struct Claim {
     QString sourcePeerToken;
     QString batchId;
     QString assetHash;
+    int batchSize = 0;
+};
+
+struct SupersessionPlan {
+    QStringList removedKeys;
+    QSet<QString> removedHashes;
+    QMap<QString, int> batchSizes;
+    bool preserveActiveTransfer = false;
+
+    bool found() const noexcept { return !removedKeys.isEmpty(); }
 };
 
 struct ExpiryPlan {
@@ -33,5 +43,13 @@ ExpiryPlan planBatchExpiry(
     const QString& activeHash,
     const QString& activeSourcePeerToken,
     const QSet<QString>& pendingArrangementHashes);
+
+SupersessionPlan planPeerSupersession(
+    const QList<Claim>& claims,
+    const QString& supersededSourcePeerToken,
+    bool activeTrackContribution,
+    const QString& activeHash,
+    const QString& activeSourcePeerToken,
+    const QSet<QString>& replacementArrangementHashes);
 
 } // namespace jam2::gui::track_asset_ownership

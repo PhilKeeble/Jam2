@@ -46,6 +46,10 @@ constexpr int kPeerCount = 4;
 constexpr int kSampleRate = 48000;
 constexpr std::int64_t kAudioCallbackFrames = 256;
 constexpr int kNetworkAudioFrameFrames = 64;
+constexpr int kMaximumRecoveredPeerQueueFrames =
+    20 * kNetworkAudioFrameFrames;
+constexpr int kMaximumRecoveredPeerPathFrames =
+    28 * kNetworkAudioFrameFrames;
 constexpr std::int64_t kListenerAlignmentMedianLimitFrames =
     kSampleRate / 100 + kNetworkAudioFrameFrames;
 constexpr int kInitialBpm = 120;
@@ -1541,8 +1545,14 @@ AttemptResult runAttempt(
                  QStringLiteral("mix_deadline_slots"),
                  QStringLiteral("mix_missing_peer_frames"),
                  QStringLiteral("mix_late_after_release_frames"),
+                 QStringLiteral("mix_live_tail_trimmed_frames"),
                  QStringLiteral("mix_capacity_drops"),
+                 QStringLiteral("peer_playback_queue_current_frames"),
+                 QStringLiteral("peer_playback_path_current_frames"),
                  QStringLiteral("adaptive_playback_padding_frames"),
+                 QStringLiteral("jitter_buffer_forced_releases"),
+                 QStringLiteral("receive_processing_max_us"),
+                 QStringLiteral("ping_reply_turnaround_max_us"),
                  QStringLiteral("sequence_lost"),
                  QStringLiteral("sequence_duplicate"),
                  QStringLiteral("sequence_late"),
@@ -1641,6 +1651,14 @@ AttemptResult runAttempt(
             final, QStringLiteral("mix_capacity_dropped_frames"), -1.0);
         const double mixOutputFrames = peer.csv.number(
             final, QStringLiteral("mix_output_frames"), -1.0);
+        const double liveQueueFrames = peer.csv.number(
+            final, QStringLiteral("peer_playback_queue_current_frames"), -1.0);
+        const double livePathFrames = peer.csv.number(
+            final, QStringLiteral("peer_playback_path_current_frames"), -1.0);
+        const double deadlineSlots = peer.csv.number(
+            final, QStringLiteral("mix_deadline_slots"), -1.0);
+        const double lateAfterReleaseFrames = peer.csv.number(
+            final, QStringLiteral("mix_late_after_release_frames"), -1.0);
         const double adaptivePaddingGrowth = peer.csv.number(
             final, QStringLiteral("adaptive_playback_padding_frames"), -1.0) -
             peer.csv.number(
@@ -1657,6 +1675,18 @@ AttemptResult runAttempt(
             mixCapacityDroppedFrames == mixCapacityDrops &&
             mixOutputFrames > 0.0 &&
             mixCapacityDrops <= maximumMixCapacityDrops;
+        // Final queue depth is a stable latency assertion for the clean run
+        // and the bounded global-blackout recovery run. Security cases stop
+        // their synthetic callback timeline while injection/verification is
+        // still completing, so their final instantaneous queue is not a
+        // device-playout latency sample.
+        const bool liveLatencyHealthy =
+            (condition != NetworkCondition::Clean &&
+             condition != NetworkCondition::BurstLoss) ||
+            (liveQueueFrames >= 0.0 &&
+             liveQueueFrames <= kMaximumRecoveredPeerQueueFrames &&
+             livePathFrames >= 0.0 &&
+             livePathFrames <= kMaximumRecoveredPeerPathFrames);
         const double authenticationFailures = peer.csv.number(
             final, QStringLiteral("udp_authentication_failed"));
         if (initialAuthority != creatorId || finalAuthority != expectedFinalAuthority ||
@@ -1665,7 +1695,9 @@ AttemptResult runAttempt(
             finalEpoch == initialEpoch ||
             mappedEpoch <= 0 || std::abs(mappingError) > 1024.0 ||
             sentPackets <= 0.0 || receivedPackets <= 0.0 || callbacks <= 0.0 ||
-            !mixCapacityHealthy || !adaptivePaddingHealthy ||
+            !mixCapacityHealthy || !adaptivePaddingHealthy || !liveLatencyHealthy ||
+            (condition == NetworkCondition::BurstLoss &&
+             (deadlineSlots <= 0.0 || lateAfterReleaseFrames <= 0.0)) ||
             (condition != NetworkCondition::Security &&
              authenticationFailures != 0.0)) {
             return die(QStringLiteral(
@@ -1674,7 +1706,8 @@ AttemptResult runAttempt(
                 "aligned=%10 beat_delta=%11 epochs=%12->%13 mapped=%14 "
                 "mapping_error=%15 sent=%16 recv=%17 callbacks=%18 "
                 "mix_capacity_drops=%19/%20 output_frames=%21 "
-                "adaptive_padding_growth=%22 auth_failures=%23")
+                "adaptive_padding_growth=%22 auth_failures=%23 "
+                "live_queue=%24 live_path=%25 deadline_slots=%26 late_frames=%27")
                 .arg(index + 1)
                 .arg(initialAuthority).arg(finalAuthority)
                 .arg(creatorId).arg(expectedFinalAuthority)
@@ -1685,7 +1718,9 @@ AttemptResult runAttempt(
                 .arg(mappingError).arg(sentPackets).arg(receivedPackets)
                 .arg(callbacks).arg(mixCapacityDrops).arg(maximumMixCapacityDrops)
                 .arg(mixOutputFrames).arg(adaptivePaddingGrowth)
-                .arg(authenticationFailures));
+                .arg(authenticationFailures)
+                .arg(liveQueueFrames).arg(livePathFrames)
+                .arg(deadlineSlots).arg(lateAfterReleaseFrames));
         }
         if (!initialAuthorityEpoch) initialAuthorityEpoch = initialEpoch;
         if (!finalAuthorityEpoch) finalAuthorityEpoch = finalEpoch;

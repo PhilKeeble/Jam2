@@ -120,13 +120,6 @@ int main(int argc, char** argv)
         longName.name.assign(513, 'x');
         requireThrows([&] { (void)runPipeline(longName); },
             "pipeline rejects a display name beyond 512 characters");
-        const auto stereoPath = root / "stereo.wav";
-        writeWavPcm16(stereoPath, syntheticMusic(22050, 0.1, 2));
-        PipelineOptions stereo = options;
-        stereo.input = stereoPath;
-        requireThrows([&] { (void)runPipeline(stereo); },
-            "pipeline rejects non-mono loopback input before analysis");
-
         const std::string sourceHash = sha256File(inputPath);
         const auto sourceRoot = options.projectRoot / "analysis" / "sources" / sourceHash;
         const auto stemsRoot = sourceRoot / "stems";
@@ -174,6 +167,27 @@ int main(int argc, char** argv)
                 manifest.get("format").stringValue() == "jamtaster-manifest-v1" &&
                 manifest.get("jamjar_bytes").numberValue() > 0.0,
             "pipeline reports a cached separation and current complete output formats");
+
+        const auto stereoPath = root / "stereo.wav";
+        writeWavPcm16(stereoPath, syntheticMusic(22050, 0.1, 2));
+        PipelineOptions stereo = options;
+        stereo.input = stereoPath;
+        const auto stereoRoot = stereo.projectRoot / "analysis" / "sources" /
+            sha256File(stereoPath);
+        const auto stereoSongRoot = stereoRoot / "converted" /
+            result.songRoot.filename();
+        std::filesystem::create_directories(stereoSongRoot);
+        std::filesystem::copy_file(
+            result.analysisReport, stereoRoot / "analysis.json",
+            std::filesystem::copy_options::overwrite_existing);
+        std::filesystem::copy_file(
+            result.jamjar, stereoSongRoot / result.jamjar.filename(),
+            std::filesystem::copy_options::overwrite_existing);
+        const PipelineResult stereoResult = runPipeline(stereo);
+        require(stereoResult.cached &&
+                std::filesystem::is_regular_file(stereoResult.analysisReport) &&
+                std::filesystem::is_regular_file(stereoResult.jamjar),
+            "pipeline downmixes stereo WAV input instead of rejecting analysis");
 
         std::vector<std::pair<int, std::string>> cachedProgress;
         const PipelineResult cached = runPipeline(options,

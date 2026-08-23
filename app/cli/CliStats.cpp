@@ -31,13 +31,25 @@ void ReceiveLoopDiagnostics::beginWake(std::uint64_t now_us) noexcept
     ++iterations_;
 }
 
-void ReceiveLoopDiagnostics::finishWake(std::size_t received_packets) noexcept
+void ReceiveLoopDiagnostics::finishWake(
+    std::size_t received_packets,
+    std::uint64_t processing_start_us,
+    std::uint64_t processing_end_us) noexcept
 {
     const std::uint64_t batch = static_cast<std::uint64_t>(received_packets);
     batch_sum_ += batch;
     batch_max_ = std::max(batch_max_, batch);
     if (batch == 0) {
         ++idle_count_;
+    }
+    if (batch > 0 && processing_end_us >= processing_start_us) {
+        const std::uint64_t duration = processing_end_us - processing_start_us;
+        if (processing_samples_ == 0 || duration < processing_min_us_) {
+            processing_min_us_ = duration;
+        }
+        processing_sum_us_ += duration;
+        processing_max_us_ = std::max(processing_max_us_, duration);
+        ++processing_samples_;
     }
 }
 
@@ -53,6 +65,10 @@ void ReceiveLoopDiagnostics::applyTo(AudioPacketStats& target) const noexcept
     target.recv_loop_idle_count = idle_count_;
     target.recv_loop_batch_sum = batch_sum_;
     target.recv_loop_batch_max = batch_max_;
+    target.receive_processing_min_us = processing_min_us_;
+    target.receive_processing_sum_us = processing_sum_us_;
+    target.receive_processing_max_us = processing_max_us_;
+    target.receive_processing_samples = processing_samples_;
 }
 
 double unit_from_ppm(int value)
@@ -193,7 +209,10 @@ void copy_peer_stream_stats(
     JAM2_COPY_PEER_STAT(jitter_buffer_late_packets);
     JAM2_COPY_PEER_STAT(jitter_buffer_dropped_packets);
     JAM2_COPY_PEER_STAT(jitter_buffer_dropped_frames);
+    JAM2_COPY_PEER_STAT(jitter_buffer_target_releases);
+    JAM2_COPY_PEER_STAT(jitter_buffer_timeout_releases);
     JAM2_COPY_PEER_STAT(jitter_buffer_forced_releases);
+    JAM2_COPY_PEER_STAT(jitter_buffer_rebases);
     JAM2_COPY_PEER_STAT(adaptive_playback_cushion_enabled);
     JAM2_COPY_PEER_STAT(adaptive_playback_target_frames);
     JAM2_COPY_PEER_STAT(adaptive_playback_min_frames);
@@ -324,7 +343,10 @@ void add_peer_stream_stats(
     target.jitter_buffer_late_packets += source.jitter_buffer_late_packets;
     target.jitter_buffer_dropped_packets += source.jitter_buffer_dropped_packets;
     target.jitter_buffer_dropped_frames += source.jitter_buffer_dropped_frames;
+    target.jitter_buffer_target_releases += source.jitter_buffer_target_releases;
+    target.jitter_buffer_timeout_releases += source.jitter_buffer_timeout_releases;
     target.jitter_buffer_forced_releases += source.jitter_buffer_forced_releases;
+    target.jitter_buffer_rebases += source.jitter_buffer_rebases;
     target.adaptive_playback_cushion_enabled =
         target.adaptive_playback_cushion_enabled || source.adaptive_playback_cushion_enabled;
     target.adaptive_playback_target_frames = std::max(
@@ -365,6 +387,9 @@ void copy_peer_mixer_stats(
     target.mix_missing_peer_contributions = source.missing_peer_contributions;
     target.mix_missing_peer_frames = source.missing_peer_frames;
     target.mix_late_after_release_frames = source.late_after_release_frames;
+    target.mix_live_tail_trim_events = source.live_tail_trim_events;
+    target.mix_live_tail_trimmed_frames = source.live_tail_trimmed_frames;
+    target.mix_live_tail_trim_max_frames = source.live_tail_trim_max_frames;
     target.mix_capacity_drops = source.capacity_drops;
     target.mix_capacity_dropped_frames = source.capacity_dropped_frames;
     target.mix_clipped_samples = source.clipped_samples;
@@ -425,9 +450,9 @@ void append_os_scheduling_csv(std::ostream& out, const OsSchedulingStatus& statu
         << ',' << csv_escape(status.qos_requested)
         << ',' << csv_escape(status.qos_active)
         << ',' << csv_escape(status.qos_error)
-        << ',' << csv_escape(status.realtime_requested)
-        << ',' << csv_escape(status.realtime_active)
-        << ',' << csv_escape(status.realtime_error);
+        // Preserve the three historical macOS realtime CSV columns as empty
+        // fields so existing comparison tooling retains stable column indexes.
+        << ",,,";
 }
 
 std::string command_line_text(int argc, char** argv)
@@ -590,6 +615,12 @@ CsvStatsLog::AudioSnapshot make_audio_snapshot(
     if (!engine_snapshot.frame_clock_active) return snapshot;
     snapshot.has_audio = true;
     snapshot.stream = engine->coldSnapshot().stream;
+    snapshot.driver_output_ready_status =
+        engine_snapshot.driver_output_ready_status;
+    snapshot.driver_output_ready_error =
+        engine_snapshot.driver_output_ready_error;
+    snapshot.driver_output_ready_latency_reduction_frames =
+        engine_snapshot.driver_output_ready_latency_reduction_frames;
     snapshot.callbacks = engine_snapshot.callbacks;
     snapshot.callback_timing = engine_snapshot.callback_timing;
     snapshot.playback_prefilled = engine_snapshot.playback_prefilled;
@@ -749,6 +780,10 @@ void print_periodic_stream_stats(
               << " receive_loop_gap_max_ms="
               << (stats.receive_loop_gap_samples > 0 ? static_cast<double>(stats.receive_loop_gap_max_us) / 1000.0 : 0.0)
               << " receive_burst_packets_max=" << stats.receive_burst_packets_max
+              << " receive_processing_avg_us="
+              << avg_u64(stats.receive_processing_sum_us, stats.receive_processing_samples)
+              << " ping_reply_turnaround_avg_us="
+              << avg_u64(stats.ping_reply_turnaround_sum_us, stats.ping_reply_turnaround_samples)
               << " estimated_one_way_ms=" << estimated_one_way_ms(stats, options)
               << " rtt_avg_ms=" << rtt_avg_ms(stats)
               << " drift_ppm=" << stats.drift_ppm
@@ -762,7 +797,12 @@ void print_periodic_stream_stats(
               << " jitter_buffer_released_packets=" << stats.jitter_buffer_released_packets
               << " jitter_buffer_late_packets=" << stats.jitter_buffer_late_packets
               << " jitter_buffer_dropped_packets=" << stats.jitter_buffer_dropped_packets
+              << " jitter_buffer_target_releases=" << stats.jitter_buffer_target_releases
+              << " jitter_buffer_timeout_releases=" << stats.jitter_buffer_timeout_releases
               << " jitter_buffer_forced_releases=" << stats.jitter_buffer_forced_releases
+              << " peer_playback_queue_current_frames=" << stats.peer_playback_queue_current_frames
+              << " peer_playback_path_current_frames=" << stats.peer_playback_path_current_frames
+              << " mix_live_tail_trimmed_frames=" << stats.mix_live_tail_trimmed_frames
               << " metronome_compensation_active=" << (stats.metronome_compensation_active ? "yes" : "no")
               << " metronome_compensation_offset_ms="
               << signed_frames_to_ms(stats.metronome_compensation_offset_frames, options.sample_rate)
@@ -775,6 +815,17 @@ void print_periodic_stream_stats(
               << " metronome_peak=" << audio.metronome_peak
               << " output_peak=" << audio.output_peak
               << " output_clipped_samples=" << audio.output_clipped_samples
+              << " driver_input_latency_frames="
+              << audio.stream.input_latency_frames
+              << " driver_output_latency_frames="
+              << audio.stream.output_latency_frames
+              << " driver_output_ready="
+              << jam2::audio::driver_output_ready_status_text(
+                     audio.driver_output_ready_status)
+              << " driver_output_ready_error="
+              << audio.driver_output_ready_error
+              << " driver_output_ready_latency_reduction_frames="
+              << audio.driver_output_ready_latency_reduction_frames
               << " input_downmix_selected_channels=" << audio.input_downmix.selected_channels
               << " input_downmix_effective_weight="
               << static_cast<double>(audio.input_downmix.effective_weight_ppm) / 1000000.0
@@ -791,12 +842,23 @@ void print_periodic_stream_stats(
               << " os_priority_requested=" << os_priority_text(stats.os_scheduling.requested)
               << " os_cpu_count=" << stats.os_scheduling.cpu_count
               << " os_process_priority_active=" << stats.os_scheduling.process_priority
+              << " os_process_priority_error=" << stats.os_scheduling.process_priority_error
               << " os_thread_priority_active=" << stats.os_scheduling.thread_priority
               << " os_mmcss_active=" << stats.os_scheduling.mmcss_active
               << " os_mmcss_profile=" << stats.os_scheduling.mmcss_profile
+              << " os_mmcss_priority_active="
+              << stats.os_scheduling.mmcss_priority_active
               << " os_timer_resolution_active=" << stats.os_scheduling.timer_resolution_active
               << " os_qos_active=" << stats.os_scheduling.qos_active
-              << " os_realtime_active=" << stats.os_scheduling.realtime_active
+              << " capture_ready_wake_signals=" << stats.capture_ready_wake_signals
+              << " capture_ready_wake_consumptions="
+              << stats.capture_ready_wake_consumptions
+              << " capture_clock_packet_pacing_active="
+              << (stats.capture_clock_packet_pacing_active ? "yes" : "no")
+              << " capture_ready_dispatch_avg_us="
+              << avg_u64(
+                     stats.capture_ready_dispatch_sum_us,
+                     stats.capture_ready_dispatch_samples)
               << "\n";
 }
 
@@ -850,20 +912,25 @@ void print_audio_packet_stats(const AudioPacketStats& stats, const Options& opti
     std::cout << "OS platform: " << stats.os_scheduling.platform << "\n";
     std::cout << "OS CPU count: " << stats.os_scheduling.cpu_count << "\n";
     std::cout << "OS process priority active: " << stats.os_scheduling.process_priority << "\n";
+    std::cout << "OS process priority error: "
+              << stats.os_scheduling.process_priority_error << "\n";
     std::cout << "OS thread priority active: " << stats.os_scheduling.thread_priority << "\n";
     std::cout << "OS MMCSS requested: " << stats.os_scheduling.mmcss_requested << "\n";
     std::cout << "OS MMCSS active: " << stats.os_scheduling.mmcss_active << "\n";
     std::cout << "OS MMCSS profile: " << stats.os_scheduling.mmcss_profile << "\n";
     std::cout << "OS MMCSS error: " << stats.os_scheduling.mmcss_error << "\n";
+    std::cout << "OS MMCSS priority requested: "
+              << stats.os_scheduling.mmcss_priority_requested << "\n";
+    std::cout << "OS MMCSS priority active: "
+              << stats.os_scheduling.mmcss_priority_active << "\n";
+    std::cout << "OS MMCSS priority error: "
+              << stats.os_scheduling.mmcss_priority_error << "\n";
     std::cout << "OS timer resolution requested: " << stats.os_scheduling.timer_resolution_requested << "\n";
     std::cout << "OS timer resolution active: " << stats.os_scheduling.timer_resolution_active << "\n";
     std::cout << "OS timer resolution error: " << stats.os_scheduling.timer_resolution_error << "\n";
     std::cout << "OS QoS requested: " << stats.os_scheduling.qos_requested << "\n";
     std::cout << "OS QoS active: " << stats.os_scheduling.qos_active << "\n";
     std::cout << "OS QoS error: " << stats.os_scheduling.qos_error << "\n";
-    std::cout << "OS realtime requested: " << stats.os_scheduling.realtime_requested << "\n";
-    std::cout << "OS realtime active: " << stats.os_scheduling.realtime_active << "\n";
-    std::cout << "OS realtime error: " << stats.os_scheduling.realtime_error << "\n";
     std::cout << "Network audio bytes per sample: "
               << jam2::protocol::audio_bytes_per_sample(options.network_audio_format) << "\n";
     std::cout << "UDP header bytes: " << jam2::protocol::kHeaderSize << "\n";
@@ -1018,7 +1085,23 @@ void print_audio_packet_stats(const AudioPacketStats& stats, const Options& opti
     std::cout << "Jitter buffer late packets: " << stats.jitter_buffer_late_packets << "\n";
     std::cout << "Jitter buffer dropped packets: " << stats.jitter_buffer_dropped_packets << "\n";
     std::cout << "Jitter buffer dropped frames: " << stats.jitter_buffer_dropped_frames << "\n";
+    std::cout << "Jitter buffer target releases: " << stats.jitter_buffer_target_releases << "\n";
+    std::cout << "Jitter buffer timeout releases: " << stats.jitter_buffer_timeout_releases << "\n";
     std::cout << "Jitter buffer forced releases: " << stats.jitter_buffer_forced_releases << "\n";
+    std::cout << "Jitter buffer rebases: " << stats.jitter_buffer_rebases << "\n";
+    std::cout << "Peer playback queue current frames: "
+              << stats.peer_playback_queue_current_frames << "\n";
+    std::cout << "Peer playback queue current ms: "
+              << frames_to_ms(
+                     static_cast<std::size_t>(stats.peer_playback_queue_current_frames),
+                     options.sample_rate) << "\n";
+    std::cout << "Peer playback queue high water frames: "
+              << stats.peer_playback_queue_high_water_frames << "\n";
+    std::cout << "Peer playback path current frames: "
+              << stats.peer_playback_path_current_frames << "\n";
+    std::cout << "Mixer live-tail trim events: " << stats.mix_live_tail_trim_events << "\n";
+    std::cout << "Mixer live-tail trimmed frames: " << stats.mix_live_tail_trimmed_frames << "\n";
+    std::cout << "Mixer live-tail trim max frames: " << stats.mix_live_tail_trim_max_frames << "\n";
     if (stats.send_interval_samples > 0) {
         std::cout << "Send interval ms min: " << static_cast<double>(stats.send_interval_min_us) / 1000.0 << "\n";
         std::cout << "Send interval ms avg: " << avg_us_to_ms(stats.send_interval_sum_us, stats.send_interval_samples) << "\n";
@@ -1039,6 +1122,53 @@ void print_audio_packet_stats(const AudioPacketStats& stats, const Options& opti
     }
     std::cout << "Receive burst packets max: " << stats.receive_burst_packets_max << "\n";
     std::cout << "Receive packets per loop max: " << stats.receive_packets_per_loop_max << "\n";
+    if (stats.receive_processing_samples > 0) {
+        std::cout << "Receive processing us min: " << stats.receive_processing_min_us << "\n";
+        std::cout << "Receive processing us avg: "
+                  << avg_u64(stats.receive_processing_sum_us, stats.receive_processing_samples) << "\n";
+        std::cout << "Receive processing us max: " << stats.receive_processing_max_us << "\n";
+    }
+    if (stats.pre_receive_work_samples > 0) {
+        std::cout << "Pre-receive work us min: " << stats.pre_receive_work_min_us << "\n";
+        std::cout << "Pre-receive work us avg: "
+                  << avg_u64(stats.pre_receive_work_sum_us, stats.pre_receive_work_samples) << "\n";
+        std::cout << "Pre-receive work us max: " << stats.pre_receive_work_max_us << "\n";
+        std::cout << "Pre-receive advance us avg/max: "
+                  << avg_u64(stats.pre_receive_advance_sum_us, stats.pre_receive_work_samples)
+                  << '/' << stats.pre_receive_advance_max_us << "\n";
+        std::cout << "Pre-receive maintenance us avg/max: "
+                  << avg_u64(stats.pre_receive_maintenance_sum_us, stats.pre_receive_work_samples)
+                  << '/' << stats.pre_receive_maintenance_max_us << "\n";
+        std::cout << "Pre-receive send us avg/max: "
+                  << avg_u64(stats.pre_receive_send_sum_us, stats.pre_receive_work_samples)
+                  << '/' << stats.pre_receive_send_max_us << "\n";
+        std::cout << "Pre-receive peak stages us advance/maintenance/send: "
+                  << stats.pre_receive_peak_advance_us << '/'
+                  << stats.pre_receive_peak_maintenance_us << '/'
+                  << stats.pre_receive_peak_send_us << "\n";
+    }
+    std::cout << "Capture-ready wake signals/consumptions: "
+              << stats.capture_ready_wake_signals << '/'
+              << stats.capture_ready_wake_consumptions << "\n";
+    std::cout << "Capture-clock packet pacing: "
+              << (stats.capture_clock_packet_pacing_active ? "active" : "off")
+              << "\n";
+    if (stats.capture_ready_dispatch_samples > 0) {
+        std::cout << "Capture-ready dispatch us min/avg/max: "
+                  << stats.capture_ready_dispatch_min_us << '/'
+                  << avg_u64(
+                         stats.capture_ready_dispatch_sum_us,
+                         stats.capture_ready_dispatch_samples) << '/'
+                  << stats.capture_ready_dispatch_max_us << "\n";
+    }
+    if (stats.ping_reply_turnaround_samples > 0) {
+        std::cout << "PING reply turnaround us min: " << stats.ping_reply_turnaround_min_us << "\n";
+        std::cout << "PING reply turnaround us avg: "
+                  << avg_u64(
+                         stats.ping_reply_turnaround_sum_us,
+                         stats.ping_reply_turnaround_samples) << "\n";
+        std::cout << "PING reply turnaround us max: " << stats.ping_reply_turnaround_max_us << "\n";
+    }
     std::cout << "Adaptive playback cushion: " << (stats.adaptive_playback_cushion_enabled ? "on" : "off") << "\n";
     std::cout << "Adaptive playback target frames: " << stats.adaptive_playback_target_frames << "\n";
     std::cout << "Adaptive playback target ms: "

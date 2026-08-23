@@ -45,10 +45,13 @@ bool TrackWorkspaceController::startFileTask(
     std::function<void()> complete,
     std::function<void(const QString&)> failed)
 {
-    constexpr int kMaximumFileWorkerTasks = 2;
+    // QThreadPool still runs at most two file jobs concurrently. Keep a bounded
+    // outstanding queue so a valid multi-WAV arrangement is not rejected just
+    // because validation and transfer completions briefly arrive together.
+    constexpr int kMaximumFileWorkerTasks = 64;
     if (fileWorkerTasksActive >= kMaximumFileWorkerTasks) {
         ++fileWorkerTasksRejected;
-        appendAssetLog(QStringLiteral("file worker saturated: active=%1 capacity=%2 rejected=%3")
+        appendAssetLog(QStringLiteral("file worker saturated: outstanding=%1 capacity=%2 rejected=%3")
             .arg(fileWorkerTasksActive)
             .arg(kMaximumFileWorkerTasks)
             .arg(fileWorkerTasksRejected));

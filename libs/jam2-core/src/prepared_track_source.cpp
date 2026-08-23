@@ -208,7 +208,7 @@ int PreparedTrackSource::mix(
         }
         cursor = segmentEnd;
     }
-    playingAtomic_.store(playing_, std::memory_order_relaxed);
+    playingAtomic_.store(playing_, std::memory_order_release);
     sourceFrame_.store(sourcePos_, std::memory_order_relaxed);
     return static_cast<int>(
         static_cast<std::uint64_t>(peak) * 1000000ULL /

@@ -9,7 +9,6 @@ namespace {
 
 constexpr std::uint32_t kMagic = 0x324d414aU; // JAM2 little-endian.
 constexpr std::size_t kAuthTagOffset = 28;
-constexpr std::size_t kAuthTagSize = 8;
 
 void put_u16(std::span<std::uint8_t> out, std::size_t offset, std::uint16_t value)
 {
@@ -54,25 +53,21 @@ std::uint64_t read_u64(std::span<const std::uint8_t> in, std::size_t offset)
     return value;
 }
 
+template <bool ZeroAuthTag>
 std::uint64_t siphash24(
     std::span<const std::uint8_t> data,
-    const std::array<std::uint8_t, 16>& key,
-    bool zero_auth_tag = false)
+    const std::array<std::uint8_t, 16>& key)
 {
     auto rotl = [](std::uint64_t value, int bits) {
         return (value << bits) | (value >> (64 - bits));
     };
-    auto read_key = [&](std::size_t offset) {
-        std::uint64_t value = 0;
-        for (int i = 7; i >= 0; --i) {
-            value = (value << 8) | key[offset + i];
-        }
-        return value;
-    };
-    std::uint64_t v0 = 0x736f6d6570736575ULL ^ read_key(0);
-    std::uint64_t v1 = 0x646f72616e646f6dULL ^ read_key(8);
-    std::uint64_t v2 = 0x6c7967656e657261ULL ^ read_key(0);
-    std::uint64_t v3 = 0x7465646279746573ULL ^ read_key(8);
+    const std::span<const std::uint8_t> keyBytes(key);
+    const std::uint64_t k0 = read_u64(keyBytes, 0);
+    const std::uint64_t k1 = read_u64(keyBytes, 8);
+    std::uint64_t v0 = 0x736f6d6570736575ULL ^ k0;
+    std::uint64_t v1 = 0x646f72616e646f6dULL ^ k1;
+    std::uint64_t v2 = 0x6c7967656e657261ULL ^ k0;
+    std::uint64_t v3 = 0x7465646279746573ULL ^ k1;
 
     auto sip_round = [&]() {
         v0 += v1;
@@ -90,18 +85,18 @@ std::uint64_t siphash24(
         v1 ^= v2;
         v2 = rotl(v2, 32);
     };
-    auto data_byte = [&](std::size_t index) {
-        if (zero_auth_tag && index >= kAuthTagOffset && index < kAuthTagOffset + kAuthTagSize) {
-            return static_cast<std::uint8_t>(0);
-        }
-        return data[index];
-    };
-
     std::size_t offset = 0;
     while (offset + 8 <= data.size()) {
-        std::uint64_t m = 0;
-        for (std::size_t i = 0; i < 8; ++i) {
-            m |= static_cast<std::uint64_t>(data_byte(offset + i)) << (8 * i);
+        std::uint64_t m = read_u64(data, offset);
+        if constexpr (ZeroAuthTag) {
+            // The fixed tag occupies bytes 28..35, straddling only these two
+            // SipHash words. Masking them once per word avoids a range test
+            // for every byte while authenticating the exact same zeroed view.
+            if (offset == 24) {
+                m &= 0x00000000ffffffffULL;
+            } else if (offset == 32) {
+                m &= 0xffffffff00000000ULL;
+            }
         }
         v3 ^= m;
         sip_round();
@@ -112,7 +107,12 @@ std::uint64_t siphash24(
 
     std::uint64_t b = static_cast<std::uint64_t>(data.size()) << 56;
     for (std::size_t i = 0; offset + i < data.size(); ++i) {
-        b |= static_cast<std::uint64_t>(data_byte(offset + i)) << (8 * i);
+        b |= static_cast<std::uint64_t>(data[offset + i]) << (8 * i);
+    }
+    if constexpr (ZeroAuthTag) {
+        // Header-only and very short payload packets leave bytes 32..35 in
+        // the final partial word rather than the full-word loop above.
+        if (offset == 32) b &= 0xffffffff00000000ULL;
     }
     v3 ^= b;
     sip_round();
@@ -219,7 +219,7 @@ std::size_t encode_packet_into(
     if (!payload.empty()) {
         std::memcpy(out.data() + kHeaderSize, payload.data(), payload.size());
     }
-    put_u64(out, kAuthTagOffset, siphash24(out, key));
+    put_u64(out, kAuthTagOffset, siphash24<false>(out, key));
     return packet_size;
 }
 
@@ -255,7 +255,7 @@ ParseResult parse_packet(
         !valid_payload_size(header.type, header.payload_length, audio_format)) {
         return {header, ParseError::InvalidPayloadSize};
     }
-    if (siphash24(packet, key, true) != header.auth_tag) {
+    if (siphash24<true>(packet, key) != header.auth_tag) {
         return {header, ParseError::AuthenticationFailed};
     }
     return {header, ParseError::None};
@@ -436,6 +436,71 @@ bool unpack_audio_into(
     case NetworkAudioFormat::Pcm24Mono: return unpack_pcm24_into(bytes, output);
     }
     return false;
+}
+
+bool pack_audio_q31_into(
+    NetworkAudioFormat format,
+    std::span<const std::int32_t> samples,
+    std::span<std::uint8_t> output) noexcept
+{
+    const std::size_t bytes_per_sample = audio_bytes_per_sample(format);
+    if (bytes_per_sample == 0 || output.size() != samples.size() * bytes_per_sample) {
+        return false;
+    }
+    if (format == NetworkAudioFormat::Pcm24Mono) {
+        for (std::size_t i = 0; i < samples.size(); ++i) {
+            const std::int32_t signed_value = samples[i] / 256;
+            const std::uint32_t value =
+                static_cast<std::uint32_t>(signed_value) & 0x00ffffffU;
+            output[i * 3] = static_cast<std::uint8_t>(value & 0xffU);
+            output[i * 3 + 1] = static_cast<std::uint8_t>((value >> 8) & 0xffU);
+            output[i * 3 + 2] = static_cast<std::uint8_t>((value >> 16) & 0xffU);
+        }
+        return true;
+    }
+    for (std::size_t i = 0; i < samples.size(); ++i) {
+        const std::int32_t signed_24 = samples[i] / 256;
+        const std::int32_t quantized = signed_24 >= 0
+            ? signed_24 / 256
+            : -static_cast<std::int32_t>(
+                (static_cast<std::uint32_t>(-signed_24) + 255U) / 256U);
+        const std::uint16_t value = static_cast<std::uint16_t>(quantized & 0xffff);
+        output[i * 2] = static_cast<std::uint8_t>(value & 0xffU);
+        output[i * 2 + 1] = static_cast<std::uint8_t>((value >> 8) & 0xffU);
+    }
+    return true;
+}
+
+bool unpack_audio_q31_into(
+    NetworkAudioFormat format,
+    std::span<const std::uint8_t> bytes,
+    std::span<std::int32_t> output) noexcept
+{
+    const std::size_t bytes_per_sample = audio_bytes_per_sample(format);
+    if (bytes_per_sample == 0 || bytes.size() != output.size() * bytes_per_sample) {
+        return false;
+    }
+    if (format == NetworkAudioFormat::Pcm24Mono) {
+        for (std::size_t i = 0; i < output.size(); ++i) {
+            std::uint32_t value = static_cast<std::uint32_t>(bytes[i * 3]) |
+                (static_cast<std::uint32_t>(bytes[i * 3 + 1]) << 8) |
+                (static_cast<std::uint32_t>(bytes[i * 3 + 2]) << 16);
+            if ((value & 0x00800000U) != 0) {
+                value |= 0xff000000U;
+            }
+            output[i] = static_cast<std::int32_t>(value) * 256;
+        }
+        return true;
+    }
+    for (std::size_t i = 0; i < output.size(); ++i) {
+        const std::uint16_t encoded = static_cast<std::uint16_t>(bytes[i * 2]) |
+            (static_cast<std::uint16_t>(bytes[i * 2 + 1]) << 8);
+        const std::int32_t signed_value = (encoded & 0x8000U) != 0
+            ? static_cast<std::int32_t>(encoded) - 65536
+            : static_cast<std::int32_t>(encoded);
+        output[i] = signed_value * 65536;
+    }
+    return true;
 }
 
 ReplayResult ReplayWindow::observe(std::uint32_t sequence)

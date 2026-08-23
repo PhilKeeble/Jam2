@@ -78,6 +78,7 @@ public:
     bool start_at(std::uint64_t frame, std::string& error);
     bool stop_at(std::uint64_t frame, std::string& error);
     void cancel() noexcept;
+    bool armed() const noexcept;
     void record(std::uint64_t audio_frame_start, std::span<const std::int32_t> input) noexcept;
 
     TrackTakeRecorderSnapshot snapshot() const noexcept;

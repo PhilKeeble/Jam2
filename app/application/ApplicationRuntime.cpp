@@ -267,7 +267,12 @@ void ApplicationRuntime::pollEngine()
 void ApplicationRuntime::publishNetworkSnapshot(Jam2NetworkOperationalSnapshot snapshot)
 {
     {
-        std::lock_guard<std::mutex> lock(network_snapshot_mutex_);
+        std::unique_lock<std::mutex> lock(network_snapshot_mutex_, std::try_to_lock);
+        if (!lock.owns_lock()) {
+            // Operational GUI telemetry is replaceable. Never make the UDP
+            // worker wait for a GUI reader holding the previous snapshot.
+            return;
+        }
         network_snapshot_ = snapshot;
     }
     QMetaObject::invokeMethod(this, [this, snapshot = std::move(snapshot)] {

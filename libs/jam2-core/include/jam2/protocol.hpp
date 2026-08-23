@@ -160,6 +160,16 @@ bool unpack_audio_into(
     NetworkAudioFormat format,
     std::span<const std::uint8_t> bytes,
     std::span<std::int32_t> output) noexcept;
+// Device and mixer audio uses Q31. These variants preserve the exact wire
+// quantization while avoiding an intermediate signed-24 conversion pass.
+bool pack_audio_q31_into(
+    NetworkAudioFormat format,
+    std::span<const std::int32_t> samples,
+    std::span<std::uint8_t> output) noexcept;
+bool unpack_audio_q31_into(
+    NetworkAudioFormat format,
+    std::span<const std::uint8_t> bytes,
+    std::span<std::int32_t> output) noexcept;
 
 } // namespace protocol
 } // namespace jam2

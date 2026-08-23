@@ -207,7 +207,7 @@ constexpr std::array kRuntimeFields{
     RuntimeField{"local_monitor", "--local-monitor", FieldKind::Boolean, 0, 1, ""},
     RuntimeField{"local_monitor_level", "--local-monitor-level", FieldKind::Number, 0, 4, ""},
     RuntimeField{"test_input", "--test-input", FieldKind::String, 0, 0, "off|silence|tone-440|pulse-1s|metro-pulse"},
-    RuntimeField{"os_priority", "--os-priority", FieldKind::String, 0, 0, "off|high|realtime"},
+    RuntimeField{"os_priority", "--os-priority", FieldKind::String, 0, 0, "off|high"},
     RuntimeField{"input_channels", "--input-channels", FieldKind::String, 0, 0, "channel-list"},
     RuntimeField{"output_channels", "--output-channels", FieldKind::String, 0, 0, "channel-list"},
     RuntimeField{"socket_send_buffer", "--socket-send-buffer", FieldKind::Integer, 1, 1073741824, ""},

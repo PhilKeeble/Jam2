@@ -56,6 +56,8 @@ struct NetworkPeerSendStats {
     std::uint64_t attempts = 0;
     std::uint64_t sent_packets = 0;
     std::uint64_t sent_bytes = 0;
+    std::uint64_t audio_sent_packets = 0;
+    std::uint64_t audio_sent_bytes = 0;
     std::uint64_t would_block_drops = 0;
     std::uint64_t no_buffer_drops = 0;
     std::uint64_t unreachable_errors = 0;
@@ -65,6 +67,19 @@ struct NetworkPeerSendStats {
     std::uint32_t consecutive_path_errors = 0;
     int last_error_code = 0;
     UdpSendOutcome last_outcome = UdpSendOutcome::Sent;
+};
+
+// Non-owning network-thread view. It is valid only until peer membership or
+// endpoint ownership is changed on the same NetworkSession.
+struct NetworkPeerAccess {
+    const NetworkPeerDescriptor* descriptor = nullptr;
+    PeerStream* stream = nullptr;
+    const NetworkPeerSendStats* send = nullptr;
+
+    explicit operator bool() const noexcept
+    {
+        return descriptor != nullptr && stream != nullptr && send != nullptr;
+    }
 };
 
 struct NetworkPeerSnapshot {
@@ -84,6 +99,34 @@ struct NetworkSessionSnapshot {
     std::vector<NetworkPeerSnapshot> peers;
 };
 
+enum class NetworkAudioPacing {
+    Scheduled,
+    CaptureSynchronized,
+    CaptureClock,
+};
+
+NetworkAudioPacing capture_audio_pacing(
+    long audio_callback_frames,
+    int frames_per_packet) noexcept;
+
+class NetworkCapturePacketPacer {
+public:
+    NetworkCapturePacketPacer(
+        NetworkAudioPacing pacing,
+        std::size_t frames_per_packet) noexcept;
+
+    bool captureClockActive() const noexcept;
+    bool captureReady(std::size_t capture_depth_frames) const noexcept;
+    bool catchupReady(std::size_t capture_depth_frames) const noexcept;
+    bool packetRequiresSpacing() const noexcept;
+    void observePacketSent(std::size_t remaining_capture_frames) noexcept;
+
+private:
+    NetworkAudioPacing pacing_ = NetworkAudioPacing::Scheduled;
+    std::size_t frames_per_packet_ = 0;
+    bool packet_requires_spacing_ = false;
+};
+
 class NetworkPacketSchedule {
 public:
     NetworkPacketSchedule(
@@ -94,6 +137,13 @@ public:
 
     std::uint64_t startTimeUs() const noexcept;
     std::uint64_t nextAudioSendUs() const noexcept;
+    bool audioSendReady(
+        std::uint64_t now_us,
+        NetworkAudioPacing pacing,
+        bool capture_deadline_override = false) const noexcept;
+    std::uint64_t audioSendWaitBudgetUs(
+        std::uint64_t now_us,
+        std::uint64_t maximum_wait_us) const noexcept;
     std::uint64_t nextPingUs() const noexcept;
     std::uint64_t nextGridStateUs() const noexcept;
     std::uint64_t sampleTime() const noexcept;
@@ -101,6 +151,7 @@ public:
     std::uint32_t takeControlSequence() noexcept;
 
     void commitAudioPacket() noexcept;
+    void resynchronizeAudioSend(std::uint64_t now_us) noexcept;
     void commitPing(std::uint64_t interval_us = 100000ULL) noexcept;
     void scheduleNextGridState(std::uint64_t now_us, std::uint64_t interval_us) noexcept;
 
@@ -177,6 +228,8 @@ public:
     NetworkSessionSnapshot snapshot() const;
     const NetworkPeerDescriptor& remotePeer() const;
     const NetworkPeerDescriptor* peer(PeerId peer_id) const noexcept;
+    NetworkPeerAccess accessPeer(PeerId peer_id) noexcept;
+    NetworkPeerAccess accessPeer(const ResolvedUdpEndpoint& endpoint) noexcept;
     PeerId peerIdForEndpoint(const ResolvedUdpEndpoint& endpoint) const noexcept;
     bool recognizesEndpoint(const ResolvedUdpEndpoint& endpoint) const noexcept;
     bool acceptsEndpoint(const ResolvedUdpEndpoint& endpoint) const noexcept;
@@ -228,7 +281,9 @@ public:
         std::uint64_t timing_value,
         std::span<const std::uint8_t> payload,
         bool allow_inactive = false);
-    std::optional<NetworkDatagram> receiveFor(std::uint64_t timeout_us);
+    std::optional<NetworkDatagram> receiveFor(
+        std::uint64_t timeout_us,
+        RealtimeWakeSignal* wake_signal = nullptr);
     protocol::ParseResult parse(std::span<const std::uint8_t> packet) const noexcept;
     void close() noexcept;
 

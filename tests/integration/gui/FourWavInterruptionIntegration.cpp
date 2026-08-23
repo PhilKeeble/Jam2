@@ -1163,7 +1163,13 @@ int main(int argc, char* argv[])
     expectedHashes.append(hashes[4]);
     if (!waitForAll(coordinator, QStringLiteral("request-start timeout recovery"),
             [&expectedHashes](std::size_t, const QJsonObject& state) {
-                if (!transferIdle(state)) return false;
+                const QJsonObject content = state.value(
+                    QStringLiteral("content")).toObject();
+                if (!transferIdle(state) ||
+                    content.value(QStringLiteral("file_tasks_rejected")).toInteger() != 0 ||
+                    content.value(QStringLiteral("file_tasks_high_water")).toInt() > 64) {
+                    return false;
+                }
                 for (const QString& expected : expectedHashes) {
                     if (assetCount(state, expected) != 1) return false;
                 }
@@ -1472,7 +1478,13 @@ int main(int argc, char* argv[])
     expectedHashes.append(hashes[6]);
     if (!waitForAll(coordinator, QStringLiteral("source-handoff exact convergence"),
             [&expectedHashes](std::size_t, const QJsonObject& state) {
-                if (!transferIdle(state)) return false;
+                const QJsonObject content = state.value(
+                    QStringLiteral("content")).toObject();
+                if (!transferIdle(state) ||
+                    content.value(QStringLiteral("file_tasks_rejected")).toInteger() != 0 ||
+                    content.value(QStringLiteral("file_tasks_high_water")).toInt() > 64) {
+                    return false;
+                }
                 for (const QString& expected : expectedHashes) {
                     if (assetCount(state, expected) != 1 ||
                         !assetAvailable(state, expected)) return false;

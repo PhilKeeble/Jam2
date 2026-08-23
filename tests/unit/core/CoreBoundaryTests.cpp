@@ -15,8 +15,10 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <exception>
+#include <filesystem>
 #include <iostream>
 #include <span>
 #include <stdexcept>
@@ -66,11 +68,35 @@ public:
     }
 
     void setResamplerRatio(double value) noexcept override { ratio = value; }
+    std::uint64_t underrunFrames() const noexcept override { return underruns; }
 
     std::size_t depth = 0;
     std::size_t pushed = 0;
     std::size_t requestedDrops = 0;
+    std::uint64_t underruns = 0;
     double ratio = 1.0;
+};
+
+class CollectingSink final : public jam2::PeerStreamPlayback {
+public:
+    std::size_t depthFrames() const noexcept override { return depth; }
+
+    std::size_t pushFrames(std::span<const std::int32_t> frames) noexcept override
+    {
+        depth += frames.size();
+        samples.insert(samples.end(), frames.begin(), frames.end());
+        return frames.size();
+    }
+
+    void requestDropFrames(std::size_t frames) noexcept override
+    {
+        depth -= (std::min)(depth, frames);
+    }
+
+    void setResamplerRatio(double) noexcept override {}
+
+    std::size_t depth = 0;
+    std::vector<std::int32_t> samples;
 };
 
 void putU16(std::vector<std::uint8_t>& bytes, std::size_t offset, std::uint16_t value)
@@ -135,6 +161,23 @@ void testRingMidiAndDownmixBoundaries()
             resetStats.underruns == 0 && resetStats.overruns == 0,
         "ring reset restores capacity and clears diagnostics");
 
+    jam2::audio::MonoRingBuffer exactRing(4);
+    const std::array<std::int32_t, 2> exactFirst{31, 32};
+    expect(exactRing.push(exactFirst) == exactFirst.size(),
+        "exact ring fixture queues its partial packet");
+    std::array<std::int32_t, 3> exactOutput{7, 8, 9};
+    expect(exactRing.pop_exact(exactOutput) == 0 &&
+            exactRing.available_read() == exactFirst.size() &&
+            exactOutput == std::array<std::int32_t, 3>{7, 8, 9} &&
+            exactRing.stats().underruns == 0,
+        "exact ring pop preserves partial capture data and caller output");
+    const std::array<std::int32_t, 1> exactLast{33};
+    expect(exactRing.push(exactLast) == exactLast.size() &&
+            exactRing.pop_exact(exactOutput) == exactOutput.size() &&
+            exactOutput == std::array<std::int32_t, 3>{31, 32, 33} &&
+            exactRing.available_read() == 0,
+        "exact ring pop consumes one complete fixed packet in order");
+
     jam2::midi::EventQueue queue;
     expect(queue.push({1, 0, 0x90, 60, 100, 3}), "MIDI clear fixture enqueues");
     queue.clear();
@@ -178,15 +221,83 @@ void testPreparedAndRecorderBoundaries()
     source.abandonLoadingSlot(-1);
     source.abandonReadySlot(99);
 
-    jam2::audio::TrackTakeRecorder recorder(128);
-    const auto stats = recorder.stats();
-    expect(!stats.armed && !stats.recording && !stats.finalized &&
-            stats.queue_capacity_frames == 4096,
-        "track-take recorder stats expose a clean state and minimum queue bound");
+    const std::filesystem::path takePath =
+        std::filesystem::temp_directory_path() /
+        ("jam2-track-take-boundary-" + std::to_string(jam2::monotonic_us()) + ".wav");
+    {
+        jam2::audio::TrackTakeRecorder recorder(128);
+        const auto stats = recorder.stats();
+        expect(!recorder.armed() && !stats.armed && !stats.recording && !stats.finalized &&
+                stats.queue_capacity_frames == 4096,
+            "track-take recorder stats expose a clean state and minimum queue bound");
+        std::string error;
+        expect(recorder.arm("boundary-take", takePath, 48000, error) && recorder.armed(),
+            "armed track-take recorder publishes callback-side activity");
+        recorder.cancel();
+        expect(!recorder.armed(),
+            "canceled track-take recorder clears callback-side activity");
+    }
+    std::error_code removeError;
+    (void)std::filesystem::remove(takePath, removeError);
 }
 
 void testProtocolPeerAndMixerBoundaries()
 {
+    jam2::NetworkPacketSchedule packetSchedule(48000, 64, 1000);
+    expect(jam2::capture_audio_pacing(32, 64) ==
+                jam2::NetworkAudioPacing::CaptureClock &&
+            jam2::capture_audio_pacing(64, 64) ==
+                jam2::NetworkAudioPacing::CaptureClock &&
+            jam2::capture_audio_pacing(128, 64) ==
+                jam2::NetworkAudioPacing::CaptureSynchronized &&
+            jam2::capture_audio_pacing(0, 64) ==
+                jam2::NetworkAudioPacing::CaptureSynchronized,
+        "capture-clock pacing is limited to valid callbacks no larger than one packet");
+    jam2::NetworkCapturePacketPacer captureClockPacer(
+        jam2::NetworkAudioPacing::CaptureClock, 64);
+    expect(captureClockPacer.captureClockActive() &&
+            captureClockPacer.captureReady(64) &&
+            !captureClockPacer.catchupReady(64),
+        "one freshly published callback-sized packet may lead its wall deadline");
+    captureClockPacer.observePacketSent(64);
+    expect(captureClockPacer.packetRequiresSpacing() &&
+            !captureClockPacer.captureReady(64) &&
+            !captureClockPacer.catchupReady(64),
+        "one packet left from an accumulated callback remains wall-clock spaced");
+    expect(captureClockPacer.catchupReady(128),
+        "capture backlog catches up only while more than one packet remains");
+    captureClockPacer.observePacketSent(0);
+    expect(!captureClockPacer.packetRequiresSpacing() &&
+            captureClockPacer.captureReady(64),
+        "draining capture to the live edge re-enables device-clock dispatch");
+    jam2::NetworkCapturePacketPacer largeCallbackPacer(
+        jam2::NetworkAudioPacing::CaptureSynchronized, 64);
+    expect(!largeCallbackPacer.captureClockActive() &&
+            !largeCallbackPacer.captureReady(64) &&
+            largeCallbackPacer.catchupReady(128),
+        "large callbacks retain scheduled anti-burst pacing and bounded catch-up");
+    expect(!packetSchedule.audioSendReady(
+               999, jam2::NetworkAudioPacing::Scheduled) &&
+            !packetSchedule.audioSendReady(
+               999, jam2::NetworkAudioPacing::CaptureSynchronized) &&
+            packetSchedule.audioSendReady(
+               999, jam2::NetworkAudioPacing::CaptureSynchronized, true) &&
+            packetSchedule.audioSendReady(
+               999, jam2::NetworkAudioPacing::CaptureClock, true) &&
+            packetSchedule.audioSendReady(
+               1000, jam2::NetworkAudioPacing::Scheduled),
+        "capture synchronization overrides only an explicit stale device deadline");
+    expect(packetSchedule.audioSendWaitBudgetUs(0, 1000) == 1000 &&
+            packetSchedule.audioSendWaitBudgetUs(500, 1000) == 500 &&
+            packetSchedule.audioSendWaitBudgetUs(1000, 1000) == 0,
+        "network receive wait is bounded by the next audio-send deadline");
+    packetSchedule.commitAudioPacket();
+    expect(packetSchedule.audioSendWaitBudgetUs(1500, 1000) == 833,
+        "fractional packet schedule exposes its exact remaining receive wait");
+    packetSchedule.resynchronizeAudioSend(5000);
+    expect(packetSchedule.nextAudioSendUs() == 5000,
+        "capture synchronization rebases the wall deadline without changing packet ownership");
+
     for (int value = static_cast<int>(jam2::protocol::ParseError::None);
          value <= static_cast<int>(jam2::protocol::ParseError::AuthenticationFailed);
          ++value) {
@@ -234,6 +345,16 @@ void testProtocolPeerAndMixerBoundaries()
     const std::array<std::int32_t, 4> samples{1, 2, 3, 4};
     expect(slot->pushFrames(samples) > 0,
         "peer mixer slot accepts bounded source frames");
+    expect(firstMixer.peerStats(44)->unity_resampler_fast_frames == samples.size(),
+        "aligned unity peer audio bypasses scalar interpolation exactly");
+    slot->setResamplerRatio(1.001);
+    expect(slot->pushFrames(samples) > 0 &&
+            firstMixer.peerStats(44)->unity_resampler_fast_frames == samples.size(),
+        "non-unity peer audio retains the continuity-preserving resampler");
+    slot->setResamplerRatio(1.0);
+    expect(slot->pushFrames(samples) > 0 &&
+            firstMixer.peerStats(44)->unity_resampler_fast_frames == samples.size(),
+        "fractional resampler state is not discarded when correction returns to unity");
     slot->requestDropFrames(2);
     expect(firstMixer.setPeerGain(44, 750000) && firstMixer.setPeerMuted(44, true),
         "peer mixer applies per-peer gain and mute controls");
@@ -243,6 +364,31 @@ void testProtocolPeerAndMixerBoundaries()
     secondMixer = std::move(firstMixer);
     expect(secondMixer.peerStats(44) != nullptr,
         "peer-mixer move assignment preserves owned slots");
+
+    BufferSink recoverySink;
+    mixerConfig.adaptive_playback_cushion = true;
+    mixerConfig.adaptive_target_frames = 128;
+    mixerConfig.adaptive_min_frames = 128;
+    mixerConfig.adaptive_max_frames = 256;
+    jam2::PeerMixer recoveryMixer(mixerConfig, &recoverySink);
+    auto* recoverySlot = recoveryMixer.addPeer(55, 256);
+    expect(recoveryMixer.setPeerActive(55, true),
+        "idle-gated mixer activates its recovery fixture");
+    const std::array<std::int32_t, 64> recoveryFrames{};
+    expect(recoverySlot->pushFrames(recoveryFrames) == recoveryFrames.size(),
+        "idle-gated mixer queues its first complete block");
+    recoveryMixer.advance(1000);
+    const std::size_t pushedBeforeIdle = recoverySink.pushed;
+    recoveryMixer.advance(2000);
+    expect(recoverySink.pushed == pushedBeforeIdle,
+        "idle mixer advancement does not manufacture output without new work");
+    recoverySink.depth = 0;
+    recoverySink.underruns = 64;
+    recoveryMixer.advance(10000);
+    expect(recoverySink.pushed > pushedBeforeIdle &&
+            recoveryMixer.stats().deadline_slots > 0 &&
+            recoveryMixer.stats().adaptive_raise_events > 0,
+        "idle mixer gate still observes asynchronous output underruns and advances recovery");
 }
 
 void testPeerStreamDriftCalibrationRejectsDequeuedBurst()
@@ -368,6 +514,140 @@ void testPeerStreamDriftCalibrationRejectsDequeuedBurst()
         "peer drift correction obeys its bounded ratio slew");
 }
 
+void testJitterBufferTracksOccupancyAcrossClockDrift()
+{
+    constexpr std::uint32_t packetCount = 60000;
+    std::array<std::uint8_t, 128> payload{};
+    for (const long double clockScale : {1.0005L, 0.9995L}) {
+        BufferSink sink;
+        jam2::PeerStreamConfig config = peerConfig();
+        config.sample_time_playout = false;
+        config.playback_max_frames = 0;
+        config.jitter_buffer_frames = 512;
+        config.jitter_buffer_max_frames = 1024;
+        config.stats_warmup_us = 0;
+        jam2::PeerStream stream(config, 0, &sink);
+
+        std::uint64_t lastReceiveTime = 0;
+        for (std::uint32_t sequence = 0; sequence < packetCount; ++sequence) {
+            const long double remoteTimeUs =
+                static_cast<long double>(sequence) * 64.0L * 1000000.0L / 48000.0L;
+            lastReceiveTime = 1000ULL + static_cast<std::uint64_t>(
+                std::llround(remoteTimeUs / clockScale));
+            const jam2::protocol::Header header{
+                jam2::protocol::PacketType::Audio,
+                1,
+                sequence,
+                static_cast<std::uint64_t>(sequence) * 64ULL,
+                static_cast<std::uint16_t>(payload.size()),
+                0,
+            };
+            expect(stream.receiveAudio(header, payload, lastReceiveTime) ==
+                    jam2::PeerAudioResult::Accepted,
+                "drifting jitter stream accepts ordered audio");
+            stream.advance(lastReceiveTime);
+        }
+        stream.advance(lastReceiveTime + 20000ULL);
+
+        const auto& stats = stream.stats();
+        expect(stats.jitter_buffer_forced_releases == 0 &&
+                stats.jitter_capacity_drops == 0,
+            "clock drift does not drive the jitter queue into forced release or capacity pressure");
+        expect(stats.jitter_buffer_depth_max_frames <= 512 &&
+                stats.jitter_pending_high_water <= 8,
+            "drift-safe jitter scheduling stays within one configured target window");
+        expect(stats.jitter_buffer_target_releases > packetCount - 16 &&
+                stats.jitter_buffer_released_packets == packetCount,
+            "drift-safe jitter scheduling releases the complete ordered stream");
+    }
+}
+
+void testJitterBufferPreservesOrderAndRebasesDiscontinuities()
+{
+    auto payloadForMarker = [](std::uint16_t marker) {
+        std::array<std::uint8_t, 128> payload{};
+        for (std::size_t offset = 0; offset < payload.size(); offset += 2) {
+            payload[offset] = static_cast<std::uint8_t>(marker & 0xffU);
+            payload[offset + 1] = static_cast<std::uint8_t>(marker >> 8U);
+        }
+        return payload;
+    };
+    auto receive = [](jam2::PeerStream& stream,
+                      std::uint32_t sequence,
+                      std::uint64_t receiveTimeUs,
+                      std::span<const std::uint8_t> payload) {
+        const jam2::protocol::Header header{
+            jam2::protocol::PacketType::Audio,
+            1,
+            sequence,
+            static_cast<std::uint64_t>(sequence) * 64ULL,
+            static_cast<std::uint16_t>(payload.size()),
+            0,
+        };
+        return stream.receiveAudio(header, payload, receiveTimeUs);
+    };
+
+    jam2::PeerStreamConfig config = peerConfig();
+    config.sample_time_playout = false;
+    config.playback_max_frames = 0;
+    config.jitter_buffer_frames = 256;
+    config.jitter_buffer_max_frames = 512;
+    config.stats_warmup_us = 0;
+
+    CollectingSink orderedSink;
+    jam2::PeerStream ordered(config, 0, &orderedSink);
+    const auto first = payloadForMarker(1);
+    const auto second = payloadForMarker(2);
+    const auto third = payloadForMarker(3);
+    const auto fourth = payloadForMarker(4);
+    expect(receive(ordered, 0, 1000, first) == jam2::PeerAudioResult::Accepted &&
+            receive(ordered, 2, 2000, third) == jam2::PeerAudioResult::Accepted &&
+            receive(ordered, 1, 3000, second) == jam2::PeerAudioResult::Accepted &&
+            receive(ordered, 3, 4000, fourth) == jam2::PeerAudioResult::Accepted,
+        "jitter buffer accepts bounded packet reordering");
+    ordered.advance(10000);
+
+    const auto& orderedStats = ordered.stats();
+    expect(orderedSink.samples.size() == 256 &&
+            orderedSink.samples[0] == 65536 &&
+            orderedSink.samples[64] == 131072 &&
+            orderedSink.samples[128] == 196608 &&
+            orderedSink.samples[192] == 262144,
+        "jitter buffer releases reordered packets in sequence order");
+    expect(orderedStats.jitter_buffer_target_releases == 1 &&
+            orderedStats.jitter_buffer_timeout_releases == 3 &&
+            orderedStats.jitter_buffer_queued_packets == 4 &&
+            orderedStats.jitter_buffer_released_packets == 4 &&
+            orderedStats.reordered_recovered == 1,
+        "bounded packet handoff preserves reordered target-depth and residence-time releases");
+
+    CollectingSink discontinuitySink;
+    config.jitter_buffer_frames = 512;
+    config.jitter_buffer_max_frames = 1024;
+    jam2::PeerStream discontinuity(config, 0, &discontinuitySink);
+    expect(receive(discontinuity, 0, 1000, first) == jam2::PeerAudioResult::Accepted &&
+            receive(discontinuity, 1, 2000, second) == jam2::PeerAudioResult::Accepted,
+        "jitter discontinuity fixture queues its original stream");
+    expect(receive(discontinuity, 1000, 3000, third) ==
+                jam2::PeerAudioResult::ForwardGapRejected &&
+            receive(discontinuity, 1001, 4000, third) ==
+                jam2::PeerAudioResult::ForwardGapRejected &&
+            receive(discontinuity, 1002, 5000, fourth) ==
+                jam2::PeerAudioResult::Accepted,
+        "jitter buffer confirms a large forward discontinuity before rebasing");
+    discontinuity.advance(20000);
+
+    const auto& discontinuityStats = discontinuity.stats();
+    expect(discontinuityStats.forward_gap_resyncs == 1 &&
+            discontinuityStats.jitter_buffer_rebases == 1 &&
+            discontinuityStats.jitter_buffer_dropped_packets == 2 &&
+            discontinuityStats.jitter_buffer_dropped_frames == 128,
+        "jitter rebase discards only packets from the obsolete sequence timeline");
+    expect(discontinuitySink.samples.size() == 64 &&
+            discontinuitySink.samples.front() == 262144,
+        "jitter rebase releases only the confirmed replacement timeline");
+}
+
 void testUdpStunAndSessionBoundaries()
 {
     jam2::NetworkRuntime networkRuntime;
@@ -389,9 +669,95 @@ void testUdpStunAndSessionBoundaries()
     expect(invalidSend.outcome == jam2::UdpSendOutcome::Fatal,
         "moved-from UDP send reports a classified fatal socket error");
 
+    jam2::RealtimeWakeSignal captureReadyWake;
+    jam2::audio::MonoRingBuffer captureReadyRing(8);
+    jam2::audio::StreamControl captureReadyControl;
+    captureReadyControl.network_capture_wake_signal.store(
+        &captureReadyWake, std::memory_order_relaxed);
+    captureReadyControl.network_capture_wake_frames.store(
+        4, std::memory_order_relaxed);
+    captureReadyControl.network_capture_requested_enabled.store(
+        true, std::memory_order_relaxed);
+    captureReadyControl.network_capture_generation_requested.store(
+        1, std::memory_order_relaxed);
+    expect(jam2::audio::prepare_network_capture_callback(
+               captureReadyControl, captureReadyRing, 0),
+        "capture-ready fixture enables its callback attachment");
+    const std::array<std::int32_t, 2> firstCaptureFrames{1, 2};
+    const std::array<std::int32_t, 2> secondCaptureFrames{3, 4};
+    const std::array<std::int32_t, 4> dormantCaptureFrames{1, 2, 3, 4};
+    (void)jam2::audio::push_network_capture_callback(
+        captureReadyControl, captureReadyRing, dormantCaptureFrames, 50);
+    expect(captureReadyWake.signalCount() == 0,
+        "complete capture packet stays dormant when the network worker has not requested a wake");
+    (void)captureReadyRing.discard_all();
+    captureReadyWake.requestWake();
+    (void)jam2::audio::push_network_capture_callback(
+        captureReadyControl, captureReadyRing, firstCaptureFrames, 100);
+    expect(captureReadyWake.signalCount() == 0,
+        "capture callback does not wake before a complete packet is ready");
+    (void)jam2::audio::push_network_capture_callback(
+        captureReadyControl, captureReadyRing, secondCaptureFrames, 200);
+    const auto wakeWaitStarted = std::chrono::steady_clock::now();
+    std::array<std::uint8_t, 8> wakeBuffer{};
+    const auto wakeDatagram = movedTo.recv_from_for(
+        wakeBuffer, 250000, &captureReadyWake);
+    const auto wakeWaitElapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - wakeWaitStarted);
+    expect(!wakeDatagram && wakeWaitElapsed < std::chrono::milliseconds(50) &&
+            captureReadyWake.signalCount() == 1 &&
+            captureReadyWake.consumptionCount() == 1 &&
+            captureReadyWake.lastSignalTimeUs() == 200,
+        "complete capture packet wakes an otherwise idle UDP receive immediately");
+
+    jam2::UdpSocket simultaneousWakeSender;
+    simultaneousWakeSender.bind({"127.0.0.1", 0});
+    const auto simultaneousWakeTarget =
+        jam2::resolve_udp_endpoint(movedTo.local_endpoint());
+    const std::array<std::uint8_t, 1> simultaneousWakePacket{9};
+    expect(simultaneousWakeSender.send_to(
+               simultaneousWakeTarget, simultaneousWakePacket).outcome ==
+               jam2::UdpSendOutcome::Sent,
+        "simultaneous UDP/capture-wake fixture queues its datagram");
+    captureReadyWake.signal(300);
+    const auto simultaneousWakeDatagram = movedTo.recv_from_for(
+        wakeBuffer, 250000, &captureReadyWake);
+    expect(simultaneousWakeDatagram && simultaneousWakeDatagram->size == 1 &&
+            wakeBuffer[0] == 9 && captureReadyWake.signalCount() == 2 &&
+            captureReadyWake.consumptionCount() == 2,
+        "UDP readiness consumes a simultaneous capture notification without losing the datagram");
+    captureReadyWake.cancelWakeRequest();
+
     jam2::UdpSocket duplicateBind;
     expectThrows([&] { duplicateBind.bind(movedTo.local_endpoint()); },
         "UDP bind collision reports its platform socket error");
+
+    jam2::UdpSocket burstSender;
+    burstSender.bind({"127.0.0.1", 0});
+    const auto burstTarget = jam2::resolve_udp_endpoint(movedTo.local_endpoint());
+    const std::array<std::uint8_t, 1> burstOne{1};
+    const std::array<std::uint8_t, 1> burstTwo{2};
+    const std::array<std::uint8_t, 1> burstThree{3};
+    expect(burstSender.send_to(burstTarget, burstOne).outcome ==
+                jam2::UdpSendOutcome::Sent &&
+            burstSender.send_to(burstTarget, burstTwo).outcome ==
+                jam2::UdpSendOutcome::Sent &&
+            burstSender.send_to(burstTarget, burstThree).outcome ==
+                jam2::UdpSendOutcome::Sent,
+        "nonblocking UDP fixture queues a three-datagram receive burst");
+    std::array<std::uint8_t, 8> burstBuffer{};
+    const auto burstFirst = movedTo.recv_from_for(burstBuffer, 500000);
+    const bool firstMatches = burstFirst && burstFirst->size == 1 &&
+        burstBuffer[0] == 1;
+    const auto burstSecond = movedTo.recv_from_for(burstBuffer, 0);
+    const bool secondMatches = burstSecond && burstSecond->size == 1 &&
+        burstBuffer[0] == 2;
+    const auto burstThird = movedTo.recv_from_for(burstBuffer, 0);
+    const bool thirdMatches = burstThird && burstThird->size == 1 &&
+        burstBuffer[0] == 3;
+    const auto burstEmpty = movedTo.recv_from_for(burstBuffer, 0);
+    expect(firstMatches && secondMatches && thirdMatches && !burstEmpty,
+        "zero-timeout UDP drains queued datagrams in order and stops at would-block");
 
     const auto request = jam2::stun::make_binding_request();
     expect(request.bytes.size() == 20,
@@ -480,6 +846,13 @@ void testUdpStunAndSessionBoundaries()
             snapshot.peers[0].mix.gain_ppm == 700000 &&
             snapshot.peers[0].mix.muted,
         "network session snapshot publishes exact peer mixer state");
+    const auto accessById = networkSession.accessPeer(jam2::PeerId{2});
+    const auto accessByEndpoint = networkSession.accessPeer(remote.endpoint);
+    expect(accessById && accessByEndpoint &&
+            accessById.descriptor == accessByEndpoint.descriptor &&
+            accessById.stream == accessByEndpoint.stream &&
+            accessById.descriptor->peer_id == jam2::PeerId{2},
+        "network session resolves one typed peer view by identity or endpoint");
 
     const std::size_t packetSize = networkSession.send(
         jam2::protocol::PacketType::Ping, 1, 99, {});
@@ -490,6 +863,16 @@ void testUdpStunAndSessionBoundaries()
             networkSession.parse(std::span<const std::uint8_t>(
                 packet.data(), receivedOne ? receivedOne->size : 0)),
         "network session sends and authenticates a fixed-shape ping");
+    const std::array<std::uint8_t, 128> audioPayload{};
+    const std::size_t audioPacketSize = networkSession.send(
+        jam2::protocol::PacketType::Audio, 2, 0, audioPayload);
+    const auto receivedAudio = receiverOne.recv_from(packet, 500);
+    const auto* categorizedSend = networkSession.peerSendStats({2});
+    expect(receivedAudio && receivedAudio->size == audioPacketSize &&
+            categorizedSend != nullptr && categorizedSend->sent_packets == 2 &&
+            categorizedSend->audio_sent_packets == 1 &&
+            categorizedSend->audio_sent_bytes == audioPacketSize,
+        "network send ownership counts audio without per-packet runtime peer rescans");
 
     jam2::UdpSocket receiverTwo;
     receiverTwo.bind({"127.0.0.1", 0});
@@ -566,6 +949,60 @@ void testSmallDiagnosticBoundaries()
         "session authority exposes its local peer identity");
     expect(!jam2::tuning_profile_names().empty(),
         "tuning profile diagnostics enumerate maintained profiles");
+    const jam2::JoinProfile* fast = jam2::find_join_profile("fast");
+    const jam2::CreateProfile* fast_create = jam2::find_create_profile("fast");
+    expect(fast != nullptr && fast_create != nullptr && fast_create->local == fast &&
+            fast_create->sample_rate == 48000 && fast_create->frame_size == 64 &&
+            fast->audio_buffer_size == 32 && fast->playback_prefill_frames == 64 &&
+            fast->playout_delay_frames == 64 && fast->jitter_buffer_frames == 64 &&
+            fast->jitter_buffer_max_frames == 512 &&
+            fast->adaptive_playback_target_frames == 64 &&
+            fast->adaptive_playback_min_frames == 64 &&
+            fast->adaptive_playback_max_frames == 512,
+        "fast create and join profiles preserve the measured 64-frame floor and 512-frame recovery bounds");
+}
+
+void testQ31NetworkAudioConversion()
+{
+    constexpr auto minimum = (std::numeric_limits<std::int32_t>::min)();
+    constexpr auto maximum = (std::numeric_limits<std::int32_t>::max)();
+    const std::array<std::int32_t, 9> q31{
+        minimum, -65537, -65536, -1, 0, 1, 65535, 65536, maximum,
+    };
+    std::array<std::int32_t, q31.size()> signed24{};
+    for (std::size_t i = 0; i < q31.size(); ++i) {
+        signed24[i] = q31[i] / 256;
+    }
+    for (const auto format : {
+             jam2::NetworkAudioFormat::Pcm16Mono,
+             jam2::NetworkAudioFormat::Pcm24Mono}) {
+        const std::size_t bytes = jam2::protocol::audio_payload_size(format, q31.size());
+        std::vector<std::uint8_t> legacy(bytes);
+        std::vector<std::uint8_t> direct(bytes);
+        expect(jam2::protocol::pack_audio_into(format, signed24, legacy) &&
+                jam2::protocol::pack_audio_q31_into(format, q31, direct) &&
+                direct == legacy,
+            "direct Q31 network packing preserves the exact PCM wire bytes");
+
+        std::array<std::int32_t, q31.size()> legacyDecoded{};
+        std::array<std::int32_t, q31.size()> directDecoded{};
+        expect(jam2::protocol::unpack_audio_into(format, legacy, legacyDecoded) &&
+                jam2::protocol::unpack_audio_q31_into(format, legacy, directDecoded),
+            "direct Q31 network unpacking accepts the maintained PCM formats");
+        for (std::int32_t& sample : legacyDecoded) {
+            sample *= 256;
+        }
+        expect(directDecoded == legacyDecoded,
+            "direct Q31 network unpacking preserves the exact mixer samples");
+    }
+
+    std::array<std::uint8_t, 1> invalidBytes{};
+    std::array<std::int32_t, 1> invalidOutput{};
+    expect(!jam2::protocol::pack_audio_q31_into(
+               jam2::NetworkAudioFormat::Pcm24Mono, q31, invalidBytes) &&
+            !jam2::protocol::unpack_audio_q31_into(
+                jam2::NetworkAudioFormat::Pcm24Mono, invalidBytes, invalidOutput),
+        "direct Q31 conversion rejects mismatched fixed-shape buffers");
 }
 
 } // namespace
@@ -577,7 +1014,10 @@ int main()
         testPreparedAndRecorderBoundaries();
         testProtocolPeerAndMixerBoundaries();
         testPeerStreamDriftCalibrationRejectsDequeuedBurst();
+        testJitterBufferTracksOccupancyAcrossClockDrift();
+        testJitterBufferPreservesOrderAndRebasesDiscontinuities();
         testUdpStunAndSessionBoundaries();
+        testQ31NetworkAudioConversion();
         testSmallDiagnosticBoundaries();
     } catch (const std::exception& exception) {
         ++failures;

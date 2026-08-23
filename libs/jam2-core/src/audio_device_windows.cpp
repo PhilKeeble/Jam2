@@ -193,6 +193,34 @@ std::string selected_channel_range_text(const ChannelSelection& channels, bool i
     return out.str();
 }
 
+processing::DriverOutputReadyObservation output_ready_observation(
+    ASIOError error) noexcept
+{
+    if (error == ASE_OK) {
+        return processing::DriverOutputReadyObservation::Accepted;
+    }
+    if (error == ASE_NotPresent) {
+        return processing::DriverOutputReadyObservation::Unsupported;
+    }
+    return processing::DriverOutputReadyObservation::Error;
+}
+
+void publish_output_ready_state(
+    StreamControl* control,
+    const processing::DriverOutputReadyState& state) noexcept
+{
+    if (control == nullptr) {
+        return;
+    }
+    control->driver_output_ready_error.store(state.error, std::memory_order_relaxed);
+    if (!state.shouldNotify()) {
+        control->driver_output_ready_latency_reduction_frames.store(
+            0, std::memory_order_relaxed);
+    }
+    control->driver_output_ready_status.store(
+        static_cast<int>(state.status), std::memory_order_release);
+}
+
 std::string channel_range_error(
     const char* backend,
     const char* direction,
@@ -217,6 +245,7 @@ struct DuplexContext {
     MonoRingBuffer* pitch = nullptr;
     MonoRingBuffer* playback = nullptr;
     StreamControl* control = nullptr;
+    IASIO* driver = nullptr;
     OutputRecorder* recorder = nullptr;
     TrackTakeRecorder* track_take_recorder = nullptr;
     std::vector<std::int32_t> capture_scratch;
@@ -224,6 +253,7 @@ struct DuplexContext {
     std::vector<double> input_peak_scratch;
     SmoothedMonoDownmix input_downmix;
     std::vector<std::int32_t> playback_scratch;
+    std::vector<std::int32_t> playback_resampler_scratch;
     std::vector<std::int32_t> recorder_my_input_scratch;
     std::vector<std::int32_t> recorder_their_input_scratch;
     std::vector<std::int32_t> recorder_inputs_mix_scratch;
@@ -238,6 +268,9 @@ struct DuplexContext {
     std::atomic<long> callbacks{0};
     std::atomic<bool> playback_prefilled{false};
     processing::CallbackIntervalState callback_intervals;
+    processing::DriverOutputReadyState output_ready;
+    std::uint64_t callback_generation = 0;
+    processing::MetronomeWaveBank metronome_wave_bank;
 };
 
 DuplexContext* g_duplex_context = nullptr;
@@ -260,13 +293,13 @@ void duplex_buffer_switch(long double_buffer_index, ASIOBool)
     if (context == nullptr || context->capture == nullptr || context->playback == nullptr) {
         return;
     }
-    if (context->control != nullptr) {
-        context->control->audio_callback_generation.fetch_add(
-            1, std::memory_order_acq_rel);
-    }
+    const std::uint64_t callback_start_us = processing::callback_now_us();
+    processing::publish_callback_begin(
+        context->control,
+        context->callback_generation);
     processing::observe_callback_interval(
         context->callback_intervals,
-        processing::callback_now_us(),
+        callback_start_us,
         static_cast<std::size_t>(context->buffer_size),
         context->sample_rate);
     const bool network_capture_enabled = context->control != nullptr &&
@@ -274,7 +307,25 @@ void duplex_buffer_switch(long double_buffer_index, ASIOBool)
             *context->control,
             *context->capture,
             context->engine_frame_counter);
-    if (context->recorder_my_input_scratch.size() >= static_cast<std::size_t>(context->buffer_size)) {
+    const bool track_take_armed = context->track_take_recorder != nullptr &&
+        context->track_take_recorder->armed();
+    const bool jam_recording_active = context->recorder != nullptr &&
+        context->recorder->active();
+    const std::int32_t track_take_options = track_take_armed && context->control != nullptr
+        ? context->control->track_take_options.load(std::memory_order_relaxed)
+        : 0;
+    const auto track_take_source = static_cast<TrackTakeSource>(
+        track_take_options & 0xff);
+    const bool current_jam_take = track_take_armed &&
+        track_take_source == TrackTakeSource::CurrentJam;
+    const bool prepared_stem_required = current_jam_take &&
+        (track_take_options & kTrackTakeIncludePrepared) != 0;
+    const bool metronome_stem_required = jam_recording_active ||
+        (current_jam_take &&
+         (track_take_options & kTrackTakeIncludeMetronome) != 0);
+    const bool recording_scratch_required = track_take_armed || jam_recording_active;
+    if (recording_scratch_required &&
+        context->recorder_my_input_scratch.size() >= static_cast<std::size_t>(context->buffer_size)) {
         std::fill(
             context->recorder_my_input_scratch.begin(),
             context->recorder_my_input_scratch.begin() + context->buffer_size,
@@ -310,15 +361,22 @@ void duplex_buffer_switch(long double_buffer_index, ASIOBool)
             if (!routed) std::fill(generated.begin(), generated.end(), 0);
         }
         if (context->control != nullptr) {
-            processing::observe_input_peaks(context->control, generated);
+            if (source_router != nullptr) {
+                processing::observe_input_peak_value(
+                    context->control, source_router->last_peak_ppm());
+            } else {
+                processing::observe_input_peaks(context->control, generated);
+            }
         }
         if (network_capture_enabled) {
-            context->capture->push(std::span<const std::int32_t>(generated.data(), generated.size()));
+            push_network_capture_callback(
+                *context->control, *context->capture, generated, callback_start_us);
         }
         if (context->control != nullptr && context->pitch != nullptr) {
             push_pitch_analysis_callback(*context->control, *context->pitch, generated);
         }
-        if (context->recorder_my_input_scratch.size() >= static_cast<std::size_t>(context->buffer_size)) {
+        if (recording_scratch_required &&
+            context->recorder_my_input_scratch.size() >= static_cast<std::size_t>(context->buffer_size)) {
             std::copy(generated.begin(), generated.end(), context->recorder_my_input_scratch.begin());
         }
     } else if (!context->inputs.empty() &&
@@ -347,13 +405,17 @@ void duplex_buffer_switch(long double_buffer_index, ASIOBool)
                 static_cast<std::size_t>(context->buffer_size), 0);
             captured_input = std::span<const std::int32_t>(context->capture_scratch.data(),
                 static_cast<std::size_t>(context->buffer_size));
-            if (network_capture_enabled) context->capture->push(captured_input);
+            if (network_capture_enabled) {
+                push_network_capture_callback(
+                    *context->control, *context->capture, captured_input, callback_start_us);
+            }
         } else if (context->inputs.size() == 1) {
             const auto* input = static_cast<const std::int32_t*>(context->inputs[0]->buffers[double_buffer_index]);
             captured_input = std::span<const std::int32_t>(input, static_cast<std::size_t>(context->buffer_size));
             std::copy(captured_input.begin(), captured_input.end(), context->capture_scratch.begin());
             if (network_capture_enabled) {
-                context->capture->push(captured_input);
+                push_network_capture_callback(
+                    *context->control, *context->capture, captured_input, callback_start_us);
             }
         } else {
             std::fill(
@@ -406,16 +468,23 @@ void duplex_buffer_switch(long double_buffer_index, ASIOBool)
                 context->capture_scratch.data(),
                 static_cast<std::size_t>(context->buffer_size));
             if (network_capture_enabled) {
-                context->capture->push(captured_input);
+                push_network_capture_callback(
+                    *context->control, *context->capture, captured_input, callback_start_us);
             }
         }
         if (context->control != nullptr && context->pitch != nullptr) {
             push_pitch_analysis_callback(*context->control, *context->pitch, captured_input);
         }
         if (context->control != nullptr) {
-            processing::observe_input_peaks(context->control, captured_input);
+            if (source_router != nullptr) {
+                processing::observe_input_peak_value(
+                    context->control, source_router->last_peak_ppm());
+            } else {
+                processing::observe_input_peaks(context->control, captured_input);
+            }
         }
-        if (context->recorder_my_input_scratch.size() >= static_cast<std::size_t>(context->buffer_size)) {
+        if (recording_scratch_required &&
+            context->recorder_my_input_scratch.size() >= static_cast<std::size_t>(context->buffer_size)) {
             const bool selected = source_router != nullptr && source_router->copy_recording_source(
                 static_cast<std::size_t>(context->buffer_size),
                 std::span<std::int32_t>(context->recorder_my_input_scratch.data(),
@@ -425,6 +494,7 @@ void duplex_buffer_switch(long double_buffer_index, ASIOBool)
         }
     }
 
+    bool output_block_written = false;
     if (!context->outputs.empty() &&
         context->outputs[0] != nullptr &&
         context->outputs[0]->buffers[double_buffer_index] != nullptr &&
@@ -452,6 +522,7 @@ void duplex_buffer_switch(long double_buffer_index, ASIOBool)
                 context->playback,
                 context->control,
                 context->playback_resampler,
+                context->playback_resampler_scratch,
                 playback);
             processing::apply_remote_level(context->control, playback);
         }
@@ -459,10 +530,13 @@ void duplex_buffer_switch(long double_buffer_index, ASIOBool)
             context->control->network_playback_enabled_applied.store(
                 network_playback_enabled,
                 std::memory_order_release);
-            processing::observe_peak(context->control->remote_peak_ppm, playback);
-            processing::observe_peak(context->control->gui_remote_peak_ppm, playback);
+            processing::observe_shared_peak(
+                context->control->remote_peak_ppm,
+                context->control->gui_remote_peak_ppm,
+                playback);
         }
-        if (context->recorder_their_input_scratch.size() >= static_cast<std::size_t>(context->buffer_size)) {
+        if (recording_scratch_required &&
+            context->recorder_their_input_scratch.size() >= static_cast<std::size_t>(context->buffer_size)) {
             std::copy(playback.begin(), playback.end(), context->recorder_their_input_scratch.begin());
         }
         processing::mix_local_monitor(
@@ -476,51 +550,44 @@ void duplex_buffer_switch(long double_buffer_index, ASIOBool)
             context->control,
             playback,
             audio_frame_start,
-            std::span<std::int32_t>(
-                context->recorder_prepared_scratch.data(),
-                std::min<std::size_t>(context->recorder_prepared_scratch.size(), playback.size())));
+            prepared_stem_required
+                ? std::span<std::int32_t>(
+                    context->recorder_prepared_scratch.data(),
+                    std::min<std::size_t>(
+                        context->recorder_prepared_scratch.size(), playback.size()))
+                : std::span<std::int32_t>{});
         processing::mix_metronome_click(
             context->control,
             context->sample_rate,
             context->engine_frame_counter,
             context->metronome_beat_index,
             playback,
-            std::span<std::int32_t>(
-                context->recorder_metronome_scratch.data(),
-                std::min<std::size_t>(context->recorder_metronome_scratch.size(), playback.size())));
+            metronome_stem_required
+                ? std::span<std::int32_t>(
+                    context->recorder_metronome_scratch.data(),
+                    std::min<std::size_t>(
+                        context->recorder_metronome_scratch.size(), playback.size()))
+                : std::span<std::int32_t>{},
+            &context->metronome_wave_bank);
         processing::apply_output_level(context->control, playback);
         if (context->control != nullptr) {
-            processing::observe_peak(
-                context->control->metronome_peak_ppm,
-                std::span<const std::int32_t>(
-                    context->recorder_metronome_scratch.data(),
-                    std::min<std::size_t>(context->recorder_metronome_scratch.size(), playback.size())));
-            processing::observe_peak(
-                context->control->gui_metronome_peak_ppm,
-                std::span<const std::int32_t>(
-                    context->recorder_metronome_scratch.data(),
-                    std::min<std::size_t>(context->recorder_metronome_scratch.size(), playback.size())));
             processing::observe_output_peak(context->control, playback);
         }
-        if (context->track_take_recorder != nullptr &&
+        if (track_take_armed &&
             context->recorder_my_input_scratch.size() >= playback.size() &&
             context->recorder_their_input_scratch.size() >= playback.size() &&
             context->recorder_inputs_mix_scratch.size() >= playback.size()) {
-            const std::int32_t options = context->control != nullptr
-                ? context->control->track_take_options.load(std::memory_order_relaxed)
-                : 0;
-            const auto source = static_cast<TrackTakeSource>(options & 0xff);
-            if (source == TrackTakeSource::CurrentJam) {
+            if (track_take_source == TrackTakeSource::CurrentJam) {
                 for (std::size_t index = 0; index < playback.size(); ++index) {
                     std::int32_t sample = processing::mix_i32_samples(
                         context->recorder_my_input_scratch[index],
                         context->recorder_their_input_scratch[index]);
-                    if ((options & kTrackTakeIncludePrepared) != 0 &&
+                    if ((track_take_options & kTrackTakeIncludePrepared) != 0 &&
                         context->recorder_prepared_scratch.size() >= playback.size()) {
                         sample = processing::mix_i32_samples(
                             sample, context->recorder_prepared_scratch[index]);
                     }
-                    if ((options & kTrackTakeIncludeMetronome) != 0 &&
+                    if ((track_take_options & kTrackTakeIncludeMetronome) != 0 &&
                         context->recorder_metronome_scratch.size() >= playback.size()) {
                         sample = processing::mix_i32_samples(
                             sample, context->recorder_metronome_scratch[index]);
@@ -549,7 +616,7 @@ void duplex_buffer_switch(long double_buffer_index, ASIOBool)
                         context->recorder_my_input_scratch.data(), playback.size()));
             }
         }
-        if (context->recorder != nullptr &&
+        if (jam_recording_active &&
             context->recorder_inputs_mix_scratch.size() >= playback.size() &&
             context->recorder_my_input_scratch.size() >= playback.size() &&
             context->recorder_their_input_scratch.size() >= playback.size() &&
@@ -568,24 +635,39 @@ void duplex_buffer_switch(long double_buffer_index, ASIOBool)
                 std::span<const std::int32_t>(context->recorder_metronome_scratch.data(), playback.size()),
             });
         }
-        for (long i = 0; i < context->buffer_size; ++i) {
-            for (ASIOBufferInfo* output_info : context->outputs) {
-                if (output_info == nullptr || output_info->buffers[double_buffer_index] == nullptr) {
-                    continue;
-                }
-                auto* output = static_cast<std::int32_t*>(output_info->buffers[double_buffer_index]);
-                output[i] = mono[i];
+        const std::size_t output_bytes =
+            static_cast<std::size_t>(context->buffer_size) * sizeof(std::int32_t);
+        for (ASIOBufferInfo* output_info : context->outputs) {
+            if (output_info == nullptr || output_info->buffers[double_buffer_index] == nullptr) {
+                continue;
             }
+            std::memcpy(output_info->buffers[double_buffer_index], mono, output_bytes);
+            output_block_written = true;
+        }
+    }
+
+    if (output_block_written && context->driver != nullptr &&
+        context->output_ready.shouldNotify()) {
+        const ASIOError ready_error = context->driver->outputReady();
+        if (ready_error != ASE_OK) {
+            context->output_ready.observe(
+                output_ready_observation(ready_error), ready_error);
+            publish_output_ready_state(context->control, context->output_ready);
         }
     }
 
     context->engine_frame_counter += static_cast<std::uint64_t>(context->buffer_size);
     if (context->control != nullptr) {
         context->control->engine_frame_counter.store(context->engine_frame_counter, std::memory_order_release);
-        context->control->audio_callback_generation.fetch_add(
-            1, std::memory_order_release);
     }
+    processing::publish_callback_end(
+        context->control,
+        context->callback_generation);
     context->callbacks.fetch_add(1, std::memory_order_relaxed);
+    processing::observe_callback_work(
+        context->callback_intervals,
+        callback_start_us,
+        processing::callback_now_us());
 }
 
 ASIOTime* duplex_buffer_switch_time_info(ASIOTime* params, long double_buffer_index, ASIOBool direct_process)
@@ -637,6 +719,7 @@ public:
         context_.pitch = &pitch_ring;
         context_.playback = &playback_ring;
         context_.control = &control;
+        context_.driver = driver_.get();
         context_.recorder = recorder;
         context_.track_take_recorder = track_take_recorder;
         context_.capture_scratch.resize(static_cast<std::size_t>(buffer_size));
@@ -646,6 +729,8 @@ public:
         control.input_downmix_selected_channels.store(
             static_cast<int>(input_count), std::memory_order_relaxed);
         context_.playback_scratch.resize(static_cast<std::size_t>(buffer_size));
+        context_.playback_resampler_scratch.resize(
+            static_cast<std::size_t>(buffer_size) * 2U + 2U);
         context_.recorder_my_input_scratch.resize(static_cast<std::size_t>(buffer_size));
         context_.recorder_their_input_scratch.resize(static_cast<std::size_t>(buffer_size));
         context_.recorder_inputs_mix_scratch.resize(static_cast<std::size_t>(buffer_size));
@@ -653,6 +738,7 @@ public:
         context_.recorder_prepared_scratch.resize(static_cast<std::size_t>(buffer_size));
         context_.playback_prefill_frames = playback_prefill_frames;
         context_.sample_rate = sample_rate;
+        context_.metronome_wave_bank.prepare(sample_rate);
     }
 
     ~WindowsDeviceStream() override
@@ -683,13 +769,32 @@ public:
             driver_.get()->createBuffers(buffers_.data(), static_cast<long>(buffers_.size()), buffer_size_, &callbacks_),
             "ASIO createBuffers");
         created_ = true;
+        long baseline_input_latency = 0;
+        long baseline_output_latency = 0;
+        require_asio_ok(
+            driver_.get()->getLatencies(
+                &baseline_input_latency, &baseline_output_latency),
+            "ASIO getLatencies before outputReady");
+        (void)baseline_input_latency;
+        if (!context_.outputs.empty()) {
+            const ASIOError ready_error = driver_.get()->outputReady();
+            context_.output_ready.observe(
+                output_ready_observation(ready_error), ready_error);
+            publish_output_ready_state(context_.control, context_.output_ready);
+        }
         long reported_input_latency = 0;
         long reported_output_latency = 0;
         require_asio_ok(
             driver_.get()->getLatencies(&reported_input_latency, &reported_output_latency),
-            "ASIO getLatencies");
+            "ASIO getLatencies after outputReady");
         input_latency_frames_ = (std::max)(0L, reported_input_latency);
         output_latency_frames_ = context_.outputs.empty() ? 0L : (std::max)(0L, reported_output_latency);
+        context_.control->driver_output_ready_latency_reduction_frames.store(
+            processing::driver_output_ready_latency_reduction(
+                context_.output_ready,
+                (std::max)(0L, baseline_output_latency),
+                output_latency_frames_),
+            std::memory_order_relaxed);
         context_.control->input_latency_frames.store(
             static_cast<std::uint32_t>(input_latency_frames_),
             std::memory_order_relaxed);
@@ -737,6 +842,10 @@ public:
             context_.callback_intervals.gapsOver1_1x.load(std::memory_order_relaxed),
             context_.callback_intervals.gapsOver1_5x.load(std::memory_order_relaxed),
             context_.callback_intervals.gapsOver2x.load(std::memory_order_relaxed),
+            context_.callback_intervals.workMinimumUs.load(std::memory_order_relaxed),
+            context_.callback_intervals.workSumUs.load(std::memory_order_relaxed),
+            context_.callback_intervals.workMaximumUs.load(std::memory_order_relaxed),
+            context_.callback_intervals.workSamples.load(std::memory_order_relaxed),
         };
     }
 

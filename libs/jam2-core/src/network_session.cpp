@@ -11,6 +11,55 @@
 
 namespace jam2 {
 
+NetworkAudioPacing capture_audio_pacing(
+    long audio_callback_frames,
+    int frames_per_packet) noexcept
+{
+    return audio_callback_frames > 0 && frames_per_packet > 0 &&
+            audio_callback_frames <= frames_per_packet
+        ? NetworkAudioPacing::CaptureClock
+        : NetworkAudioPacing::CaptureSynchronized;
+}
+
+NetworkCapturePacketPacer::NetworkCapturePacketPacer(
+    NetworkAudioPacing pacing,
+    std::size_t frames_per_packet) noexcept
+    : pacing_(pacing),
+      frames_per_packet_(frames_per_packet)
+{
+}
+
+bool NetworkCapturePacketPacer::captureClockActive() const noexcept
+{
+    return pacing_ == NetworkAudioPacing::CaptureClock && frames_per_packet_ > 0;
+}
+
+bool NetworkCapturePacketPacer::captureReady(
+    std::size_t capture_depth_frames) const noexcept
+{
+    return captureClockActive() && !packet_requires_spacing_ &&
+        capture_depth_frames >= frames_per_packet_;
+}
+
+bool NetworkCapturePacketPacer::catchupReady(
+    std::size_t capture_depth_frames) const noexcept
+{
+    return pacing_ != NetworkAudioPacing::Scheduled && frames_per_packet_ > 0 &&
+        capture_depth_frames > frames_per_packet_;
+}
+
+bool NetworkCapturePacketPacer::packetRequiresSpacing() const noexcept
+{
+    return packet_requires_spacing_;
+}
+
+void NetworkCapturePacketPacer::observePacketSent(
+    std::size_t remaining_capture_frames) noexcept
+{
+    packet_requires_spacing_ = captureClockActive() &&
+        remaining_capture_frames >= frames_per_packet_;
+}
+
 NetworkPacketSchedule::NetworkPacketSchedule(
     int sample_rate,
     int frames_per_packet,
@@ -35,6 +84,24 @@ NetworkPacketSchedule::NetworkPacketSchedule(
 
 std::uint64_t NetworkPacketSchedule::startTimeUs() const noexcept { return start_time_us_; }
 std::uint64_t NetworkPacketSchedule::nextAudioSendUs() const noexcept { return next_audio_send_us_; }
+bool NetworkPacketSchedule::audioSendReady(
+    std::uint64_t now_us,
+    NetworkAudioPacing pacing,
+    bool capture_deadline_override) const noexcept
+{
+    return now_us >= next_audio_send_us_ ||
+        (pacing != NetworkAudioPacing::Scheduled && capture_deadline_override);
+}
+
+std::uint64_t NetworkPacketSchedule::audioSendWaitBudgetUs(
+    std::uint64_t now_us,
+    std::uint64_t maximum_wait_us) const noexcept
+{
+    if (next_audio_send_us_ <= now_us) {
+        return 0;
+    }
+    return (std::min)(maximum_wait_us, next_audio_send_us_ - now_us);
+}
 std::uint64_t NetworkPacketSchedule::nextPingUs() const noexcept { return next_ping_us_; }
 std::uint64_t NetworkPacketSchedule::nextGridStateUs() const noexcept { return next_grid_state_us_; }
 std::uint64_t NetworkPacketSchedule::sampleTime() const noexcept { return sample_time_; }
@@ -56,6 +123,11 @@ void NetworkPacketSchedule::commitAudioPacket() noexcept
         interval_remainder_accumulator_ -= interval_denominator_;
     }
     next_audio_send_us_ += step;
+}
+
+void NetworkPacketSchedule::resynchronizeAudioSend(std::uint64_t now_us) noexcept
+{
+    next_audio_send_us_ = now_us;
 }
 
 void NetworkPacketSchedule::commitPing(std::uint64_t interval_us) noexcept
@@ -292,7 +364,10 @@ struct NetworkSession::Impl {
         return std::span<const std::uint8_t>(transmit_packet.data(), packet_size);
     }
 
-    UdpSendOutcome sendPacket(PeerEntry& peer, std::span<const std::uint8_t> packet)
+    UdpSendOutcome sendPacket(
+        PeerEntry& peer,
+        protocol::PacketType type,
+        std::span<const std::uint8_t> packet)
     {
         ++peer.send.attempts;
         const UdpSendResult sent = socket.send_to(peer.descriptor.endpoint, packet);
@@ -302,6 +377,10 @@ struct NetworkSession::Impl {
         case UdpSendOutcome::Sent:
             ++peer.send.sent_packets;
             peer.send.sent_bytes += packet.size();
+            if (type == protocol::PacketType::Audio) {
+                ++peer.send.audio_sent_packets;
+                peer.send.audio_sent_bytes += packet.size();
+            }
             peer.send.consecutive_path_errors = 0;
             return sent.outcome;
         case UdpSendOutcome::WouldBlock:
@@ -438,6 +517,23 @@ const NetworkPeerDescriptor* NetworkSession::peer(PeerId peer_id) const noexcept
 {
     const auto* entry = impl_->find(peer_id);
     return entry != nullptr ? &entry->descriptor : nullptr;
+}
+
+NetworkPeerAccess NetworkSession::accessPeer(PeerId peer_id) noexcept
+{
+    auto* entry = impl_->find(peer_id);
+    return entry != nullptr
+        ? NetworkPeerAccess{&entry->descriptor, entry->stream.get(), &entry->send}
+        : NetworkPeerAccess{};
+}
+
+NetworkPeerAccess NetworkSession::accessPeer(
+    const ResolvedUdpEndpoint& endpoint) noexcept
+{
+    auto* entry = impl_->find(endpoint);
+    return entry != nullptr
+        ? NetworkPeerAccess{&entry->descriptor, entry->stream.get(), &entry->send}
+        : NetworkPeerAccess{};
 }
 
 PeerId NetworkSession::peerIdForEndpoint(const ResolvedUdpEndpoint& endpoint) const noexcept
@@ -641,7 +737,7 @@ NetworkSendResult NetworkSession::sendToActive(
             continue;
         }
         ++result.attempted_peer_count;
-        const UdpSendOutcome outcome = impl_->sendPacket(*peer, packet);
+        const UdpSendOutcome outcome = impl_->sendPacket(*peer, type, packet);
         if (outcome == UdpSendOutcome::Sent) {
             ++result.peer_count;
             result.total_bytes += packet.size();
@@ -678,14 +774,17 @@ std::size_t NetworkSession::sendToPeer(
         return 0;
     }
     const auto packet = impl_->encode(type, sequence, timing_value, payload);
-    return impl_->sendPacket(*peer, packet) == UdpSendOutcome::Sent
+    return impl_->sendPacket(*peer, type, packet) == UdpSendOutcome::Sent
         ? packet.size()
         : 0;
 }
 
-std::optional<NetworkDatagram> NetworkSession::receiveFor(std::uint64_t timeout_us)
+std::optional<NetworkDatagram> NetworkSession::receiveFor(
+    std::uint64_t timeout_us,
+    RealtimeWakeSignal* wake_signal)
 {
-    const auto received = impl_->socket.recv_from_for(impl_->receive_packet, timeout_us);
+    const auto received = impl_->socket.recv_from_for(
+        impl_->receive_packet, timeout_us, wake_signal);
     if (!received) {
         return std::nullopt;
     }

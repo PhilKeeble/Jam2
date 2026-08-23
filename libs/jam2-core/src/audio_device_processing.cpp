@@ -1,4 +1,5 @@
 #include "audio_device_processing.hpp"
+#include "runtime_limits.hpp"
 
 #include <algorithm>
 #include <array>
@@ -47,25 +48,32 @@ void update_interval_peak(std::atomic<int>& target, int value) noexcept
     }
 }
 
-void atomic_update_max(
+void single_writer_update_max(
     std::atomic<std::uint64_t>& target,
     std::uint64_t value) noexcept
 {
-    std::uint64_t current = target.load(std::memory_order_relaxed);
-    while (value > current && !target.compare_exchange_weak(
-               current, value, std::memory_order_relaxed)) {
+    if (value > target.load(std::memory_order_relaxed)) {
+        target.store(value, std::memory_order_relaxed);
     }
 }
 
-void atomic_update_min(
+void single_writer_update_min(
     std::atomic<std::uint64_t>& target,
     std::uint64_t value) noexcept
 {
-    std::uint64_t current = target.load(std::memory_order_relaxed);
-    while ((current == 0 || value < current) &&
-           !target.compare_exchange_weak(
-               current, value, std::memory_order_relaxed)) {
+    const std::uint64_t current = target.load(std::memory_order_relaxed);
+    if (current == 0 || value < current) {
+        target.store(value, std::memory_order_relaxed);
     }
+}
+
+void single_writer_add(
+    std::atomic<std::uint64_t>& target,
+    std::uint64_t value = 1) noexcept
+{
+    target.store(
+        target.load(std::memory_order_relaxed) + value,
+        std::memory_order_relaxed);
 }
 
 std::int32_t pop_one_frame(
@@ -96,6 +104,42 @@ std::int32_t pop_one_frame(
 
 } // namespace
 
+bool DriverOutputReadyState::shouldNotify() const noexcept
+{
+    return status == DriverOutputReadyStatus::Active;
+}
+
+void DriverOutputReadyState::observe(
+    DriverOutputReadyObservation observation,
+    long errorCode) noexcept
+{
+    switch (observation) {
+    case DriverOutputReadyObservation::Accepted:
+        status = DriverOutputReadyStatus::Active;
+        error = 0;
+        break;
+    case DriverOutputReadyObservation::Unsupported:
+        status = DriverOutputReadyStatus::Unsupported;
+        error = 0;
+        break;
+    case DriverOutputReadyObservation::Error:
+        status = DriverOutputReadyStatus::Error;
+        error = errorCode;
+        break;
+    }
+}
+
+long driver_output_ready_latency_reduction(
+    const DriverOutputReadyState& state,
+    long beforeFrames,
+    long afterFrames) noexcept
+{
+    if (!state.shouldNotify() || beforeFrames <= afterFrames) {
+        return 0;
+    }
+    return beforeFrames - afterFrames;
+}
+
 void PlaybackResamplerState::reset() noexcept
 {
     current = 0;
@@ -106,6 +150,89 @@ void PlaybackResamplerState::reset() noexcept
     underrunConcealmentOrigin = 0;
     underrunConcealmentFrames = 0;
     ratioSmoother.reset();
+}
+
+namespace {
+
+std::size_t metronome_wave_index(
+    bool accent,
+    metronome::ClickVoice voice,
+    metronome::ClickSound sound) noexcept
+{
+    return static_cast<std::size_t>(sound) * 4U +
+        (voice == metronome::ClickVoice::CountIn ? 2U : 0U) +
+        (accent ? 1U : 0U);
+}
+
+} // namespace
+
+MetronomeWaveBank::MetronomeWaveBank(double sampleRate)
+{
+    prepare(sampleRate);
+}
+
+void MetronomeWaveBank::prepare(double sampleRate)
+{
+    sampleRate_ = 0.0;
+    for (auto& wave : waves_) {
+        wave.clear();
+    }
+    if (!valid_render_sample_rate(sampleRate) ||
+        sampleRate < static_cast<double>(limits::kMinimumSampleRate) ||
+        sampleRate > static_cast<double>(limits::kMaximumSampleRate)) {
+        return;
+    }
+    for (int soundValue = static_cast<int>(metronome::ClickSound::Classic);
+         soundValue <= static_cast<int>(metronome::ClickSound::DigitalTick);
+         ++soundValue) {
+        const auto sound = static_cast<metronome::ClickSound>(soundValue);
+        for (const auto voice : {
+                 metronome::ClickVoice::Normal,
+                 metronome::ClickVoice::CountIn}) {
+            for (const bool accent : {false, true}) {
+                auto& wave = waves_[metronome_wave_index(accent, voice, sound)];
+                wave.resize(static_cast<std::size_t>(
+                    metronome::click_duration_samples(
+                        sampleRate, accent, voice, sound)));
+                for (std::size_t offset = 0; offset < wave.size(); ++offset) {
+                    wave[offset] = metronome::render_click_tone_sample(
+                        offset, sampleRate, accent, voice, sound);
+                }
+            }
+        }
+    }
+    sampleRate_ = sampleRate;
+}
+
+bool MetronomeWaveBank::preparedFor(double sampleRate) const noexcept
+{
+    return sampleRate_ == sampleRate && sampleRate_ > 0.0;
+}
+
+double MetronomeWaveBank::render(
+    const metronome::PatternSnapshot& pattern,
+    int patternStep,
+    std::uint64_t stepOffset,
+    double level,
+    metronome::ClickVoice voice,
+    metronome::ClickSound sound) const noexcept
+{
+    if (pattern.step_count <= 0 || patternStep < 0 ||
+        patternStep >= pattern.step_count ||
+        !metronome::mask_enabled(
+            pattern.play_mask_low, pattern.play_mask_high, patternStep)) {
+        return 0.0;
+    }
+    const bool accent = metronome::mask_enabled(
+        pattern.accent_mask_low, pattern.accent_mask_high, patternStep);
+    sound = metronome::sanitize_click_sound(static_cast<int>(sound));
+    const auto& wave = waves_[metronome_wave_index(accent, voice, sound)];
+    if (stepOffset >= wave.size()) {
+        return 0.0;
+    }
+    const double clickLevel = std::clamp(level, 0.0, 1.0) *
+        (accent ? 1.25 : 0.78);
+    return std::clamp(wave[static_cast<std::size_t>(stepOffset)] * clickLevel, -1.0, 1.0);
 }
 
 std::uint64_t callback_now_us() noexcept
@@ -121,27 +248,27 @@ void observe_callback_interval(
     std::size_t bufferFrames,
     double sampleRate) noexcept
 {
-    const std::uint64_t previous = state.lastCallbackUs.exchange(
-        nowUs, std::memory_order_relaxed);
+    const std::uint64_t previous = state.lastCallbackUs;
+    state.lastCallbackUs = nowUs;
     if (previous == 0 || nowUs <= previous || bufferFrames == 0 ||
         !std::isfinite(sampleRate) || sampleRate <= 0.0) {
         return;
     }
     const std::uint64_t interval = nowUs - previous;
-    atomic_update_min(state.minimumUs, interval);
-    state.sumUs.fetch_add(interval, std::memory_order_relaxed);
-    atomic_update_max(state.maximumUs, interval);
-    state.samples.fetch_add(1, std::memory_order_relaxed);
+    single_writer_update_min(state.minimumUs, interval);
+    single_writer_add(state.sumUs, interval);
+    single_writer_update_max(state.maximumUs, interval);
+    single_writer_add(state.samples);
     const double expected = static_cast<double>(bufferFrames) * 1000000.0 /
         sampleRate;
     if (interval_exceeds(interval, expected, 1.1)) {
-        state.gapsOver1_1x.fetch_add(1, std::memory_order_relaxed);
+        single_writer_add(state.gapsOver1_1x);
     }
     if (interval_exceeds(interval, expected, 1.5)) {
-        state.gapsOver1_5x.fetch_add(1, std::memory_order_relaxed);
+        single_writer_add(state.gapsOver1_5x);
     }
     if (interval_exceeds(interval, expected, 2.0)) {
-        state.gapsOver2x.fetch_add(1, std::memory_order_relaxed);
+        single_writer_add(state.gapsOver2x);
     }
 }
 
@@ -189,14 +316,28 @@ void observe_peak(
     update_peak(peak, i32_peak_ppm(samples));
 }
 
+void observe_shared_peak(
+    std::atomic<int>& currentPeak,
+    std::atomic<int>& intervalPeak,
+    std::span<const std::int32_t> samples) noexcept
+{
+    const int peak = i32_peak_ppm(samples);
+    update_peak(currentPeak, peak);
+    update_peak(intervalPeak, peak);
+}
+
 void observe_input_peaks(
     StreamControl* control,
     std::span<const std::int32_t> samples) noexcept
 {
-    if (control == nullptr) {
-        return;
-    }
-    const int inputPeak = i32_peak_ppm(samples);
+    if (control == nullptr) return;
+    observe_input_peak_value(control, i32_peak_ppm(samples));
+}
+
+void observe_input_peak_value(StreamControl* control, int inputPeak) noexcept
+{
+    if (control == nullptr) return;
+    inputPeak = std::max(0, inputPeak);
     update_peak(control->input_peak_ppm, inputPeak);
     update_peak(control->gui_input_peak_ppm, inputPeak);
     const int sendPeak = static_cast<int>(
@@ -301,19 +442,32 @@ void mix_local_monitor(
         control->gui_monitor_peak_ppm.store(0, std::memory_order_relaxed);
         return;
     }
-    const double level = static_cast<double>(
-        std::clamp(levelPpm, 0, 4000000)) / 1000000.0;
     std::uint32_t monitorPeak = 0;
     const std::size_t frames = (std::min)(output.size(), input.size());
-    for (std::size_t frame = 0; frame < frames; ++frame) {
-        const std::int32_t monitored = scale_i32_sample(input[frame], level);
-        const std::uint32_t absolute =
-            monitored == (std::numeric_limits<std::int32_t>::min)()
-            ? static_cast<std::uint32_t>(
-                (std::numeric_limits<std::int32_t>::max)())
-            : static_cast<std::uint32_t>(std::abs(monitored));
-        monitorPeak = (std::max)(monitorPeak, absolute);
-        output[frame] = mix_i32_samples(output[frame], monitored);
+    if (levelPpm == 1000000) {
+        for (std::size_t frame = 0; frame < frames; ++frame) {
+            const std::int32_t monitored = input[frame];
+            const std::uint32_t absolute =
+                monitored == (std::numeric_limits<std::int32_t>::min)()
+                ? static_cast<std::uint32_t>(
+                    (std::numeric_limits<std::int32_t>::max)())
+                : static_cast<std::uint32_t>(std::abs(monitored));
+            monitorPeak = (std::max)(monitorPeak, absolute);
+            output[frame] = mix_i32_samples(output[frame], monitored);
+        }
+    } else {
+        const double level = static_cast<double>(
+            std::clamp(levelPpm, 0, 4000000)) / 1000000.0;
+        for (std::size_t frame = 0; frame < frames; ++frame) {
+            const std::int32_t monitored = scale_i32_sample(input[frame], level);
+            const std::uint32_t absolute =
+                monitored == (std::numeric_limits<std::int32_t>::min)()
+                ? static_cast<std::uint32_t>(
+                    (std::numeric_limits<std::int32_t>::max)())
+                : static_cast<std::uint32_t>(std::abs(monitored));
+            monitorPeak = (std::max)(monitorPeak, absolute);
+            output[frame] = mix_i32_samples(output[frame], monitored);
+        }
     }
     const double normalized = static_cast<double>(monitorPeak) / 2147483647.0;
     const int peakPpm = static_cast<int>(
@@ -333,6 +487,13 @@ void mix_prepared_source(
         if (control != nullptr) {
             control->prepared_track_peak_ppm.store(0, std::memory_order_relaxed);
         }
+        return;
+    }
+    if (!control->prepared_source->needsProcessing()) {
+        if (stem.size() == output.size()) {
+            std::fill(stem.begin(), stem.end(), 0);
+        }
+        control->prepared_track_peak_ppm.store(0, std::memory_order_relaxed);
         return;
     }
     const int peak = control->prepared_source->mix(
@@ -357,21 +518,79 @@ void observe_output_peak(
     if (control == nullptr) {
         return;
     }
-    observe_peak(control->output_peak_ppm, output);
-    observe_peak(control->gui_output_peak_ppm, output);
+    std::uint32_t peak = 0;
+    std::uint64_t clipped = 0;
     for (const std::int32_t sample : output) {
+        const std::uint32_t magnitude =
+            sample == (std::numeric_limits<std::int32_t>::min)()
+            ? static_cast<std::uint32_t>(
+                (std::numeric_limits<std::int32_t>::max)())
+            : static_cast<std::uint32_t>(std::abs(sample));
+        peak = (std::max)(peak, magnitude);
         if (sample == (std::numeric_limits<std::int32_t>::min)() ||
             sample == (std::numeric_limits<std::int32_t>::max)()) {
-            control->output_clipped_samples.fetch_add(
-                1, std::memory_order_relaxed);
+            ++clipped;
         }
     }
+    const int peakPpm = static_cast<int>(
+        std::clamp(
+            static_cast<double>(peak) / 2147483647.0,
+            0.0,
+            1.0) * 1000000.0);
+    update_peak(control->output_peak_ppm, peakPpm);
+    update_peak(control->gui_output_peak_ppm, peakPpm);
+    if (clipped > 0) {
+        control->output_clipped_samples.fetch_add(
+            clipped, std::memory_order_relaxed);
+    }
+}
+
+void observe_callback_work(
+    CallbackIntervalState& state,
+    std::uint64_t startUs,
+    std::uint64_t endUs) noexcept
+{
+    if (endUs < startUs) {
+        return;
+    }
+    const std::uint64_t duration = endUs - startUs;
+    single_writer_update_min(state.workMinimumUs, duration);
+    single_writer_add(state.workSumUs, duration);
+    single_writer_update_max(state.workMaximumUs, duration);
+    single_writer_add(state.workSamples);
+}
+
+void publish_callback_begin(
+    StreamControl* control,
+    std::uint64_t& writerGeneration) noexcept
+{
+    if (control == nullptr) {
+        return;
+    }
+    writerGeneration += (writerGeneration & 1ULL) == 0 ? 1ULL : 2ULL;
+    control->audio_callback_generation.store(
+        writerGeneration,
+        std::memory_order_release);
+}
+
+void publish_callback_end(
+    StreamControl* control,
+    std::uint64_t& writerGeneration) noexcept
+{
+    if (control == nullptr) {
+        return;
+    }
+    writerGeneration += (writerGeneration & 1ULL) != 0 ? 1ULL : 2ULL;
+    control->audio_callback_generation.store(
+        writerGeneration,
+        std::memory_order_release);
 }
 
 void pop_resampled_playback(
     MonoRingBuffer* playback,
     StreamControl* control,
     PlaybackResamplerState& state,
+    std::span<std::int32_t> sourceScratch,
     std::span<std::int32_t> output) noexcept
 {
     if (playback == nullptr || control == nullptr) {
@@ -389,12 +608,54 @@ void pop_resampled_playback(
         control->playback_ratio_ramping.store(false, std::memory_order_relaxed);
         return;
     }
+    PlaybackRatioSmoother sizingSmoother = state.ratioSmoother;
+    double sizingPhase = state.phase;
+    std::size_t requiredSourceFrames =
+        (state.hasCurrent ? 0U : 1U) + (state.hasNext ? 0U : 1U);
+    for (std::size_t frame = 0; frame < output.size(); ++frame) {
+        sizingPhase += sizingSmoother.nextRatio();
+        while (sizingPhase >= 1.0) {
+            sizingPhase -= 1.0;
+            ++requiredSourceFrames;
+        }
+    }
+    const bool batchSource = sourceScratch.size() >= requiredSourceFrames;
+    std::size_t realSourceFrames = 0;
+    std::size_t sourceIndex = 0;
+    if (batchSource && requiredSourceFrames > 0) {
+        realSourceFrames = playback->pop(
+            sourceScratch.first(requiredSourceFrames), false);
+    }
+    auto nextSource = [&](std::int32_t continuityFallback) noexcept {
+        if (!batchSource) {
+            return pop_one_frame(*playback, state, continuityFallback);
+        }
+        if (sourceIndex < realSourceFrames) {
+            state.underrunConcealmentOrigin = 0;
+            state.underrunConcealmentFrames = 0;
+            return sourceScratch[sourceIndex++];
+        }
+        ++sourceIndex;
+        if (state.underrunConcealmentFrames == 0) {
+            state.underrunConcealmentOrigin = continuityFallback;
+        }
+        if (state.underrunConcealmentFrames >= kPlaybackUnderrunFadeFrames) {
+            return std::int32_t{0};
+        }
+        const std::uint32_t remaining =
+            kPlaybackUnderrunFadeFrames - state.underrunConcealmentFrames;
+        ++state.underrunConcealmentFrames;
+        return static_cast<std::int32_t>(
+            static_cast<std::int64_t>(state.underrunConcealmentOrigin) *
+            static_cast<std::int64_t>(remaining) /
+            static_cast<std::int64_t>(kPlaybackUnderrunFadeFrames));
+    };
     if (!state.hasCurrent) {
-        state.current = pop_one_frame(*playback, state, 0);
+        state.current = nextSource(0);
         state.hasCurrent = true;
     }
     if (!state.hasNext) {
-        state.next = pop_one_frame(*playback, state, state.current);
+        state.next = nextSource(state.current);
         state.hasNext = true;
     }
     for (std::int32_t& sample : output) {
@@ -412,7 +673,7 @@ void pop_resampled_playback(
             // literal zero here creates a full-scale discontinuity at a
             // non-unity playback ratio even when the producer refills the
             // ring one frame later. The ring still records the exact underrun.
-            state.next = pop_one_frame(*playback, state, state.current);
+            state.next = nextSource(state.current);
         }
     }
     control->playback_ratio_applied_ppm.store(
@@ -532,7 +793,8 @@ void mix_metronome_click(
     std::uint64_t engineFrame,
     std::uint64_t& beatIndex,
     std::span<std::int32_t> output,
-    std::span<std::int32_t> metronomeStem) noexcept
+    std::span<std::int32_t> metronomeStem,
+    const MetronomeWaveBank* waveBank) noexcept
 {
     if (control == nullptr || !valid_render_sample_rate(sampleRate)) {
         return;
@@ -591,6 +853,24 @@ void mix_metronome_click(
         control->recording_count_in_start_frame.load(std::memory_order_relaxed);
     const std::uint64_t countInTarget =
         control->recording_count_in_target_frame.load(std::memory_order_relaxed);
+    // Engine commands are applied before this callback is rendered. Snapshot
+    // the click origin once so every sample in the block observes one coherent
+    // state and the hot loop does not reload up to seven atomics per frame.
+    bool patternOriginValid = control->metronome_pattern_origin_valid.load(
+        std::memory_order_relaxed);
+    std::uint64_t patternOrigin = patternOriginValid
+        ? control->metronome_pattern_origin_frame.load(std::memory_order_relaxed)
+        : epoch;
+    std::uint64_t scheduledPatternOrigin =
+        control->metronome_pattern_scheduled_origin_raw_frame.load(
+            std::memory_order_relaxed);
+    std::uint32_t clickPeak = 0;
+    bool positionSequenceValid = false;
+    bool previousInCountIn = false;
+    std::uint64_t previousPosition = 0;
+    std::uint64_t stepIndex = 0;
+    std::uint64_t stepOffset = 0;
+    int patternStep = 0;
     for (std::size_t frame = 0; frame < output.size(); ++frame) {
         const std::uint64_t frameOffset = static_cast<std::uint64_t>(frame);
         const std::uint64_t rawFrame = frameOffset >
@@ -603,37 +883,96 @@ void mix_metronome_click(
         const std::uint64_t musicalFrame = metronome_musical_frame_from_raw(
             rawFrame, renderOffset);
         std::uint64_t position = 0;
-        if (!metronome_pattern_position(
-                *control,
-                rawFrame,
-                musicalFrame,
-                epochValid,
-                epoch,
-                position)) {
-            continue;
+        const bool inCountIn = countInActive &&
+            rawFrame >= countInStart && rawFrame < countInTarget;
+        if (inCountIn) {
+            position = rawFrame - countInStart;
+        } else {
+            if (scheduledPatternOrigin != 0 &&
+                rawFrame >= scheduledPatternOrigin) {
+                patternOrigin = metronome_musical_frame_from_raw(
+                    scheduledPatternOrigin, renderOffset);
+                patternOriginValid = true;
+                scheduledPatternOrigin = 0;
+                control->metronome_pattern_origin_frame.store(
+                    patternOrigin, std::memory_order_relaxed);
+                control->metronome_pattern_origin_valid.store(
+                    true, std::memory_order_relaxed);
+                control->metronome_pattern_scheduled_origin_raw_frame.store(
+                    0, std::memory_order_relaxed);
+            }
+            if ((patternOriginValid || epochValid) &&
+                musicalFrame < patternOrigin) {
+                continue;
+            }
+            position = patternOriginValid || epochValid
+                ? musicalFrame - patternOrigin
+                : musicalFrame;
         }
-        const double rendered = metronome::render_sample(
-            pattern,
-            position,
-            interval,
-            sampleRate,
-            level,
-            countInActive && rawFrame >= countInStart && rawFrame < countInTarget
+        double rendered = 0.0;
+        if (interval > 0) {
+            const bool sequential = positionSequenceValid &&
+                previousInCountIn == inCountIn &&
+                previousPosition != (std::numeric_limits<std::uint64_t>::max)() &&
+                position == previousPosition + 1ULL;
+            if (sequential) {
+                ++stepOffset;
+                if (stepOffset == interval) {
+                    stepOffset = 0;
+                    ++stepIndex;
+                    ++patternStep;
+                    if (patternStep == pattern.step_count) {
+                        patternStep = 0;
+                    }
+                }
+            } else {
+                stepIndex = position / interval;
+                stepOffset = position % interval;
+                patternStep = static_cast<int>(
+                    stepIndex % static_cast<std::uint64_t>(pattern.step_count));
+            }
+            const auto voice = inCountIn
                 ? metronome::ClickVoice::CountIn
-                : metronome::ClickVoice::Normal,
-            clickSound);
+                : metronome::ClickVoice::Normal;
+            rendered = waveBank != nullptr && waveBank->preparedFor(sampleRate)
+                ? waveBank->render(
+                    pattern, patternStep, stepOffset, level, voice, clickSound)
+                : metronome::render_pattern_step_sample(
+                    pattern,
+                    patternStep,
+                    stepOffset,
+                    sampleRate,
+                    level,
+                    voice,
+                    clickSound);
+            previousPosition = position;
+            previousInCountIn = inCountIn;
+            positionSequenceValid = true;
+        }
+        const std::int32_t clickSample = metronome::mix_i32(0, rendered);
+        const std::uint32_t magnitude = clickSample ==
+                (std::numeric_limits<std::int32_t>::min)()
+            ? static_cast<std::uint32_t>(
+                (std::numeric_limits<std::int32_t>::max)())
+            : static_cast<std::uint32_t>(std::abs(clickSample));
+        clickPeak = (std::max)(clickPeak, magnitude);
         if (metronomeStem.size() == output.size()) {
-            metronomeStem[frame] = metronome::mix_i32(0, rendered);
+            metronomeStem[frame] = clickSample;
         }
         output[frame] = metronome::mix_i32(output[frame], rendered);
         if (interval > 0) {
-            const std::uint64_t zeroBasedBeat = position / interval;
-            beatIndex = zeroBasedBeat ==
+            beatIndex = stepIndex ==
                     (std::numeric_limits<std::uint64_t>::max)()
-                ? zeroBasedBeat
-                : zeroBasedBeat + 1;
+                ? stepIndex
+                : stepIndex + 1;
         }
     }
+    const int peakPpm = static_cast<int>(
+        static_cast<std::uint64_t>(clickPeak) * 1000000ULL /
+        static_cast<std::uint64_t>(
+            (std::numeric_limits<std::int32_t>::max)()));
+    update_peak(control->metronome_peak_ppm, peakPpm);
+    update_peak(control->gui_metronome_peak_ppm, peakPpm);
 }
 
 } // namespace jam2::audio::device_processing

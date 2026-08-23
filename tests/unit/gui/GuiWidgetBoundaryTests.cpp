@@ -366,6 +366,68 @@ void testLocalEngineDialogState()
         "local engine dialog returns the edited persistence choice");
 }
 
+void testSessionDefaultsAndPriorityControls()
+{
+    const auto hasFastPlaybackDefaults = [](const LocalTuningPreference& tuning) {
+        return tuning.prefillFrames == 64 &&
+            tuning.playoutDelayFrames == 64 &&
+            tuning.jitterBufferFrames == 64 &&
+            tuning.jitterBufferMaxFrames == 512 &&
+            tuning.adaptiveTargetFrames == 64 &&
+            tuning.adaptiveMinFrames == 64 &&
+            tuning.adaptiveMaxFrames == 512;
+    };
+    jam2::gui::StartJamDialogState startInitial;
+    jam2::gui::StartJamDialog startDialog(startInitial, {}, {});
+    auto* startProfile = qobject_cast<QComboBox*>(findControl(
+        startDialog, QStringLiteral("session.dialog.create-profile")));
+    auto* startPriority = qobject_cast<QComboBox*>(findControl(
+        startDialog, QStringLiteral("session.dialog.os-priority")));
+    expect(startProfile != nullptr &&
+            hasFastPlaybackDefaults(startDialog.state().create.tuning),
+        "create dialog opens with the fully coupled Fast playback defaults");
+    if (startProfile != nullptr) {
+        startProfile->setCurrentIndex(startProfile->findData(QStringLiteral("moderate")));
+        startProfile->setCurrentIndex(startProfile->findData(QStringLiteral("fast")));
+        expect(hasFastPlaybackDefaults(startDialog.state().create.tuning),
+            "selecting Fast reapplies every create-side playback default");
+    }
+    expect(startPriority != nullptr && startPriority->count() == 2 &&
+            startPriority->currentData().toString() == QStringLiteral("high") &&
+            startPriority->findData(QStringLiteral("realtime")) < 0,
+        "create dialog exposes only High and Off scheduling choices");
+    if (startPriority != nullptr) {
+        startPriority->setCurrentIndex(startPriority->findData(QStringLiteral("off")));
+        expect(startDialog.state().create.runtime.osPriority == QStringLiteral("off"),
+            "create dialog returns the selected scheduling mode");
+    }
+
+    jam2::gui::JoinJamDialogState joinInitial;
+    jam2::gui::JoinJamDialog joinDialog(joinInitial, {}, {});
+    auto* joinProfile = qobject_cast<QComboBox*>(findControl(
+        joinDialog, QStringLiteral("session.join-dialog.profile")));
+    auto* joinPriority = qobject_cast<QComboBox*>(findControl(
+        joinDialog, QStringLiteral("session.dialog.os-priority")));
+    expect(joinProfile != nullptr &&
+            hasFastPlaybackDefaults(joinDialog.state().join.tuning),
+        "join dialog opens with the fully coupled Fast playback defaults");
+    if (joinProfile != nullptr) {
+        joinProfile->setCurrentIndex(joinProfile->findData(QStringLiteral("moderate")));
+        joinProfile->setCurrentIndex(joinProfile->findData(QStringLiteral("fast")));
+        expect(hasFastPlaybackDefaults(joinDialog.state().join.tuning),
+            "selecting Fast reapplies every join-side playback default");
+    }
+    expect(joinPriority != nullptr && joinPriority->count() == 2 &&
+            joinPriority->currentData().toString() == QStringLiteral("high") &&
+            joinPriority->findData(QStringLiteral("realtime")) < 0,
+        "join dialog exposes only High and Off scheduling choices");
+    if (joinPriority != nullptr) {
+        joinPriority->setCurrentIndex(joinPriority->findData(QStringLiteral("off")));
+        expect(joinDialog.state().join.runtime.osPriority == QStringLiteral("off"),
+            "join dialog returns the selected scheduling mode");
+    }
+}
+
 void testAudioDeviceUiSupport()
 {
     const std::vector<jam2::audio::DeviceInfo> devices{
@@ -1267,6 +1329,7 @@ int main(int argc, char** argv)
     testTimelineHelpers();
     testGuiInteractionPolicy();
     testLocalEngineDialogState();
+    testSessionDefaultsAndPriorityControls();
     testAudioDeviceUiSupport();
     testConnectionGuidance();
     testWaveformAndMeterWidgets();
