@@ -1593,3 +1593,53 @@ boundary is allocation-free, fixed-shape for the observed devices, measured,
 fault-visible, comfortably inside its deadline and no longer performs
 per-sample buffer-list discovery. The next phase is the explicitly separate
 Moderate-profile Wi-Fi tuning using the retained real-connection baseline.
+
+## 2026-08-23 multi-wake receive-burst latency recovery
+
+The subsequent real Windows jam had subjectively clean audio but noticeable
+receive latency. Its packet stream contained 199-452 ms gaps and catch-up wakes
+of the full 64-datagram receive budget. Existing live-tail recovery did discard
+38,043 obsolete frames across 61 events, but it completed recovery inside one
+bounded wake. Packets from the same kernel backlog then arrived in later
+saturated wakes as apparently current audio. The peer mixer reached several
+thousand frames while the device-facing playback ring stayed near its
+1,536-frame limit. Returning the adaptive target to 64 did not remove that
+already-resident audio.
+
+The native `jam2_core_input_units` CTest now reproduces the exact ownership
+failure for an exactly-four-participant mesh: one local listener and its three
+remote contributors, a 225 ms device-clock gap, and a 230-packet catch-up split
+into `64/64/64/38` packet wakes. The first pre-fix fixture built and failed its
+peer-tail, device-ring and complete-path latency assertions. After correcting
+the fixture from four remote contributors to the real exactly-four-participant
+ownership above, a controlled run with receive-burst finalization disabled also
+failed: 400 frames remained instead of 128, the device ring missed its live-tail
+bound, no output-prefix drop was reported, and the newest mixed marker was not
+at the output. Restoring the implementation made the identical fixture pass.
+These are recorded failing runs, not failures inferred after implementation.
+
+The retained implementation keeps timeline recovery active while a receive
+wake exhausts the 64-datagram work budget. Each saturated portion is rebased to
+the newest two packet blocks. Once a non-saturated wake proves the queued burst
+has ended, the mixer rebases every contributor again, requests a lock-free drop
+of the stale device-ring prefix down to the larger of two packet blocks or the
+configured adaptive minimum, resets the recovery target to that configured
+minimum, and returns the resampler to unity. Normal receive processing, packet
+format, multi-peer mixing, callback ownership, and bounded per-wake work are
+unchanged. Existing live-tail and output-drop counters expose the discarded
+frames.
+
+The final deterministic measurements were:
+
+| Recovery point | Complete receiver-path frames | Time at 48 kHz |
+|---|---:|---:|
+| Peak catch-up ingest before that wake's recovery pass | 12,432 | 259.00 ms |
+| End of final receive wake, before burst finalization | 400 | 8.33 ms |
+| Completed recovery | 128 | 2.67 ms |
+
+The final sink contains only the newest four-peer mixed marker, proving that the
+latency reduction keeps current audio rather than an older catch-up prefix. The
+focused optimized Windows command
+`compile.cmd --in-dev-shell --tests unit --test-name jam2_core_input_units`
+passes in 2.88 seconds. The test executable repeated the same `12432/400/128`
+frame metrics and passed. No broader suite was run.

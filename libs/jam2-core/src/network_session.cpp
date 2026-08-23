@@ -715,6 +715,11 @@ void NetworkSession::advance(std::uint64_t now_us) noexcept
     impl_->mixer.advance(now_us);
 }
 
+void NetworkSession::finishReceiveBatch(bool receive_budget_exhausted) noexcept
+{
+    impl_->mixer.finishReceiveBatch(receive_budget_exhausted);
+}
+
 void NetworkSession::finish(std::uint64_t now_us) noexcept
 {
     for (auto& peer : impl_->peers) {

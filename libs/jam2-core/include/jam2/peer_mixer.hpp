@@ -93,6 +93,7 @@ public:
     bool setPeerMuted(std::uint64_t peer_id, bool muted) noexcept;
 
     void advance(std::uint64_t now_us) noexcept;
+    void finishReceiveBatch(bool receive_budget_exhausted) noexcept;
     void finish(std::uint64_t now_us) noexcept;
 
     const PeerMixerStats& stats() const noexcept;

@@ -303,6 +303,7 @@ struct PeerMixer::Impl {
     bool cached_all_ready = false;
     bool cached_any_ready = false;
     bool occupancy_dirty = true;
+    bool receive_catchup_active = false;
 
     Impl(const PeerMixerConfig& requested, PeerStreamPlayback* sink)
         : config(requested),
@@ -667,6 +668,7 @@ struct PeerMixer::Impl {
             timeline_recovered = peer->recoverTimeline(recovery_tail) || timeline_recovered;
         }
         if (timeline_recovered) {
+            receive_catchup_active = true;
             // A deadline release advances the one shared output timeline.  If
             // only the peer that missed that deadline discards its late tail,
             // healthy peers can remain seconds behind and eventually fill
@@ -684,6 +686,15 @@ struct PeerMixer::Impl {
             // normal bounded prefill window before another incomplete release.
             next_deadline_us = now_us + deadlineDelay();
             consecutive_deadline_slots = 0;
+        } else if (receive_catchup_active) {
+            // A kernel receive backlog can span several bounded datagram
+            // wakes. Keep each newly ingested portion at the same live tail
+            // until the runtime confirms that it reached the end of the burst.
+            for (auto& peer : peers) {
+                if (peer->stats.active && peer->stats.contributing) {
+                    peer->retainLiveTail(recovery_tail);
+                }
+            }
         }
         ContributorReadiness readiness = occupancy_dirty
             ? updateOccupancy()
@@ -766,6 +777,48 @@ struct PeerMixer::Impl {
             ++stats.work_budget_yields;
         }
     }
+
+    void finishReceiveBatch(bool receive_budget_exhausted) noexcept
+    {
+        if (!receive_catchup_active) {
+            return;
+        }
+
+        const std::size_t recovery_tail =
+            static_cast<std::size_t>(config.frames_per_block) * 2U;
+        for (auto& peer : peers) {
+            if (peer->stats.active && peer->stats.contributing) {
+                peer->retainLiveTail(recovery_tail);
+            }
+        }
+        if (receive_budget_exhausted) {
+            return;
+        }
+
+        // The source queues now own only current audio, but the device ring can
+        // still contain the stale prefix mixed before the receive stall was
+        // detected. Retain one bounded live tail there as well. The lock-free
+        // playback ring applies this request at its callback boundary.
+        if (output != nullptr) {
+            const std::size_t output_tail = std::max<std::size_t>(
+                recovery_tail,
+                config.adaptive_min_frames);
+            const std::size_t output_depth = output->depthFrames();
+            if (output_depth > output_tail) {
+                const std::size_t requested = output_depth - output_tail;
+                output->requestDropFrames(requested);
+                stats.output_drop_requested_frames += requested;
+                ++stats.output_drop_request_events;
+            }
+            output->setResamplerRatio(1.0);
+        }
+        adaptive_target_frames = config.adaptive_min_frames;
+        adaptive_release_accumulator_frames = 0.0;
+        adaptive_release_active = false;
+        stats.adaptive_target_frames = adaptive_target_frames;
+        receive_catchup_active = false;
+        occupancy_dirty = true;
+    }
 };
 
 PeerMixer::PeerMixer(const PeerMixerConfig& config, PeerStreamPlayback* output)
@@ -842,6 +895,11 @@ bool PeerMixer::setPeerMuted(std::uint64_t peer_id, bool muted) noexcept
 void PeerMixer::advance(std::uint64_t now_us) noexcept
 {
     impl_->advance(now_us);
+}
+
+void PeerMixer::finishReceiveBatch(bool receive_budget_exhausted) noexcept
+{
+    impl_->finishReceiveBatch(receive_budget_exhausted);
 }
 
 void PeerMixer::finish(std::uint64_t now_us) noexcept

@@ -11,6 +11,7 @@
 #include <array>
 #include <cstdint>
 #include <chrono>
+#include <deque>
 #include <iostream>
 #include <span>
 #include <thread>
@@ -133,6 +134,36 @@ public:
     std::size_t depth = 0;
     std::uint64_t underruns = 0;
     std::vector<std::int32_t> samples;
+};
+
+class LiveTailMixerSink final : public jam2::PeerStreamPlayback {
+public:
+    std::size_t depthFrames() const noexcept override { return samples.size(); }
+    std::uint64_t underrunFrames() const noexcept override { return underruns; }
+    std::size_t pushFrames(std::span<const std::int32_t> frames) noexcept override
+    {
+        samples.insert(samples.end(), frames.begin(), frames.end());
+        return frames.size();
+    }
+    void requestDropFrames(std::size_t frames) noexcept override
+    {
+        const std::size_t dropped = std::min(frames, samples.size());
+        for (std::size_t index = 0; index < dropped; ++index) {
+            samples.pop_front();
+        }
+    }
+    void setResamplerRatio(double) noexcept override {}
+    void consume(std::size_t frames) noexcept
+    {
+        const std::size_t consumed = std::min(frames, samples.size());
+        for (std::size_t index = 0; index < consumed; ++index) {
+            samples.pop_front();
+        }
+        underruns += frames - consumed;
+    }
+
+    std::deque<std::int32_t> samples;
+    std::uint64_t underruns = 0;
 };
 
 class ResampledMixerSink final : public jam2::PeerStreamPlayback {
@@ -711,6 +742,111 @@ void test_peer_mixer_global_gap_discards_obsolete_timeline()
         "global source recovery emits fresh markers without replaying stale markers");
 }
 
+void test_exactly_four_peer_multi_wake_catchup_returns_to_live_latency()
+{
+    LiveTailMixerSink sink;
+    jam2::PeerMixerConfig config;
+    config.sample_rate = 48000;
+    config.frames_per_block = 64;
+    config.deadline_frames = 64;
+    config.output_max_frames = 1536;
+    config.max_blocks_per_advance = 64;
+    config.adaptive_playback_cushion = true;
+    config.adaptive_target_frames = 64;
+    config.adaptive_min_frames = 64;
+    config.adaptive_max_frames = 512;
+    jam2::PeerMixer mixer(config, &sink);
+
+    // One local listener plus these three remote contributors is the normal
+    // exactly-four-peer full-mesh ownership seen by each participant.
+    constexpr std::array<std::uint64_t, 3> peerIds{201, 202, 203};
+    std::array<jam2::PeerStreamPlayback*, peerIds.size()> peers{};
+    const std::array<std::int32_t, 64> initial{};
+    for (std::size_t index = 0; index < peerIds.size(); ++index) {
+        peers[index] = mixer.addPeer(peerIds[index], 16384);
+        expect(peers[index] != nullptr && mixer.setPeerActive(peerIds[index], true),
+            "multi-wake recovery activates every peer");
+        peers[index]->pushFrames(initial);
+    }
+    mixer.advance(0);
+
+    // Reproduce a 225 ms receive stall while the device clock continues. The
+    // subsequent 230-packet catch-up is larger than three 64-datagram receive
+    // budgets, just like the saturated wakes observed in the real jam.
+    for (std::uint64_t now = 1000; now <= 225000; now += 1000) {
+        sink.consume(48);
+        mixer.advance(now);
+    }
+    expect(mixer.stats().deadline_slots > 100,
+        "multi-wake recovery first advances the missing live timeline");
+
+    constexpr std::array<std::size_t, 4> packetsPerWake{64, 64, 64, 38};
+    std::vector<std::int32_t> batch;
+    std::uint64_t now = 226000;
+    std::size_t beforeFinalPeerDepth = 0;
+    std::size_t beforeFinalOutputDepth = 0;
+    std::size_t peakCatchupIngestDepth = 0;
+    for (std::size_t wake = 0; wake < packetsPerWake.size(); ++wake) {
+        batch.assign(packetsPerWake[wake] * 64U,
+            static_cast<std::int32_t>(wake + 1));
+        for (auto* peer : peers) {
+            peer->pushFrames(batch);
+        }
+        std::size_t ingestDepth = sink.depthFrames();
+        for (const std::uint64_t peerId : peerIds) {
+            const auto* stats = mixer.peerStats(peerId);
+            if (stats != nullptr) {
+                ingestDepth += static_cast<std::size_t>(stats->queue_depth_frames);
+            }
+        }
+        peakCatchupIngestDepth = std::max(peakCatchupIngestDepth, ingestDepth);
+        mixer.advance(now++);
+        if (wake + 1U == packetsPerWake.size()) {
+            beforeFinalOutputDepth = sink.depthFrames();
+            for (const std::uint64_t peerId : peerIds) {
+                const auto* stats = mixer.peerStats(peerId);
+                if (stats != nullptr) {
+                    beforeFinalPeerDepth +=
+                        static_cast<std::size_t>(stats->queue_depth_frames);
+                }
+            }
+        }
+        mixer.finishReceiveBatch(wake + 1U < packetsPerWake.size());
+    }
+
+    std::size_t totalPeerDepth = 0;
+    bool everyPeerAtLiveTail = true;
+    for (const std::uint64_t peerId : peerIds) {
+        const auto* stats = mixer.peerStats(peerId);
+        everyPeerAtLiveTail = everyPeerAtLiveTail && stats != nullptr &&
+            stats->queue_depth_frames <= 128;
+        if (stats != nullptr) {
+            totalPeerDepth += static_cast<std::size_t>(stats->queue_depth_frames);
+        }
+    }
+    expect(everyPeerAtLiveTail,
+        "every peer returns to the bounded two-packet live tail after a split catch-up burst");
+    expect(sink.depthFrames() <= 128,
+        "catch-up completion also returns the device-facing ring to the live tail");
+    expect(totalPeerDepth + sink.depthFrames() <= peerIds.size() * 128U + 128U,
+        "exactly-four-peer recovery bounds the complete receiver path instead of retaining burst latency");
+    expect(peakCatchupIngestDepth >
+            peerIds.size() * 128U + 128U,
+        "the multi-wake fixture contains measurable stale latency before final recovery");
+    expect(mixer.stats().output_drop_requested_frames > 0,
+        "final recovery reports the stale device-facing frames it discarded");
+    expect(!sink.samples.empty() && std::all_of(
+            sink.samples.begin(), sink.samples.end(),
+            [](std::int32_t sample) { return sample == 12; }),
+        "exactly-four-peer recovery retains the newest mixed audio rather than stale catch-up samples");
+    std::cout << "METRIC exactly_four_peer_catchup_peak_ingest_frames="
+              << peakCatchupIngestDepth << '\n'
+              << "METRIC exactly_four_peer_catchup_before_finalize_frames="
+              << beforeFinalPeerDepth + beforeFinalOutputDepth << '\n'
+              << "METRIC exactly_four_peer_catchup_after_finalize_frames="
+              << totalPeerDepth + sink.depthFrames() << '\n';
+}
+
 void test_peer_mixer_batches_wrapped_queue_operations()
 {
     MarkerMixerSink sink;
@@ -900,6 +1036,7 @@ int main()
     test_current_transport_packet_contract();
     test_peer_mixer_recovery_rebases_every_source();
     test_peer_mixer_global_gap_discards_obsolete_timeline();
+    test_exactly_four_peer_multi_wake_catchup_returns_to_live_latency();
     test_peer_mixer_batches_wrapped_queue_operations();
     test_peer_mixer_adapts_to_device_ring_underrun();
     test_peer_mixer_release_does_not_replace_drained_audio_with_silence();

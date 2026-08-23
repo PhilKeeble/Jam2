@@ -262,6 +262,7 @@ public:
     const NetworkPeerSendStats* peerSendStats(PeerId peer_id) const noexcept;
 
     void advance(std::uint64_t now_us) noexcept;
+    void finishReceiveBatch(bool receive_budget_exhausted) noexcept;
     void finish(std::uint64_t now_us) noexcept;
 
     std::size_t send(

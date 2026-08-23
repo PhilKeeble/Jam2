@@ -4149,6 +4149,10 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
         // Drain current packets immediately after the pre-receive deadline
         // pass classified any queued catch-up audio as stale.
         network_session.advance(jam2::monotonic_us());
+        // A delayed UDP burst can exceed the bounded 64-datagram work budget.
+        // Keep timeline recovery active across every saturated wake, then
+        // rebase the source queues and device output once the burst is drained.
+        network_session.finishReceiveBatch(mesh_datagrams_this_wake == 64);
         // Runtime/GUI commands and membership can tolerate one receive wake of
         // delay. Apply them after audio so their locks and formatting cannot
         // sit in front of an already queued packet batch.
