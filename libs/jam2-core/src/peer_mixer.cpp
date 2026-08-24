@@ -135,6 +135,10 @@ struct PeerMixer::Impl {
             const std::size_t available = (std::numeric_limits<std::size_t>::max)() -
                 late_frames_to_discard;
             late_frames_to_discard += std::min(frames, available);
+            if (owner->receiveRecoveryDebtFrames() <
+                owner->config.receive_recovery_trigger_frames) {
+                return;
+            }
             timeline_recovery_pending = true;
             owner->armReceiveRecovery();
         }
@@ -332,6 +336,9 @@ struct PeerMixer::Impl {
         if (config.adaptive_release_ppm < 0 || config.adaptive_release_ppm > 1000000) {
             throw std::runtime_error("PeerMixer adaptive playback release is outside 0..1000000 ppm");
         }
+        if (config.receive_recovery_trigger_frames == 0) {
+            throw std::runtime_error("PeerMixer receive recovery trigger must be nonzero");
+        }
         const std::uint64_t numerator =
             static_cast<std::uint64_t>(config.frames_per_block) * 1000000ULL;
         interval_us = numerator / interval_denominator;
@@ -341,6 +348,7 @@ struct PeerMixer::Impl {
         }
         stats.adaptive_playback_cushion_enabled = config.adaptive_playback_cushion;
         stats.adaptive_target_frames = adaptive_target_frames;
+        stats.receive_recovery_trigger_frames = config.receive_recovery_trigger_frames;
     }
 
     PeerSlot* find(std::uint64_t peer_id) noexcept

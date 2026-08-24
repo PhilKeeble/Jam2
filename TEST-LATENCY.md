@@ -1701,3 +1701,58 @@ schema grows from 488 to 495 columns; native CLI boundary coverage verifies the
 periodic/final width and copied values. Focused optimized Windows validation
 passed `jam2_core_input_units` and `jam2_cli_boundary_units`. No broader suite
 was run.
+
+## 2026-08-24 256-frame provisional receive-recovery gate
+
+Two post-recovery Windows receive runs showed that the first debt-driven
+implementation was removing persistent latency but treating routine delivery
+variation as a hard recovery. With both peers on Fast, Windows ran 129 new
+recoveries in 68.016 seconds (1.90/s), missed 7.43% of mixer audio, reported
+8.02% playback-underrun audio and trimmed 8.94% of the interval from live
+tails. Changing the macOS peer to Moderate produced effectively the same
+Windows result: 93 recoveries in 48.010 seconds (1.94/s), 7.48% missing mixer
+audio, 8.06% underrun audio and 8.96% live-tail trimming. RTT remained
+13.27-13.28 ms, severe packet-gap frequency remained 2.03-2.08/s, and both
+runs had zero sequence loss, reordering, missing sample ranges, jitter-buffer
+drops and UDP send errors. Mean retained Windows audio stayed extremely low at
+3.44-3.50 ms, so the issue was repeated destructive recovery rather than
+retained latency.
+
+The Moderate choice on macOS could not directly relax Windows recovery:
+`JoinProfile` is explicitly local receive/playback tuning, and the Windows
+receiver correctly remained on Fast's 64-frame playout, jitter and adaptive
+minimum settings. The latest comparison therefore supports the subjective
+report of over-aggressive Windows recovery while retaining the important fact
+that this was an intentionally difficult Fast-over-Wi-Fi setup with packet
+gaps as large as approximately 93 ms.
+
+Hard recovery now has a configurable mixer-owned trigger whose default is 256
+frames. Missing frames still advance the live timeline immediately and the
+exact late prefix is still discarded as it arrives. Debt below 256 frames does
+not arm catch-up recovery, trim any peer live tail, rebase the device output or
+force the adaptive target back to its minimum. The fourth missing 64-frame
+block reaches 256 and enters the existing saturated/trickled recovery state
+unchanged. This preserves 64-frame steady-state Fast latency while allowing up
+to three missing packet blocks to use the ordinary adaptive path. At 44.1 kHz,
+the hard-recovery decision boundary is 5.80 ms. If an isolated sub-threshold
+underrun raises the adaptive target from 64 to 512, the resulting maximum 10.16
+ms cushion remains temporary and is released by the existing 5,000 ppm path;
+the change does not add permanent or steady-state latency.
+
+The configured threshold is visible as the appended
+`mix_receive_recovery_trigger_frames` CSV field and in final console
+diagnostics; the CSV schema grows from 495 to 496 columns. Native mixer
+coverage proves that 192 frames of debt discard exactly 192 stale frames with
+zero recovery events, completions or live-tail trims, while 256 frames arm one
+hard recovery. It also rejects a zero trigger. The older immediate-rebase unit
+fixture explicitly selects 64 frames because it owns recovery mechanics, not
+the new threshold policy. The production-default exactly-four-peer 225 ms
+saturated and 94 ms trickled recovery fixtures both continue to pass.
+
+The required optimized `release/jam2.exe` build succeeded. Focused CTests
+passed `jam2_core_input_units` in 2.96 seconds and
+`jam2_cli_boundary_units` in 0.34 seconds. No full suite was run. A further
+real Fast-over-Wi-Fi jam should compare recovery events/s, missing/underrun
+percentages, live-tail trims and buffered frames against the two baselines
+above; the intended result is substantially fewer hard recoveries without
+returning to the earlier approximately 90 ms retained queue.

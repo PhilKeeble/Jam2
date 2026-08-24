@@ -135,6 +135,7 @@ struct AudioPacketStats {
     std::uint64_t mix_receive_recovery_debt_max_frames = 0;
     std::uint64_t mix_receive_recovery_duration_us = 0;
     std::uint64_t mix_receive_recovery_duration_max_us = 0;
+    std::uint64_t mix_receive_recovery_trigger_frames = 0;
     std::uint64_t bootstrap_coordinator_peer_id = 0;
     std::uint64_t arrangement_authority_peer_id = 0;
     std::uint64_t grid_authority_peer_id = 0;
@@ -703,7 +704,7 @@ public:
                 "mix_receive_recovery_active,mix_receive_recovery_events,"
                 "mix_receive_recovery_completions,mix_receive_recovery_debt_frames,"
                 "mix_receive_recovery_debt_max_frames,mix_receive_recovery_duration_us,"
-                "mix_receive_recovery_duration_max_us\n";
+                "mix_receive_recovery_duration_max_us,mix_receive_recovery_trigger_frames\n";
     }
 
     explicit operator bool() const { return out_.is_open(); }
@@ -1251,7 +1252,8 @@ public:
              << stats.mix_receive_recovery_debt_frames << ','
              << stats.mix_receive_recovery_debt_max_frames << ','
              << stats.mix_receive_recovery_duration_us << ','
-             << stats.mix_receive_recovery_duration_max_us;
+             << stats.mix_receive_recovery_duration_max_us << ','
+             << stats.mix_receive_recovery_trigger_frames;
         out_ << '\n';
         if (row_type == "final") {
             out_.flush();
@@ -1267,7 +1269,7 @@ public:
         if (!out_) {
             return;
         }
-        std::vector<std::string> fields(495);
+        std::vector<std::string> fields(496);
         auto set = [&](std::size_t index, auto value) {
             std::ostringstream text;
             text << value;
@@ -1743,6 +1745,7 @@ public:
         set(492, stats.mix_receive_recovery_debt_max_frames);
         set(493, stats.mix_receive_recovery_duration_us);
         set(494, stats.mix_receive_recovery_duration_max_us);
+        set(495, stats.mix_receive_recovery_trigger_frames);
 
         for (std::size_t i = 0; i < fields.size(); ++i) {
             if (i != 0) {

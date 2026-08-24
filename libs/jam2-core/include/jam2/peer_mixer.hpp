@@ -19,6 +19,7 @@ struct PeerMixerConfig {
     std::size_t adaptive_min_frames = 0;
     std::size_t adaptive_max_frames = 0;
     int adaptive_release_ppm = 5000;
+    std::size_t receive_recovery_trigger_frames = 256;
 };
 
 struct PeerMixerPeerStats {
@@ -73,6 +74,7 @@ struct PeerMixerStats {
     std::uint64_t receive_recovery_debt_max_frames = 0;
     std::uint64_t receive_recovery_duration_us = 0;
     std::uint64_t receive_recovery_duration_max_us = 0;
+    std::uint64_t receive_recovery_trigger_frames = 0;
     bool adaptive_playback_cushion_enabled = false;
     std::uint64_t adaptive_target_frames = 0;
     std::uint64_t adaptive_raise_events = 0;

@@ -407,6 +407,7 @@ void copy_peer_mixer_stats(
     target.mix_receive_recovery_debt_max_frames = source.receive_recovery_debt_max_frames;
     target.mix_receive_recovery_duration_us = source.receive_recovery_duration_us;
     target.mix_receive_recovery_duration_max_us = source.receive_recovery_duration_max_us;
+    target.mix_receive_recovery_trigger_frames = source.receive_recovery_trigger_frames;
     target.adaptive_playback_cushion_enabled = source.adaptive_playback_cushion_enabled;
     target.adaptive_playback_target_frames = source.adaptive_target_frames;
     target.adaptive_playback_raise_events = source.adaptive_raise_events;
@@ -1141,6 +1142,8 @@ void print_audio_packet_stats(const AudioPacketStats& stats, const Options& opti
               << stats.mix_receive_recovery_duration_us << "\n";
     std::cout << "Mixer receive recovery duration max us: "
               << stats.mix_receive_recovery_duration_max_us << "\n";
+    std::cout << "Mixer receive recovery trigger frames: "
+              << stats.mix_receive_recovery_trigger_frames << "\n";
     if (stats.send_interval_samples > 0) {
         std::cout << "Send interval ms min: " << static_cast<double>(stats.send_interval_min_us) / 1000.0 << "\n";
         std::cout << "Send interval ms avg: " << avg_us_to_ms(stats.send_interval_sum_us, stats.send_interval_samples) << "\n";

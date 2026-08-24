@@ -254,6 +254,7 @@ void testOptionAndStatsContracts()
     mixerSource.receive_recovery_debt_max_frames = 14;
     mixerSource.receive_recovery_duration_us = 15;
     mixerSource.receive_recovery_duration_max_us = 17;
+    mixerSource.receive_recovery_trigger_frames = 256;
     jam2::cli::stats::copy_peer_mixer_stats(copied, mixerSource);
     expect(copied.mix_receive_recovery_active &&
             copied.mix_receive_recovery_events == 11 &&
@@ -261,7 +262,8 @@ void testOptionAndStatsContracts()
             copied.mix_receive_recovery_debt_frames == 13 &&
             copied.mix_receive_recovery_debt_max_frames == 14 &&
             copied.mix_receive_recovery_duration_us == 15 &&
-            copied.mix_receive_recovery_duration_max_us == 17,
+            copied.mix_receive_recovery_duration_max_us == 17 &&
+            copied.mix_receive_recovery_trigger_frames == 256,
         "CLI diagnostics copy debt-driven receive-recovery state");
 
     jam2::PeerStreamStats firstGap;
@@ -391,8 +393,8 @@ void testOptionAndStatsContracts()
         };
         const bool schemaMatches = opened && lines.size() == 2 &&
                 csvFieldCount(header) == csvFieldCount(finalRow) &&
-                header.endsWith("mix_receive_recovery_duration_max_us") &&
-                finalRow.endsWith(",17");
+                header.endsWith("mix_receive_recovery_trigger_frames") &&
+                finalRow.endsWith(",17,256");
         expect(schemaMatches,
             "final CSV preserves the capture-clock pacing field and schema width");
     }

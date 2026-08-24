@@ -619,6 +619,9 @@ void test_peer_mixer_recovery_rebases_every_source()
     config.frames_per_block = 64;
     config.deadline_frames = 64;
     config.max_blocks_per_advance = 64;
+    // This fixture isolates the hard-recovery rebase mechanics themselves.
+    // Threshold policy is covered separately at the production 256 frames.
+    config.receive_recovery_trigger_frames = 64;
     jam2::PeerMixer mixer(config, &sink);
     auto* first = mixer.addPeer(1, 512);
     auto* second = mixer.addPeer(2, 512);
@@ -740,6 +743,75 @@ void test_peer_mixer_global_gap_discards_obsolete_timeline()
     expect(std::find(sink.samples.begin(), sink.samples.end(), 1111) == sink.samples.end() &&
             std::find(sink.samples.begin(), sink.samples.end(), 2222) != sink.samples.end(),
         "global source recovery emits fresh markers without replaying stale markers");
+}
+
+void test_peer_mixer_recovery_waits_for_256_frame_debt()
+{
+    LiveTailMixerSink sink;
+    jam2::PeerMixerConfig config;
+    config.sample_rate = 44100;
+    config.frames_per_block = 64;
+    config.deadline_frames = 64;
+    config.output_max_frames = 1536;
+    config.max_blocks_per_advance = 64;
+    config.adaptive_playback_cushion = true;
+    config.adaptive_target_frames = 64;
+    config.adaptive_min_frames = 64;
+    config.adaptive_max_frames = 512;
+    config.receive_recovery_trigger_frames = 256;
+    jam2::PeerMixer mixer(config, &sink);
+    auto* peer = mixer.addPeer(91, 4096);
+    expect(peer != nullptr && mixer.setPeerActive(91, true),
+        "provisional recovery creates its active source");
+
+    const std::array<std::int32_t, 64> packet{};
+    peer->pushFrames(packet);
+    mixer.advance(0);
+
+    std::uint64_t now = 0;
+    const auto missOnePacket = [&] {
+        sink.consume(sink.depthFrames() + 64U);
+        now += 3000;
+        mixer.advance(now);
+        mixer.finishReceiveBatch(false);
+    };
+    for (std::size_t packetIndex = 0; packetIndex < 3; ++packetIndex) {
+        missOnePacket();
+    }
+    expect(mixer.stats().missing_peer_frames == 192 &&
+            mixer.stats().receive_recovery_trigger_frames == 256,
+        "three missing packets remain below the visible 256-frame hard-recovery trigger");
+
+    std::vector<std::int32_t> delayedPrefix(192, 1111);
+    peer->pushFrames(delayedPrefix);
+    expect(mixer.stats().late_after_release_frames == 192 &&
+            mixer.stats().receive_recovery_events == 0 &&
+            mixer.stats().receive_recovery_completions == 0 &&
+            !mixer.stats().receive_recovery_active &&
+            mixer.stats().live_tail_trim_events == 0,
+        "sub-threshold debt discards only its exact stale prefix without hard recovery or trimming");
+
+    peer->pushFrames(packet);
+    mixer.advance(now + 1);
+    now += 1;
+    for (std::size_t packetIndex = 0; packetIndex < 4; ++packetIndex) {
+        missOnePacket();
+    }
+    expect(mixer.stats().receive_recovery_events == 1 &&
+            mixer.stats().receive_recovery_active &&
+            mixer.stats().receive_recovery_debt_frames >= 256,
+        "four missing packets arm one hard recovery at the configured threshold");
+
+    bool rejectedZeroTrigger = false;
+    try {
+        jam2::PeerMixerConfig invalid = config;
+        invalid.receive_recovery_trigger_frames = 0;
+        jam2::PeerMixer invalidMixer(invalid, &sink);
+    } catch (const std::runtime_error&) {
+        rejectedZeroTrigger = true;
+    }
+    expect(rejectedZeroTrigger,
+        "receive recovery rejects a zero-frame trigger instead of silently restoring eager recovery");
 }
 
 void test_exactly_four_peer_multi_wake_catchup_returns_to_live_latency()
@@ -1165,6 +1237,7 @@ int main()
     test_current_transport_packet_contract();
     test_peer_mixer_recovery_rebases_every_source();
     test_peer_mixer_global_gap_discards_obsolete_timeline();
+    test_peer_mixer_recovery_waits_for_256_frame_debt();
     test_exactly_four_peer_multi_wake_catchup_returns_to_live_latency();
     test_exactly_four_peer_trickled_catchup_stays_at_live_latency();
     test_peer_mixer_batches_wrapped_queue_operations();
