@@ -12,8 +12,8 @@ constexpr std::array<JoinProfile, 3> kJoinProfiles{{
         true, 64, 64, 512, 5000, 250,
     },
     {
-        "moderate", "Moderate", 64, 512, 8192, 4096, 4096,
-        true, 0.02, 25, 500, true, 512, 2048, 3072,
+        "moderate", "Moderate", 64, 256, 8192, 4096, 4096,
+        true, 0.02, 25, 500, true, 512, 1536, 3072,
         true, 512, 512, 4096, 5000, 250,
     },
     {

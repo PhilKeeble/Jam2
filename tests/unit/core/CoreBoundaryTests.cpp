@@ -960,6 +960,20 @@ void testSmallDiagnosticBoundaries()
             fast->adaptive_playback_min_frames == 64 &&
             fast->adaptive_playback_max_frames == 512,
         "fast create and join profiles preserve the measured 64-frame floor and 512-frame recovery bounds");
+    const jam2::JoinProfile* moderate = jam2::find_join_profile("moderate");
+    const jam2::CreateProfile* moderate_create = jam2::find_create_profile("moderate");
+    expect(moderate != nullptr && moderate_create != nullptr &&
+            moderate_create->local == moderate &&
+            moderate_create->sample_rate == 48000 && moderate_create->frame_size == 128 &&
+            moderate->audio_buffer_size == 64 &&
+            moderate->playback_prefill_frames == 256 &&
+            moderate->playout_delay_frames == 512 &&
+            moderate->jitter_buffer_frames == 1536 &&
+            moderate->jitter_buffer_max_frames == 3072 &&
+            moderate->adaptive_playback_target_frames == 512 &&
+            moderate->adaptive_playback_min_frames == 512 &&
+            moderate->adaptive_playback_max_frames == 4096,
+        "moderate create and join profiles preserve the measured 256-frame prefill and 1536-frame jitter target");
 }
 
 void testQ31NetworkAudioConversion()

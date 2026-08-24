@@ -1756,3 +1756,29 @@ real Fast-over-Wi-Fi jam should compare recovery events/s, missing/underrun
 percentages, live-tail trims and buffered frames against the two baselines
 above; the intended result is substantially fewer hard recoveries without
 returning to the earlier approximately 90 ms retained queue.
+
+## 2026-08-24 Moderate profile Wi-Fi defaults
+
+Subsequent 44.1 kHz/128-frame Wi-Fi trials established that a 1536-frame
+jitter target retained subjectively clean audio with zero mixer misses, hard
+recoveries and live-tail trims. Reducing configured buffer ceilings alone did
+not materially reduce total queued latency because delayed audio moved from
+the jitter and playback rings into the peer mixer. A later trial reducing
+playout from 512 to 256 frames produced a real but modest approximately 4-7 ms
+receive-side saving while remaining clean after four startup underrun events.
+
+Moderate now adopts the user-selected 256-frame playback prefill and the
+measured 1536-frame jitter target. Its 512-frame playout delay, 3072-frame
+jitter maximum, 512-frame adaptive target/minimum, 4096-frame adaptive maximum,
+128-frame session packet and all queue capacities remain unchanged. Prefill is
+a startup-only control and does not lower steady-state latency. The latest
+clean CSV actually recorded a 512-frame prefill, so the new 256/1536
+combination requires a further real-jam startup-quality check even though the
+1536 steady-state jitter behavior is already validated.
+
+Native core profile coverage now asserts the Moderate create/join ownership,
+128-frame session packet, 64-frame requested device buffer, 256-frame prefill,
+1536/3072 jitter bounds and unchanged adaptive values.
+The required optimized `release/jam2.exe` build succeeded and the focused
+`jam2_core_boundary_units` CTest passed in 0.04 seconds. No broader suite was
+run.
