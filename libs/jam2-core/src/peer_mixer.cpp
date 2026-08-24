@@ -136,6 +136,7 @@ struct PeerMixer::Impl {
                 late_frames_to_discard;
             late_frames_to_discard += std::min(frames, available);
             timeline_recovery_pending = true;
+            owner->armReceiveRecovery();
         }
 
         std::size_t retainLiveTail(std::size_t retain_frames) noexcept
@@ -164,14 +165,9 @@ struct PeerMixer::Impl {
             return dropped;
         }
 
-        bool recoverTimeline(std::size_t retain_frames) noexcept
+        void completeTimelineRecovery() noexcept
         {
-            if (!timeline_recovery_pending || late_frames_to_discard > 0 || queued == 0) {
-                return false;
-            }
-            retainLiveTail(retain_frames);
             timeline_recovery_pending = false;
-            return true;
         }
 
         std::span<const std::int32_t> firstReadableSpan(std::size_t frames) const noexcept
@@ -304,6 +300,12 @@ struct PeerMixer::Impl {
     bool cached_any_ready = false;
     bool occupancy_dirty = true;
     bool receive_catchup_active = false;
+    bool receive_rebase_started = false;
+    std::uint64_t current_advance_us = 0;
+    std::uint64_t receive_recovery_started_us = 0;
+    std::uint64_t receive_recovery_stable_until_us = 0;
+    std::uint64_t receive_recovery_window_us = 0;
+    std::size_t receive_recovery_peak_debt_frames = 0;
 
     Impl(const PeerMixerConfig& requested, PeerStreamPlayback* sink)
         : config(requested),
@@ -379,6 +381,167 @@ struct PeerMixer::Impl {
             delay += deadlineStep();
         }
         return std::max<std::uint64_t>(1, delay);
+    }
+
+    std::size_t receiveRecoveryDebtFrames() const noexcept
+    {
+        std::size_t debt = 0;
+        for (const auto& peer : peers) {
+            if (peer->stats.active && peer->stats.contributing) {
+                debt = std::max(debt, peer->late_frames_to_discard);
+            }
+        }
+        return debt;
+    }
+
+    std::size_t receiveRecoveryTailFrames() const noexcept
+    {
+        return static_cast<std::size_t>(config.frames_per_block) * 2U;
+    }
+
+    std::size_t receiveRecoveryOutputTailFrames() const noexcept
+    {
+        return std::max<std::size_t>(
+            receiveRecoveryTailFrames(),
+            config.adaptive_min_frames);
+    }
+
+    std::uint64_t receiveRecoveryWindowUs() const noexcept
+    {
+        const std::uint64_t debt_us = static_cast<std::uint64_t>(
+            (static_cast<long double>(receive_recovery_peak_debt_frames) * 1000000.0L) /
+            static_cast<long double>(config.sample_rate));
+        const std::uint64_t minimum_us = static_cast<std::uint64_t>(
+            (static_cast<long double>(config.frames_per_block) * 4.0L * 1000000.0L) /
+            static_cast<long double>(config.sample_rate));
+        return std::max<std::uint64_t>(1, std::max(debt_us, minimum_us));
+    }
+
+    void armReceiveRecovery() noexcept
+    {
+        if (!receive_catchup_active) {
+            receive_catchup_active = true;
+            receive_recovery_started_us = current_advance_us;
+            receive_recovery_peak_debt_frames = 0;
+            ++stats.receive_recovery_events;
+        }
+        receive_rebase_started = false;
+        receive_recovery_stable_until_us = 0;
+        receive_recovery_peak_debt_frames = std::max(
+            receive_recovery_peak_debt_frames,
+            receiveRecoveryDebtFrames());
+        stats.receive_recovery_active = true;
+        stats.receive_recovery_debt_frames = receiveRecoveryDebtFrames();
+        stats.receive_recovery_debt_max_frames = std::max<std::uint64_t>(
+            stats.receive_recovery_debt_max_frames,
+            receive_recovery_peak_debt_frames);
+    }
+
+    std::size_t trimReceiveRecoverySources() noexcept
+    {
+        std::size_t dropped = 0;
+        const std::size_t recovery_tail = receiveRecoveryTailFrames();
+        for (auto& peer : peers) {
+            if (peer->stats.active && peer->stats.contributing) {
+                dropped += peer->retainLiveTail(recovery_tail);
+                peer->completeTimelineRecovery();
+            }
+        }
+        return dropped;
+    }
+
+    void processReceiveRecovery(std::uint64_t now_us) noexcept
+    {
+        if (!receive_catchup_active) {
+            return;
+        }
+        const std::size_t debt = receiveRecoveryDebtFrames();
+        stats.receive_recovery_active = true;
+        stats.receive_recovery_debt_frames = debt;
+        stats.receive_recovery_duration_us = now_us >= receive_recovery_started_us
+            ? now_us - receive_recovery_started_us
+            : 0;
+        if (debt > 0) {
+            receive_recovery_peak_debt_frames = std::max(
+                receive_recovery_peak_debt_frames,
+                debt);
+            stats.receive_recovery_debt_max_frames = std::max<std::uint64_t>(
+                stats.receive_recovery_debt_max_frames,
+                receive_recovery_peak_debt_frames);
+            return;
+        }
+
+        const std::size_t dropped = trimReceiveRecoverySources();
+        if (!receive_rebase_started) {
+            receive_recovery_window_us = receiveRecoveryWindowUs();
+            receive_recovery_stable_until_us = now_us + receive_recovery_window_us;
+            if (output != nullptr) {
+                const std::size_t output_tail = receiveRecoveryOutputTailFrames();
+                const std::size_t output_depth = output->depthFrames();
+                if (output_depth > output_tail) {
+                    const std::size_t requested = output_depth - output_tail;
+                    output->requestDropFrames(requested);
+                    stats.output_drop_requested_frames += requested;
+                    ++stats.output_drop_request_events;
+                }
+                output->setResamplerRatio(1.0);
+            }
+            adaptive_target_frames = config.adaptive_min_frames;
+            adaptive_release_accumulator_frames = 0.0;
+            adaptive_release_active = false;
+            stats.adaptive_target_frames = adaptive_target_frames;
+            receive_rebase_started = true;
+            occupancy_dirty = true;
+        } else if (dropped > 0) {
+            // More of the same delayed prefix arrived after the first debt
+            // repayment. Restart the stability interval from this newest trim.
+            receive_recovery_stable_until_us = now_us + receive_recovery_window_us;
+        }
+    }
+
+    bool receiveRecoveryPathBounded() const noexcept
+    {
+        const std::size_t peer_tail = receiveRecoveryTailFrames();
+        for (const auto& peer : peers) {
+            if (peer->stats.active && peer->stats.contributing && peer->queued > peer_tail) {
+                return false;
+            }
+        }
+        if (output == nullptr || config.output_max_frames == 0) {
+            return true;
+        }
+        return output->depthFrames() <= receiveRecoveryOutputTailFrames() +
+            static_cast<std::size_t>(config.frames_per_block);
+    }
+
+    void completeReceiveRecovery(std::uint64_t now_us) noexcept
+    {
+        if (output != nullptr && config.output_max_frames > 0) {
+            const std::size_t output_tail = receiveRecoveryOutputTailFrames();
+            const std::size_t output_depth = output->depthFrames();
+            if (output_depth > output_tail) {
+                const std::size_t requested = output_depth - output_tail;
+                output->requestDropFrames(requested);
+                stats.output_drop_requested_frames += requested;
+                ++stats.output_drop_request_events;
+            }
+        }
+        const std::uint64_t duration = now_us >= receive_recovery_started_us
+            ? now_us - receive_recovery_started_us
+            : 0;
+        stats.receive_recovery_duration_us = duration;
+        stats.receive_recovery_duration_max_us = std::max(
+            stats.receive_recovery_duration_max_us,
+            duration);
+        ++stats.receive_recovery_completions;
+        stats.receive_recovery_active = false;
+        stats.receive_recovery_debt_frames = 0;
+        receive_catchup_active = false;
+        receive_rebase_started = false;
+        receive_recovery_stable_until_us = 0;
+        receive_recovery_window_us = 0;
+        receive_recovery_peak_debt_frames = 0;
+        occupancy_dirty = true;
     }
 
     struct ContributorReadiness {
@@ -572,8 +735,14 @@ struct PeerMixer::Impl {
 
     bool outputAtLimit() const noexcept
     {
-        return output != nullptr && config.output_max_frames > 0 &&
-            output->depthFrames() + mixed_output.size() > config.output_max_frames;
+        if (output == nullptr) {
+            return false;
+        }
+        const std::size_t limit = config.output_max_frames > 0 &&
+            receive_catchup_active && receive_rebase_started
+            ? receiveRecoveryOutputTailFrames()
+            : config.output_max_frames;
+        return limit > 0 && output->depthFrames() + mixed_output.size() > limit;
     }
 
     void releaseSlot(bool complete) noexcept
@@ -642,11 +811,12 @@ struct PeerMixer::Impl {
 
     void advance(std::uint64_t now_us) noexcept
     {
+        current_advance_us = now_us;
         if (output != nullptr && !output->acceptsFrames()) {
             return;
         }
         if (!occupancy_dirty && stats.contributing_peers == 0 &&
-            !adaptive_release_active) {
+            !adaptive_release_active && !receive_catchup_active) {
             return;
         }
         const std::uint64_t output_underrun_frames = output != nullptr
@@ -654,7 +824,7 @@ struct PeerMixer::Impl {
             : observed_output_underrun_frames;
         const bool output_underrun_changed =
             output_underrun_frames > observed_output_underrun_frames;
-        if (!occupancy_dirty && !adaptive_release_active &&
+        if (!occupancy_dirty && !adaptive_release_active && !receive_catchup_active &&
             !output_underrun_changed) {
             if (!cached_any_ready ||
                 (!cached_all_ready && now_us < next_deadline_us) ||
@@ -662,23 +832,9 @@ struct PeerMixer::Impl {
                 return;
             }
         }
-        const std::size_t recovery_tail = static_cast<std::size_t>(config.frames_per_block) * 2U;
-        bool timeline_recovered = false;
-        for (auto& peer : peers) {
-            timeline_recovered = peer->recoverTimeline(recovery_tail) || timeline_recovered;
-        }
-        if (timeline_recovered) {
-            receive_catchup_active = true;
-            // A deadline release advances the one shared output timeline.  If
-            // only the peer that missed that deadline discards its late tail,
-            // healthy peers can remain seconds behind and eventually fill
-            // their queues.  Rebase every active contributor to the same live
-            // tail whenever any source completes timeline recovery.
-            for (auto& peer : peers) {
-                if (peer->stats.active && peer->stats.contributing) {
-                    peer->retainLiveTail(recovery_tail);
-                }
-            }
+        const bool recovery_rebase_was_started = receive_rebase_started;
+        processReceiveRecovery(now_us);
+        if (!recovery_rebase_was_started && receive_rebase_started) {
             // Recovery can leave one source with a partial block. Reusing an
             // already-due deadline would immediately release that fragment,
             // recreate the same missing-frame debt, and keep the source in a
@@ -686,15 +842,6 @@ struct PeerMixer::Impl {
             // normal bounded prefill window before another incomplete release.
             next_deadline_us = now_us + deadlineDelay();
             consecutive_deadline_slots = 0;
-        } else if (receive_catchup_active) {
-            // A kernel receive backlog can span several bounded datagram
-            // wakes. Keep each newly ingested portion at the same live tail
-            // until the runtime confirms that it reached the end of the burst.
-            for (auto& peer : peers) {
-                if (peer->stats.active && peer->stats.contributing) {
-                    peer->retainLiveTail(recovery_tail);
-                }
-            }
         }
         ContributorReadiness readiness = occupancy_dirty
             ? updateOccupancy()
@@ -783,41 +930,13 @@ struct PeerMixer::Impl {
         if (!receive_catchup_active) {
             return;
         }
-
-        const std::size_t recovery_tail =
-            static_cast<std::size_t>(config.frames_per_block) * 2U;
-        for (auto& peer : peers) {
-            if (peer->stats.active && peer->stats.contributing) {
-                peer->retainLiveTail(recovery_tail);
-            }
-        }
-        if (receive_budget_exhausted) {
+        processReceiveRecovery(current_advance_us);
+        if (receive_budget_exhausted || !receive_rebase_started ||
+            current_advance_us < receive_recovery_stable_until_us ||
+            !receiveRecoveryPathBounded()) {
             return;
         }
-
-        // The source queues now own only current audio, but the device ring can
-        // still contain the stale prefix mixed before the receive stall was
-        // detected. Retain one bounded live tail there as well. The lock-free
-        // playback ring applies this request at its callback boundary.
-        if (output != nullptr) {
-            const std::size_t output_tail = std::max<std::size_t>(
-                recovery_tail,
-                config.adaptive_min_frames);
-            const std::size_t output_depth = output->depthFrames();
-            if (output_depth > output_tail) {
-                const std::size_t requested = output_depth - output_tail;
-                output->requestDropFrames(requested);
-                stats.output_drop_requested_frames += requested;
-                ++stats.output_drop_request_events;
-            }
-            output->setResamplerRatio(1.0);
-        }
-        adaptive_target_frames = config.adaptive_min_frames;
-        adaptive_release_accumulator_frames = 0.0;
-        adaptive_release_active = false;
-        stats.adaptive_target_frames = adaptive_target_frames;
-        receive_catchup_active = false;
-        occupancy_dirty = true;
+        completeReceiveRecovery(current_advance_us);
     }
 };
 

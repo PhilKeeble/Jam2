@@ -128,6 +128,13 @@ struct AudioPacketStats {
     std::uint64_t mix_output_drop_request_events = 0;
     std::uint64_t mix_output_dropped_frames = 0;
     std::uint64_t mix_work_budget_yields = 0;
+    bool mix_receive_recovery_active = false;
+    std::uint64_t mix_receive_recovery_events = 0;
+    std::uint64_t mix_receive_recovery_completions = 0;
+    std::uint64_t mix_receive_recovery_debt_frames = 0;
+    std::uint64_t mix_receive_recovery_debt_max_frames = 0;
+    std::uint64_t mix_receive_recovery_duration_us = 0;
+    std::uint64_t mix_receive_recovery_duration_max_us = 0;
     std::uint64_t bootstrap_coordinator_peer_id = 0;
     std::uint64_t arrangement_authority_peer_id = 0;
     std::uint64_t grid_authority_peer_id = 0;
@@ -692,7 +699,11 @@ public:
                 "coreaudio_cycle_to_output_min_us,coreaudio_cycle_to_output_avg_us,"
                 "coreaudio_cycle_to_output_max_us,coreaudio_cycle_to_output_samples,"
                 "coreaudio_cycle_jitter_min_us,coreaudio_cycle_jitter_avg_us,"
-                "coreaudio_cycle_jitter_max_us,coreaudio_cycle_jitter_samples\n";
+                "coreaudio_cycle_jitter_max_us,coreaudio_cycle_jitter_samples,"
+                "mix_receive_recovery_active,mix_receive_recovery_events,"
+                "mix_receive_recovery_completions,mix_receive_recovery_debt_frames,"
+                "mix_receive_recovery_debt_max_frames,mix_receive_recovery_duration_us,"
+                "mix_receive_recovery_duration_max_us\n";
     }
 
     explicit operator bool() const { return out_.is_open(); }
@@ -1233,7 +1244,14 @@ public:
                     audio.callback_timing.cycle_jitter_sum_ns,
                     audio.callback_timing.cycle_jitter_samples)) / 1000.0 << ','
              << static_cast<double>(audio.callback_timing.cycle_jitter_max_ns) / 1000.0 << ','
-             << audio.callback_timing.cycle_jitter_samples;
+             << audio.callback_timing.cycle_jitter_samples << ','
+             << (stats.mix_receive_recovery_active ? "yes" : "no") << ','
+             << stats.mix_receive_recovery_events << ','
+             << stats.mix_receive_recovery_completions << ','
+             << stats.mix_receive_recovery_debt_frames << ','
+             << stats.mix_receive_recovery_debt_max_frames << ','
+             << stats.mix_receive_recovery_duration_us << ','
+             << stats.mix_receive_recovery_duration_max_us;
         out_ << '\n';
         if (row_type == "final") {
             out_.flush();
@@ -1249,7 +1267,7 @@ public:
         if (!out_) {
             return;
         }
-        std::vector<std::string> fields(488);
+        std::vector<std::string> fields(495);
         auto set = [&](std::size_t index, auto value) {
             std::ostringstream text;
             text << value;
@@ -1718,6 +1736,13 @@ public:
             audio.callback_timing.cycle_jitter_samples)) / 1000.0);
         set(486, static_cast<double>(audio.callback_timing.cycle_jitter_max_ns) / 1000.0);
         set(487, audio.callback_timing.cycle_jitter_samples);
+        fields[488] = stats.mix_receive_recovery_active ? "yes" : "no";
+        set(489, stats.mix_receive_recovery_events);
+        set(490, stats.mix_receive_recovery_completions);
+        set(491, stats.mix_receive_recovery_debt_frames);
+        set(492, stats.mix_receive_recovery_debt_max_frames);
+        set(493, stats.mix_receive_recovery_duration_us);
+        set(494, stats.mix_receive_recovery_duration_max_us);
 
         for (std::size_t i = 0; i < fields.size(); ++i) {
             if (i != 0) {

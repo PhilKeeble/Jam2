@@ -400,6 +400,13 @@ void copy_peer_mixer_stats(
     target.mix_output_dropped_frames = source.output_dropped_frames;
 
     target.mix_work_budget_yields = source.work_budget_yields;
+    target.mix_receive_recovery_active = source.receive_recovery_active;
+    target.mix_receive_recovery_events = source.receive_recovery_events;
+    target.mix_receive_recovery_completions = source.receive_recovery_completions;
+    target.mix_receive_recovery_debt_frames = source.receive_recovery_debt_frames;
+    target.mix_receive_recovery_debt_max_frames = source.receive_recovery_debt_max_frames;
+    target.mix_receive_recovery_duration_us = source.receive_recovery_duration_us;
+    target.mix_receive_recovery_duration_max_us = source.receive_recovery_duration_max_us;
     target.adaptive_playback_cushion_enabled = source.adaptive_playback_cushion_enabled;
     target.adaptive_playback_target_frames = source.adaptive_target_frames;
     target.adaptive_playback_raise_events = source.adaptive_raise_events;
@@ -803,6 +810,12 @@ void print_periodic_stream_stats(
               << " peer_playback_queue_current_frames=" << stats.peer_playback_queue_current_frames
               << " peer_playback_path_current_frames=" << stats.peer_playback_path_current_frames
               << " mix_live_tail_trimmed_frames=" << stats.mix_live_tail_trimmed_frames
+              << " mix_receive_recovery_active="
+              << (stats.mix_receive_recovery_active ? "yes" : "no")
+              << " mix_receive_recovery_debt_frames="
+              << stats.mix_receive_recovery_debt_frames
+              << " mix_receive_recovery_completions="
+              << stats.mix_receive_recovery_completions
               << " metronome_compensation_active=" << (stats.metronome_compensation_active ? "yes" : "no")
               << " metronome_compensation_offset_ms="
               << signed_frames_to_ms(stats.metronome_compensation_offset_frames, options.sample_rate)
@@ -1114,6 +1127,20 @@ void print_audio_packet_stats(const AudioPacketStats& stats, const Options& opti
     std::cout << "Mixer live-tail trim events: " << stats.mix_live_tail_trim_events << "\n";
     std::cout << "Mixer live-tail trimmed frames: " << stats.mix_live_tail_trimmed_frames << "\n";
     std::cout << "Mixer live-tail trim max frames: " << stats.mix_live_tail_trim_max_frames << "\n";
+    std::cout << "Mixer receive recovery active: "
+              << (stats.mix_receive_recovery_active ? "yes" : "no") << "\n";
+    std::cout << "Mixer receive recovery events: "
+              << stats.mix_receive_recovery_events << "\n";
+    std::cout << "Mixer receive recovery completions: "
+              << stats.mix_receive_recovery_completions << "\n";
+    std::cout << "Mixer receive recovery debt frames: "
+              << stats.mix_receive_recovery_debt_frames << "\n";
+    std::cout << "Mixer receive recovery debt max frames: "
+              << stats.mix_receive_recovery_debt_max_frames << "\n";
+    std::cout << "Mixer receive recovery duration us: "
+              << stats.mix_receive_recovery_duration_us << "\n";
+    std::cout << "Mixer receive recovery duration max us: "
+              << stats.mix_receive_recovery_duration_max_us << "\n";
     if (stats.send_interval_samples > 0) {
         std::cout << "Send interval ms min: " << static_cast<double>(stats.send_interval_min_us) / 1000.0 << "\n";
         std::cout << "Send interval ms avg: " << avg_us_to_ms(stats.send_interval_sum_us, stats.send_interval_samples) << "\n";

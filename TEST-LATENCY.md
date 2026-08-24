@@ -1643,3 +1643,61 @@ focused optimized Windows command
 `compile.cmd --in-dev-shell --tests unit --test-name jam2_core_input_units`
 passes in 2.88 seconds. The test executable repeated the same `12432/400/128`
 frame metrics and passed. No broader suite was run.
+
+## 2026-08-24 debt-driven recovery for saturated and trickled bursts
+
+The next Windows receiver log, against a macOS peer on Wi-Fi, exposed a second
+recovery shape. Incoming audio had approximately 91-94 ms packet gaps but was
+returned through wakes of only five to nine packets. Sequence loss, jitter
+drops and mixer capacity drops remained zero, yet the device ring stayed near
+1,536 frames and the peer queue near 2,400-2,600 frames. Mean current buffering
+was 3,592 frames/81.45 ms and the approximate local receive ledger was 91 ms.
+No live-tail trim or output rebase occurred. The earlier 64-datagram solution
+therefore handled a saturated kernel backlog but incorrectly treated a
+non-saturated wake as proof that gradual Wi-Fi catch-up had ended.
+
+The exactly-four-participant native fixture now also covers a 94 ms gap at
+44.1 kHz, followed by an `5/7/9/6/8/...` sequence of non-saturated receive
+wakes and then 100 normally paced current packets. Before the new production
+change, this test built and failed with a 14,784-frame maximum stable path and
+the same 14,784 frames still resident at the end. The existing 225 ms
+`64/64/64/38` saturated-burst fixture remained in the same CTest.
+
+Recovery is now owned by explicit mixer timeline state instead of UDP batch
+shape:
+
+- the first real incomplete mixer deadline arms recovery and records the
+  largest outstanding per-peer live-timeline debt;
+- incoming frames continue paying that debt without becoming playable stale
+  audio;
+- once debt reaches zero, every contributor retains only the newest two packet
+  blocks and the device output is bounded to the larger of that tail or the
+  configured adaptive minimum;
+- the stability window is derived from the recovered debt duration, with a
+  four-packet minimum, and every additional stale-tail trim restarts it;
+- saturated receive wakes still prevent completion, but a small wake alone no
+  longer ends recovery;
+- completion requires zero debt, every peer within its live tail, the output
+  within one callback of its target, and the full stability interval without a
+  new miss; the final output prefix is bounded again at completion;
+- output drop requests remain lock-free and are applied by the existing audio
+  ring at its callback boundary.
+
+Both strategies now pass together in `jam2_core_input_units`:
+
+| Deterministic recovery case | Peak/pre-final path | Final path | Result |
+|---|---:|---:|---|
+| 225 ms saturated `64/64/64/38` catch-up | 12,560 / 464 frames | 144 frames / 3.00 ms at 48 kHz | current marker only |
+| 94 ms trickled 5-9 packet wakes | 320-frame maximum after normal pacing | 192 frames / 4.35 ms at 44.1 kHz | current marker only |
+
+The trickled case verifies every remote contributor remains at or below its
+128-frame live tail and the device output remains within one 64-frame callback
+of its 128-frame target. Both cases require a reported recovery event,
+completion, inactive final state and zero final debt.
+
+CSV and console diagnostics now expose recovery active state, events,
+completions, current/maximum debt frames and current/maximum duration. The CSV
+schema grows from 488 to 495 columns; native CLI boundary coverage verifies the
+periodic/final width and copied values. Focused optimized Windows validation
+passed `jam2_core_input_units` and `jam2_cli_boundary_units`. No broader suite
+was run.

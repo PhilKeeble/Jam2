@@ -66,6 +66,13 @@ struct PeerMixerStats {
     std::uint64_t output_drop_request_events = 0;
     std::uint64_t output_dropped_frames = 0;
     std::uint64_t work_budget_yields = 0;
+    bool receive_recovery_active = false;
+    std::uint64_t receive_recovery_events = 0;
+    std::uint64_t receive_recovery_completions = 0;
+    std::uint64_t receive_recovery_debt_frames = 0;
+    std::uint64_t receive_recovery_debt_max_frames = 0;
+    std::uint64_t receive_recovery_duration_us = 0;
+    std::uint64_t receive_recovery_duration_max_us = 0;
     bool adaptive_playback_cushion_enabled = false;
     std::uint64_t adaptive_target_frames = 0;
     std::uint64_t adaptive_raise_events = 0;

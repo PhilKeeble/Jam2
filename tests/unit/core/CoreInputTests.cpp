@@ -814,6 +814,21 @@ void test_exactly_four_peer_multi_wake_catchup_returns_to_live_latency()
         mixer.finishReceiveBatch(wake + 1U < packetsPerWake.size());
     }
 
+    const std::array<std::int32_t, 64> stablePacket = [] {
+        std::array<std::int32_t, 64> result{};
+        result.fill(4);
+        return result;
+    }();
+    for (std::size_t callback = 0; callback < 200; ++callback) {
+        sink.consume(64);
+        now += 1333;
+        for (auto* peer : peers) {
+            peer->pushFrames(stablePacket);
+        }
+        mixer.advance(now);
+        mixer.finishReceiveBatch(false);
+    }
+
     std::size_t totalPeerDepth = 0;
     bool everyPeerAtLiveTail = true;
     for (const std::uint64_t peerId : peerIds) {
@@ -826,15 +841,18 @@ void test_exactly_four_peer_multi_wake_catchup_returns_to_live_latency()
     }
     expect(everyPeerAtLiveTail,
         "every peer returns to the bounded two-packet live tail after a split catch-up burst");
-    expect(sink.depthFrames() <= 128,
-        "catch-up completion also returns the device-facing ring to the live tail");
+    expect(sink.depthFrames() <= 192,
+        "catch-up completion returns the device-facing ring within one callback of the live tail");
     expect(totalPeerDepth + sink.depthFrames() <= peerIds.size() * 128U + 128U,
         "exactly-four-peer recovery bounds the complete receiver path instead of retaining burst latency");
     expect(peakCatchupIngestDepth >
             peerIds.size() * 128U + 128U,
         "the multi-wake fixture contains measurable stale latency before final recovery");
-    expect(mixer.stats().output_drop_requested_frames > 0,
-        "final recovery reports the stale device-facing frames it discarded");
+    expect(mixer.stats().receive_recovery_events > 0 &&
+            mixer.stats().receive_recovery_completions > 0 &&
+            !mixer.stats().receive_recovery_active &&
+            mixer.stats().receive_recovery_debt_frames == 0,
+        "large-burst recovery reports a completed debt-driven recovery cycle");
     expect(!sink.samples.empty() && std::all_of(
             sink.samples.begin(), sink.samples.end(),
             [](std::int32_t sample) { return sample == 12; }),
@@ -845,6 +863,117 @@ void test_exactly_four_peer_multi_wake_catchup_returns_to_live_latency()
               << beforeFinalPeerDepth + beforeFinalOutputDepth << '\n'
               << "METRIC exactly_four_peer_catchup_after_finalize_frames="
               << totalPeerDepth + sink.depthFrames() << '\n';
+}
+
+void test_exactly_four_peer_trickled_catchup_stays_at_live_latency()
+{
+    LiveTailMixerSink sink;
+    jam2::PeerMixerConfig config;
+    config.sample_rate = 44100;
+    config.frames_per_block = 64;
+    config.deadline_frames = 64;
+    config.output_max_frames = 1536;
+    config.max_blocks_per_advance = 64;
+    config.adaptive_playback_cushion = true;
+    config.adaptive_target_frames = 64;
+    config.adaptive_min_frames = 64;
+    config.adaptive_max_frames = 512;
+    jam2::PeerMixer mixer(config, &sink);
+
+    constexpr std::array<std::uint64_t, 3> peerIds{301, 302, 303};
+    std::array<jam2::PeerStreamPlayback*, peerIds.size()> peers{};
+    const std::array<std::int32_t, 64> initial{};
+    for (std::size_t index = 0; index < peerIds.size(); ++index) {
+        peers[index] = mixer.addPeer(peerIds[index], 16384);
+        expect(peers[index] != nullptr && mixer.setPeerActive(peerIds[index], true),
+            "trickled recovery activates every remote contributor");
+        peers[index]->pushFrames(initial);
+    }
+    mixer.advance(0);
+
+    // Match the Wi-Fi jam's approximately 94 ms interruption while the local
+    // device continues consuming one 64-frame callback every 1.451 ms.
+    std::uint64_t now = 0;
+    for (std::size_t callback = 0; callback < 65; ++callback) {
+        sink.consume(64);
+        now += 1451;
+        mixer.advance(now);
+        mixer.finishReceiveBatch(false);
+    }
+    expect(mixer.stats().deadline_slots > 0,
+        "trickled recovery first advances the missing 94 ms timeline");
+
+    // Repay the missing timeline and deliver the trailing catch-up through
+    // small, non-saturated wakes. The old 64-datagram completion rule treated
+    // the first such wake after debt repayment as the end of recovery.
+    constexpr std::array<std::size_t, 18> packetsPerWake{
+        5, 7, 9, 6, 8, 5, 9, 7, 6, 8, 5, 9, 7, 6, 8, 5, 9, 7};
+    std::vector<std::int32_t> batch;
+    for (const std::size_t packets : packetsPerWake) {
+        batch.assign(packets * 64U, 1111);
+        for (auto* peer : peers) {
+            peer->pushFrames(batch);
+        }
+        now += 250;
+        mixer.advance(now);
+        mixer.finishReceiveBatch(false);
+    }
+
+    // Once packet pacing is normal again, recovery must remain at the live
+    // edge and must not replay the preceding trickled catch-up prefix.
+    const std::array<std::int32_t, 64> currentPacket = [] {
+        std::array<std::int32_t, 64> result{};
+        result.fill(2222);
+        return result;
+    }();
+    std::size_t maximumStablePath = 0;
+    for (std::size_t callback = 0; callback < 100; ++callback) {
+        sink.consume(64);
+        now += 1451;
+        for (auto* peer : peers) {
+            peer->pushFrames(currentPacket);
+        }
+        mixer.advance(now);
+        mixer.finishReceiveBatch(false);
+        std::size_t currentPath = sink.depthFrames();
+        for (const std::uint64_t peerId : peerIds) {
+            const auto* stats = mixer.peerStats(peerId);
+            if (stats != nullptr) {
+                currentPath += static_cast<std::size_t>(stats->queue_depth_frames);
+            }
+        }
+        maximumStablePath = std::max(maximumStablePath, currentPath);
+    }
+
+    std::size_t finalPeerDepth = 0;
+    bool everyPeerAtLiveTail = true;
+    for (const std::uint64_t peerId : peerIds) {
+        const auto* stats = mixer.peerStats(peerId);
+        if (stats != nullptr) {
+            finalPeerDepth += static_cast<std::size_t>(stats->queue_depth_frames);
+        }
+        everyPeerAtLiveTail = everyPeerAtLiveTail && stats != nullptr &&
+            stats->queue_depth_frames <= 128;
+    }
+    const std::size_t finalPath = finalPeerDepth + sink.depthFrames();
+    const std::size_t livePathBound = peerIds.size() * 128U + 128U;
+    expect(maximumStablePath <= livePathBound && finalPath <= livePathBound,
+        "small-wake recovery reaches and retains the configured live-path bound");
+    expect(everyPeerAtLiveTail && sink.depthFrames() <= 192,
+        "small-wake recovery bounds every peer and the callback-quantized output tail");
+    expect(!sink.samples.empty() && std::all_of(
+            sink.samples.begin(), sink.samples.end(),
+            [](std::int32_t sample) { return sample == 6666; }),
+        "small-wake recovery emits only current mixed audio after pacing normalizes");
+    expect(mixer.stats().receive_recovery_events > 0 &&
+            mixer.stats().receive_recovery_completions > 0 &&
+            !mixer.stats().receive_recovery_active &&
+            mixer.stats().receive_recovery_debt_frames == 0,
+        "small-wake recovery reports a completed debt-driven recovery cycle");
+    std::cout << "METRIC exactly_four_peer_trickle_max_stable_frames="
+              << maximumStablePath << '\n'
+              << "METRIC exactly_four_peer_trickle_final_frames="
+              << finalPath << '\n';
 }
 
 void test_peer_mixer_batches_wrapped_queue_operations()
@@ -1037,6 +1166,7 @@ int main()
     test_peer_mixer_recovery_rebases_every_source();
     test_peer_mixer_global_gap_discards_obsolete_timeline();
     test_exactly_four_peer_multi_wake_catchup_returns_to_live_latency();
+    test_exactly_four_peer_trickled_catchup_stays_at_live_latency();
     test_peer_mixer_batches_wrapped_queue_operations();
     test_peer_mixer_adapts_to_device_ring_underrun();
     test_peer_mixer_release_does_not_replace_drained_audio_with_silence();
