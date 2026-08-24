@@ -254,6 +254,8 @@ void testMixerPresentation()
     MixerStatsViewModel model;
     const MixerStatsLabels absent = model.present(nullptr);
     expect(absent.latency == QStringLiteral("RTT -") &&
+            absent.incomingPill.isEmpty() &&
+            absent.incomingBreakdown.contains(QStringLiteral("Waiting")) &&
             absent.diagnosis == QStringLiteral("Diagnosis -"),
         "missing connection statistics have explicit placeholders");
 
@@ -263,6 +265,16 @@ void testMixerPresentation()
         peer.peer_id = static_cast<std::uint64_t>(index + 1);
         peer.rtt_ms = 10.0 + index;
         peer.has_rtt = index != 1;
+        peer.incoming_audio.valid = index != 1;
+        peer.incoming_audio.network_ms = peer.rtt_ms * 0.5;
+        peer.incoming_audio.sample_rate = 48000.0;
+        peer.incoming_audio.jitter_buffer_frames = 64;
+        peer.incoming_audio.mixer_queue_frames = 32;
+        peer.incoming_audio.playback_ring_frames = 96;
+        peer.incoming_audio.output_path_frames = 128;
+        peer.incoming_audio.output_path_reported = true;
+        peer.incoming_audio.total_ms = peer.incoming_audio.network_ms +
+            static_cast<double>(64 + 32 + 96 + 128) * 1000.0 / 48000.0;
         stats.peers.push_back(peer);
     }
     const MixerStatsLabels normal = model.present(&stats);
@@ -271,6 +283,16 @@ void testMixerPresentation()
         "latency summary shows four peers and overflow count");
     expect(normal.latencyTooltip.count(QLatin1Char('\n')) == 4,
         "latency tooltip retains every peer");
+    expect(normal.incomingPill == QStringLiteral("~12-14 ms") &&
+            normal.incomingBreakdown.contains(
+                QStringLiteral("Peer 1 incoming: ~11.7 ms")) &&
+            normal.incomingBreakdown.contains(
+                QStringLiteral("Jitter buffer 1.3 ms (64 fr)")) &&
+            normal.incomingBreakdown.contains(
+                QStringLiteral("Playback ring 2.0 ms (96 fr)")) &&
+            normal.incomingBreakdown.contains(
+                QStringLiteral("Peer 2 incoming: measuring")),
+        "incoming presentation exposes the health-pill range and complete component evidence");
     expect(normal.diagnosis == QStringLiteral("Diagnosis OK"),
         "healthy measurements report an explicit OK diagnosis");
 

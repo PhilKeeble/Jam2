@@ -376,6 +376,41 @@ void testRuntimeCountersAndPeerGain()
         "runtime host reset clears stale UDP proof requests");
 }
 
+void testIncomingAudioDelayEstimate()
+{
+    const Jam2IncomingAudioDelay measured = jam2_estimate_incoming_audio_delay(
+        true, 12.602, true, 44100.0, 1408, 49, 3072, 154, 64);
+    const double expected = 12.602 * 0.5 +
+        static_cast<double>(1408 + 49 + 3072 + 154) * 1000.0 / 44100.0;
+    expect(measured.valid && measured.output_path_reported &&
+            measured.jitter_buffer_frames == 1408 &&
+            measured.mixer_queue_frames == 49 &&
+            measured.playback_ring_frames == 3072 &&
+            measured.output_path_frames == 154 &&
+            std::abs(measured.network_ms - 6.301) < 0.000001 &&
+            std::abs(measured.total_ms - expected) < 0.000001,
+        "incoming delay sums live network, peer queues, playback ring, and reported output path");
+
+    const Jam2IncomingAudioDelay fallback = jam2_estimate_incoming_audio_delay(
+        true, 0.6, true, 48000.0, 64, 32, 96, 0, 128);
+    expect(fallback.valid && !fallback.output_path_reported &&
+            fallback.output_path_frames == 128 &&
+            std::abs(fallback.total_ms -
+                (0.3 + static_cast<double>(64 + 32 + 96 + 128) * 1000.0 / 48000.0)) <
+                0.000001,
+        "incoming delay uses one active callback only when the driver output path is unavailable");
+
+    expect(!jam2_estimate_incoming_audio_delay(
+                false, 12.0, true, 44100.0, 1, 2, 3, 4, 5).valid &&
+            !jam2_estimate_incoming_audio_delay(
+                true, 12.0, false, 44100.0, 1, 2, 3, 4, 5).valid &&
+            !jam2_estimate_incoming_audio_delay(
+                true, -1.0, true, 44100.0, 1, 2, 3, 4, 5).valid &&
+            !jam2_estimate_incoming_audio_delay(
+                true, 12.0, true, 0.0, 1, 2, 3, 4, 5).valid,
+        "incoming delay remains unavailable until audio, RTT, and sample-rate evidence are valid");
+}
+
 void testControlToken()
 {
     const QString first = jam2::control_protocol::randomPeerToken();
@@ -436,6 +471,7 @@ int main(int argc, char** argv)
         testAutomationChannelStateAndDisconnect();
         testTcpReservationAndListener();
         testRuntimeCountersAndPeerGain();
+        testIncomingAudioDelayEstimate();
         testControlToken();
     } catch (const std::exception& exception) {
         ++failures;

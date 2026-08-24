@@ -607,6 +607,18 @@ void MainWindowPages::build(MainWindow& w)
     dataHeader->addWidget(closeData);
     dataLayout->addLayout(dataHeader);
 
+    auto* incomingAudioTitle = new QLabel(
+        QStringLiteral("INCOMING AUDIO DELAY"), dataContent);
+    incomingAudioTitle->setObjectName(QStringLiteral("DrawerSection"));
+    dataLayout->addWidget(incomingAudioTitle);
+    w.diagnosticIncomingAudioValue_ = new QLabel(
+        QStringLiteral("Waiting for live incoming-audio measurements."), dataContent);
+    w.diagnosticIncomingAudioValue_->setObjectName(
+        QStringLiteral("IncomingAudioDelayBreakdown"));
+    w.diagnosticIncomingAudioValue_->setWordWrap(true);
+    w.diagnosticIncomingAudioValue_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    dataLayout->addWidget(w.diagnosticIncomingAudioValue_);
+
     auto* audioPathTitle = new QLabel(QStringLiteral("AUDIO PATH"), dataContent);
     audioPathTitle->setObjectName(QStringLiteral("DrawerSection"));
     dataLayout->addWidget(audioPathTitle);

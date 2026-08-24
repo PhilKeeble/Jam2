@@ -2590,6 +2590,12 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
         snapshot.elapsed_ms = (now_us - start_time) / 1000ULL;
         snapshot.interval_ms = (now_us - diagnostics_baseline_us) / 1000ULL;
         snapshot.peers.reserve(peers.size());
+        const jam2::EngineSnapshot engine = audio.engine
+            ? audio.engine->snapshot()
+            : jam2::EngineSnapshot{};
+        const double diagnostic_sample_rate = engine.sample_rate > 0.0
+            ? engine.sample_rate
+            : static_cast<double>(options.sample_rate);
         std::uint64_t jitter_sum_us = 0;
         std::uint64_t jitter_samples = 0;
         std::uint64_t lost_packets = 0;
@@ -2611,23 +2617,38 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                 stats.sequence.out_of_order + stats.sequence.late + stats.reordered_lost,
                 previous.reordered_or_late);
             const std::uint64_t peer_expected = peer_received + peer_lost;
-            snapshot.peers.push_back({
-                peer.peer_id.value,
-                rtt_samples > 0 ? static_cast<double>(rtt_sum) /
-                    static_cast<double>(rtt_samples) / 1000.0 : 0.0,
-                rtt_samples > 0,
-                peer_jitter_samples > 0
-                    ? static_cast<double>(peer_jitter_sum) /
-                        static_cast<double>(peer_jitter_samples) / 1000.0
-                    : 0.0,
-                peer_expected > 0
-                    ? static_cast<double>(peer_lost) * 100.0 /
-                        static_cast<double>(peer_expected)
-                    : 0.0,
-                peer_reordered_or_late,
-                stats.drift_ppm,
-                stats.drift_valid,
-            });
+            const double peer_rtt_ms = rtt_samples > 0
+                ? static_cast<double>(rtt_sum) /
+                    static_cast<double>(rtt_samples) / 1000.0
+                : 0.0;
+            const auto* mix = network_session.peerMixStats(peer.peer_id);
+            Jam2PeerDiagnostics peer_diagnostics;
+            peer_diagnostics.peer_id = peer.peer_id.value;
+            peer_diagnostics.rtt_ms = peer_rtt_ms;
+            peer_diagnostics.has_rtt = rtt_samples > 0;
+            peer_diagnostics.jitter_average_ms = peer_jitter_samples > 0
+                ? static_cast<double>(peer_jitter_sum) /
+                    static_cast<double>(peer_jitter_samples) / 1000.0
+                : 0.0;
+            peer_diagnostics.packet_loss_percent = peer_expected > 0
+                ? static_cast<double>(peer_lost) * 100.0 /
+                    static_cast<double>(peer_expected)
+                : 0.0;
+            peer_diagnostics.reordered_or_late_packets = peer_reordered_or_late;
+            peer_diagnostics.drift_ppm = stats.drift_ppm;
+            peer_diagnostics.drift_valid = stats.drift_valid;
+            peer_diagnostics.incoming_audio = jam2_estimate_incoming_audio_delay(
+                engine.network_playback_enabled &&
+                    stats.expected_remote_sample_time > 0 && mix != nullptr,
+                peer_rtt_ms,
+                peer_diagnostics.has_rtt,
+                diagnostic_sample_rate,
+                stats.jitter_buffer_depth_frames,
+                mix != nullptr ? mix->queue_depth_frames : 0,
+                engine.playback_ring_depth_frames,
+                engine.output_latency_frames,
+                engine.audio_buffer_frames);
+            snapshot.peers.push_back(peer_diagnostics);
             jitter_sum_us += peer_jitter_sum;
             jitter_samples += peer_jitter_samples;
             snapshot.jitter_max_ms = std::max(
@@ -2679,9 +2700,6 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
         snapshot.packet_loss_percent = expected_packets > 0
             ? static_cast<double>(lost_packets) * 100.0 / static_cast<double>(expected_packets)
             : 0.0;
-        const jam2::EngineSnapshot engine = audio.engine
-            ? audio.engine->snapshot()
-            : jam2::EngineSnapshot{};
         snapshot.output_underrun_frames = counter_delta(
             engine.playback_ring.underruns,
             diagnostics_engine_baseline.playback_ring.underruns);

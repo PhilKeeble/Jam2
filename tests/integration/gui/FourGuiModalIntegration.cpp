@@ -915,6 +915,7 @@ bool exerciseLocalFakeAudioWorkflow(AutomationProcess& peer)
 
     for (const QString& action : {
              QStringLiteral("session-maintenance"),
+             QStringLiteral("incoming-delay-presentation"),
              QStringLiteral("track-reload"),
              QStringLiteral("file-dialog-cancels"),
              QStringLiteral("jamtaster-dialog-cancel"),
@@ -945,6 +946,14 @@ bool exerciseLocalFakeAudioWorkflow(AutomationProcess& peer)
             applied.value(QStringLiteral("performance")).toObject()
                 .value(QStringLiteral("metronome_bpm")).toInt() != 137) {
             fail(QStringLiteral("JamTaster tempo boundary did not reach the live metronome"));
+        }
+        if (action == QStringLiteral("incoming-delay-presentation")) {
+            const QJsonObject jam = applied.value(QStringLiteral("jam")).toObject();
+            if (!jam.value(QStringLiteral("incoming_audio_breakdown")).toString().contains(
+                    QStringLiteral("Playback ring 69.7 ms (3072 fr)"))) {
+                fail(QStringLiteral(
+                    "Data drawer omitted the incoming-delay evidence"));
+            }
         }
     }
 
@@ -2583,6 +2592,27 @@ int main(int argc, char* argv[])
                     performance.value(QStringLiteral("callbacks")).toInteger() > 0;
             }, runtimeStates)) {
         return 1;
+    }
+
+    {
+        const QString id = QStringLiteral("active-incoming-delay-presentation");
+        QJsonObject applied;
+        if (!send(creator, {
+                {QStringLiteral("type"), QStringLiteral("application.boundary")},
+                {QStringLiteral("id"), id},
+                {QStringLiteral("action"), QStringLiteral("incoming-delay-presentation")},
+            }) || !receiveApplied(creator, id, &applied)) {
+            return 1;
+        }
+        const QJsonObject jam = applied.value(QStringLiteral("jam")).toObject();
+        if (!jam.value(QStringLiteral("health_pill")).toString().contains(
+                QStringLiteral("IN ~112 ms")) ||
+            !jam.value(QStringLiteral("incoming_audio_breakdown")).toString().contains(
+                QStringLiteral("Playback ring 69.7 ms (3072 fr)"))) {
+            fail(QStringLiteral(
+                "active jam health pill or Data drawer omitted the incoming-delay evidence"));
+            return 1;
+        }
     }
 
     if (!exerciseActiveCreatorWorkflows(coordinator, runtimeStates)) {

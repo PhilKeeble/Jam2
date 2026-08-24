@@ -809,6 +809,18 @@ void GuiTestAgent::handle(const QJsonObject& command)
             window_.requestRecordingGroupRecovery();
             window_.handleRecordingGroupRecovery({});
             window_.revealLooperLaneWav(-1);
+        } else if (action == QStringLiteral("incoming-delay-presentation")) {
+            ConnectionDiagnosticsSnapshot diagnostics;
+            diagnostics.received_packets = 1000;
+            diagnostics.packet_gap_samples = 1000;
+            Jam2PeerDiagnostics peer;
+            peer.peer_id = 2;
+            peer.rtt_ms = 12.602;
+            peer.has_rtt = true;
+            peer.incoming_audio = jam2_estimate_incoming_audio_delay(
+                true, peer.rtt_ms, true, 44100.0, 1408, 49, 3072, 154, 64);
+            diagnostics.peers.push_back(peer);
+            window_.handleConnectionDiagnostics(diagnostics);
         } else if (action == QStringLiteral("track-reload")) {
             window_.loadTrackJson(
                 window_.trackToJson(), window_.trackController_.model());

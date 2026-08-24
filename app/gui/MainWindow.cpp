@@ -2053,8 +2053,8 @@ void MainWindow::updateJamSessionHeaderStatus(
         pill = QStringLiteral("JAM · %1 %2")
             .arg(totalPeers)
             .arg(totalPeers == 1 ? QStringLiteral("PEER") : QStringLiteral("PEERS"));
-        if (!sessionHeaderRtt_.isEmpty()) {
-            pill += QStringLiteral(" · %1").arg(sessionHeaderRtt_);
+        if (!sessionHeaderIncomingAudio_.isEmpty()) {
+            pill += QStringLiteral(" · IN %1").arg(sessionHeaderIncomingAudio_);
         }
     }
     setSessionHeaderStatus(pill, role, lines);
@@ -2447,6 +2447,10 @@ QJsonObject MainWindow::automationJamSnapshot() const
         {QStringLiteral("coordinator_token"), session.coordinatorToken},
         {QStringLiteral("failure"), session.failureDetail},
         {QStringLiteral("last_startup_failure"), lastJamFailureDialog_},
+        {QStringLiteral("health_pill"), connectionLabel_
+            ? connectionLabel_->text() : QString{}},
+        {QStringLiteral("incoming_audio_breakdown"), diagnosticIncomingAudioValue_
+            ? diagnosticIncomingAudioValue_->text() : QString{}},
         {QStringLiteral("policy"), policy},
     };
     if (role == QStringLiteral("creator")) {
@@ -4300,6 +4304,9 @@ void MainWindow::updateStatsDisplay(const ConnectionDiagnosticsSnapshot* stats)
     if (lossLabel_) lossLabel_->setText(labels.loss);
     if (underrunLabel_) underrunLabel_->setText(labels.underrun);
     diagnosisLabel_->setText(labels.diagnosis);
+    if (diagnosticIncomingAudioValue_) {
+        diagnosticIncomingAudioValue_->setText(labels.incomingBreakdown);
+    }
     QString measuredRtt;
     if (stats != nullptr) {
         const auto measured = std::find_if(
@@ -4310,8 +4317,11 @@ void MainWindow::updateStatsDisplay(const ConnectionDiagnosticsSnapshot* stats)
             measuredRtt = QStringLiteral("%1 ms").arg(measured->rtt_ms, 0, 'f', 1);
         }
     }
-    if (sessionHeaderRtt_ != measuredRtt) {
+    const QString measuredIncomingAudio = labels.incomingPill;
+    if (sessionHeaderRtt_ != measuredRtt ||
+        sessionHeaderIncomingAudio_ != measuredIncomingAudio) {
         sessionHeaderRtt_ = measuredRtt;
+        sessionHeaderIncomingAudio_ = measuredIncomingAudio;
         updateJamSessionHeaderStatus(sessionController_.snapshot());
     }
     if (diagnosticPacketsValue_) {

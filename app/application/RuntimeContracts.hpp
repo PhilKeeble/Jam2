@@ -175,6 +175,29 @@ struct Jam2NetworkOperationalSnapshot {
     std::int64_t grid_mapping_error_frames = 0;
 };
 
+struct Jam2IncomingAudioDelay {
+    bool valid = false;
+    double total_ms = 0.0;
+    double network_ms = 0.0;
+    double sample_rate = 0.0;
+    std::uint64_t jitter_buffer_frames = 0;
+    std::uint64_t mixer_queue_frames = 0;
+    std::uint64_t playback_ring_frames = 0;
+    std::uint64_t output_path_frames = 0;
+    bool output_path_reported = false;
+};
+
+Jam2IncomingAudioDelay jam2_estimate_incoming_audio_delay(
+    bool receiving_audio,
+    double rtt_ms,
+    bool has_rtt,
+    double sample_rate,
+    std::uint64_t jitter_buffer_frames,
+    std::uint64_t mixer_queue_frames,
+    std::uint64_t playback_ring_frames,
+    long output_latency_frames,
+    long fallback_audio_buffer_frames) noexcept;
+
 struct Jam2PeerDiagnostics {
     std::uint64_t peer_id = 0;
     double rtt_ms = 0.0;
@@ -184,6 +207,7 @@ struct Jam2PeerDiagnostics {
     std::uint64_t reordered_or_late_packets = 0;
     double drift_ppm = 0.0;
     bool drift_valid = false;
+    Jam2IncomingAudioDelay incoming_audio;
 };
 
 struct ConnectionDiagnosticsSnapshot {

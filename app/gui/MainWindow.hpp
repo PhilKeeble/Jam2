@@ -612,6 +612,7 @@ private:
     QPushButton* leaveJamButton_ = nullptr;
     QPushButton* refreshControlButton_ = nullptr;
     QString sessionHeaderRtt_;
+    QString sessionHeaderIncomingAudio_;
     QLabel* connectionLabel_ = nullptr;
     QLabel* jitterLabel_ = nullptr;
     QLabel* lossLabel_ = nullptr;
@@ -763,6 +764,7 @@ private:
     QLabel* diagnosticLateValue_ = nullptr;
     QLabel* diagnosticLossEventsValue_ = nullptr;
     QLabel* diagnosticBurstGapsValue_ = nullptr;
+    QLabel* diagnosticIncomingAudioValue_ = nullptr;
     QTableWidget* diagnosticPeerTable_ = nullptr;
 
     std::uint64_t sessionId_ = 0;

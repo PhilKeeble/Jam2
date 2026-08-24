@@ -70,6 +70,43 @@ std::int64_t jam2_next_metronome_compensation_offset(
     return currentOffsetFrames + step;
 }
 
+Jam2IncomingAudioDelay jam2_estimate_incoming_audio_delay(
+    bool receivingAudio,
+    double rttMs,
+    bool hasRtt,
+    double sampleRate,
+    std::uint64_t jitterBufferFrames,
+    std::uint64_t mixerQueueFrames,
+    std::uint64_t playbackRingFrames,
+    long outputLatencyFrames,
+    long fallbackAudioBufferFrames) noexcept
+{
+    Jam2IncomingAudioDelay result;
+    if (!receivingAudio || !hasRtt || !std::isfinite(rttMs) || rttMs < 0.0 ||
+        !std::isfinite(sampleRate) || sampleRate <= 0.0) {
+        return result;
+    }
+    const long boundedReportedOutput = (std::max)(0L, outputLatencyFrames);
+    const long boundedFallbackOutput = (std::max)(0L, fallbackAudioBufferFrames);
+    const long outputFrames = boundedReportedOutput > 0
+        ? boundedReportedOutput
+        : boundedFallbackOutput;
+    result.valid = true;
+    result.network_ms = rttMs * 0.5;
+    result.sample_rate = sampleRate;
+    result.jitter_buffer_frames = jitterBufferFrames;
+    result.mixer_queue_frames = mixerQueueFrames;
+    result.playback_ring_frames = playbackRingFrames;
+    result.output_path_frames = static_cast<std::uint64_t>(outputFrames);
+    result.output_path_reported = boundedReportedOutput > 0;
+    const double bufferedFrames = static_cast<double>(jitterBufferFrames) +
+        static_cast<double>(mixerQueueFrames) +
+        static_cast<double>(playbackRingFrames) +
+        static_cast<double>(result.output_path_frames);
+    result.total_ms = result.network_ms + bufferedFrames * 1000.0 / sampleRate;
+    return result;
+}
+
 bool Jam2RuntimeHost::submitCommand(const jam2::EngineCommand& command) noexcept
 
 {

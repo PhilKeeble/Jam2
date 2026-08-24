@@ -10,6 +10,8 @@
 struct MixerStatsLabels {
     QString latency;
     QString latencyTooltip;
+    QString incomingPill;
+    QString incomingBreakdown;
     QString jitter;
     QString loss;
     QString underrun;

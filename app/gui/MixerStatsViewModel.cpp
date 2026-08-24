@@ -7,6 +7,77 @@
 
 namespace {
 
+double framesToMs(std::uint64_t frames, double sampleRate)
+{
+    return sampleRate > 0.0
+        ? static_cast<double>(frames) * 1000.0 / sampleRate
+        : 0.0;
+}
+
+QString incomingPill(const ConnectionDiagnosticsSnapshot& stats)
+{
+    std::vector<double> values;
+    values.reserve(stats.peers.size());
+    for (const Jam2PeerDiagnostics& peer : stats.peers) {
+        if (peer.incoming_audio.valid && std::isfinite(peer.incoming_audio.total_ms)) {
+            values.push_back(peer.incoming_audio.total_ms);
+        }
+    }
+    if (values.empty()) return {};
+    const auto [minimum, maximum] = std::minmax_element(values.cbegin(), values.cend());
+    const qlonglong roundedMinimum = std::llround(*minimum);
+    const qlonglong roundedMaximum = std::llround(*maximum);
+    return roundedMinimum == roundedMaximum
+        ? QStringLiteral("~%1 ms").arg(roundedMaximum)
+        : QStringLiteral("~%1-%2 ms").arg(roundedMinimum).arg(roundedMaximum);
+}
+
+QString incomingBreakdown(const ConnectionDiagnosticsSnapshot& stats)
+{
+    if (stats.peers.empty()) {
+        return QStringLiteral("Waiting for an authenticated peer audio path.");
+    }
+    QStringList peers;
+    for (std::size_t index = 0; index < stats.peers.size(); ++index) {
+        const Jam2PeerDiagnostics& peer = stats.peers[index];
+        const Jam2IncomingAudioDelay& incoming = peer.incoming_audio;
+        if (!incoming.valid) {
+            peers << QStringLiteral("<b>Peer %1 incoming: measuring</b>").arg(index + 1);
+            continue;
+        }
+        const double jitterMs = framesToMs(
+            incoming.jitter_buffer_frames, incoming.sample_rate);
+        const double mixerMs = framesToMs(
+            incoming.mixer_queue_frames, incoming.sample_rate);
+        const double playbackMs = framesToMs(
+            incoming.playback_ring_frames, incoming.sample_rate);
+        const double outputMs = framesToMs(
+            incoming.output_path_frames, incoming.sample_rate);
+        const QString outputSource = incoming.output_path_reported
+            ? QStringLiteral("reported output path")
+            : QStringLiteral("callback fallback");
+        peers << QStringLiteral(
+            "<b>Peer %1 incoming: ~%2 ms</b><br>"
+            "Network RTT/2 %3 ms (RTT %4 ms)<br>"
+            "Jitter buffer %5 ms (%6 fr) | Mixer queue %7 ms (%8 fr)<br>"
+            "Playback ring %9 ms (%10 fr) | Output %11 ms (%12 fr, %13)")
+            .arg(index + 1)
+            .arg(incoming.total_ms, 0, 'f', 1)
+            .arg(incoming.network_ms, 0, 'f', 1)
+            .arg(peer.rtt_ms, 0, 'f', 1)
+            .arg(jitterMs, 0, 'f', 1)
+            .arg(static_cast<qulonglong>(incoming.jitter_buffer_frames))
+            .arg(mixerMs, 0, 'f', 1)
+            .arg(static_cast<qulonglong>(incoming.mixer_queue_frames))
+            .arg(playbackMs, 0, 'f', 1)
+            .arg(static_cast<qulonglong>(incoming.playback_ring_frames))
+            .arg(outputMs, 0, 'f', 1)
+            .arg(static_cast<qulonglong>(incoming.output_path_frames))
+            .arg(outputSource);
+    }
+    return peers.join(QStringLiteral("<br><br>"));
+}
+
 QString diagnosis(const ConnectionDiagnosticsSnapshot& stats)
 {
     if (stats.output_underrun_events > 0) {
@@ -50,7 +121,9 @@ MixerStatsLabels MixerStatsViewModel::present(const ConnectionDiagnosticsSnapsho
 {
     if (stats == nullptr) {
         return {
-            QStringLiteral("RTT -"), {}, QStringLiteral("Jitter -"),
+            QStringLiteral("RTT -"), {}, {},
+            QStringLiteral("Waiting for live incoming-audio measurements."),
+            QStringLiteral("Jitter -"),
             QStringLiteral("Loss -"), QStringLiteral("Underruns -"),
             QStringLiteral("Diagnosis -"),
         };
@@ -79,6 +152,8 @@ MixerStatsLabels MixerStatsViewModel::present(const ConnectionDiagnosticsSnapsho
     return {
         latency,
         allPeers.join(QStringLiteral("\n")),
+        incomingPill(*stats),
+        incomingBreakdown(*stats),
         QStringLiteral("Jitter %1 ms").arg(stats->jitter_average_ms, 0, 'f', 1),
         QStringLiteral("Loss %1%").arg(stats->packet_loss_percent, 0, 'f', 2),
         underrun,
