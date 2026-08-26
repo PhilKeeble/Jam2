@@ -743,10 +743,8 @@ QJsonObject jam2RunControllerLifecycleValidation(
     const bool joinerControlReceived = creatorControlSent && pumpUntil([&] {
         return joinerControlBinary == controlBinary;
     }, kSignalDeadmanTimeoutMs);
-    const auto assetClientDiagnostics = joiner.assetClientStats();
     check(QStringLiteral("controller.authenticated-control-binary-roundtrip"),
-        controlQueuesReady && creatorControlReceived && joinerControlReceived &&
-            assetClientDiagnostics.framesSent > 0);
+        controlQueuesReady && creatorControlReceived && joinerControlReceived);
 
     const QByteArray binaryAsset = jam2::application::asset_chunk::encode({
         QString(64, QLatin1Char('a')), 0, 0, QByteArray("binary-asset", 12)});
@@ -760,6 +758,7 @@ QJsonObject jam2RunControllerLifecycleValidation(
     joiner.onAssetBinaryMessage = [&](const QString&, const QByteArray& payload) {
         joinerBinary = payload;
     };
+    joiner.setAssetChannelRequired(true);
     const bool assetChannelReady = joined && pumpUntil([&] {
         return joiner.canQueueAssetTo(QString{}, 1024) &&
             creator.serverStats().assetActiveConnections > 0;
@@ -983,6 +982,7 @@ QJsonObject jam2RunControllerLifecycleValidation(
                 statsBeforeAutoReconnect.authenticationRejects &&
             statsAfterAutoReconnect.authenticationRateLimitRejects ==
                 statsBeforeAutoReconnect.authenticationRateLimitRejects);
+    joiner.setAssetChannelRequired(false);
 
     const quint64 revisionBeforeRefresh = joiner.snapshot().membershipRevision;
     bool manualRefreshReconnected = false;

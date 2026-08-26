@@ -23,6 +23,8 @@ using namespace jam2::control_protocol;
 
 namespace {
 
+constexpr int kAssetIdleCloseDelayMs = 1000;
+
 constexpr int kMembershipEntriesPerPage = 64;
 constexpr double kMaxExactJsonInteger = 9007199254740991.0;
 
@@ -160,10 +162,27 @@ SharedSessionController::SharedSessionController(QObject* parent)
     assetReconnectTimer_.setSingleShot(true);
     assetReconnectTimer_.setInterval(1000);
     QObject::connect(&assetReconnectTimer_, &QTimer::timeout, this, [this] {
-        if (!closing_ && role_ == Role::Joiner && client_.isConnected() &&
+        if (assetChannelRequired_ && !closing_ && role_ == Role::Joiner &&
+            client_.isConnected() &&
             !assetClient_.isConnected()) {
             connectAssetJoiner();
         }
+    });
+    assetIdleCloseTimer_.setSingleShot(true);
+    assetIdleCloseTimer_.setInterval(kAssetIdleCloseDelayMs);
+    QObject::connect(&assetIdleCloseTimer_, &QTimer::timeout, this, [this] {
+        if (closing_ || assetChannelRequired_ || role_ != Role::Joiner ||
+            !assetClient_.isConnected()) {
+            return;
+        }
+        assetClient_.close();
+        publishTransportEvent(TransportEvent{
+            TransportEventType::Disconnected,
+            TransportFailure::None,
+            QStringLiteral("TCP asset stream closed after track transfer became idle"),
+            false,
+            true,
+            true}, false);
     });
     heartbeatTimer_.setSingleShot(false);
     QObject::connect(&heartbeatTimer_, &QTimer::timeout, this, [this] {
@@ -454,11 +473,13 @@ void SharedSessionController::reset(bool stopRuntime)
     reconnectEnabled_ = false;
     reconnectTimer_.stop();
     assetReconnectTimer_.stop();
+    assetIdleCloseTimer_.stop();
     heartbeatTimer_.stop();
     heartbeatDeadlineTimer_.stop();
     server_.close();
     client_.close();
     assetClient_.close();
+    assetChannelRequired_ = false;
     if (stopRuntime && runtime_ != nullptr && runtime_->isNetworkRunning()) {
         runtime_->stopNetwork();
     }
@@ -694,7 +715,8 @@ bool SharedSessionController::sendAssetTo(
 {
     return role_ == Role::Creator
         ? server_.sendAssetTo(token, message)
-        : role_ == Role::Joiner && token.isEmpty() && assetClient_.send(message);
+        : role_ == Role::Joiner && token.isEmpty() && assetChannelRequired_ &&
+            assetClient_.send(message);
 }
 
 bool SharedSessionController::sendAssetBinaryTo(
@@ -703,7 +725,8 @@ bool SharedSessionController::sendAssetBinaryTo(
 {
     return role_ == Role::Creator
         ? server_.sendAssetBinaryTo(token, payload)
-        : role_ == Role::Joiner && token.isEmpty() && assetClient_.sendBinary(payload);
+        : role_ == Role::Joiner && token.isEmpty() && assetChannelRequired_ &&
+            assetClient_.sendBinary(payload);
 }
 
 bool SharedSessionController::canQueueAssetTo(
@@ -712,7 +735,27 @@ bool SharedSessionController::canQueueAssetTo(
 {
     return role_ == Role::Creator
         ? server_.canQueueAssetTo(token, additionalBytes)
-        : role_ == Role::Joiner && token.isEmpty() && assetClient_.canQueue(additionalBytes);
+        : role_ == Role::Joiner && token.isEmpty() && assetChannelRequired_ &&
+            assetClient_.canQueue(additionalBytes);
+}
+
+void SharedSessionController::setAssetChannelRequired(bool required)
+{
+    if (assetChannelRequired_ == required) {
+        return;
+    }
+    assetChannelRequired_ = required;
+    if (required) {
+        assetIdleCloseTimer_.stop();
+        if (role_ == Role::Joiner && !closing_ && client_.isConnected()) {
+            connectAssetJoiner();
+        }
+        return;
+    }
+    assetReconnectTimer_.stop();
+    if (role_ == Role::Joiner && assetClient_.isConnected()) {
+        assetIdleCloseTimer_.start();
+    }
 }
 
 bool SharedSessionController::hasPeer() const
@@ -840,7 +883,9 @@ void SharedSessionController::handleClientEvent(const TransportEvent& event)
             (void)runtime_->reprobePeers();
         }
         setLifecycle(Lifecycle::Authenticated);
-        connectAssetJoiner();
+        if (assetChannelRequired_) {
+            connectAssetJoiner();
+        }
     } else if (event.type == TransportEventType::Disconnected && !closing_) {
         assetReconnectTimer_.stop();
         assetClient_.close();
@@ -872,7 +917,8 @@ void SharedSessionController::handleAssetClientEvent(const TransportEvent& incom
     event.assetChannel = true;
     if ((event.type == TransportEventType::Disconnected ||
          event.type == TransportEventType::Failure) &&
-        !closing_ && role_ == Role::Joiner && client_.isConnected()) {
+        assetChannelRequired_ && !closing_ && role_ == Role::Joiner &&
+        client_.isConnected()) {
         if (event.type == TransportEventType::Disconnected && onAssetDisconnected) {
             onAssetDisconnected(QString{});
         }
@@ -881,6 +927,9 @@ void SharedSessionController::handleAssetClientEvent(const TransportEvent& incom
         }
     } else if (event.type == TransportEventType::Authenticated) {
         assetReconnectTimer_.stop();
+        if (!assetChannelRequired_) {
+            assetIdleCloseTimer_.start();
+        }
     }
     publishTransportEvent(event, false);
 }
@@ -1403,7 +1452,8 @@ void SharedSessionController::connectJoiner()
 
 void SharedSessionController::connectAssetJoiner()
 {
-    if (role_ != Role::Joiner || closing_ || !client_.isConnected() ||
+    if (!assetChannelRequired_ || role_ != Role::Joiner || closing_ ||
+        !client_.isConnected() ||
         assetClient_.isConnected()) {
         return;
     }

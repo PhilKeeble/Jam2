@@ -138,9 +138,17 @@ int activeBankLaneCount(const QJsonObject& state)
 
 bool transferIdle(const QJsonObject& state)
 {
+    const QJsonObject jam = state.value(QStringLiteral("jam")).toObject();
     const QJsonObject content = state.value(QStringLiteral("content")).toObject();
     const QJsonObject transfer = content.value(QStringLiteral("transfer")).toObject();
-    return content.value(QStringLiteral("pending_asset_count")).toInt() == 0 &&
+    return jam.contains(QStringLiteral("asset_channel_required")) &&
+        jam.contains(QStringLiteral("asset_channel_connected")) &&
+        jam.contains(QStringLiteral("asset_server_active_connections")) &&
+        !jam.value(QStringLiteral("asset_channel_required")).toBool() &&
+        !jam.value(QStringLiteral("asset_channel_connected")).toBool() &&
+        jam.value(QStringLiteral("asset_server_active_connections")).toInt() == 0 &&
+        content.value(QStringLiteral("track_transfer_status")).toString().isEmpty() &&
+        content.value(QStringLiteral("pending_asset_count")).toInt() == 0 &&
         content.value(QStringLiteral("pending_track_contribution_count")).toInt() == 0 &&
         content.value(QStringLiteral("outgoing_track_batch_count")).toInt() == 0 &&
         !content.value(QStringLiteral("incoming_asset_active")).toBool() &&
@@ -620,6 +628,12 @@ bool meshReady(std::size_t index, const QJsonObject& state)
         jam.value(QStringLiteral("network_attachment_ready")).toBool() &&
         jam.value(QStringLiteral("network_running")).toBool() &&
         jam.value(QStringLiteral("failure")).toString().isEmpty() &&
+        jam.contains(QStringLiteral("asset_client_connection_attempts")) &&
+        jam.value(QStringLiteral("asset_client_connection_attempts")).toInt() == 0 &&
+        !jam.value(QStringLiteral("asset_channel_required")).toBool() &&
+        !jam.value(QStringLiteral("asset_channel_connected")).toBool() &&
+        jam.value(QStringLiteral("asset_server_active_connections")).toInt() == 0 &&
+        content.value(QStringLiteral("track_transfer_status")).toString().isEmpty() &&
         content.value(QStringLiteral("arrangement_revision")).toInteger() >= 1 &&
         content.value(QStringLiteral("title")) == content.value(QStringLiteral("title_view"));
 }
@@ -1260,10 +1274,13 @@ int main(int argc, char* argv[])
             QStringLiteral("delayed source validation to become active"),
             [](std::size_t index, const QJsonObject& state) {
                 if (index != 2) return true;
-                return state.value(QStringLiteral("content")).toObject()
-                    .value(QStringLiteral("transfer")).toObject()
-                    .value(QStringLiteral("pause_active")).toString() ==
-                    QStringLiteral("outgoing-validation");
+                const QJsonObject jam = state.value(QStringLiteral("jam")).toObject();
+                return jam.value(QStringLiteral("asset_channel_required")).toBool() &&
+                    jam.value(QStringLiteral("asset_channel_connected")).toBool() &&
+                    state.value(QStringLiteral("content")).toObject()
+                        .value(QStringLiteral("transfer")).toObject()
+                        .value(QStringLiteral("pause_active")).toString() ==
+                        QStringLiteral("outgoing-validation");
             }, states, false) || !apply(coordinator, 2, {
             {QStringLiteral("type"), QStringLiteral("looper.transfer.release")},
             {QStringLiteral("id"), QStringLiteral("wav-reshare-release-source-validation")},

@@ -610,6 +610,28 @@ if(WIN32)
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
 endif()
 
+add_executable(jam2_asset_channel_lifecycle_tests EXCLUDE_FROM_ALL
+    integration/application/AssetChannelLifecycleTests.cpp
+    "${CMAKE_SOURCE_DIR}/app/application/ControlClient.cpp"
+    "${CMAKE_SOURCE_DIR}/app/application/ControlProtocol.cpp"
+    "${CMAKE_SOURCE_DIR}/app/application/ControlServer.cpp"
+    "${CMAKE_SOURCE_DIR}/app/application/NativeTcpTransport.cpp")
+jam2_configure_test_target(jam2_asset_channel_lifecycle_tests)
+target_include_directories(jam2_asset_channel_lifecycle_tests PRIVATE
+    "${CMAKE_SOURCE_DIR}/app/application")
+target_link_libraries(jam2_asset_channel_lifecycle_tests PRIVATE
+    jam2_core Qt6::Core Qt6::Network)
+add_test(NAME jam2_asset_channel_lifecycle_integration
+    COMMAND $<TARGET_FILE:jam2_asset_channel_lifecycle_tests>)
+set_tests_properties(jam2_asset_channel_lifecycle_integration PROPERTIES
+    LABELS "integration;application;network;security;shared-content"
+    TIMEOUT 30)
+if(WIN32)
+    set_tests_properties(jam2_asset_channel_lifecycle_integration PROPERTIES
+        ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
+endif()
+
 add_executable(jamtaster_tests EXCLUDE_FROM_ALL
     unit/jamtaster/NativeTests.cpp)
 jam2_configure_test_target(jamtaster_tests)
@@ -1379,6 +1401,7 @@ add_custom_target(jam2_tests_jam_sync
 add_custom_target(jam2_tests_shared_content
     DEPENDS
         jam2
+        jam2_asset_channel_lifecycle_tests
         jam2_looper_project_tests
         jam2_prepared_mix_lifecycle_tests
         jam2_project_persistence_tests
@@ -1391,6 +1414,7 @@ add_custom_target(jam2_tests_shared_content
 add_custom_target(jam2_tests_network
     DEPENDS
         jam2
+        jam2_asset_channel_lifecycle_tests
         jam2_core_boundary_tests
         jam2_application_boundary_tests
         jam2_debug_diagnostic_tests

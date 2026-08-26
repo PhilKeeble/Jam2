@@ -693,18 +693,21 @@ void ControlServer::handleHandshake(const PeerHandle& peer, const QJsonObject& m
         token = randomPeerToken();
     }
     bool controlPeerPresent = false;
+    PeerHandle replacedAssetPeer;
     for (const PeerHandle& existing : peers_) {
         if (existing != peer && existing && existing->authenticated && existing->token == token) {
             controlPeerPresent = controlPeerPresent || !existing->assetChannel;
             if (existing->assetChannel != assetChannel) {
                 continue;
             }
+            if (assetChannel) {
+                replacedAssetPeer = existing;
+                continue;
+            }
             noteAuthenticationReject();
             rejectPeer(
                 peer,
-                assetChannel
-                    ? QStringLiteral("TCP asset stream for peer token is already active")
-                    : QStringLiteral("TCP control peer token is already active"),
+                QStringLiteral("TCP control peer token is already active"),
                 TransportFailure::AuthenticationRejected);
             return;
         }
@@ -764,6 +767,11 @@ void ControlServer::handleHandshake(const PeerHandle& peer, const QJsonObject& m
         peer->transcript);
     peer->authenticated = true;
     peer->authenticationTimer->stop();
+    if (replacedAssetPeer && replacedAssetPeer->connection &&
+        findPeer(replacedAssetPeer->connection)) {
+        replacedAssetPeer->connection->close();
+        disconnectPeer(replacedAssetPeer);
+    }
     if (assetChannel) {
         ++stats_.assetAcceptedConnections;
         ++stats_.assetActiveConnections;

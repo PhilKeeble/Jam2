@@ -121,6 +121,7 @@ public:
     void setTrackWaveform(std::vector<float> peaks, bool valid);
     void setTrackBpmMismatch(bool mismatched, double backingBpm, double sessionBpm);
     void setTrackTransferStatus(const QString& status);
+    const QString& trackTransferStatus() const noexcept { return trackTransferStatus_; }
     void setWavGenerationActive(bool active);
     void setJamTasterTaskStatus(bool active, int percent);
     void setJamRecordingState(bool enabled, bool active, const QString& takeName);

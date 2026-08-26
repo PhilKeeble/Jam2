@@ -300,3 +300,10 @@ bool TrackWorkspaceController::sendAssetBinary(
 {
     return callbacks_.sendBinary && callbacks_.sendBinary(peerToken, payload);
 }
+
+void TrackWorkspaceController::assetWorkStateChanged(bool pending)
+{
+    if (callbacks_.assetWorkStateChanged) {
+        callbacks_.assetWorkStateChanged(pending);
+    }
+}

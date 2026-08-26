@@ -42,6 +42,7 @@ public:
     virtual bool canQueueAssetControl(const QString& peerToken, qint64 estimatedBytes) const = 0;
     virtual bool sendAssetControl(const QString& peerToken, const QJsonObject& message) = 0;
     virtual bool sendAssetBinary(const QString& peerToken, const QByteArray& payload) = 0;
+    virtual void assetWorkStateChanged(bool) {}
 };
 
 class AssetTransferService {
@@ -72,6 +73,7 @@ public:
     void clearAutomationPause();
     QJsonObject automationSnapshot() const;
     bool incomingTransferActive() const noexcept;
+    bool workPending() const noexcept;
 
 private:
     enum class AutomationPausePoint {
@@ -86,6 +88,7 @@ private:
     void finalizeIncoming();
     void clearIncoming(bool abandonExpected);
     void resetOutgoing();
+    void publishWorkState();
     bool pauseForAutomation(
         AutomationPausePoint point,
         std::function<void()> resume);
@@ -121,6 +124,7 @@ private:
     QElapsedTimer outgoingLooperAssetProgress_;
     QTimer outgoingLooperAssetTimer_;
     quint64 outgoingLooperAssetGeneration_ = 0;
+    bool publishedWorkPending_ = false;
 
     AutomationPausePoint automationPauseArmed_ = AutomationPausePoint::None;
     AutomationPausePoint automationPauseActive_ = AutomationPausePoint::None;

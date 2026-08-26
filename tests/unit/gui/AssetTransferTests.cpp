@@ -144,6 +144,10 @@ public:
         binaries.append(payload);
         return true;
     }
+    void assetWorkStateChanged(bool pending) override
+    {
+        workStates.append(pending);
+    }
 
     bool runNext()
     {
@@ -194,6 +198,7 @@ public:
     QStringList logs;
     QList<QJsonObject> controls;
     QList<QByteArray> binaries;
+    QList<bool> workStates;
 };
 
 QJsonObject startMessage(const QString& hash, qsizetype bytes)
@@ -998,6 +1003,30 @@ void test_track_batch_expiry_preserves_same_hash_ownership()
         "unrelated batch expiry is a no-op");
 }
 
+void test_asset_work_demand_tracks_real_transfer_lifecycle(const QString& folder)
+{
+    const QByteArray wav = pcm16Wav(32, 1900);
+    const QString hash = sha256(wav);
+    const QString path = QDir(folder).absoluteFilePath(QStringLiteral("asset-demand.wav"));
+    QFile file(path);
+    expect(file.open(QIODevice::WriteOnly | QIODevice::Truncate) &&
+        file.write(wav) == wav.size(), "asset demand fixture is written");
+    file.close();
+
+    DeferredContext context(folder);
+    context.outgoingPaths.insert(hash, path);
+    AssetTransferService transfer(context);
+    expect(!transfer.workPending() && context.workStates.isEmpty(),
+        "idle transfer service has no asset-channel demand");
+    transfer.queueSend(hash, QStringLiteral("peer-b"));
+    expect(transfer.workPending() && context.workStates == QList<bool>{true},
+        "queued real asset work raises asset-channel demand once");
+    transfer.cancel();
+    expect(!transfer.workPending() &&
+            context.workStates == QList<bool>{true, false},
+        "cancelling all asset work releases asset-channel demand once");
+}
+
 void test_arrangement_supersession_preserves_the_active_wav()
 {
     using jam2::gui::track_asset_ownership::Claim;
@@ -1141,6 +1170,7 @@ int main(int argc, char* argv[])
         test_cancelled_incoming_completion_stays_stale(folder.path());
         test_superseded_incoming_completion_cannot_replace_current(folder.path());
         test_cancelled_outgoing_validation_cannot_send(folder.path());
+        test_asset_work_demand_tracks_real_transfer_lifecycle(folder.path());
         test_hash_scoped_outgoing_discard_preserves_other_work(folder.path());
         test_silent_incoming_discard_invalidates_workers_without_retry(folder.path());
         test_hash_mismatch_is_rejected(folder.path());

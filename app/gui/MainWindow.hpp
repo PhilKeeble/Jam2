@@ -447,6 +447,8 @@ private:
     bool sendAssetControlTo(const QString& targetPeerToken, const QJsonObject& message);
     bool sendAssetBinaryTo(const QString& targetPeerToken, const QByteArray& payload);
     bool canQueueAssetTo(const QString& targetPeerToken, qint64 estimatedBytes) const;
+    bool assetChannelWorkRequired() const noexcept;
+    void updateAssetChannelRequirement();
     void handleSongSet(const QJsonObject& message, const QString& sourcePeerToken);
     void applyPendingSongIfAssetsReady();
     QJsonObject normalizeLooperAssetPaths(QJsonObject song) const;

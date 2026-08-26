@@ -634,11 +634,10 @@ MainWindow::MainWindow(
         [this](const QString& message) {
             appendLog(message);
             const QString lower = message.toLower();
-            if (performanceHome_ &&
+            if (performanceHome_ && assetChannelWorkRequired() &&
                 (lower.contains(QStringLiteral("failed")) ||
                  lower.contains(QStringLiteral("timeout")) ||
-                 lower.contains(QStringLiteral("could not")) ||
-                 lower.contains(QStringLiteral("cancelled")))) {
+                 lower.contains(QStringLiteral("could not")))) {
                 performanceHome_->setTrackTransferStatus(
                     QStringLiteral("TRACK SHARE ERROR — see Data / Logs"));
             }
@@ -654,13 +653,16 @@ MainWindow::MainWindow(
             applyPendingTrackContributions();
             applyPendingSongIfAssetsReady();
             requestNextPendingAsset();
+            updateAssetChannelRequirement();
         },
         [this](const QString& hash, const QString& source) {
             retryOrFailIncomingAsset(hash, source);
+            updateAssetChannelRequirement();
         },
         [this](const QString& hash, const QString& peerToken, bool receiving) {
             noteTrackAssetProgress(hash, peerToken, receiving);
         },
+        [this](bool) { updateAssetChannelRequirement(); },
     });
     jamTaster_ = std::make_unique<JamTasterService>(this);
     JamTasterService::Observer jamTasterObserver;
@@ -2204,6 +2206,7 @@ void MainWindow::resetTrackSyncSessionState()
     deferredSongSetSourcePeerToken_.clear();
     looperArrangementRevision_ = 0;
     lastAppliedHostArrangementRevision_ = 0;
+    updateAssetChannelRequirement();
 }
 
 void MainWindow::startJam(bool createSession)
@@ -2446,6 +2449,14 @@ QJsonObject MainWindow::automationJamSnapshot() const
         {QStringLiteral("local_token"), session.localToken},
         {QStringLiteral("coordinator_token"), session.coordinatorToken},
         {QStringLiteral("failure"), session.failureDetail},
+        {QStringLiteral("asset_channel_required"),
+            sessionController_.assetChannelRequired()},
+        {QStringLiteral("asset_channel_connected"),
+            sessionController_.assetChannelConnected()},
+        {QStringLiteral("asset_client_connection_attempts"), static_cast<qint64>(
+            sessionController_.assetClientStats().connectionAttempts)},
+        {QStringLiteral("asset_server_active_connections"), static_cast<qint64>(
+            sessionController_.serverStats().assetActiveConnections)},
         {QStringLiteral("last_startup_failure"), lastJamFailureDialog_},
         {QStringLiteral("health_pill"), connectionLabel_
             ? connectionLabel_->text() : QString{}},
@@ -2751,6 +2762,8 @@ QJsonObject MainWindow::automationContentSnapshot() const
         {QStringLiteral("file_tasks_rejected"), static_cast<qint64>(
             fileWorkerTasksRejected_)},
         {QStringLiteral("transfer"), automationTransferSnapshot()},
+        {QStringLiteral("track_transfer_status"), performanceHome_
+            ? performanceHome_->trackTransferStatus() : QString{}},
     };
 }
 
@@ -4848,10 +4861,16 @@ void MainWindow::handleControlEvent(
                     .arg(stats.maxQueuedOutputBytes)
                     .arg(stats.outputHighWaterRejects));
             }
-            if (performanceHome_) {
+            if (performanceHome_ && assetChannelWorkRequired() &&
+                performanceHome_->trackTransferStatus().isEmpty()) {
                 performanceHome_->setTrackTransferStatus(
                     QStringLiteral("TRACK SHARE ERROR — asset connection retrying"));
             }
+        } else if (event.type == TransportEventType::Authenticated &&
+                   performanceHome_ &&
+                   performanceHome_->trackTransferStatus() ==
+                       QStringLiteral("TRACK SHARE ERROR — asset connection retrying")) {
+            performanceHome_->setTrackTransferStatus(QString{});
         }
         return;
     }
@@ -12659,6 +12678,7 @@ void MainWindow::requestNextPendingAsset()
     incomingAssetWorkflow_ = workflow;
     incomingAssetHash_ = hash;
     incomingAssetSourcePeerToken_ = source;
+    updateAssetChannelRequirement();
     const std::uint64_t requestGeneration =
         ++trackWorkspace_.incomingAssetRequestGeneration;
     if (workflow == IncomingAssetWorkflow::TrackContribution) {
@@ -12679,6 +12699,7 @@ void MainWindow::requestNextPendingAsset()
         incomingAssetWorkflow_ = IncomingAssetWorkflow::None;
         incomingAssetHash_.clear();
         incomingAssetSourcePeerToken_.clear();
+        updateAssetChannelRequirement();
         appendLog(QStringLiteral(
             "could not request looper asset: workflow=%1 hash=%2 source=%3")
             .arg(workflow == IncomingAssetWorkflow::TrackContribution
@@ -12731,6 +12752,7 @@ void MainWindow::handleAssetRequestStartTimeout(
     incomingAssetWorkflow_ = IncomingAssetWorkflow::None;
     incomingAssetHash_.clear();
     incomingAssetSourcePeerToken_.clear();
+    updateAssetChannelRequirement();
     appendLog(timeoutMilliseconds > 0
         ? QStringLiteral(
             "looper asset request received no transfer start within %1 ms: "
@@ -13173,6 +13195,17 @@ bool MainWindow::canQueueAssetTo(
     qint64 estimatedBytes) const
 {
     return sessionController_.canQueueAssetTo(targetPeerToken, estimatedBytes);
+}
+
+bool MainWindow::assetChannelWorkRequired() const noexcept
+{
+    return incomingAssetWorkflow_ != IncomingAssetWorkflow::None ||
+        assetTransfer_.workPending();
+}
+
+void MainWindow::updateAssetChannelRequirement()
+{
+    sessionController_.setAssetChannelRequired(assetChannelWorkRequired());
 }
 
 bool MainWindow::sendAssetControlTo(

@@ -35,6 +35,7 @@ public:
         std::function<void()> incomingAssetAccepted;
         std::function<void(const QString&, const QString&)> incomingAssetAbandoned;
         std::function<void(const QString&, const QString&, bool)> assetProgress;
+        std::function<void(bool)> assetWorkStateChanged;
     };
 
     struct LooperWaveformPreview {
@@ -100,6 +101,7 @@ public:
     bool canQueueAssetControl(const QString& peerToken, qint64 estimatedBytes) const override;
     bool sendAssetControl(const QString& peerToken, const QJsonObject& message) override;
     bool sendAssetBinary(const QString& peerToken, const QByteArray& payload) override;
+    void assetWorkStateChanged(bool pending) override;
 
     SharedTrackController trackController;
     LooperProject looperProject;

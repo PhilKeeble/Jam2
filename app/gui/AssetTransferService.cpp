@@ -213,6 +213,26 @@ bool AssetTransferService::incomingTransferActive() const noexcept
     return incomingWorkerState_ != nullptr && incomingSequence_.active();
 }
 
+bool AssetTransferService::workPending() const noexcept
+{
+    return incomingWorkerState_ != nullptr || incomingSequence_.active() ||
+        incomingLooperAssetWritePending_ || incomingLooperAssetDonePending_ ||
+        !incomingLooperAssetQueue_.isEmpty() ||
+        outgoingLooperAssetValidationPending_ ||
+        !outgoingLooperAssetPendingHash_.isEmpty() ||
+        !outgoingLooperAssetQueue_.isEmpty() ||
+        !outgoingLooperAssetHash_.isEmpty() || outgoingLooperAssetReadPending_ ||
+        !outgoingLooperAssetPreparedChunk_.isEmpty();
+}
+
+void AssetTransferService::publishWorkState()
+{
+    const bool pending = workPending();
+    if (publishedWorkPending_ == pending) return;
+    publishedWorkPending_ = pending;
+    context_.assetWorkStateChanged(pending);
+}
+
 bool AssetTransferService::pauseForAutomation(
     AutomationPausePoint point,
     std::function<void()> resume)
@@ -260,6 +280,7 @@ void AssetTransferService::queueSend(const QString& hash, const QString& targetP
         ++outgoingLooperAssetGeneration_;
         resetOutgoing();
         outgoingLooperAssetQueue_.prepend(request);
+        publishWorkState();
         if (!outgoingLooperAssetTimer_.isActive()) {
             outgoingLooperAssetTimer_.start();
         }
@@ -276,6 +297,7 @@ void AssetTransferService::queueSend(const QString& hash, const QString& targetP
         return;
     }
     outgoingLooperAssetQueue_.append(request);
+    publishWorkState();
     if (!outgoingLooperAssetTimer_.isActive()) {
         outgoingLooperAssetTimer_.start();
     }
@@ -290,6 +312,7 @@ void AssetTransferService::continueSend()
         }
         if (outgoingLooperAssetQueue_.isEmpty()) {
             outgoingLooperAssetTimer_.stop();
+            publishWorkState();
             return;
         }
         const QPair<QString, QString> request = outgoingLooperAssetQueue_.takeFirst();
@@ -309,6 +332,7 @@ void AssetTransferService::continueSend()
         outgoingLooperAssetValidationPending_ = true;
         outgoingLooperAssetPendingHash_ = hash;
         outgoingLooperAssetPendingTargetToken_ = targetPeerToken;
+        publishWorkState();
         const quint64 generation = outgoingLooperAssetGeneration_;
         if (pauseForAutomation(AutomationPausePoint::OutgoingValidation,
                 [this, request, generation] {
@@ -368,6 +392,7 @@ void AssetTransferService::continueSend()
                 outgoingLooperAssetNextChunk_ = -1;
                 outgoingLooperAssetAckedChunks_ = 0;
                 outgoingLooperAssetProgress_.start();
+                publishWorkState();
                 continueSend();
             },
             [this, request, generation](const QString&) {
@@ -637,6 +662,7 @@ void AssetTransferService::resetOutgoing()
     outgoingLooperAssetReadPending_ = false;
     outgoingLooperAssetPreparedChunk_.clear();
     outgoingLooperAssetProgress_.invalidate();
+    publishWorkState();
 }
 
 void AssetTransferService::resetIncoming()
@@ -674,6 +700,7 @@ void AssetTransferService::clearIncoming(bool abandonExpected)
     incomingLooperAssetWritePending_ = false;
     incomingLooperAssetDonePending_ = false;
     incomingLooperAssetDoneChunks_ = 0;
+    publishWorkState();
     if (interruptedState && !workerPending && !interruptedState->temporaryPath.isEmpty()) {
         (void)context_.startAssetFileTask(
             [interruptedState] { QFile::remove(interruptedState->temporaryPath); },
@@ -744,6 +771,7 @@ void AssetTransferService::receiveStart(const QJsonObject& message, const QStrin
     incomingLooperAssetSourceToken_ = sourcePeerToken;
     incomingLooperAssetBytesExpected_ = static_cast<qint64>(declaredBytes);
     incomingLooperAssetTimer_.start(kLooperAssetProgressDeadlineMs);
+    publishWorkState();
     context_.noteAssetProgress(hash, sourcePeerToken, true);
     context_.appendAssetLog(QStringLiteral(
         "receiving looper asset: bytes=%1 hash=%2 chunk_bytes=%3 window_chunks=%4")

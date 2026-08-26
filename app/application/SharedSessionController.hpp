@@ -162,6 +162,9 @@ public:
     bool sendAssetTo(const QString& token, const QJsonObject& message);
     bool sendAssetBinaryTo(const QString& token, const QByteArray& payload);
     bool canQueueAssetTo(const QString& token, qint64 additionalBytes) const;
+    void setAssetChannelRequired(bool required);
+    bool assetChannelRequired() const noexcept { return assetChannelRequired_; }
+    bool assetChannelConnected() const noexcept { return assetClient_.isConnected(); }
     bool hasPeer() const;
     bool isConnected() const;
     bool isServer() const noexcept { return role_ == Role::Creator; }
@@ -281,9 +284,11 @@ private:
     bool reconcilingRuntime_ = false;
     QTimer reconnectTimer_;
     QTimer assetReconnectTimer_;
+    QTimer assetIdleCloseTimer_;
     QTimer heartbeatTimer_;
     QTimer heartbeatDeadlineTimer_;
     ControlServer server_;
     ControlClient client_;
     ControlClient assetClient_;
+    bool assetChannelRequired_ = false;
 };
