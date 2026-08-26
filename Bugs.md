@@ -33,6 +33,7 @@ in a jam it shows RTT but that is not actually taht useful, show the estimate ti
 
 ## Bugs
 
+user preference schema keeps growing to account for odler profiles, make sure removed before release
 
 ## Bugs - MacOS
 listening tools gets cut off by the tracks so you cant see it when its expanded 

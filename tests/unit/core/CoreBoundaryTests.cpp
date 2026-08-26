@@ -829,10 +829,19 @@ void testUdpStunAndSessionBoundaries()
         jam2::resolve_udp_endpoint(receiverOne.local_endpoint()),
         jam2::PeerEndpointState::Active,
     };
+    jam2::PeerStreamConfig fixedTargetConfig = peerConfig();
+    fixedTargetConfig.sample_time_playout = false;
+    fixedTargetConfig.playout_delay_frames = 128;
+    fixedTargetConfig.playback_max_frames = 1536;
+    fixedTargetConfig.playback_queue_capacity_frames = 4096;
+    fixedTargetConfig.adaptive_playback_cushion = false;
+    fixedTargetConfig.adaptive_playback_target_frames = 0;
+    fixedTargetConfig.adaptive_playback_min_frames = 0;
+    fixedTargetConfig.adaptive_playback_max_frames = 0;
     jam2::NetworkSession networkSession(
         std::move(sender), sessionInfo, contract,
         jam2::SessionBootstrapRole::Creator, jam2::PeerId{1}, remote,
-        peerConfig(), &outputSink);
+        fixedTargetConfig, &outputSink);
     expect(networkSession.sessionId() == sessionInfo.session_id &&
             networkSession.activePeerCount() == 1 &&
             networkSession.remotePeer().peer_id == jam2::PeerId{2} &&
@@ -853,6 +862,32 @@ void testUdpStunAndSessionBoundaries()
             accessById.stream == accessByEndpoint.stream &&
             accessById.descriptor->peer_id == jam2::PeerId{2},
         "network session resolves one typed peer view by identity or endpoint");
+
+    const std::array<std::uint8_t, 128> fixedBurstPayload{};
+    bool fixedBurstAccepted = true;
+    for (std::uint32_t sequence = 0; sequence < 38; ++sequence) {
+        const jam2::protocol::Header header{
+            jam2::protocol::PacketType::Audio,
+            1,
+            sequence,
+            static_cast<std::uint64_t>(sequence) * 64ULL,
+            static_cast<std::uint16_t>(fixedBurstPayload.size()),
+            0,
+        };
+        fixedBurstAccepted = fixedBurstAccepted &&
+            networkSession.peerStream({2}).receiveAudio(
+                header,
+                fixedBurstPayload,
+                1000ULL + static_cast<std::uint64_t>(sequence) * 1333ULL) ==
+                jam2::PeerAudioResult::Accepted;
+    }
+    networkSession.advance(52000);
+    const auto* fixedMix = networkSession.peerMixStats({2});
+    expect(fixedBurstAccepted && fixedMix != nullptr &&
+            !networkSession.mixStats().adaptive_playback_cushion_enabled &&
+            networkSession.mixStats().adaptive_target_frames == 0 &&
+            outputSink.depth + fixedMix->queue_depth_frames <= 192,
+        "network session wires adaptive-off playout delay into the fixed mixer target");
 
     const std::size_t packetSize = networkSession.send(
         jam2::protocol::PacketType::Ping, 1, 99, {});
@@ -954,12 +989,13 @@ void testSmallDiagnosticBoundaries()
     expect(fast != nullptr && fast_create != nullptr && fast_create->local == fast &&
             fast_create->sample_rate == 48000 && fast_create->frame_size == 64 &&
             fast->audio_buffer_size == 32 && fast->playback_prefill_frames == 64 &&
+            fast->playback_max_frames == 1024 &&
             fast->playout_delay_frames == 64 && fast->jitter_buffer_frames == 64 &&
             fast->jitter_buffer_max_frames == 512 &&
             fast->adaptive_playback_target_frames == 64 &&
             fast->adaptive_playback_min_frames == 64 &&
             fast->adaptive_playback_max_frames == 512,
-        "fast create and join profiles preserve the measured 64-frame floor and 512-frame recovery bounds");
+        "fast create and join profiles preserve the 64-frame floor, 512-frame adaptive bound, and 1024-frame safety ceiling");
     const jam2::JoinProfile* moderate = jam2::find_join_profile("moderate");
     const jam2::CreateProfile* moderate_create = jam2::find_create_profile("moderate");
     expect(moderate != nullptr && moderate_create != nullptr &&

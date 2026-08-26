@@ -32,7 +32,7 @@ target_link_libraries(jam2_core_input_tests PRIVATE jam2_core)
 add_test(NAME jam2_core_input_units
     COMMAND $<TARGET_FILE:jam2_core_input_tests>)
 set_tests_properties(jam2_core_input_units PROPERTIES
-    LABELS "unit;core;performance"
+    LABELS "unit;core;network;performance;four-peer"
     TIMEOUT 30)
 
 add_executable(jam2_core_boundary_tests EXCLUDE_FROM_ALL

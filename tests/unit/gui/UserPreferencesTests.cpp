@@ -84,6 +84,7 @@ int main(int argc, char** argv)
         const auto hasFastPlaybackDefaults = [](const LocalTuningPreference& tuning) {
             return tuning.profile == QStringLiteral("fast") &&
                 tuning.prefillFrames == 64 &&
+                tuning.playbackMaxFrames == 1024 &&
                 tuning.playoutDelayFrames == 64 &&
                 tuning.jitterBufferFrames == 64 &&
                 tuning.jitterBufferMaxFrames == 512 &&
@@ -175,6 +176,38 @@ int main(int argc, char** argv)
                 customFast.create.tuning.adaptiveMinFrames == 256 &&
                 customFast.create.tuning.adaptiveMaxFrames == 1536,
             "Fast migration changed an explicitly customized latency tuple");
+
+        const auto writePreviousFastMaximum = [](QSettings& settings,
+                                                  const QString& group,
+                                                  int playbackMaximum) {
+            settings.beginGroup(group);
+            settings.setValue(QStringLiteral("profile"), QStringLiteral("fast"));
+            settings.setValue(QStringLiteral("prefill_frames"), 64);
+            settings.setValue(QStringLiteral("playback_max_frames"), playbackMaximum);
+            settings.setValue(QStringLiteral("playout_delay_frames"), 64);
+            settings.setValue(QStringLiteral("jitter_buffer_frames"), 64);
+            settings.setValue(QStringLiteral("jitter_buffer_max_frames"), 512);
+            settings.setValue(QStringLiteral("adaptive_target_frames"), 64);
+            settings.setValue(QStringLiteral("adaptive_min_frames"), 64);
+            settings.setValue(QStringLiteral("adaptive_max_frames"), 512);
+            settings.endGroup();
+        };
+        const QString previousMaximumPath =
+            directory.filePath(QStringLiteral("previous-fast-maximum.ini"));
+        {
+            QSettings previousMaximum(previousMaximumPath, QSettings::IniFormat);
+            previousMaximum.setValue(QStringLiteral("schema_version"), 7);
+            writePreviousFastMaximum(
+                previousMaximum, QStringLiteral("create/tuning"), 1536);
+            writePreviousFastMaximum(
+                previousMaximum, QStringLiteral("join/tuning"), 1408);
+        }
+        require(UserPreferencesStore::setFilePathForTesting(previousMaximumPath, error),
+            "previous Fast maximum preference path was rejected");
+        const UserPreferences migratedMaximum = UserPreferencesStore::load();
+        require(migratedMaximum.create.tuning.playbackMaxFrames == 1024 &&
+                migratedMaximum.join.tuning.playbackMaxFrames == 1408,
+            "Fast maximum migration did not update the old default while preserving an explicit custom value");
 
         std::cout << "Jam2 user preference tests passed\n";
         return 0;

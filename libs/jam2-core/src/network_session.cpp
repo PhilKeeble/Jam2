@@ -194,6 +194,7 @@ struct NetworkSession::Impl {
               }),
               peer_config.playback_max_frames,
               64,
+              peer_config.playout_delay_frames,
               peer_config.adaptive_playback_cushion,
               peer_config.adaptive_playback_target_frames,
               peer_config.adaptive_playback_min_frames,

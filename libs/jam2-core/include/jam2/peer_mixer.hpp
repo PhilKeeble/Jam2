@@ -14,6 +14,7 @@ struct PeerMixerConfig {
     std::size_t deadline_frames = 0;
     std::size_t output_max_frames = 0;
     std::size_t max_blocks_per_advance = 64;
+    std::size_t fixed_target_frames = 0;
     bool adaptive_playback_cushion = false;
     std::size_t adaptive_target_frames = 0;
     std::size_t adaptive_min_frames = 0;

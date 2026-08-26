@@ -91,6 +91,24 @@ void migrateLegacyFastPlaybackDefaults(LocalTuningPreference& value)
     }
 }
 
+void migrateFastPlaybackMaximum(LocalTuningPreference& value)
+{
+    // Schema 7's current Fast tuple used a 1536-frame playback safety ceiling.
+    // Update only that exact maintained tuple; any other numeric combination
+    // remains an explicit user tuning choice.
+    if (value.profile == QStringLiteral("fast") &&
+        value.prefillFrames == 64 &&
+        value.playbackMaxFrames == 1536 &&
+        value.playoutDelayFrames == 64 &&
+        value.jitterBufferFrames == 64 &&
+        value.jitterBufferMaxFrames == 512 &&
+        value.adaptiveTargetFrames == 64 &&
+        value.adaptiveMinFrames == 64 &&
+        value.adaptiveMaxFrames == 512) {
+        value.playbackMaxFrames = 1024;
+    }
+}
+
 void saveTuning(QSettings& s, const LocalTuningPreference& v)
 {
     s.setValue(QStringLiteral("profile"), v.profile);
@@ -294,6 +312,10 @@ UserPreferences UserPreferencesStore::load()
     if (schemaVersion < 7) {
         migrateLegacyFastPlaybackDefaults(out.create.tuning);
         migrateLegacyFastPlaybackDefaults(out.join.tuning);
+    }
+    if (schemaVersion < 8) {
+        migrateFastPlaybackMaximum(out.create.tuning);
+        migrateFastPlaybackMaximum(out.join.tuning);
     }
     if (schemaVersion >= 2) {
         settings.beginGroup(QStringLiteral("logging"));

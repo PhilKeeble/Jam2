@@ -402,16 +402,45 @@ struct PeerMixer::Impl {
         return debt;
     }
 
+    std::size_t liveTargetFrames() const noexcept
+    {
+        const std::size_t requested = config.adaptive_playback_cushion
+            ? static_cast<std::size_t>(adaptive_target_frames)
+            : config.fixed_target_frames;
+        if (requested == 0) {
+            return 0;
+        }
+        const std::size_t target = std::max<std::size_t>(
+            static_cast<std::size_t>(config.frames_per_block),
+            requested);
+        return config.output_max_frames > 0
+            ? std::min(config.output_max_frames, target)
+            : target;
+    }
+
     std::size_t receiveRecoveryTailFrames() const noexcept
     {
-        return static_cast<std::size_t>(config.frames_per_block) * 2U;
+        const std::size_t minimum_tail =
+            static_cast<std::size_t>(config.frames_per_block) * 2U;
+        if (config.adaptive_playback_cushion || output == nullptr) {
+            return minimum_tail;
+        }
+        const std::size_t fixed_target = liveTargetFrames();
+        const std::size_t output_depth = output->depthFrames();
+        const std::size_t target_fill = output_depth < fixed_target
+            ? fixed_target - output_depth
+            : 0;
+        return std::max(minimum_tail, target_fill);
     }
 
     std::size_t receiveRecoveryOutputTailFrames() const noexcept
     {
+        const std::size_t fixed_target = !config.adaptive_playback_cushion
+            ? liveTargetFrames()
+            : 0;
         return std::max<std::size_t>(
-            receiveRecoveryTailFrames(),
-            config.adaptive_min_frames);
+            static_cast<std::size_t>(config.frames_per_block) * 2U,
+            std::max(config.adaptive_min_frames, fixed_target));
     }
 
     std::uint64_t receiveRecoveryWindowUs() const noexcept
@@ -431,10 +460,14 @@ struct PeerMixer::Impl {
             receive_catchup_active = true;
             receive_recovery_started_us = current_advance_us;
             receive_recovery_peak_debt_frames = 0;
+            receive_rebase_started = false;
+            receive_recovery_stable_until_us = 0;
             ++stats.receive_recovery_events;
         }
-        receive_rebase_started = false;
-        receive_recovery_stable_until_us = 0;
+        // Additional real debt keeps this recovery active until it is repaid,
+        // but it does not erase an already-established stability window. In
+        // particular, scheduler-batched packets must not turn one recovery
+        // event into an indefinitely moving deadline.
         receive_recovery_peak_debt_frames = std::max(
             receive_recovery_peak_debt_frames,
             receiveRecoveryDebtFrames());
@@ -479,7 +512,7 @@ struct PeerMixer::Impl {
             return;
         }
 
-        const std::size_t dropped = trimReceiveRecoverySources();
+        (void)trimReceiveRecoverySources();
         if (!receive_rebase_started) {
             receive_recovery_window_us = receiveRecoveryWindowUs();
             receive_recovery_stable_until_us = now_us + receive_recovery_window_us;
@@ -500,10 +533,6 @@ struct PeerMixer::Impl {
             stats.adaptive_target_frames = adaptive_target_frames;
             receive_rebase_started = true;
             occupancy_dirty = true;
-        } else if (dropped > 0) {
-            // More of the same delayed prefix arrived after the first debt
-            // repayment. Restart the stability interval from this newest trim.
-            receive_recovery_stable_until_us = now_us + receive_recovery_window_us;
         }
     }
 
@@ -741,15 +770,48 @@ struct PeerMixer::Impl {
         stats.adaptive_target_frames = adaptive_target_frames;
     }
 
+    std::size_t normalOutputLimitFrames() const noexcept
+    {
+        const std::size_t target = liveTargetFrames();
+        return target > 0 ? target : config.output_max_frames;
+    }
+
+    void trimLivePathToTarget() noexcept
+    {
+        if (output == nullptr || receive_catchup_active) {
+            return;
+        }
+        const std::size_t output_target = liveTargetFrames();
+        if (output_target == 0) {
+            return;
+        }
+        const std::size_t output_depth = output->depthFrames();
+        const std::size_t fill_frames = output_depth < output_target
+            ? output_target - output_depth
+            : 0;
+        // Keep enough source audio to fill the moving output target, plus at
+        // least one complete callback when the output is already at target.
+        // The latter is the bounded scheduling allowance for a packet that
+        // arrives just before the device consumes its next block.
+        const std::size_t retain_frames = std::max<std::size_t>(
+            static_cast<std::size_t>(config.frames_per_block),
+            fill_frames);
+        for (auto& peer : peers) {
+            if (peer->stats.active && peer->stats.contributing) {
+                (void)peer->retainLiveTail(retain_frames);
+            }
+        }
+    }
+
     bool outputAtLimit() const noexcept
     {
         if (output == nullptr) {
             return false;
         }
-        const std::size_t limit = config.output_max_frames > 0 &&
-            receive_catchup_active && receive_rebase_started
+        const std::size_t limit = receive_catchup_active && receive_rebase_started &&
+            config.output_max_frames > 0
             ? receiveRecoveryOutputTailFrames()
-            : config.output_max_frames;
+            : normalOutputLimitFrames();
         return limit > 0 && output->depthFrames() + mixed_output.size() > limit;
     }
 
@@ -872,11 +934,22 @@ struct PeerMixer::Impl {
             // first real block. Later padding must never outrank queued audio.
             ensureAdaptiveCushion();
         }
+        trimLivePathToTarget();
+        if (occupancy_dirty) {
+            readiness = updateOccupancy();
+        }
         bool output_underrun_observed =
             output_underrun_frames > observed_output_underrun_frames;
         observed_output_underrun_frames = output_underrun_frames;
-        updateAdaptiveReleaseState(
-            output_underrun_observed, false, readiness.any_ready);
+        const bool actual_output_underrun = output_underrun_observed;
+        if (actual_output_underrun) {
+            // Raise the target before applying its output gate. Otherwise a
+            // full old target can prevent the queued recovery block from being
+            // released, hiding the underrun that should expand the cushion.
+            updateAdaptiveTarget(now_us, true, readiness.any_ready);
+        } else {
+            updateAdaptiveReleaseState(false, false, readiness.any_ready);
+        }
         std::size_t work = 0;
         while (work < config.max_blocks_per_advance) {
             if (outputAtLimit()) {
@@ -905,7 +978,7 @@ struct PeerMixer::Impl {
             readiness = updateOccupancy();
             updateAdaptiveTarget(
                 now_us,
-                consecutive_deadline_slots >= 3 || output_underrun_observed,
+                consecutive_deadline_slots >= 3,
                 readiness.any_ready);
             output_underrun_observed = false;
             ++work;
@@ -923,10 +996,10 @@ struct PeerMixer::Impl {
         // release is meant to remove. Recovery padding is therefore permitted
         // only after the device reports a real underrun and no real block was
         // available during this advance.
-        if (!readiness.any_ready && work == 0 && output_underrun_observed) {
-            updateAdaptiveTarget(now_us, true, false);
+        if (!readiness.any_ready && work == 0 && actual_output_underrun) {
             ensureAdaptiveCushion();
         }
+        trimLivePathToTarget();
         if (work == config.max_blocks_per_advance &&
             (readiness.all_ready || now_us >= next_deadline_us)) {
             ++stats.work_budget_yields;

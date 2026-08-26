@@ -17,7 +17,7 @@ struct LocalTuningPreference {
     int bufferSize = 32;
     int frameSize = 64;
     int prefillFrames = 64;
-    int playbackMaxFrames = 1536;
+    int playbackMaxFrames = 1024;
     int captureRingFrames = 4096;
     int playbackRingFrames = 4096;
     bool driftCorrection = true;
@@ -197,7 +197,7 @@ struct SyncPreference {
 };
 
 struct UserPreferences {
-    static constexpr int kSchemaVersion = 7;
+    static constexpr int kSchemaVersion = 8;
     AudioDevicePreference localAudio;
     AudioDevicePreference networkAudio;
     bool splitNetworkAudioByRole = false;

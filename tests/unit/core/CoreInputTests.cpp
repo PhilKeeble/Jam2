@@ -752,7 +752,7 @@ void test_peer_mixer_recovery_waits_for_256_frame_debt()
     config.sample_rate = 44100;
     config.frames_per_block = 64;
     config.deadline_frames = 64;
-    config.output_max_frames = 1536;
+    config.output_max_frames = 1024;
     config.max_blocks_per_advance = 64;
     config.adaptive_playback_cushion = true;
     config.adaptive_target_frames = 64;
@@ -821,7 +821,7 @@ void test_exactly_four_peer_multi_wake_catchup_returns_to_live_latency()
     config.sample_rate = 48000;
     config.frames_per_block = 64;
     config.deadline_frames = 64;
-    config.output_max_frames = 1536;
+    config.output_max_frames = 1024;
     config.max_blocks_per_advance = 64;
     config.adaptive_playback_cushion = true;
     config.adaptive_target_frames = 64;
@@ -944,7 +944,7 @@ void test_exactly_four_peer_trickled_catchup_stays_at_live_latency()
     config.sample_rate = 44100;
     config.frames_per_block = 64;
     config.deadline_frames = 64;
-    config.output_max_frames = 1536;
+    config.output_max_frames = 1024;
     config.max_blocks_per_advance = 64;
     config.adaptive_playback_cushion = true;
     config.adaptive_target_frames = 64;
@@ -1048,6 +1048,322 @@ void test_exactly_four_peer_trickled_catchup_stays_at_live_latency()
               << finalPath << '\n';
 }
 
+void test_exactly_four_peer_receive_burst_obeys_adaptive_path_target()
+{
+    MixerSink sink;
+    jam2::PeerMixerConfig config;
+    config.sample_rate = 48000;
+    config.frames_per_block = 64;
+    config.deadline_frames = 64;
+    config.output_max_frames = 1024;
+    config.max_blocks_per_advance = 64;
+    config.adaptive_playback_cushion = true;
+    config.adaptive_target_frames = 128;
+    config.adaptive_min_frames = 64;
+    config.adaptive_max_frames = 512;
+    jam2::PeerMixer mixer(config, &sink);
+
+    constexpr std::array<std::uint64_t, 3> peerIds{401, 402, 403};
+    std::array<jam2::PeerStreamPlayback*, peerIds.size()> peers{};
+    const std::array<std::int32_t, 64> initial{};
+    for (std::size_t index = 0; index < peerIds.size(); ++index) {
+        peers[index] = mixer.addPeer(peerIds[index], 16384);
+        expect(peers[index] != nullptr && mixer.setPeerActive(peerIds[index], true),
+            "burst-path fixture activates every remote contributor");
+        peers[index]->pushFrames(initial);
+    }
+    mixer.advance(0);
+
+    // The jam logs contained receive wakes of up to 38 packets (50.7 ms of
+    // audio). This is delayed captured audio, not legitimate future audio, so
+    // the adaptive target must bound the complete per-peer path rather than
+    // allowing the device ring to grow toward its 1536-frame safety capacity.
+    sink.consume(64);
+    std::vector<std::int32_t> observedBurst(38U * 64U, 1234);
+    for (auto* peer : peers) {
+        peer->pushFrames(observedBurst);
+    }
+    std::uint64_t now = 1333;
+    mixer.advance(now);
+    mixer.finishReceiveBatch(false);
+
+    auto currentPerPeerPath = [&]() {
+        std::size_t maximumPeerQueue = 0;
+        for (const std::uint64_t peerId : peerIds) {
+            const auto* stats = mixer.peerStats(peerId);
+            if (stats != nullptr) {
+                maximumPeerQueue = std::max(
+                    maximumPeerQueue,
+                    static_cast<std::size_t>(stats->queue_depth_frames));
+            }
+        }
+        return sink.depthFrames() + maximumPeerQueue;
+    };
+
+    std::size_t maximumStablePath = currentPerPeerPath();
+    const std::array<std::int32_t, 64> pacedPacket{};
+    for (std::size_t callback = 0; callback < 100; ++callback) {
+        sink.consume(64);
+        now += 1333;
+        for (auto* peer : peers) {
+            peer->pushFrames(pacedPacket);
+        }
+        mixer.advance(now);
+        mixer.finishReceiveBatch(false);
+        maximumStablePath = std::max(maximumStablePath, currentPerPeerPath());
+    }
+
+    const std::size_t maximumLivePathLimit =
+        config.adaptive_target_frames +
+        static_cast<std::size_t>(config.frames_per_block);
+    const std::size_t finalLivePathLimit =
+        static_cast<std::size_t>(mixer.stats().adaptive_target_frames) +
+        static_cast<std::size_t>(config.frames_per_block);
+    expect(maximumStablePath <= maximumLivePathLimit &&
+            currentPerPeerPath() <= finalLivePathLimit,
+        "a 38-packet wake remains within the adaptive target plus one callback instead of filling the safety maximum");
+    expect(mixer.stats().live_tail_trim_events > 0,
+        "ordinary burst bounding reports the obsolete prefix through existing live-tail diagnostics");
+    std::cout << "METRIC exactly_four_peer_burst_path_peak_frames="
+              << maximumStablePath << '\n'
+              << "METRIC exactly_four_peer_burst_path_final_frames="
+              << currentPerPeerPath() << '\n'
+              << "METRIC exactly_four_peer_burst_path_limit_frames="
+              << maximumLivePathLimit << '\n'
+              << "METRIC exactly_four_peer_burst_path_final_limit_frames="
+              << finalLivePathLimit << '\n';
+}
+
+void test_exactly_four_peer_adaptive_off_uses_fixed_playout_target()
+{
+    MixerSink sink;
+    jam2::PeerMixerConfig config;
+    config.sample_rate = 48000;
+    config.frames_per_block = 64;
+    config.deadline_frames = 64;
+    config.output_max_frames = 1024;
+    config.max_blocks_per_advance = 64;
+    config.fixed_target_frames = 128;
+    config.adaptive_playback_cushion = false;
+    config.adaptive_target_frames = 0;
+    config.adaptive_min_frames = 0;
+    config.adaptive_max_frames = 0;
+    jam2::PeerMixer mixer(config, &sink);
+
+    constexpr std::array<std::uint64_t, 3> peerIds{421, 422, 423};
+    std::array<jam2::PeerStreamPlayback*, peerIds.size()> peers{};
+    const std::array<std::int32_t, 64> packet{};
+    for (std::size_t index = 0; index < peerIds.size(); ++index) {
+        peers[index] = mixer.addPeer(peerIds[index], 16384);
+        expect(peers[index] != nullptr && mixer.setPeerActive(peerIds[index], true),
+            "fixed-target fixture activates every remote contributor");
+        peers[index]->pushFrames(packet);
+    }
+    mixer.advance(0);
+    for (auto* peer : peers) {
+        peer->pushFrames(packet);
+    }
+    mixer.advance(1);
+    sink.consume(64);
+
+    std::vector<std::int32_t> observedBurst(38U * 64U, 4444);
+    for (auto* peer : peers) {
+        peer->pushFrames(observedBurst);
+    }
+    std::uint64_t now = 1333;
+    mixer.advance(now);
+    mixer.finishReceiveBatch(false);
+
+    auto currentPerPeerPath = [&]() {
+        std::size_t maximumPeerQueue = 0;
+        for (const std::uint64_t peerId : peerIds) {
+            const auto* stats = mixer.peerStats(peerId);
+            if (stats != nullptr) {
+                maximumPeerQueue = std::max(
+                    maximumPeerQueue,
+                    static_cast<std::size_t>(stats->queue_depth_frames));
+            }
+        }
+        return sink.depthFrames() + maximumPeerQueue;
+    };
+
+    std::size_t maximumPath = currentPerPeerPath();
+    for (std::size_t callback = 0; callback < 100; ++callback) {
+        sink.consume(64);
+        now += 1333;
+        for (auto* peer : peers) {
+            peer->pushFrames(packet);
+        }
+        mixer.advance(now);
+        mixer.finishReceiveBatch(false);
+        maximumPath = std::max(maximumPath, currentPerPeerPath());
+    }
+
+    const std::size_t fixedPathLimit =
+        config.fixed_target_frames +
+        static_cast<std::size_t>(config.frames_per_block);
+    expect(!mixer.stats().adaptive_playback_cushion_enabled &&
+            mixer.stats().adaptive_target_frames == 0,
+        "fixed target does not silently enable or invent an adaptive target");
+    expect(maximumPath <= fixedPathLimit &&
+            currentPerPeerPath() <= fixedPathLimit,
+        "adaptive-off receive bursts remain near the explicit fixed playout floor instead of the safety maximum");
+
+    // Hard recovery remains available in fixed mode. The same scheduler-shaped
+    // three-packet batches must complete recovery without changing the fixed
+    // target into a hidden adaptive value.
+    for (std::size_t callback = 0; callback < 48; ++callback) {
+        sink.consume(64);
+        now += 1333;
+        mixer.advance(now);
+        mixer.finishReceiveBatch(false);
+    }
+    expect(mixer.stats().receive_recovery_active,
+        "fixed-target mode still enters hard recovery after a sustained outage");
+    const std::size_t debtPackets = static_cast<std::size_t>(
+        (mixer.stats().receive_recovery_debt_frames + 63U) / 64U);
+    std::vector<std::int32_t> repayment((debtPackets + 3U) * 64U, 5555);
+    for (auto* peer : peers) {
+        peer->pushFrames(repayment);
+    }
+    now += 250;
+    mixer.advance(now);
+    mixer.finishReceiveBatch(false);
+
+    std::vector<std::int32_t> scheduledBatch(3U * 64U, 6666);
+    for (std::size_t callback = 0; callback < 200; ++callback) {
+        sink.consume(64);
+        now += 1333;
+        if (callback % 3U == 0) {
+            for (auto* peer : peers) {
+                peer->pushFrames(scheduledBatch);
+            }
+        }
+        mixer.advance(now);
+        mixer.finishReceiveBatch(false);
+    }
+    expect(!mixer.stats().receive_recovery_active &&
+            mixer.stats().receive_recovery_events ==
+                mixer.stats().receive_recovery_completions,
+        "fixed-target hard recovery completes under average-rate receive batching");
+    expect(currentPerPeerPath() <= fixedPathLimit,
+        "fixed-target recovery returns the complete inbound path to the profile floor");
+    std::cout << "METRIC exactly_four_peer_fixed_burst_path_peak_frames="
+              << maximumPath << '\n'
+              << "METRIC exactly_four_peer_fixed_burst_path_limit_frames="
+              << fixedPathLimit << '\n'
+              << "METRIC exactly_four_peer_fixed_recovery_events="
+              << mixer.stats().receive_recovery_events << '\n'
+              << "METRIC exactly_four_peer_fixed_recovery_completions="
+              << mixer.stats().receive_recovery_completions << '\n';
+}
+
+void test_exactly_four_peer_recovery_completes_during_continuous_batching()
+{
+    MixerSink sink;
+    jam2::PeerMixerConfig config;
+    config.sample_rate = 48000;
+    config.frames_per_block = 64;
+    config.deadline_frames = 64;
+    config.output_max_frames = 1024;
+    config.max_blocks_per_advance = 64;
+    config.adaptive_playback_cushion = true;
+    config.adaptive_target_frames = 64;
+    config.adaptive_min_frames = 64;
+    config.adaptive_max_frames = 512;
+    config.receive_recovery_trigger_frames = 256;
+    jam2::PeerMixer mixer(config, &sink);
+
+    constexpr std::array<std::uint64_t, 3> peerIds{411, 412, 413};
+    std::array<jam2::PeerStreamPlayback*, peerIds.size()> peers{};
+    const std::array<std::int32_t, 64> packet{};
+    for (std::size_t index = 0; index < peerIds.size(); ++index) {
+        peers[index] = mixer.addPeer(peerIds[index], 16384);
+        expect(peers[index] != nullptr && mixer.setPeerActive(peerIds[index], true),
+            "batched-recovery fixture activates every remote contributor");
+        peers[index]->pushFrames(packet);
+    }
+    mixer.advance(0);
+
+    std::uint64_t now = 0;
+    std::uint64_t recoveryArmedAt = 0;
+    // A 48-callback outage is 64 ms at this block size: long enough to model
+    // the earlier high-debt recovery periods rather than only a short hiccup.
+    for (std::size_t callback = 0; callback < 48; ++callback) {
+        sink.consume(64);
+        now += 1333;
+        mixer.advance(now);
+        mixer.finishReceiveBatch(false);
+        if (recoveryArmedAt == 0 && mixer.stats().receive_recovery_active) {
+            recoveryArmedAt = now;
+        }
+    }
+    const std::uint64_t recoveryPeakDebt =
+        mixer.stats().receive_recovery_debt_max_frames;
+    expect(recoveryArmedAt != 0 && mixer.stats().receive_recovery_active &&
+            mixer.stats().receive_recovery_debt_frames >= 256,
+        "batched-recovery fixture enters debt-driven recovery before catch-up arrives");
+
+    const std::size_t debtPackets = static_cast<std::size_t>(
+        (mixer.stats().receive_recovery_debt_frames + 63U) / 64U);
+    std::vector<std::int32_t> repayment((debtPackets + 3U) * 64U, 2222);
+    for (auto* peer : peers) {
+        peer->pushFrames(repayment);
+    }
+    now += 250;
+    mixer.advance(now);
+    mixer.finishReceiveBatch(false);
+    const std::uint64_t debtRepaidAt = now;
+
+    // Three packets every three callbacks preserves the source's average
+    // audio rate while reproducing the multi-packet receive batches in the
+    // jam. A trimmed delayed prefix must not restart the same recovery's
+    // stability deadline forever.
+    std::vector<std::int32_t> threePacketBatch(3U * 64U, 3333);
+    for (std::size_t callback = 0; callback < 200; ++callback) {
+        sink.consume(64);
+        now += 1333;
+        if (callback % 3U == 0) {
+            for (auto* peer : peers) {
+                peer->pushFrames(threePacketBatch);
+            }
+        }
+        mixer.advance(now);
+        mixer.finishReceiveBatch(false);
+    }
+
+    expect(!mixer.stats().receive_recovery_active &&
+            mixer.stats().receive_recovery_events ==
+                mixer.stats().receive_recovery_completions,
+        "average-rate receive batching cannot keep one recovery active indefinitely");
+    const std::uint64_t debtWindowUs =
+        (recoveryPeakDebt * 1000000ULL +
+            static_cast<std::uint64_t>(config.sample_rate) - 1ULL) /
+        static_cast<std::uint64_t>(config.sample_rate);
+    const std::uint64_t minimumWindowUs =
+        (static_cast<std::uint64_t>(config.frames_per_block) * 4ULL * 1000000ULL +
+            static_cast<std::uint64_t>(config.sample_rate) - 1ULL) /
+        static_cast<std::uint64_t>(config.sample_rate);
+    const std::uint64_t recoveryWindowUs =
+        std::max(debtWindowUs, minimumWindowUs);
+    const std::uint64_t schedulingAllowanceUs = 3ULL * 1333ULL;
+    const std::uint64_t expectedMaximumDurationUs =
+        debtRepaidAt - recoveryArmedAt + recoveryWindowUs + schedulingAllowanceUs;
+    expect(mixer.stats().receive_recovery_duration_max_us <=
+            expectedMaximumDurationUs,
+        "long batched recovery is bounded by debt repayment, its measured recovery window, and scheduling granularity");
+    std::cout << "METRIC exactly_four_peer_batched_recovery_events="
+              << mixer.stats().receive_recovery_events << '\n'
+              << "METRIC exactly_four_peer_batched_recovery_completions="
+              << mixer.stats().receive_recovery_completions << '\n'
+              << "METRIC exactly_four_peer_batched_recovery_active="
+              << (mixer.stats().receive_recovery_active ? 1 : 0) << '\n'
+              << "METRIC exactly_four_peer_batched_recovery_max_us="
+              << mixer.stats().receive_recovery_duration_max_us << '\n'
+              << "METRIC exactly_four_peer_batched_recovery_bound_us="
+              << expectedMaximumDurationUs << '\n';
+}
+
 void test_peer_mixer_batches_wrapped_queue_operations()
 {
     MarkerMixerSink sink;
@@ -1110,7 +1426,7 @@ void test_peer_mixer_adapts_to_device_ring_underrun()
         "device-facing ring underrun raises the bounded adaptive cushion");
 }
 
-void test_peer_mixer_release_does_not_replace_drained_audio_with_silence()
+void test_peer_mixer_burst_bound_preserves_adaptive_recovery()
 {
     MixerSink sink;
     jam2::PeerMixerConfig config;
@@ -1133,9 +1449,9 @@ void test_peer_mixer_release_does_not_replace_drained_audio_with_silence()
     peer->pushFrames(block);
     mixer.advance(0);
 
-    // Release is reserved for recovery cushion that was explicitly raised by
-    // a real device underrun. A normal packet burst at the minimum target must
-    // not engage fast playback.
+    // A real underrun may raise the live target. A following delayed burst
+    // must fill that target, not the much larger safety capacity and then rely
+    // on several seconds of accelerated playback to remove the mistake.
     sink.underruns += 64;
     peer->pushFrames(block);
     mixer.advance(1000);
@@ -1145,22 +1461,20 @@ void test_peer_mixer_release_does_not_replace_drained_audio_with_silence()
     const std::array<std::int32_t, 2048> burst{};
     peer->pushFrames(burst);
     mixer.advance(2000);
-    expect(sink.resamplerRatio > 1.0049,
-        "excess recovery cushion activates the bounded release ratio");
+    expect(sink.depth <= mixer.stats().adaptive_target_frames &&
+            sink.resamplerRatio == 1.0 &&
+            mixer.stats().live_tail_trim_events > 0,
+        "a delayed burst fills only the raised adaptive target without creating release feedback");
 
     const std::uint64_t paddingBeforeRelease =
         mixer.stats().adaptive_padding_frames;
-    sink.consume(sink.depth - 512);
+    sink.consume(64);
+    peer->pushFrames(block);
     mixer.advance(3000);
     expect(mixer.stats().adaptive_padding_frames == paddingBeforeRelease,
-        "active depth release does not replace deliberately drained frames with silence");
-
-    peer->pushFrames(block);
-    mixer.advance(4000);
-    expect(mixer.stats().adaptive_padding_frames == paddingBeforeRelease,
-        "a newly received real block is not followed by synthetic cushion silence");
+        "a normally paced real block is not followed by synthetic cushion silence");
     expect(sink.resamplerRatio == 1.0,
-        "release returns to unity once real playback depth reaches its stop band");
+        "bounded burst handling leaves normal playback at unity ratio");
 
     sink.consume(sink.depth + 64);
     mixer.advance(5000);
@@ -1190,22 +1504,26 @@ void test_peer_mixer_periodic_batches_do_not_accelerate_into_underruns()
     expect(peer != nullptr && mixer.setPeerActive(102, true),
         "burst-cycle mixer creates its active source");
 
-    std::array<std::int32_t, 4096> burst{};
-    std::fill(burst.begin(), burst.end(), 100000000);
+    std::array<std::int32_t, 38U * 64U> catchupBurst{};
+    std::fill(catchupBurst.begin(), catchupBurst.end(), 100000000);
     std::uint64_t nowUs = 1000000;
-    peer->pushFrames(burst);
+    peer->pushFrames(catchupBurst);
     mixer.advance(nowUs);
     const std::uint64_t startupPadding = mixer.stats().adaptive_padding_frames;
     bool targetStayedAtUnity =
         sink.control.playback_ratio_ppm.load(std::memory_order_relaxed) == 1000000;
+    const std::array<std::int32_t, 3U * 64U> scheduledBatch{};
     for (std::uint64_t cycle = 0; cycle < 32; ++cycle) {
-        if (cycle > 0) {
-            peer->pushFrames(burst);
-            mixer.advance(nowUs);
-        }
-        for (int callback = 0; callback < 128; ++callback) {
+        // Three packets every six 32-frame device callbacks is the same
+        // average source rate with realistic receive-thread scheduling
+        // batching. It must use the target as runway without rebuilding the
+        // discarded catch-up latency.
+        for (int callback = 0; callback < 6; ++callback) {
             sink.callback();
             nowUs += 667;
+            if (callback == 5) {
+                peer->pushFrames(scheduledBatch);
+            }
             mixer.advance(nowUs);
             targetStayedAtUnity = targetStayedAtUnity &&
                 sink.control.playback_ratio_ppm.load(std::memory_order_relaxed) == 1000000;
@@ -1240,9 +1558,12 @@ int main()
     test_peer_mixer_recovery_waits_for_256_frame_debt();
     test_exactly_four_peer_multi_wake_catchup_returns_to_live_latency();
     test_exactly_four_peer_trickled_catchup_stays_at_live_latency();
+    test_exactly_four_peer_receive_burst_obeys_adaptive_path_target();
+    test_exactly_four_peer_adaptive_off_uses_fixed_playout_target();
+    test_exactly_four_peer_recovery_completes_during_continuous_batching();
     test_peer_mixer_batches_wrapped_queue_operations();
     test_peer_mixer_adapts_to_device_ring_underrun();
-    test_peer_mixer_release_does_not_replace_drained_audio_with_silence();
+    test_peer_mixer_burst_bound_preserves_adaptive_recovery();
     test_peer_mixer_periodic_batches_do_not_accelerate_into_underruns();
     if (failures == 0) std::cout << "Jam2 core input tests passed\n";
     return failures == 0 ? 0 : 1;
