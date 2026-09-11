@@ -390,6 +390,9 @@ void copy_peer_mixer_stats(
     target.mix_live_tail_trim_events = source.live_tail_trim_events;
     target.mix_live_tail_trimmed_frames = source.live_tail_trimmed_frames;
     target.mix_live_tail_trim_max_frames = source.live_tail_trim_max_frames;
+    target.mix_live_tail_batch_tolerance_frames = source.live_tail_batch_tolerance_frames;
+    target.mix_normal_output_limit_frames = source.normal_output_limit_frames;
+    target.mix_normal_path_limit_frames = source.normal_path_limit_frames;
     target.mix_capacity_drops = source.capacity_drops;
     target.mix_capacity_dropped_frames = source.capacity_dropped_frames;
     target.mix_clipped_samples = source.clipped_samples;
@@ -414,6 +417,14 @@ void copy_peer_mixer_stats(
     target.adaptive_playback_release_events = source.adaptive_release_events;
     target.adaptive_playback_burst_events = source.adaptive_raise_events;
     target.adaptive_playback_padding_frames = source.adaptive_padding_frames;
+    target.adaptive_delivery_gap_hold_active = source.adaptive_delivery_gap_hold_active;
+    target.adaptive_delivery_gap_raise_events = source.adaptive_delivery_gap_raise_events;
+    target.adaptive_delivery_gap_hold_events = source.adaptive_delivery_gap_hold_events;
+    target.adaptive_delivery_gap_hold_remaining_us =
+        source.adaptive_delivery_gap_hold_remaining_us;
+    target.adaptive_delivery_gap_required_frames = source.adaptive_delivery_gap_required_frames;
+    target.adaptive_delivery_gap_required_max_frames =
+        source.adaptive_delivery_gap_required_max_frames;
 }
 
 std::string csv_escape(std::string_view value)
@@ -811,12 +822,25 @@ void print_periodic_stream_stats(
               << " peer_playback_queue_current_frames=" << stats.peer_playback_queue_current_frames
               << " peer_playback_path_current_frames=" << stats.peer_playback_path_current_frames
               << " mix_live_tail_trimmed_frames=" << stats.mix_live_tail_trimmed_frames
+              << " mix_live_tail_batch_tolerance_frames=" << stats.mix_live_tail_batch_tolerance_frames
+              << " mix_normal_output_limit_frames=" << stats.mix_normal_output_limit_frames
+              << " mix_normal_path_limit_frames=" << stats.mix_normal_path_limit_frames
               << " mix_receive_recovery_active="
               << (stats.mix_receive_recovery_active ? "yes" : "no")
               << " mix_receive_recovery_debt_frames="
               << stats.mix_receive_recovery_debt_frames
               << " mix_receive_recovery_completions="
               << stats.mix_receive_recovery_completions
+              << " adaptive_delivery_gap_hold_active="
+              << (stats.adaptive_delivery_gap_hold_active ? "yes" : "no")
+              << " adaptive_delivery_gap_raise_events="
+              << stats.adaptive_delivery_gap_raise_events
+              << " adaptive_delivery_gap_hold_remaining_ms="
+              << static_cast<double>(stats.adaptive_delivery_gap_hold_remaining_us) / 1000.0
+              << " adaptive_delivery_gap_required_frames="
+              << stats.adaptive_delivery_gap_required_frames
+              << " adaptive_delivery_gap_required_max_frames="
+              << stats.adaptive_delivery_gap_required_max_frames
               << " metronome_compensation_active=" << (stats.metronome_compensation_active ? "yes" : "no")
               << " metronome_compensation_offset_ms="
               << signed_frames_to_ms(stats.metronome_compensation_offset_frames, options.sample_rate)
@@ -1128,6 +1152,9 @@ void print_audio_packet_stats(const AudioPacketStats& stats, const Options& opti
     std::cout << "Mixer live-tail trim events: " << stats.mix_live_tail_trim_events << "\n";
     std::cout << "Mixer live-tail trimmed frames: " << stats.mix_live_tail_trimmed_frames << "\n";
     std::cout << "Mixer live-tail trim max frames: " << stats.mix_live_tail_trim_max_frames << "\n";
+    std::cout << "Mixer live-tail batch tolerance frames: " << stats.mix_live_tail_batch_tolerance_frames << "\n";
+    std::cout << "Mixer normal output limit frames: " << stats.mix_normal_output_limit_frames << "\n";
+    std::cout << "Mixer normal path limit frames: " << stats.mix_normal_path_limit_frames << "\n";
     std::cout << "Mixer receive recovery active: "
               << (stats.mix_receive_recovery_active ? "yes" : "no") << "\n";
     std::cout << "Mixer receive recovery events: "
@@ -1223,6 +1250,18 @@ void print_audio_packet_stats(const AudioPacketStats& stats, const Options& opti
     std::cout << "Adaptive playback padding frames: " << stats.adaptive_playback_padding_frames << "\n";
     std::cout << "Adaptive playback padding ms: "
               << frames_to_ms(static_cast<std::size_t>(stats.adaptive_playback_padding_frames), options.sample_rate) << "\n";
+    std::cout << "Adaptive delivery-gap hold active: "
+              << (stats.adaptive_delivery_gap_hold_active ? "yes" : "no") << "\n";
+    std::cout << "Adaptive delivery-gap raise events: "
+              << stats.adaptive_delivery_gap_raise_events << "\n";
+    std::cout << "Adaptive delivery-gap hold events: "
+              << stats.adaptive_delivery_gap_hold_events << "\n";
+    std::cout << "Adaptive delivery-gap hold remaining ms: "
+              << static_cast<double>(stats.adaptive_delivery_gap_hold_remaining_us) / 1000.0 << "\n";
+    std::cout << "Adaptive delivery-gap required frames: "
+              << stats.adaptive_delivery_gap_required_frames << "\n";
+    std::cout << "Adaptive delivery-gap required max frames: "
+              << stats.adaptive_delivery_gap_required_max_frames << "\n";
     std::cout << "Adaptive playback time above target ms: "
               << static_cast<double>(stats.adaptive_playback_time_above_target_us) / 1000.0 << "\n";
     std::cout << "Adaptive playback time under target ms: "

@@ -163,6 +163,7 @@ struct PeerStream::Impl {
     std::uint64_t drift_observation_best_receive_time_us = 0;
     long double drift_observation_best_offset_us = 0.0L;
     std::uint64_t drift_observation_packets = 0;
+    std::uint64_t last_audio_delivery_receive_us = 0;
     std::uint64_t last_audio_receive_us = 0;
     std::uint64_t last_audio_gap_receive_us = 0;
     std::uint64_t adaptive_target_frames = 0;
@@ -635,6 +636,41 @@ struct PeerStream::Impl {
                 observeDriftWindow(packet, arrival_offset_us);
             }
         }
+
+        if (!inserted_missing && playback != nullptr && packet_interval_us > 0 &&
+            last_audio_delivery_receive_us != 0) {
+            const std::uint64_t interval = packet.receive_time >= last_audio_delivery_receive_us
+                ? packet.receive_time - last_audio_delivery_receive_us
+                : 0;
+            const std::uint64_t minimum_gap_us = std::max(
+                packet_interval_us * 4U,
+                config.adaptive_delivery_gap_minimum_us);
+            if (interval > minimum_gap_us) {
+                const long double interval_frames_value =
+                    static_cast<long double>(interval) *
+                    static_cast<long double>(config.sample_rate) / 1000000.0L;
+                const std::size_t interval_frames = static_cast<std::size_t>(std::min<long double>(
+                    std::ceil(interval_frames_value),
+                    static_cast<long double>((std::numeric_limits<std::size_t>::max)())));
+                const std::size_t packet_frames =
+                    static_cast<std::size_t>(config.frames_per_packet);
+                const std::size_t upstream_runway = config.jitter_buffer_frames > packet_frames
+                    ? config.jitter_buffer_frames - packet_frames
+                    : 0;
+                if (interval_frames > upstream_runway) {
+                    const std::size_t uncovered = interval_frames - upstream_runway;
+                    const std::size_t required_playback = uncovered >
+                            (std::numeric_limits<std::size_t>::max)() - packet_frames
+                        ? (std::numeric_limits<std::size_t>::max)()
+                        : uncovered + packet_frames;
+                    playback->observeDeliveryGap({
+                        packet.receive_time,
+                        required_playback,
+                    });
+                }
+            }
+        }
+        last_audio_delivery_receive_us = packet.receive_time;
 
         if (past_warmup && last_audio_receive_us != 0) {
             const std::uint64_t interval = packet.receive_time >= last_audio_receive_us

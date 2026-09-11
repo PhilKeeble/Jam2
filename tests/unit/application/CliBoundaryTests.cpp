@@ -255,6 +255,15 @@ void testOptionAndStatsContracts()
     mixerSource.receive_recovery_duration_us = 15;
     mixerSource.receive_recovery_duration_max_us = 17;
     mixerSource.receive_recovery_trigger_frames = 256;
+    mixerSource.adaptive_delivery_gap_hold_active = true;
+    mixerSource.adaptive_delivery_gap_raise_events = 18;
+    mixerSource.adaptive_delivery_gap_hold_events = 19;
+    mixerSource.adaptive_delivery_gap_hold_remaining_us = 20000;
+    mixerSource.adaptive_delivery_gap_required_frames = 21;
+    mixerSource.adaptive_delivery_gap_required_max_frames = 22;
+    mixerSource.live_tail_batch_tolerance_frames = 128;
+    mixerSource.normal_output_limit_frames = 256;
+    mixerSource.normal_path_limit_frames = 320;
     jam2::cli::stats::copy_peer_mixer_stats(copied, mixerSource);
     expect(copied.mix_receive_recovery_active &&
             copied.mix_receive_recovery_events == 11 &&
@@ -263,8 +272,16 @@ void testOptionAndStatsContracts()
             copied.mix_receive_recovery_debt_max_frames == 14 &&
             copied.mix_receive_recovery_duration_us == 15 &&
             copied.mix_receive_recovery_duration_max_us == 17 &&
-            copied.mix_receive_recovery_trigger_frames == 256,
-        "CLI diagnostics copy debt-driven receive-recovery state");
+            copied.mix_receive_recovery_trigger_frames == 256 &&
+            copied.adaptive_delivery_gap_hold_active &&
+            copied.adaptive_delivery_gap_raise_events == 18 &&
+            copied.adaptive_delivery_gap_hold_events == 19 &&
+            copied.adaptive_delivery_gap_hold_remaining_us == 20000 &&
+            copied.adaptive_delivery_gap_required_frames == 21 &&
+            copied.adaptive_delivery_gap_required_max_frames == 22 &&
+            copied.mix_live_tail_batch_tolerance_frames == 128 &&
+            copied.mix_normal_output_limit_frames == 256 && copied.mix_normal_path_limit_frames == 320,
+        "CLI diagnostics copy debt-driven recovery and delivery-gap learning state");
 
     jam2::PeerStreamStats firstGap;
     firstGap.audio_packet_gap_min_us = 1200;
@@ -366,6 +383,7 @@ void testOptionAndStatsContracts()
             jam2::cli::stats::CsvStatsLog log(
                 std::filesystem::path(statsRoot.path().toStdString()), {});
             statsCsvPath = log.path();
+            log.write_periodic(24, copied, statsOptions, audio);
             log.write("final", 25, copied, statsOptions, audio);
         }
         QFile statsCsv(QString::fromStdString(statsCsvPath.string()));
@@ -373,8 +391,9 @@ void testOptionAndStatsContracts()
         const QList<QByteArray> lines = opened
             ? statsCsv.readAll().trimmed().split('\n')
             : QList<QByteArray>{};
-        const QByteArray header = lines.size() == 2 ? lines[0].trimmed() : QByteArray{};
-        const QByteArray finalRow = lines.size() == 2 ? lines[1].trimmed() : QByteArray{};
+        const QByteArray header = lines.size() == 3 ? lines[0].trimmed() : QByteArray{};
+        const QByteArray periodicRow = lines.size() == 3 ? lines[1].trimmed() : QByteArray{};
+        const QByteArray finalRow = lines.size() == 3 ? lines[2].trimmed() : QByteArray{};
         const auto csvFieldCount = [](const QByteArray& row) {
             int fields = 1;
             bool quoted = false;
@@ -391,10 +410,12 @@ void testOptionAndStatsContracts()
             }
             return fields;
         };
-        const bool schemaMatches = opened && lines.size() == 2 &&
+        const bool schemaMatches = opened && lines.size() == 3 &&
                 csvFieldCount(header) == csvFieldCount(finalRow) &&
-                header.endsWith("mix_receive_recovery_trigger_frames") &&
-                finalRow.endsWith(",17,256");
+                csvFieldCount(header) == csvFieldCount(periodicRow) &&
+                header.endsWith("mix_normal_output_limit_frames,mix_normal_path_limit_frames") &&
+                periodicRow.endsWith(",17,256,yes,18,19,20,21,22,128,256,320") &&
+                finalRow.endsWith(",17,256,yes,18,19,20,21,22,128,256,320");
         expect(schemaMatches,
             "final CSV preserves the capture-clock pacing field and schema width");
     }

@@ -30,8 +30,15 @@ struct PeerStreamConfig {
     double drift_smoothing = 0.02;
     int drift_deadband_ppm = 25;
     int drift_max_correction_ppm = 500;
+    // Routine local receive-thread batching is not unstable-network evidence.
+    std::uint64_t adaptive_delivery_gap_minimum_us = 50000;
     std::uint64_t stats_warmup_us = 3000000;
     bool collect_diagnostics = false;
+};
+
+struct PeerDeliveryGap {
+    std::uint64_t receive_time_us = 0;
+    std::size_t required_playback_frames = 0;
 };
 
 // Network-thread sink for accepted, clock-corrected peer audio. A one-peer
@@ -47,6 +54,7 @@ public:
     virtual std::size_t pushFrames(std::span<const std::int32_t> frames) noexcept = 0;
     virtual void requestDropFrames(std::size_t frames) noexcept = 0;
     virtual void setResamplerRatio(double ratio) noexcept = 0;
+    virtual void observeDeliveryGap(const PeerDeliveryGap&) noexcept {}
 };
 
 struct PeerStreamStats {

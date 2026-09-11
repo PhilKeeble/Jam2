@@ -81,6 +81,18 @@ struct PeerMixerStats {
     std::uint64_t adaptive_raise_events = 0;
     std::uint64_t adaptive_release_events = 0;
     std::uint64_t adaptive_padding_frames = 0;
+    bool adaptive_delivery_gap_hold_active = false;
+    std::uint64_t adaptive_delivery_gap_raise_events = 0;
+    std::uint64_t adaptive_delivery_gap_hold_events = 0;
+    std::uint64_t adaptive_delivery_gap_hold_remaining_us = 0;
+    std::uint64_t adaptive_delivery_gap_required_frames = 0;
+    std::uint64_t adaptive_delivery_gap_required_max_frames = 0;
+    std::uint64_t live_tail_batch_tolerance_frames = 0;
+    // Ordinary servicing limits, excluding peer jitter storage. Hard receive
+    // recovery uses its own smaller tails; receive ingestion can transiently
+    // exceed this path limit before the bounded batch is serviced.
+    std::uint64_t normal_output_limit_frames = 0;
+    std::uint64_t normal_path_limit_frames = 0;
 };
 
 // Network-thread mixer. Each peer has a fixed-capacity local-timeline queue and

@@ -344,6 +344,15 @@ struct AudioPacketStats {
     std::uint64_t adaptive_playback_time_under_target_us = 0;
     std::uint64_t adaptive_playback_longest_above_target_us = 0;
     std::uint64_t adaptive_playback_longest_under_target_us = 0;
+    bool adaptive_delivery_gap_hold_active = false;
+    std::uint64_t adaptive_delivery_gap_raise_events = 0;
+    std::uint64_t adaptive_delivery_gap_hold_events = 0;
+    std::uint64_t adaptive_delivery_gap_hold_remaining_us = 0;
+    std::uint64_t adaptive_delivery_gap_required_frames = 0;
+    std::uint64_t adaptive_delivery_gap_required_max_frames = 0;
+    std::uint64_t mix_live_tail_batch_tolerance_frames = 0;
+    std::uint64_t mix_normal_output_limit_frames = 0;
+    std::uint64_t mix_normal_path_limit_frames = 0;
     std::uint64_t metronome_epoch_sample_time = 0;
     std::uint64_t local_metronome_beat = 0;
     std::uint64_t remote_metronome_beat = 0;
@@ -704,7 +713,12 @@ public:
                 "mix_receive_recovery_active,mix_receive_recovery_events,"
                 "mix_receive_recovery_completions,mix_receive_recovery_debt_frames,"
                 "mix_receive_recovery_debt_max_frames,mix_receive_recovery_duration_us,"
-                "mix_receive_recovery_duration_max_us,mix_receive_recovery_trigger_frames\n";
+                "mix_receive_recovery_duration_max_us,mix_receive_recovery_trigger_frames,"
+                "adaptive_delivery_gap_hold_active,adaptive_delivery_gap_raise_events,"
+                "adaptive_delivery_gap_hold_events,adaptive_delivery_gap_hold_remaining_ms,"
+                "adaptive_delivery_gap_required_frames,"
+                "adaptive_delivery_gap_required_max_frames,mix_live_tail_batch_tolerance_frames,"
+                "mix_normal_output_limit_frames,mix_normal_path_limit_frames\n";
     }
 
     explicit operator bool() const { return out_.is_open(); }
@@ -1253,7 +1267,16 @@ public:
              << stats.mix_receive_recovery_debt_max_frames << ','
              << stats.mix_receive_recovery_duration_us << ','
              << stats.mix_receive_recovery_duration_max_us << ','
-             << stats.mix_receive_recovery_trigger_frames;
+             << stats.mix_receive_recovery_trigger_frames << ','
+             << (stats.adaptive_delivery_gap_hold_active ? "yes" : "no") << ','
+             << stats.adaptive_delivery_gap_raise_events << ','
+             << stats.adaptive_delivery_gap_hold_events << ','
+             << static_cast<double>(stats.adaptive_delivery_gap_hold_remaining_us) / 1000.0 << ','
+             << stats.adaptive_delivery_gap_required_frames << ','
+             << stats.adaptive_delivery_gap_required_max_frames << ','
+             << stats.mix_live_tail_batch_tolerance_frames << ','
+             << stats.mix_normal_output_limit_frames << ','
+             << stats.mix_normal_path_limit_frames;
         out_ << '\n';
         if (row_type == "final") {
             out_.flush();
@@ -1269,7 +1292,7 @@ public:
         if (!out_) {
             return;
         }
-        std::vector<std::string> fields(496);
+        std::vector<std::string> fields(505);
         auto set = [&](std::size_t index, auto value) {
             std::ostringstream text;
             text << value;
@@ -1746,6 +1769,15 @@ public:
         set(493, stats.mix_receive_recovery_duration_us);
         set(494, stats.mix_receive_recovery_duration_max_us);
         set(495, stats.mix_receive_recovery_trigger_frames);
+        fields[496] = stats.adaptive_delivery_gap_hold_active ? "yes" : "no";
+        set(497, stats.adaptive_delivery_gap_raise_events);
+        set(498, stats.adaptive_delivery_gap_hold_events);
+        set(499, static_cast<double>(stats.adaptive_delivery_gap_hold_remaining_us) / 1000.0);
+        set(500, stats.adaptive_delivery_gap_required_frames);
+        set(501, stats.adaptive_delivery_gap_required_max_frames);
+        set(502, stats.mix_live_tail_batch_tolerance_frames);
+        set(503, stats.mix_normal_output_limit_frames);
+        set(504, stats.mix_normal_path_limit_frames);
 
         for (std::size_t i = 0; i < fields.size(); ++i) {
             if (i != 0) {
