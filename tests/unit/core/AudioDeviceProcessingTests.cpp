@@ -43,6 +43,104 @@ bool anyNonzero(const std::array<std::int32_t, Size>& samples)
     });
 }
 
+void testDeviceClock()
+{
+    jam2::audio::StreamControl control;
+    std::uint64_t generation = 0;
+    expect(processing::read_device_clock(control).time_us == 0, "unstarted device has no clock observation");
+    processing::publish_callback_begin(&control, generation);
+    processing::publish_device_clock(&control, {48000, 2000000});
+    expect(processing::read_device_clock(control).time_us == 0, "clock reader skips an in-progress callback");
+    processing::publish_callback_end(&control, generation);
+    auto observed = processing::read_device_clock(control);
+    expect(observed.frame == 48000 && observed.time_us == 2000000, "completed callback publishes a coherent clock pair");
+    processing::publish_device_clock(nullptr, {});
+    std::atomic<bool> done{false};
+    std::thread publisher([&] {
+        for (std::uint64_t frame = 1; frame <= 100000; ++frame) {
+            processing::publish_callback_begin(&control, generation);
+            processing::publish_device_clock(&control, {frame, frame * 1000 + 2000000});
+            processing::publish_callback_end(&control, generation);
+        }
+        done.store(true, std::memory_order_release);
+    });
+    bool coherent = true;
+    while (!done.load(std::memory_order_acquire)) {
+        observed = processing::read_device_clock(control);
+        if (observed.time_us != 0 && observed.time_us != 2000000)
+            coherent = coherent && observed.time_us == observed.frame * 1000 + 2000000;
+    }
+    publisher.join();
+    expect(coherent, "concurrent clock reader never combines frames and timestamps from different callbacks");
+
+    for (int ppm : {-500, 0, 500}) {
+        jam2::audio::DeviceClockEstimator estimator(48000);
+        std::uint64_t lastTime = 0;
+        for (std::uint64_t tick = 0; tick < 45000; ++tick) {
+            const auto frame = tick * 32;
+            const auto ideal = 1000000 + static_cast<std::uint64_t>(
+                frame * 1000000.0L / (48000.0L * (1.0L + ppm / 1000000.0L)));
+            // Periodic 4ms callback stalls followed by fast catch-up dispatch.
+            const auto now = std::max<std::uint64_t>(lastTime + 1, ideal + (tick % 150 == 80 ? 4000ULL : 0ULL));
+            estimator.observe({frame, now});
+            estimator.observe({frame, now}); // network reads may repeat a callback
+            lastTime = now;
+        }
+        expect(estimator.stats().valid && estimator.stats().observations > 50 &&
+            std::abs(estimator.stats().ppm - ppm) < 3 && estimator.stats().resets == 0,
+            "clock estimate rejects recurring dispatch delay and duplicate reads without biasing oscillator rate");
+        estimator.observe({45000 * 32, lastTime + 20000000});
+        expect(!estimator.stats().valid && estimator.stats().resets == 1 && estimator.rateRatio() == 1.0,
+            "stopped device recalibrates instead of poisoning the clock estimate with its pause");
+        estimator.observe({0, lastTime + 20001000});
+        expect(estimator.stats().resets == 2, "restarted frame counter establishes a fresh device baseline");
+        for (std::uint64_t tick = 1; tick <= 3000; ++tick)
+            estimator.observe({tick * 48, lastTime + 20001000 + tick * 1000});
+        expect(estimator.stats().valid && std::abs(estimator.stats().ppm) < 0.01,
+            "restarted device clock can calibrate again");
+    }
+    jam2::audio::DeviceClockEstimator invalid(0);
+    invalid.observe({48000, 1000000});
+    expect(!invalid.stats().valid && invalid.rateRatio() == 1.0, "invalid nominal rate cannot affect playback ratio");
+    jam2::audio::DeviceClockEstimator excessive(48000);
+    for (std::uint64_t tick = 1; tick <= 4000; ++tick) excessive.observe({tick * 49, tick * 1000});
+    expect(!excessive.stats().valid && excessive.stats().rejected_observations > 0 && excessive.rateRatio() == 1.0,
+        "implausible device rates are counted and cannot drive resampling");
+}
+
+void testCaptureTimelineRing()
+{
+    jam2::audio::MonoRingBuffer ring(10, true);
+    const std::array<std::int32_t, 8> first{100,101,102,103,104,105,106,107};
+    const std::array<std::int32_t, 4> second{108,109,110,111};
+    std::array<std::int32_t, 4> output{};
+    std::uint64_t frame = 999;
+    expect(ring.push_timed(first, 100) == 8 && ring.push_timed(second, 108) == 2,
+        "capture ring can retain a partial callback before overflow");
+    expect(ring.pop_exact_timed(output, frame) == 4 && frame == 100 && output.front() == 100,
+        "capture ring preserves a complete queued packet");
+    expect(ring.pop_exact_timed(output, frame) == 4 && frame == 104 && output.back() == 107,
+        "capture ring preserves the next contiguous packet");
+    const std::array<std::int32_t, 4> resumed{200,201,202,203};
+    expect(ring.push_timed(resumed, 200) == 4 && ring.pop_exact_timed(output, frame) == 4 &&
+        frame == 200 && output == resumed && ring.stats().timeline_discarded_frames == 2,
+        "timed packet extraction retires an incomplete fragment instead of stitching across a gap and wrap");
+    expect(ring.push_timed(std::span(resumed).first(2), 204) == 2, "partial contiguous data is queued");
+    output.fill(-1);
+    frame = 999;
+    expect(ring.pop_exact_timed(output, frame) == 0 && frame == 999 && output.front() == -1 && ring.available_read() == 2,
+        "incomplete contiguous packets stay queued and leave output and timestamp untouched");
+    expect(ring.push_timed(std::span(resumed).last(2), 206) == 2 && ring.pop_exact_timed(output, frame) == 4 && frame == 204,
+        "packet extraction joins contiguous callbacks across the ring wrap");
+    ring.push_timed(resumed, 300);
+    expect(ring.discard_all() == 4, "capture detach discards queued data");
+    ring.push_timed(resumed, 1000);
+    expect(ring.pop_exact_timed(output, frame) == 4 && frame == 1000,
+        "reattached capture uses device time despite retained absolute ring indices");
+    ring.reset();
+    expect(ring.available_read() == 0 && ring.stats().timeline_discarded_frames == 0, "ring reset clears timeline diagnostics");
+}
+
 void configureMetronome(jam2::audio::StreamControl& control)
 {
     control.metronome_enabled.store(true);
@@ -1018,6 +1116,8 @@ void testHeadlessUsesSharedPipeline()
 
 int main()
 {
+    testDeviceClock();
+    testCaptureTimelineRing();
     testCallbackTiming();
     testOptionalDriverOutputReadyState();
 #if defined(JAM2_PLATFORM_MACOS)

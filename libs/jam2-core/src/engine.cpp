@@ -357,6 +357,7 @@ private:
             const std::uint64_t callback_start_us = processing::callback_now_us();
             processing::publish_callback_begin(&control_, callback_generation_);
             const std::uint64_t callback_frame = engine_frame_;
+            processing::publish_device_clock(&control_, {callback_frame, callback_start_us});
             processing::observe_callback_interval(
                 callback_intervals_,
                 callback_start_us,
@@ -564,7 +565,6 @@ struct Engine::Impl {
     std::uint64_t schedule_order = 0;
     std::atomic<bool> attachment_active{false};
     std::atomic<std::uint64_t> active_attachment_generation{0};
-    std::atomic<std::uint64_t> capture_frames_popped{0};
     std::atomic<std::uint64_t> capture_attach_count{0};
     std::atomic<std::uint64_t> capture_detach_count{0};
     std::atomic<std::uint64_t> transport_revision{0};
@@ -1121,7 +1121,7 @@ void Engine::start(const EngineConfig& requested)
         impl_->track_take_recorder = std::make_unique<audio::TrackTakeRecorder>();
         impl_->prepared_source = std::make_unique<audio::PreparedTrackSource>(
             impl_->config.prepared_track_max_frames);
-        impl_->capture_ring = std::make_unique<audio::MonoRingBuffer>(impl_->config.capture_ring_frames);
+        impl_->capture_ring = std::make_unique<audio::MonoRingBuffer>(impl_->config.capture_ring_frames, true);
         impl_->pitch_ring = std::make_unique<audio::MonoRingBuffer>(16384);
         impl_->playback_ring = std::make_unique<audio::MonoRingBuffer>(impl_->config.playback_ring_frames);
         impl_->capture_ring->set_diagnostics_enabled(impl_->config.diagnostics_enabled);
@@ -1586,7 +1586,6 @@ NetworkCaptureAttachment Engine::attachNetworkCapture(
     const std::uint64_t generation =
         impl_->control->network_capture_generation_requested.fetch_add(1, std::memory_order_acq_rel) + 1ULL;
     impl_->active_attachment_generation.store(generation, std::memory_order_release);
-    impl_->capture_frames_popped.store(0, std::memory_order_relaxed);
     impl_->capture_attach_count.fetch_add(1, std::memory_order_relaxed);
     impl_->control->network_playback_enabled.store(true, std::memory_order_release);
     return {generation};
@@ -1626,13 +1625,11 @@ CapturedAudioBlock Engine::popNetworkCapture(
     // Network packets are fixed-size blocks. One exact ring operation avoids
     // consuming a partial device callback and avoids loading both indices
     // twice on every send.
-    const std::size_t frames = impl_->capture_ring->pop_exact(output);
+    std::uint64_t first = 0;
+    const std::size_t frames = impl_->capture_ring->pop_exact_timed(output, first);
     if (frames == 0) {
         return {};
     }
-    const std::uint64_t offset = impl_->capture_frames_popped.fetch_add(frames, std::memory_order_relaxed);
-    const std::uint64_t first =
-        impl_->control->network_capture_epoch_frame.load(std::memory_order_acquire) + offset;
     return {first, frames};
 }
 
@@ -1642,6 +1639,12 @@ std::size_t Engine::networkCaptureDepth(NetworkCaptureAttachment attachment) con
         return 0;
     }
     return impl_->capture_ring->available_read();
+}
+
+audio::DeviceClockSample Engine::deviceClockSample() const noexcept
+{
+    return impl_ != nullptr && impl_->control != nullptr
+        ? audio::device_processing::read_device_clock(*impl_->control) : audio::DeviceClockSample{};
 }
 
 std::size_t Engine::networkPlaybackDepth() const noexcept

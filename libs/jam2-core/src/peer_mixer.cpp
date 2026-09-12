@@ -77,6 +77,8 @@ struct PeerMixer::Impl {
             owner->occupancy_dirty = true;
         }
 
+        void resetSourceTimeline() noexcept override { resetTimeline(); }
+
         std::size_t enqueueFrames(std::span<const std::int32_t> frames) noexcept
         {
             if (frames.empty() ||

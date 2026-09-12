@@ -151,6 +151,9 @@ public:
     std::uint32_t takeControlSequence() noexcept;
 
     void commitAudioPacket() noexcept;
+    // Sequence counts emitted packets; sample time follows capture, including
+    // samples lost before packetization. Reject rewind and arithmetic overflow.
+    bool setAudioSampleTime(std::uint64_t frame) noexcept;
     void resynchronizeAudioSend(std::uint64_t now_us) noexcept;
     void commitPing(std::uint64_t interval_us = 100000ULL) noexcept;
     void scheduleNextGridState(std::uint64_t now_us, std::uint64_t interval_us) noexcept;
@@ -258,6 +261,7 @@ public:
     PeerStream& peerStream(PeerId peer_id);
     const PeerStream& peerStream(PeerId peer_id) const;
     const PeerMixerStats& mixStats() const noexcept;
+    const audio::DeviceClockStats& deviceClockStats() const noexcept;
     const PeerMixerPeerStats* peerMixStats(PeerId peer_id) const noexcept;
     const NetworkPeerSendStats* peerSendStats(PeerId peer_id) const noexcept;
 

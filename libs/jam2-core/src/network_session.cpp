@@ -125,6 +125,14 @@ void NetworkPacketSchedule::commitAudioPacket() noexcept
     next_audio_send_us_ += step;
 }
 
+bool NetworkPacketSchedule::setAudioSampleTime(std::uint64_t frame) noexcept
+{
+    if (frame < sample_time_ || frame > (std::numeric_limits<std::uint64_t>::max)() - frames_per_packet_)
+        return false;
+    sample_time_ = frame;
+    return true;
+}
+
 void NetworkPacketSchedule::resynchronizeAudioSend(std::uint64_t now_us) noexcept
 {
     next_audio_send_us_ = now_us;
@@ -159,6 +167,7 @@ struct NetworkSession::Impl {
     NetworkPacketSchedule schedule;
     PeerMixer mixer;
     PeerStreamPlayback* playback = nullptr;
+    audio::DeviceClockEstimator device_clock;
     std::vector<std::unique_ptr<PeerEntry>> peers;
     std::array<std::uint8_t, protocol::kMaxDatagramSize> transmit_packet{};
     std::array<std::uint8_t, protocol::kMaxDatagramSize> receive_packet{};
@@ -200,7 +209,7 @@ struct NetworkSession::Impl {
               peer_config.adaptive_playback_min_frames,
               peer_config.adaptive_playback_max_frames,
               peer_config.adaptive_playback_release_ppm}, output),
-          playback(output)
+          playback(output), device_clock(contract.sample_rate)
     {
         validateContract();
         validatePeerConfig(peer_config);
@@ -710,10 +719,17 @@ const NetworkPeerSendStats* NetworkSession::peerSendStats(PeerId peer_id) const 
 
 void NetworkSession::advance(std::uint64_t now_us) noexcept
 {
+    if (impl_->playback != nullptr) impl_->device_clock.observe(impl_->playback->deviceClockSample());
     for (auto& peer : impl_->peers) {
+        peer->stream->setLocalDeviceRate(impl_->device_clock.rateRatio());
         peer->stream->advance(now_us);
     }
     impl_->mixer.advance(now_us);
+}
+
+const audio::DeviceClockStats& NetworkSession::deviceClockStats() const noexcept
+{
+    return impl_->device_clock.stats();
 }
 
 void NetworkSession::finishReceiveBatch(bool receive_budget_exhausted) noexcept

@@ -6,6 +6,7 @@
 #include <span>
 
 #include "protocol.hpp"
+#include "audio_clock.hpp"
 
 namespace jam2 {
 
@@ -34,6 +35,9 @@ struct PeerStreamConfig {
     std::uint64_t adaptive_delivery_gap_minimum_us = 50000;
     std::uint64_t stats_warmup_us = 3000000;
     bool collect_diagnostics = false;
+    // Audio participation is independent of authenticated control liveness.
+    // Keep the existing three-second connection grace for audio-only outages.
+    std::uint64_t audio_inactivity_timeout_us = 3000000;
 };
 
 struct PeerDeliveryGap {
@@ -54,13 +58,21 @@ public:
     // Callback-facing sinks expose their consumption quantum. Source queues
     // and non-device fixtures may return zero (use the network block size).
     virtual std::size_t callbackFrames() const noexcept { return 0; }
+    virtual audio::DeviceClockSample deviceClockSample() const noexcept { return {}; }
     virtual std::size_t pushFrames(std::span<const std::int32_t> frames) noexcept = 0;
     virtual void requestDropFrames(std::size_t frames) noexcept = 0;
     virtual void setResamplerRatio(double ratio) noexcept = 0;
     virtual void observeDeliveryGap(const PeerDeliveryGap&) noexcept {}
+    // Retire only this source's obsolete timeline, never another peer's audio.
+    virtual void resetSourceTimeline() noexcept { requestDropFrames(depthFrames()); }
 };
 
 struct PeerStreamStats {
+    bool audio_suspended = false;
+    std::uint64_t audio_suspensions = 0;
+    std::uint64_t audio_timeline_rebases = 0;
+    std::uint64_t sample_time_forward_resyncs = 0;
+    std::uint64_t missing_audio_frames_retired = 0;
     std::uint64_t replay_rejects = 0;
     std::uint64_t forward_gap_rejects = 0;
     std::uint64_t forward_gap_resyncs = 0;
@@ -114,6 +126,8 @@ struct PeerStreamStats {
     std::uint64_t drift_baseline_calibration_packets = 0;
     std::uint64_t drift_baseline_delay_improvement_us = 0;
     double raw_drift_ppm = 0.0;
+    double local_device_drift_ppm = 0.0;
+    double relative_drift_ppm = 0.0;
     double drift_ppm = 0.0;
     double resampler_ratio = 1.0;
     double resampler_ratio_min = 0.0;
@@ -198,6 +212,7 @@ public:
         std::span<const std::uint8_t> payload,
         std::uint64_t receive_time_us) noexcept;
     void advance(std::uint64_t now_us) noexcept;
+    void setLocalDeviceRate(double ratio) noexcept;
     void finish(std::uint64_t now_us) noexcept;
 
     bool acceptReplay(PeerReplayChannel channel, std::uint32_t sequence) noexcept;

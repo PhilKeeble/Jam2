@@ -8,6 +8,7 @@ bool prepare_network_capture_callback(
     MonoRingBuffer& capture_ring,
     std::uint64_t callback_frame) noexcept
 {
+    control.network_capture_callback_frame = callback_frame;
     const std::uint64_t requested =
         control.network_capture_generation_requested.load(std::memory_order_acquire);
     const std::uint64_t applied =
@@ -37,7 +38,7 @@ std::size_t push_network_capture_callback(
     std::span<const std::int32_t> input,
     std::uint64_t ready_time_us) noexcept
 {
-    const std::size_t pushed = capture_ring.push(input);
+    const std::size_t pushed = capture_ring.push_timed(input, control.network_capture_callback_frame);
     const std::size_t wake_frames =
         control.network_capture_wake_frames.load(std::memory_order_relaxed);
     RealtimeWakeSignal* const wake_signal =

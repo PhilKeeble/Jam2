@@ -27,6 +27,8 @@ public:
     explicit CliPeerStreamPlayback(jam2::Engine* engine) noexcept : engine_(engine) {}
 
     bool acceptsFrames() const noexcept override { return engine_ != nullptr; }
+    jam2::audio::DeviceClockSample deviceClockSample() const noexcept override
+    { return engine_ != nullptr ? engine_->deviceClockSample() : jam2::audio::DeviceClockSample{}; }
 
     std::size_t depthFrames() const noexcept override
     {

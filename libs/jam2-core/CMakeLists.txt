@@ -39,6 +39,7 @@ if(MSVC)
 endif()
 
 add_library(jam2_core STATIC
+    src/audio_clock.cpp
     src/audio_device_processing.cpp
     src/audio_ring.cpp
     src/common.cpp

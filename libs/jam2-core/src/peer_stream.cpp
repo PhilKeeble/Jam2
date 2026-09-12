@@ -142,12 +142,20 @@ struct PeerStream::Impl {
     std::uint32_t forward_gap_recovery_expected = 0;
     bool highest_remote_sample_time_set = false;
     std::uint64_t highest_remote_sample_time = 0;
+    std::uint64_t sample_time_baseline = 0;
+    std::uint64_t sample_time_baseline_receive_us = 0;
+    struct SampleTimeCandidate {
+        std::uint64_t next_sample = 0;
+        std::uint32_t next_sequence = 0;
+        unsigned confirmations = 0;
+    } sample_time_candidate;
     bool playout_sample_time_initialized = false;
     std::uint64_t next_playout_remote_sample_time = 0;
     bool drift_started = false;
     bool drift_calibrating = false;
     bool drift_smoothed = false;
     double smoothed_drift_ppm = 0.0;
+    double local_device_rate = 1.0;
     double previous_resampler_ratio = 1.0;
     std::uint64_t previous_resampler_ratio_time_us = 0;
     std::uint64_t first_remote_sample_time = 0;
@@ -164,6 +172,8 @@ struct PeerStream::Impl {
     long double drift_observation_best_offset_us = 0.0L;
     std::uint64_t drift_observation_packets = 0;
     std::uint64_t last_audio_delivery_receive_us = 0;
+    std::uint64_t last_accepted_audio_us = 0;
+    bool resume_pending = false;
     std::uint64_t last_audio_receive_us = 0;
     std::uint64_t last_audio_gap_receive_us = 0;
     std::uint64_t adaptive_target_frames = 0;
@@ -322,10 +332,12 @@ struct PeerStream::Impl {
 
         const double max_ratio_delta =
             static_cast<double>(config.drift_max_correction_ppm) / 1000000.0;
+        stats.local_device_drift_ppm = (local_device_rate - 1.0) * 1000000.0;
+        stats.relative_drift_ppm = ((1.0 + stats.drift_ppm / 1000000.0) / local_device_rate - 1.0) * 1000000.0;
         const bool inside_deadband =
-            std::abs(stats.drift_ppm) <= static_cast<double>(config.drift_deadband_ppm);
+            std::abs(stats.relative_drift_ppm) <= static_cast<double>(config.drift_deadband_ppm);
         const double requested_ratio = config.drift_correction && !inside_deadband
-            ? 1.0 + stats.drift_ppm / 1000000.0
+            ? 1.0 + stats.relative_drift_ppm / 1000000.0
             : 1.0;
         const double bounded_ratio = std::clamp(
             requested_ratio, 1.0 - max_ratio_delta, 1.0 + max_ratio_delta);
@@ -406,6 +418,42 @@ struct PeerStream::Impl {
 
     void processPacket(const PendingAudioPacket& packet) noexcept
     {
+        if (!highest_remote_sample_time_set) {
+            sample_time_baseline = packet.sample_time;
+            sample_time_baseline_receive_us = packet.receive_time;
+        }
+        if (!highest_remote_sample_time_set || packet.sample_time + packet.sample_count > highest_remote_sample_time) {
+            highest_remote_sample_time_set = true;
+            highest_remote_sample_time = packet.sample_time + packet.sample_count;
+        }
+        // Large accepted gaps have no useful silence to enqueue. Rebase only
+        // this source in constant work; sequence/authentication checks remain
+        // intact and no allocation scales with a remote sample timestamp.
+        const bool large_gap = playout_sample_time_initialized &&
+            packet.sample_time > next_playout_remote_sample_time &&
+            packet.sample_time - next_playout_remote_sample_time >
+                static_cast<std::uint64_t>(config.frames_per_packet) * 64U;
+        if (resume_pending || large_gap) {
+            if (playout_sample_time_initialized && packet.sample_time > next_playout_remote_sample_time)
+                stats.missing_audio_frames_retired += packet.sample_time - next_playout_remote_sample_time;
+            if (playback != nullptr) playback->resetSourceTimeline();
+            playout_sample_time_initialized = false;
+            resume_pending = false;
+            stats.audio_suspended = false;
+            ++stats.audio_timeline_rebases;
+            // A capture discontinuity or resumed device may have a different
+            // clock baseline. Recalibrate without contaminating the lifetime
+            // estimate with the interruption's scheduling delay.
+            drift_started = drift_calibrating = drift_smoothed = drift_observation_active = false;
+            stats.drift_valid = stats.drift_baseline_calibrating = false;
+            smoothed_drift_ppm = 0;
+            stats.raw_drift_ppm = stats.drift_ppm = 0;
+            stats.relative_drift_ppm = 0;
+            previous_resampler_ratio = stats.resampler_ratio = 1.0;
+            previous_resampler_ratio_time_us = 0;
+            last_audio_delivery_receive_us = last_audio_receive_us = last_audio_gap_receive_us = 0;
+            if (playback != nullptr) playback->setResamplerRatio(1.0);
+        }
         const bool past_warmup = packet.receive_time >= start_time_us + config.stats_warmup_us;
         if (!past_warmup) {
             ++stats.stats_warmup_skipped_packets;
@@ -980,31 +1028,54 @@ struct PeerStream::Impl {
             return PeerAudioResult::FutureSampleTime;
         }
         const std::uint64_t packet_end = header.timing_value + packet_frames;
-        if (!highest_remote_sample_time_set) {
-            // A peer may join an already-running sender whose session sample
-            // counter is well beyond zero.  The first authenticated packet is
-            // the bounded stream baseline; the horizon applies to subsequent
-            // discontinuities, not to its absolute value.
-            highest_remote_sample_time_set = true;
-            highest_remote_sample_time = packet_end;
-        } else {
-            if (packet_end < highest_remote_sample_time &&
-                highest_remote_sample_time - packet_end > sample_time_horizon_frames) {
-                if (header.sequence == expected_sequence) {
-                    markExpectedLost();
+        if (highest_remote_sample_time_set && header.timing_value > highest_remote_sample_time &&
+            header.timing_value - highest_remote_sample_time > sample_time_horizon_frames) {
+            // The admissible timeline advances during silence. The former
+            // fixed horizon permanently rejected real audio after a long
+            // outage; accepting arbitrary forward values also poisons timing.
+            // Allow elapsed device time, 5000 ppm skew, and the existing ten
+            // second tolerance without making timestamp work unbounded.
+            // Anchor to the stream baseline: freshly dequeued old audio must
+            // not rewind this envelope before live capture returns behind it.
+            const auto elapsed_us = receive_time_us > sample_time_baseline_receive_us
+                ? receive_time_us - sample_time_baseline_receive_us : 0;
+            const long double elapsed_frames = static_cast<long double>(elapsed_us) *
+                config.sample_rate * 1.005L / 1000000.0L;
+            if (header.timing_value > sample_time_baseline &&
+                static_cast<long double>(header.timing_value - sample_time_baseline) >
+                elapsed_frames + sample_time_horizon_frames) {
+                // The first packet may itself have been queued during a long
+                // stall. Three consecutive authenticated packets with matching
+                // sample progression can establish a fresh baseline; one
+                // timestamp outlier cannot invalidate the continuing stream.
+                const bool follows_candidate = sample_time_candidate.confirmations != 0 &&
+                    header.sequence == sample_time_candidate.next_sequence &&
+                    header.timing_value == sample_time_candidate.next_sample;
+                sample_time_candidate.confirmations = follows_candidate
+                    ? sample_time_candidate.confirmations + 1U : 1U;
+                sample_time_candidate.next_sequence = header.sequence + 1U;
+                sample_time_candidate.next_sample = packet_end;
+                if (sample_time_candidate.confirmations < 3U) {
+                    if (header.sequence == expected_sequence) markExpectedLost();
+                    ++stats.sample_time_future_rejects;
+                    return PeerAudioResult::FutureSampleTime;
                 }
-                ++stats.sample_time_stale_rejects;
-                return PeerAudioResult::StaleSampleTime;
+                sample_time_baseline = header.timing_value;
+                sample_time_baseline_receive_us = receive_time_us;
+                ++stats.sample_time_forward_resyncs;
             }
-            if (header.timing_value > highest_remote_sample_time &&
-                header.timing_value - highest_remote_sample_time > sample_time_horizon_frames) {
-                if (header.sequence == expected_sequence) {
-                    markExpectedLost();
-                }
-                ++stats.sample_time_future_rejects;
-                return PeerAudioResult::FutureSampleTime;
+        }
+        sample_time_candidate.confirmations = 0;
+        // Compare against ordered playback, not a future packet still waiting
+        // for reordering: that packet must not invalidate its predecessors.
+        // Forward gaps are retired in bounded work by processPacket.
+        if (highest_remote_sample_time_set && packet_end < highest_remote_sample_time &&
+            highest_remote_sample_time - packet_end > sample_time_horizon_frames) {
+            if (header.sequence == expected_sequence) {
+                markExpectedLost();
             }
-            highest_remote_sample_time = std::max(highest_remote_sample_time, packet_end);
+            ++stats.sample_time_stale_rejects;
+            return PeerAudioResult::StaleSampleTime;
         }
 
         if (header.sequence == expected_sequence) {
@@ -1039,6 +1110,7 @@ struct PeerStream::Impl {
             }
             ++expected_sequence;
             drainReorder();
+            last_accepted_audio_us = receive_time_us;
             return PeerAudioResult::Accepted;
         }
         if (reorder_slot.occupied || reorder_count >= reorder_slots.size()) {
@@ -1060,6 +1132,7 @@ struct PeerStream::Impl {
             stats.reorder_pending_high_water,
             reorder_count);
         drainReorder();
+        last_accepted_audio_us = receive_time_us;
         return PeerAudioResult::Accepted;
     }
 
@@ -1111,6 +1184,17 @@ PeerAudioResult PeerStream::receiveAudio(
 
 void PeerStream::advance(std::uint64_t now_us) noexcept
 {
+    if (impl_->config.audio_inactivity_timeout_us > 0 && impl_->last_accepted_audio_us != 0 &&
+        !impl_->stats.audio_suspended && now_us >= impl_->last_accepted_audio_us &&
+        now_us - impl_->last_accepted_audio_us >= impl_->config.audio_inactivity_timeout_us) {
+        impl_->stats.audio_suspended = true;
+        ++impl_->stats.audio_suspensions;
+        impl_->resume_pending = true;
+        if (impl_->playback != nullptr) impl_->playback->resetSourceTimeline();
+        for (auto& slot : impl_->reorder_slots) slot.occupied = false;
+        impl_->reorder_count = 0;
+        impl_->resetJitterAfterDiscontinuity();
+    }
     const bool reorder_work_pending = impl_->reorder_count != 0 ||
         (impl_->expected_sequence_set &&
          protocol::sequence_after(impl_->highest_sequence, impl_->expected_sequence) &&
@@ -1123,6 +1207,12 @@ void PeerStream::advance(std::uint64_t now_us) noexcept
     if (impl_->jitter_count != 0) {
         impl_->drainJitter(now_us);
     }
+}
+
+void PeerStream::setLocalDeviceRate(double ratio) noexcept
+{
+    if (std::isfinite(ratio) && ratio >= 0.995 && ratio <= 1.005)
+        impl_->local_device_rate = ratio;
 }
 
 void PeerStream::finish(std::uint64_t now_us) noexcept

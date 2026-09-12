@@ -47,7 +47,7 @@ Generate wav is saying 12 sections - Sections A-D, confusing
 
 Update.sh wasnt being clear that it was failing, make it easy for the user 
 
-stereo wav gets imported but cant be analysed
+stereo wav gets imported but cant be analysed - done i think
 loopback recording doesnt work on mac 
 
 

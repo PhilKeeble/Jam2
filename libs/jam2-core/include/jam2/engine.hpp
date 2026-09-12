@@ -434,6 +434,7 @@ public:
         NetworkCaptureAttachment attachment,
         std::span<std::int32_t> output) noexcept;
     NetworkPlaybackTimelineSnapshot networkPlaybackTimelineSnapshot() const noexcept;
+    audio::DeviceClockSample deviceClockSample() const noexcept;
     std::size_t networkPlaybackDepth() const noexcept;
     std::size_t networkPlaybackCallbackFrames() const noexcept;
     std::uint64_t networkPlaybackUnderrunFrames() const noexcept;

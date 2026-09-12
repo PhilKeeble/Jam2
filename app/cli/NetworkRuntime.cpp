@@ -1354,6 +1354,7 @@ void print_optional_audio_stats(const OptionalAudioStream& audio, const Options&
     std::cout << "Playback prefill frames: " << options.playback_prefill_frames << "\n";
     std::cout << "Playback prefill ms: " << frames_to_ms(options.playback_prefill_frames, options.sample_rate) << "\n";
     std::cout << "Capture ring overruns frames: " << capture_stats.overruns << "\n";
+    std::cout << "Capture timeline fragment frames discarded: " << capture_stats.timeline_discarded_frames << "\n";
     std::cout << "Capture ring underruns frames: " << capture_stats.underruns << "\n";
     std::cout << "Capture ring underrun events: " << capture_stats.underrun_events << "\n";
     std::cout << "Capture ring readable frames: " << capture_readable << "\n";
@@ -1994,6 +1995,8 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
     std::uint64_t mesh_compensation_peer_count = 0;
     bool timed_stream_audio_detached = false;
     bool capture_deadline_override = audio.engine != nullptr;
+    const std::uint64_t capture_origin_frame = audio.engine != nullptr
+        ? audio.engine->snapshot().network_capture_epoch_frame : 0;
     jam2::NetworkCapturePacketPacer capture_packet_pacer(
         attached_audio_pacing,
         static_cast<std::size_t>(options.frame_size));
@@ -2518,6 +2521,19 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                           << " sequence_out_of_order=" << peer_stats.sequence.out_of_order
                           << " sequence_late=" << peer_stats.sequence.late
                           << " drift_ppm=" << peer_stats.drift_ppm
+                          << " local_device_drift_ppm=" << peer_stats.local_device_drift_ppm
+                          << " relative_drift_ppm=" << peer_stats.relative_drift_ppm
+                          << " audio_suspended=" << peer_stats.audio_suspended
+                          << " audio_inactivity_timeout_us=" << network_session.peerStream(peer.peer_id).config().audio_inactivity_timeout_us
+                          << " audio_suspensions=" << peer_stats.audio_suspensions
+                          << " audio_timeline_rebases=" << peer_stats.audio_timeline_rebases
+                          << " sample_time_forward_resyncs=" << peer_stats.sample_time_forward_resyncs
+                          << " missing_audio_frames_retired=" << peer_stats.missing_audio_frames_retired
+                          << " device_clock_valid=" << network_session.deviceClockStats().valid
+                          << " device_clock_raw_ppm=" << network_session.deviceClockStats().raw_ppm
+                          << " device_clock_observations=" << network_session.deviceClockStats().observations
+                          << " device_clock_resets=" << network_session.deviceClockStats().resets
+                          << " device_clock_rejected_observations=" << network_session.deviceClockStats().rejected_observations
                           << " resampler_ratio=" << peer_stats.resampler_ratio
                           << " mix_queue_depth_frames=" << (mix_stats != nullptr ? mix_stats->queue_depth_frames : 0ULL)
                           << " mix_queue_high_water_frames=" << (mix_stats != nullptr ? mix_stats->queue_high_water_frames : 0ULL)
@@ -3117,6 +3133,10 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                 }
                 capture_ready_wake.cancelWakeRequest();
                 audio_send_waiting_for_capture = false;
+                if (captured.first_frame < capture_origin_frame ||
+                    !packet_schedule.setAudioSampleTime(captured.first_frame - capture_origin_frame)) {
+                    throw std::runtime_error("capture sample timeline moved backward or overflowed");
+                }
                 if (capture_deadline_override) {
                     // A callback, or an already excessive queue, owns this
                     // deadline. Re-anchor the following packet interval to the

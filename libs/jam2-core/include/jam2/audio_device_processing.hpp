@@ -103,6 +103,9 @@ void observe_callback_work(
 void publish_callback_begin(
     StreamControl* control,
     std::uint64_t& writerGeneration) noexcept;
+// Publish inside the callback generation; readers never wait for a callback.
+void publish_device_clock(StreamControl* control, DeviceClockSample sample) noexcept;
+DeviceClockSample read_device_clock(const StreamControl& control) noexcept;
 void publish_callback_end(
     StreamControl* control,
     std::uint64_t& writerGeneration) noexcept;

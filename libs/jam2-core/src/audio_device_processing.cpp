@@ -560,6 +560,25 @@ void observe_callback_work(
     single_writer_add(state.workSamples);
 }
 
+void publish_device_clock(StreamControl* control, DeviceClockSample sample) noexcept
+{
+    if (control == nullptr) return;
+    std::atomic_thread_fence(std::memory_order_release);
+    control->device_clock_frame.store(sample.frame, std::memory_order_relaxed);
+    control->device_clock_time_us.store(sample.time_us, std::memory_order_release);
+}
+
+DeviceClockSample read_device_clock(const StreamControl& control) noexcept
+{
+    const auto before = control.audio_callback_generation.load(std::memory_order_acquire);
+    if ((before & 1ULL) != 0) return {};
+    const auto time = control.device_clock_time_us.load(std::memory_order_acquire);
+    const auto frame = control.device_clock_frame.load(std::memory_order_relaxed);
+    std::atomic_thread_fence(std::memory_order_acquire);
+    const auto after = control.audio_callback_generation.load(std::memory_order_acquire);
+    return before == after ? DeviceClockSample{frame, time} : DeviceClockSample{};
+}
+
 void publish_callback_begin(
     StreamControl* control,
     std::uint64_t& writerGeneration) noexcept

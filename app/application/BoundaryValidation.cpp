@@ -8247,9 +8247,9 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
         record(QStringLiteral("peer-stream.accept-contiguous-late-join-audio"),
             stream.receiveAudio(header, payload, 3) == jam2::PeerAudioResult::Accepted);
         ++header.sequence;
-        header.timing_value += 10ULL * 44100ULL + samples.size() + 1ULL;
-        record(QStringLiteral("peer-stream.reject-post-baseline-future-jump"),
-            stream.receiveAudio(header, payload, 4) == jam2::PeerAudioResult::FutureSampleTime);
+        header.timing_value += 20ULL * 44100ULL + samples.size();
+        record(QStringLiteral("peer-stream.accept-post-baseline-timeline-gap"),
+            stream.receiveAudio(header, payload, 20000003) == jam2::PeerAudioResult::Accepted);
     }
 
     {

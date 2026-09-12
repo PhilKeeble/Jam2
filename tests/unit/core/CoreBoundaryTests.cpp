@@ -20,6 +20,7 @@
 #include <exception>
 #include <filesystem>
 #include <iostream>
+#include <limits>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -142,6 +143,87 @@ jam2::PeerStreamConfig peerConfig()
     config.playback_max_frames = 1024;
     config.collect_diagnostics = true;
     return config;
+}
+
+void testAudioTimelineRecoveryBoundaries()
+{
+    jam2::NetworkPacketSchedule schedule(48000, 64, 1000);
+    expect(schedule.setAudioSampleTime(960000) && schedule.sampleTime() == 960000 &&
+        schedule.audioSequence() == 1 && schedule.nextAudioSendUs() == 1000,
+        "capture time can skip a gap independently of packet sequence and wall pacing");
+    expect(!schedule.setAudioSampleTime(0) &&
+        !schedule.setAudioSampleTime((std::numeric_limits<std::uint64_t>::max)()) && schedule.sampleTime() == 960000,
+        "capture schedule rejects rewinds and packet-end overflow without mutation");
+    schedule.commitAudioPacket();
+    expect(schedule.sampleTime() == 960064 && schedule.audioSequence() == 2,
+        "normal packet commit follows the capture timestamp");
+
+    auto config = peerConfig();
+    config.drift_correction = false;
+    config.adaptive_playback_cushion = false;
+    BufferSink sink;
+    jam2::PeerStream stream(config, 0, &sink);
+    const std::array<std::uint8_t, 128> payload{};
+    auto receive = [&](std::uint32_t sequence, std::uint64_t frame, std::uint64_t now) {
+        return stream.receiveAudio({jam2::protocol::PacketType::Audio, 1, sequence, frame, 128, 0}, payload, now);
+    };
+    expect(receive(1, 0, 1000) == jam2::PeerAudioResult::Accepted, "initial audio establishes its timeline");
+    expect(receive(3, 960000, 20001000) == jam2::PeerAudioResult::Accepted && sink.pushed == 64,
+        "forward timestamp waits in the bounded reorder queue");
+    expect(receive(3, 960000, 20001100) == jam2::PeerAudioResult::Duplicate,
+        "accepting forward time does not bypass duplicate protection");
+    expect(receive(2, 64, 20001200) == jam2::PeerAudioResult::Accepted && sink.pushed == 192 &&
+        stream.stats().missing_audio_frames_inserted == 0 && stream.stats().missing_audio_frames_retired == 960000 - 128 &&
+        stream.stats().audio_timeline_rebases == 1 && sink.depth == 64,
+        "reordered future audio does not reject its predecessor or generate a huge silence queue");
+    expect(receive(4, 0, 20001300) == jam2::PeerAudioResult::StaleSampleTime,
+        "large backward timestamps remain rejected");
+    expect(receive(5, (std::numeric_limits<std::uint64_t>::max)() - 32, 20001400) == jam2::PeerAudioResult::FutureSampleTime,
+        "packet-end arithmetic overflow remains rejected");
+    expect(receive(6, (std::numeric_limits<std::uint64_t>::max)() - 128, 20001500) == jam2::PeerAudioResult::FutureSampleTime,
+        "an impossible forward timestamp cannot poison the continuing stream's timing baseline");
+    constexpr std::uint64_t huge = 3600000000ULL;
+    constexpr std::uint64_t resumedAt = huge * 1000000ULL / 48000 + 1000;
+    expect(receive(7, huge, resumedAt) == jam2::PeerAudioResult::Accepted && sink.pushed == 256 && sink.depth == 64 &&
+        stream.stats().missing_audio_frames_inserted == 0,
+        "even a many-hour real gap consumes constant packet work and bounded storage");
+    stream.advance(resumedAt + 2999999);
+    expect(!stream.stats().audio_suspended, "brief audio absence retains source participation");
+    stream.advance(resumedAt + 3000000);
+    stream.advance(resumedAt + 9000000);
+    expect(stream.stats().audio_suspended && stream.stats().audio_suspensions == 1 && sink.depth == 0,
+        "audio inactivity suspends only once and clears the affected source");
+    expect(receive(8, huge + 64, resumedAt + 9000100) == jam2::PeerAudioResult::Accepted && !stream.stats().audio_suspended,
+        "the suspended source resumes without a new connection");
+
+    BufferSink queuedSink;
+    jam2::PeerStream queued(config, 0, &queuedSink);
+    expect(queued.receiveAudio({jam2::protocol::PacketType::Audio, 1, 1, 0, 128, 0}, payload, 1000) == jam2::PeerAudioResult::Accepted &&
+        queued.receiveAudio({jam2::protocol::PacketType::Audio, 1, 2, 64, 128, 0}, payload, 20001000) == jam2::PeerAudioResult::Accepted &&
+        queued.receiveAudio({jam2::protocol::PacketType::Audio, 1, 3, 960000, 128, 0}, payload, 20001100) == jam2::PeerAudioResult::Accepted &&
+        queued.nextPlayoutRemoteSampleTime() == 960064 && queuedSink.depth == 64,
+        "old queued capture arriving after a stall cannot close the admission window on the following live audio");
+
+    BufferSink staleBaselineSink;
+    jam2::PeerStream staleBaseline(config, 0, &staleBaselineSink);
+    expect(staleBaseline.receiveAudio({jam2::protocol::PacketType::Audio, 1, 1, 0, 128, 0}, payload, 20000000) == jam2::PeerAudioResult::Accepted,
+        "a first packet may contain capture queued before the receiver started");
+    expect(staleBaseline.receiveAudio({jam2::protocol::PacketType::Audio, 1, 2, 960000, 128, 0}, payload, 20001000) == jam2::PeerAudioResult::FutureSampleTime &&
+        staleBaseline.receiveAudio({jam2::protocol::PacketType::Audio, 1, 3, 960064, 128, 0}, payload, 20002333) == jam2::PeerAudioResult::FutureSampleTime &&
+        staleBaseline.receiveAudio({jam2::protocol::PacketType::Audio, 1, 4, 960128, 128, 0}, payload, 20003666) == jam2::PeerAudioResult::Accepted &&
+        staleBaseline.stats().sample_time_forward_resyncs == 1 && staleBaseline.nextPlayoutRemoteSampleTime() == 960192 &&
+        staleBaselineSink.depth == 64,
+        "three coherent live packets recover a stale first-packet baseline without a permanent rejection loop");
+
+    BufferSink outlierSink;
+    jam2::PeerStream outlier(config, 0, &outlierSink);
+    outlier.receiveAudio({jam2::protocol::PacketType::Audio, 1, 1, 0, 128, 0}, payload, 1000);
+    expect(outlier.receiveAudio({jam2::protocol::PacketType::Audio, 1, 2, 960000, 128, 0}, payload, 1100) == jam2::PeerAudioResult::FutureSampleTime &&
+        outlier.receiveAudio({jam2::protocol::PacketType::Audio, 1, 3, 128, 128, 0}, payload, 1200) == jam2::PeerAudioResult::Accepted &&
+        outlier.receiveAudio({jam2::protocol::PacketType::Audio, 1, 4, 960064, 128, 0}, payload, 1300) == jam2::PeerAudioResult::FutureSampleTime &&
+        outlier.receiveAudio({jam2::protocol::PacketType::Audio, 1, 5, 256, 128, 0}, payload, 1400) == jam2::PeerAudioResult::Accepted &&
+        outlier.stats().sample_time_forward_resyncs == 0 && outlier.nextPlayoutRemoteSampleTime() == 320,
+        "interleaved timestamp outliers cannot combine into a new baseline or strand healthy audio");
 }
 
 void testRingMidiAndDownmixBoundaries()
@@ -798,6 +880,7 @@ void testUdpStunAndSessionBoundaries()
     stunClient.bind({"127.0.0.1", 0});
     jam2::Endpoint discovered;
     try {
+        testAudioTimelineRecoveryBoundaries();
         discovered = jam2::stun::discover_public_endpoint(
             stunClient, stunServer.local_endpoint(), 500, 1);
     } catch (...) {

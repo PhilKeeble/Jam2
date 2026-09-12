@@ -25,6 +25,20 @@ function(jam2_configure_test_target target)
     endif()
 endfunction()
 
+add_executable(jam2_audio_flow_interaction_tests EXCLUDE_FROM_ALL
+    integration/network/AudioFlowInteractionTests.cpp)
+jam2_configure_test_target(jam2_audio_flow_interaction_tests)
+target_link_libraries(jam2_audio_flow_interaction_tests PRIVATE jam2_core)
+foreach(experiment capture interruption clock)
+    add_test(NAME jam2_audio_flow_${experiment}
+        COMMAND $<TARGET_FILE:jam2_audio_flow_interaction_tests> ${experiment})
+    set_tests_properties(jam2_audio_flow_${experiment} PROPERTIES
+        LABELS "integration;core;audio;network;performance"
+        TIMEOUT 120)
+endforeach()
+set_property(TEST jam2_audio_flow_interruption jam2_audio_flow_clock
+    APPEND PROPERTY LABELS "four-peer")
+
 add_executable(jam2_core_input_tests EXCLUDE_FROM_ALL
     unit/core/CoreInputTests.cpp)
 jam2_configure_test_target(jam2_core_input_tests)
@@ -1388,6 +1402,7 @@ add_custom_target(jam2_tests_gui
 add_custom_target(jam2_tests_performance
     DEPENDS
         jam2
+        jam2_audio_flow_interaction_tests
         jam2_core_input_tests
         jam2_audio_device_processing_tests
         jam2_transport_timing_tests
@@ -1424,6 +1439,7 @@ add_custom_target(jam2_tests_shared_content
 add_custom_target(jam2_tests_network
     DEPENDS
         jam2
+        jam2_audio_flow_interaction_tests
         jam2_asset_channel_lifecycle_tests
         jam2_core_boundary_tests
         jam2_application_boundary_tests

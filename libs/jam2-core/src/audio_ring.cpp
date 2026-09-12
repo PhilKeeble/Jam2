@@ -24,8 +24,8 @@ std::size_t ms_to_frames(double sample_rate, double ms)
 
 } // namespace
 
-MonoRingBuffer::MonoRingBuffer(std::size_t capacity_frames)
-    : buffer_(capacity_frames), capacity_(capacity_frames)
+MonoRingBuffer::MonoRingBuffer(std::size_t capacity_frames, bool capture_timeline)
+    : buffer_(capacity_frames), timeline_offsets_(capture_timeline ? capacity_frames : 0), capacity_(capacity_frames)
 {
     if (capacity_frames == 0) {
         throw std::runtime_error("audio ring capacity must be positive");
@@ -46,6 +46,16 @@ std::size_t MonoRingBuffer::available_write() const
 
 std::size_t MonoRingBuffer::push(std::span<const std::int32_t> frames)
 {
+    return push_impl(frames, write_.load(std::memory_order_relaxed));
+}
+
+std::size_t MonoRingBuffer::push_timed(std::span<const std::int32_t> frames, std::uint64_t first_frame)
+{
+    return push_impl(frames, first_frame);
+}
+
+std::size_t MonoRingBuffer::push_impl(std::span<const std::int32_t> frames, std::uint64_t first_frame)
+{
     const std::uint64_t read = read_.load(std::memory_order_acquire);
     const std::uint64_t write = write_.load(std::memory_order_relaxed);
     const std::size_t used = static_cast<std::size_t>(write - read);
@@ -59,6 +69,11 @@ std::size_t MonoRingBuffer::push(std::span<const std::int32_t> frames)
     const std::size_t second_count = count - first_count;
     if (second_count > 0) {
         std::memcpy(buffer_.data(), frames.data() + first_count, second_count * sizeof(std::int32_t));
+    }
+    if (!timeline_offsets_.empty()) {
+        const std::uint64_t offset = first_frame - write;
+        std::fill_n(timeline_offsets_.data() + write_offset, first_count, offset);
+        std::fill_n(timeline_offsets_.data(), second_count, offset);
     }
     if (count < frames.size()) {
         const std::uint64_t dropped = static_cast<std::uint64_t>(frames.size() - count);
@@ -115,6 +130,16 @@ std::size_t MonoRingBuffer::pop(std::span<std::int32_t> frames, bool observe_dep
 
 std::size_t MonoRingBuffer::pop_exact(std::span<std::int32_t> frames)
 {
+    return pop_exact_impl(frames, nullptr);
+}
+
+std::size_t MonoRingBuffer::pop_exact_timed(std::span<std::int32_t> frames, std::uint64_t& first_frame)
+{
+    return pop_exact_impl(frames, &first_frame);
+}
+
+std::size_t MonoRingBuffer::pop_exact_impl(std::span<std::int32_t> frames, std::uint64_t* first_frame)
+{
     if (frames.empty()) {
         return 0;
     }
@@ -122,14 +147,32 @@ std::size_t MonoRingBuffer::pop_exact(std::span<std::int32_t> frames)
     const std::uint64_t write = write_.load(std::memory_order_acquire);
     const std::size_t dropped = apply_requested_drop(read, write);
     read += dropped;
-    const std::size_t readable = static_cast<std::size_t>(write - read);
+    std::size_t readable = static_cast<std::size_t>(write - read);
+    std::size_t retired = 0;
+    if (first_frame != nullptr && !timeline_offsets_.empty()) {
+        while (readable > 0) {
+            const auto offset = timeline_offsets_[static_cast<std::size_t>(read % capacity_)];
+            const auto inspect = std::min(readable, frames.size());
+            std::size_t contiguous = 1;
+            while (contiguous < inspect &&
+                timeline_offsets_[static_cast<std::size_t>((read + contiguous) % capacity_)] == offset)
+                ++contiguous;
+            if (contiguous == inspect) break;
+            read += contiguous;
+            readable -= contiguous;
+            retired += contiguous;
+        }
+        if (retired != 0) timeline_discarded_frames_.fetch_add(retired, std::memory_order_relaxed);
+    }
     if (readable < frames.size()) {
-        if (dropped > 0) {
+        if (dropped > 0 || retired > 0) {
             read_.store(read, std::memory_order_release);
         }
         return 0;
     }
     const std::size_t read_offset = static_cast<std::size_t>(read % capacity_);
+    if (first_frame != nullptr)
+        *first_frame = read + (timeline_offsets_.empty() ? 0 : timeline_offsets_[read_offset]);
     const std::size_t first_count = std::min(frames.size(), capacity_ - read_offset);
     std::memcpy(
         frames.data(),
@@ -228,6 +271,7 @@ RingStats MonoRingBuffer::stats() const
         drop_coalesced_requests_.load(std::memory_order_relaxed),
         target > read ? target - read : 0,
         drop_max_batch_frames_.load(std::memory_order_relaxed),
+        timeline_discarded_frames_.load(std::memory_order_relaxed),
     };
 }
 
@@ -242,6 +286,7 @@ std::size_t MonoRingBuffer::discard_all() noexcept
 
 void MonoRingBuffer::reset()
 {
+    timeline_discarded_frames_.store(0, std::memory_order_relaxed);
     read_.store(0, std::memory_order_release);
     write_.store(0, std::memory_order_release);
     overruns_.store(0, std::memory_order_relaxed);

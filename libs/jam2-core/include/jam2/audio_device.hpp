@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "audio_ring.hpp"
+#include "audio_clock.hpp"
 #include "input_source.hpp"
 #include "metronome.hpp"
 #include "output_recorder.hpp"
@@ -399,6 +400,8 @@ struct StreamControl {
     // and playback-ring depth, even at an OS scheduling boundary. Readers use
     // this generation as a seqlock and never combine values from two callbacks.
     std::atomic<std::uint64_t> audio_callback_generation{0};
+    std::atomic<std::uint64_t> device_clock_frame{0};
+    std::atomic<std::uint64_t> device_clock_time_us{0};
     std::atomic<std::uint64_t> engine_frame_counter{0};
     // The callback is the capture-ring producer and the only side allowed to
     // reset it. A network attachment publishes a generation; the callback
@@ -409,6 +412,7 @@ struct StreamControl {
     std::atomic<std::uint64_t> network_capture_generation_requested{0};
     std::atomic<std::uint64_t> network_capture_generation_applied{0};
     std::atomic<std::uint64_t> network_capture_epoch_frame{0};
+    std::uint64_t network_capture_callback_frame = 0; // callback writer only
     std::atomic<std::uint64_t> network_capture_stale_frames_discarded{0};
     std::atomic<RealtimeWakeSignal*> network_capture_wake_signal{nullptr};
     std::atomic<std::size_t> network_capture_wake_frames{0};

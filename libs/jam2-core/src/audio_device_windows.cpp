@@ -297,6 +297,8 @@ void duplex_buffer_switch(long double_buffer_index, ASIOBool)
     processing::publish_callback_begin(
         context->control,
         context->callback_generation);
+    processing::publish_device_clock(context->control,
+        {context->engine_frame_counter, callback_start_us});
     processing::observe_callback_interval(
         context->callback_intervals,
         callback_start_us,
