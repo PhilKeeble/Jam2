@@ -30,6 +30,16 @@
 #include <set>
 #include <utility>
 #include <vector>
+#include <thread>
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <Windows.h>
+#endif
 
 namespace {
 
@@ -41,6 +51,39 @@ using jam2::test::UdpImpairmentProxy;
 using jam2::test::UdpProxyStats;
 using jam2::test::UdpProxyDirection;
 using jam2::test::UdpSequenceSecurityTransformer;
+
+// The impairment pump must not introduce an unrequested Windows timer-tick
+// impairment. A scoped high-resolution wait keeps this a sleeping harness,
+// not a busy loop or a process-wide timer-resolution change.
+class ProxyPollWait final {
+public:
+#ifdef _WIN32
+    ProxyPollWait() : timer_(CreateWaitableTimerExW(nullptr, nullptr,
+        CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_MODIFY_STATE | SYNCHRONIZE)) {}
+    ~ProxyPollWait() { if (timer_) CloseHandle(timer_); }
+    bool wait() noexcept
+    {
+        LARGE_INTEGER due{};
+        due.QuadPart = -5000; // relative 500 us, in 100 ns units
+        return timer_ && SetWaitableTimer(timer_, &due, 0, nullptr, nullptr, FALSE) &&
+            WaitForSingleObject(timer_, 1000) == WAIT_OBJECT_0;
+    }
+private:
+    HANDLE timer_ = nullptr;
+#else
+    bool wait() noexcept
+    {
+        std::this_thread::sleep_for(std::chrono::microseconds(500));
+        return true;
+    }
+#endif
+public:
+    ProxyPollWait(const ProxyPollWait&) = delete;
+    ProxyPollWait& operator=(const ProxyPollWait&) = delete;
+#ifndef _WIN32
+    ProxyPollWait() = default;
+#endif
+};
 
 constexpr int kPeerCount = 4;
 constexpr int kSampleRate = 48000;
@@ -1006,14 +1049,19 @@ bool listenerAudioValid(const PeerEvidence& evidence, int peerIndex, QString& re
             row, QStringLiteral("metronome_compensation_offset_frames"));
         const double averageLatency = evidence.csv.number(
             row, QStringLiteral("metronome_compensation_average_latency_frames"));
-        const double appliedLatency = std::min(averageLatency, kSampleRate * 0.250);
+        // Mesh compensation follows signed remote/local phase error. The
+        // legacy "average latency" column is abs(raw target - base), not a
+        // one-way delay that must always be subtracted from base. Clamping
+        // applies to the rendered offset, not to the raw target observation.
         if (!evidence.csv.yes(row, QStringLiteral("metronome_compensation_active")) ||
             evidence.csv.integer(
                 row, QStringLiteral("metronome_compensation_peer_count"), -1) != 3 ||
-            averageLatency <= 0.0 || std::abs((target - base) + appliedLatency) > 2.0) {
+            averageLatency < 0.0 || std::abs(std::abs(target - base) - averageLatency) > 2.0 ||
+            std::abs(offset - base) > kSampleRate * 0.250 + 2.0) {
             reason = QStringLiteral(
-                "peer %1 listener-compensation formula or three-peer input failed at callback %2")
-                .arg(peerIndex + 1).arg(callbacks);
+                "peer %1 listener-compensation formula or three-peer input failed at callback %2 "
+                "base=%3 target=%4 offset=%5 magnitude=%6")
+                .arg(peerIndex + 1).arg(callbacks).arg(base).arg(target).arg(offset).arg(averageLatency);
             return false;
         }
         if (!convergenceEvidenceStartFrame) {
@@ -1220,7 +1268,7 @@ AttemptResult runAttempt(
             {QStringLiteral("runtime"), QJsonObject{
                 {QStringLiteral("headless_audio"), true},
                 {QStringLiteral("sample_rate"), kSampleRate},
-                {QStringLiteral("audio_buffer_size"), 256},
+                {QStringLiteral("audio_buffer_size"), static_cast<int>(kAudioCallbackFrames)},
                 {QStringLiteral("frame_size"), kNetworkAudioFrameFrames},
                 {QStringLiteral("network_audio_format"), QStringLiteral("pcm16")},
                 {QStringLiteral("stats"), true},
@@ -1337,6 +1385,11 @@ AttemptResult runAttempt(
 
     QElapsedTimer deadline;
     deadline.start();
+    ProxyPollWait proxyPollWait;
+    qint64 lastProxyPumpNs = 0;
+    qint64 maxProxyPumpNs = 0;
+    qint64 proxyPumpSamples = 0;
+    qint64 proxyPumpsOver2ms = 0;
     bool allFinished = false;
     UdpInjectionEvidence injectionEvidence;
     bool malformedAndReplayInjected = false;
@@ -1347,6 +1400,14 @@ AttemptResult runAttempt(
     const qint64 scenarioTimeoutMs =
         jam2::test::deadmanTimeout(std::chrono::seconds(120)).count();
     while (deadline.elapsed() < scenarioTimeoutMs) {
+        const auto pumpNs = deadline.nsecsElapsed();
+        if (lastProxyPumpNs != 0) {
+            const auto interval = pumpNs - lastProxyPumpNs;
+            maxProxyPumpNs = std::max(maxProxyPumpNs, interval);
+            proxyPumpsOver2ms += interval > 2000000;
+            ++proxyPumpSamples;
+        }
+        lastProxyPumpNs = pumpNs;
         pumpProxies(edges);
         if (condition == NetworkCondition::BurstLoss) {
             for (std::size_t edgeIndexValue = 0;
@@ -1416,7 +1477,19 @@ AttemptResult runAttempt(
                 return peer.process && peer.process->state() == QProcess::NotRunning;
             });
         if (allFinished) break;
-        QThread::usleep(500);
+        if (!proxyPollWait.wait()) {
+            stopProcesses(processes);
+            return die(QStringLiteral("high-resolution proxy wait failed"), AttemptOutcome::HarnessInvalid);
+        }
+    }
+    std::cout << "METRIC proxy_pump_average_ms="
+        << static_cast<double>(lastProxyPumpNs) / std::max<qint64>(1, proxyPumpSamples) / 1000000.0
+        << " proxy_pump_max_ms=" << static_cast<double>(maxProxyPumpNs) / 1000000.0
+        << " proxy_pump_samples=" << proxyPumpSamples
+        << " proxy_pump_over_2ms=" << proxyPumpsOver2ms << '\n';
+    if (proxyPumpSamples == 0 || lastProxyPumpNs / proxyPumpSamples > 2000000) {
+        stopProcesses(processes);
+        return die(QStringLiteral("proxy service cadence introduced unrequested batching"), AttemptOutcome::HarnessInvalid);
     }
     if (!allFinished) {
         stopProcesses(processes);

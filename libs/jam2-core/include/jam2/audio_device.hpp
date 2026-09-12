@@ -345,6 +345,10 @@ struct MetronomeConfig {
     double level = 0.20;
 };
 
+// Acceleration remains user-configured. Cancelling queue release must not
+// keep consuming its safety runway for the full (normally 250 ms) ramp.
+inline constexpr int kPlaybackReleaseReturnRampMs = 50;
+
 struct StreamControl {
     std::atomic<bool> metronome_enabled{false};
     std::atomic<bool> metronome_transport_gated{false};
@@ -371,6 +375,8 @@ struct StreamControl {
     std::atomic<int> playback_ratio_applied_ppm{1000000};
     std::atomic<bool> playback_ratio_ramping{false};
     std::atomic<std::uint64_t> playback_ratio_ramp_frames{0};
+    // Zero leaves the general ramp unchanged for standalone/custom backends.
+    std::atomic<std::uint64_t> playback_release_return_ramp_frames{0};
     std::atomic<int> metronome_mode{0};
     std::atomic<bool> leader_audio_local_click{false};
     std::atomic<std::int32_t> track_take_options{0};

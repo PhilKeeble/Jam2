@@ -22,6 +22,8 @@ struct RingStats {
     std::uint64_t depth_under_5ms_frames = 0;
     std::uint64_t depth_under_10ms_frames = 0;
     std::uint64_t depth_10ms_plus_frames = 0;
+    // Requested ring source frames (including missing frames), matching the
+    // underrun denominator. Resampled device output has a different count.
     std::uint64_t depth_observed_frames = 0;
     std::uint64_t drop_requested_frames = 0;
     std::uint64_t drop_applied_frames = 0;

@@ -51,6 +51,9 @@ public:
     virtual bool acceptsFrames() const noexcept { return true; }
     virtual std::size_t depthFrames() const noexcept = 0;
     virtual std::uint64_t underrunFrames() const noexcept { return 0; }
+    // Callback-facing sinks expose their consumption quantum. Source queues
+    // and non-device fixtures may return zero (use the network block size).
+    virtual std::size_t callbackFrames() const noexcept { return 0; }
     virtual std::size_t pushFrames(std::span<const std::int32_t> frames) noexcept = 0;
     virtual void requestDropFrames(std::size_t frames) noexcept = 0;
     virtual void setResamplerRatio(double ratio) noexcept = 0;

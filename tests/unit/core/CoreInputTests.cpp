@@ -1,3 +1,6 @@
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include "common.hpp"
 #include "input_source.hpp"
 // Native unit coverage is owned by the repository-level test tree.
@@ -5,6 +8,7 @@
 #include "engine.hpp"
 #include "midi.hpp"
 #include "peer_mixer.hpp"
+#include "network_session.hpp"
 #include "protocol.hpp"
 #include "tuning_profile.hpp"
 
@@ -215,14 +219,17 @@ public:
 
 class ProfileMixerSink final : public jam2::PeerStreamPlayback {
 public:
-    ProfileMixerSink(std::size_t capacityFrames, std::size_t prefillFrames)
+    ProfileMixerSink(std::size_t capacityFrames, std::size_t prefillFrames, std::uint64_t sampleRate = 48000)
         : ring(capacityFrames), prefillFrames(prefillFrames)
     {
         ring.set_diagnostics_enabled(true);
-        control.playback_ratio_ramp_frames.store(12000, std::memory_order_relaxed);
+        control.playback_ratio_ramp_frames.store(sampleRate / 4, std::memory_order_relaxed);
+        control.playback_release_return_ramp_frames.store(
+            sampleRate * jam2::audio::kPlaybackReleaseReturnRampMs / 1000, std::memory_order_relaxed);
     }
 
     bool acceptsFrames() const noexcept override { return true; }
+    std::size_t callbackFrames() const noexcept override { return callbackQuantum; }
     std::size_t depthFrames() const noexcept override { return ring.available_read(); }
     std::uint64_t underrunFrames() const noexcept override
     {
@@ -238,6 +245,9 @@ public:
     }
     void setResamplerRatio(double ratio) noexcept override
     {
+        // Test-only counterfactual: veto acceleration near callback-facing low
+        // water. It does not change the mixer, target decay or queue behavior.
+        if (releaseGuardFrames != 0 && ring.available_read() <= releaseGuardFrames) ratio = 1.0;
         control.playback_ratio_ppm.store(
             static_cast<int>(ratio * 1000000.0 + 0.5),
             std::memory_order_relaxed);
@@ -262,6 +272,8 @@ public:
     std::array<std::int32_t, 520> resamplerSource{};
     std::array<std::int32_t, 256> callbackOutput{};
     std::size_t prefillFrames = 0;
+    std::size_t callbackQuantum = 64;
+    std::size_t releaseGuardFrames = 0;
     bool started = false;
 };
 
@@ -834,7 +846,9 @@ jam2::EngineSnapshot measure_headless_send_peak(int sendLevelPpm)
     config.test_input = jam2::EngineTestInput::Tone440;
     config.test_input_level_ppm = 200000;
     config.send_level_ppm = sendLevelPpm;
+    expect(engine.networkPlaybackCallbackFrames() == 0, "unstarted engine exposes no callback quantum");
     engine.start(config);
+    expect(engine.networkPlaybackCallbackFrames() == 64, "mixer sees the active headless device callback quantum");
 
     jam2::EngineSnapshot snapshot;
     const std::uint64_t deadline = jam2::monotonic_us() + 30000000ULL;
@@ -1904,6 +1918,7 @@ void test_peer_mixer_periodic_batches_do_not_accelerate_into_underruns()
 
 void test_adaptive_release_retires_real_surplus_without_trimming()
 {
+    for (const std::size_t peerCount : {1U, 3U}) {
     ProfileMixerSink sink(4096, 256);
     jam2::PeerMixerConfig config;
     config.sample_rate = 48000;
@@ -1918,9 +1933,16 @@ void test_adaptive_release_retires_real_surplus_without_trimming()
     auto* peer = mixer.addPeer(1, 4096);
     expect(peer != nullptr && mixer.setPeerActive(1, true), "surplus release activates source");
     if (!peer) return;
+    std::vector<jam2::PeerStreamPlayback*> additional;
+    for (std::size_t id = 2; id <= peerCount; ++id) {
+        additional.push_back(mixer.addPeer(id, 4096));
+        expect(additional.back() != nullptr && mixer.setPeerActive(id, true), "surplus fixture activates all four participants");
+        if (!additional.back()) return;
+    }
     std::array<std::int32_t, 64> block;
     block.fill(100000000);
     peer->pushFrames(block);
+    for (auto* other : additional) other->pushFrames(block);
     mixer.advance(1);
     const auto padding = mixer.stats().adaptive_padding_frames;
     bool accelerated = false;
@@ -1929,6 +1951,7 @@ void test_adaptive_release_retires_real_surplus_without_trimming()
         sink.callback();
         mixer.advance(now);
         peer->pushFrames(block);
+        for (auto* other : additional) other->pushFrames(block);
         mixer.advance(now);
         mixer.finishReceiveBatch(false);
         accelerated |= sink.control.playback_ratio_ppm.load(std::memory_order_relaxed) > 1000000;
@@ -1945,6 +1968,55 @@ void test_adaptive_release_retires_real_surplus_without_trimming()
         "target release does not turn real audio into trims, underruns or new padding");
     expect(sink.depthFrames() + peer->depthFrames() <= config.adaptive_min_frames + 64,
         "smooth release leaves no unbounded latency tail");
+    }
+}
+
+void test_source_rounding_edge_is_fixed_and_bounded()
+{
+    MixerSink sink;
+    jam2::PeerMixerConfig config;
+    config.frames_per_block = 256;
+    config.sample_rate = 48000;
+    config.output_max_frames = 2048;
+    config.adaptive_playback_cushion = true;
+    config.adaptive_min_frames = config.adaptive_target_frames = 1024;
+    config.adaptive_max_frames = 2048;
+    jam2::PeerMixer mixer(config, &sink);
+    std::array<jam2::PeerStreamPlayback*, 3> peers{};
+    std::array<std::int32_t, 4096> audio{};
+    for (std::size_t i = 0; i < peers.size(); ++i) {
+        peers[i] = mixer.addPeer(i + 1, 8192);
+        expect(peers[i] && mixer.setPeerActive(i + 1, true), "edge fixture activates four participants");
+        if (!peers[i]) return;
+        peers[i]->pushFrames(std::span(audio).first(256));
+    }
+    mixer.advance(1);
+    expect(sink.depth == 1024 && mixer.stats().live_tail_rounding_tolerance_frames == 96,
+        "source edge is the explicit fixed 2 ms allowance, not another output prefill");
+    peers[0]->pushFrames(std::span(audio).first(352));
+    mixer.advance(2);
+    expect(mixer.stats().live_tail_trimmed_frames == 0 && peers[0]->depthFrames() == 352,
+        "one block plus the complete small edge is retained without a sample cut");
+    for (std::uint64_t step = 3; step < 103; ++step) {
+        peers[0]->pushFrames(std::span(audio).first(1));
+        mixer.advance(step);
+        expect(peers[0]->depthFrames() == 352 && mixer.stats().adaptive_target_frames == 1024,
+            "repeated excess cannot ratchet the allowance or target upward");
+    }
+    expect(mixer.stats().live_tail_trimmed_frames == 100 && mixer.stats().normal_path_limit_frames == 1376,
+        "only frames beyond the fixed edge are cut and the published path cap includes it");
+    peers[0]->pushFrames(audio);
+    mixer.advance(103);
+    expect(peers[0]->depthFrames() == 256 && sink.depth == 1024,
+        "a real backlog still sheds its obsolete prefix to the original live tail");
+    config.live_tail_rounding_tolerance_us = 10001;
+    bool rejected = false;
+    try { jam2::PeerMixer invalid(config, &sink); } catch (const std::exception&) { rejected = true; }
+    expect(rejected, "oversized source rounding allowance is rejected");
+    config.live_tail_rounding_tolerance_us = 0;
+    jam2::PeerMixer strict(config, &sink);
+    expect(strict.stats().live_tail_rounding_tolerance_frames == 0 && strict.stats().normal_path_limit_frames == 1280,
+        "explicit zero disables the source edge without changing the output target");
 }
 
 void test_four_peer_rebase_preserves_unexpired_delivery_learning()
@@ -2001,11 +2073,434 @@ void test_four_peer_rebase_preserves_unexpired_delivery_learning()
         "the original learned hold still expires rather than being restarted by rebasing");
 }
 
+void test_four_peer_heterogeneous_gap_evidence()
+{
+    for (const bool largerFirst : {false, true}) {
+        for (const bool splitAdvance : {false, true}) {
+            for (const bool underrunFirst : {false, true}) {
+                MixerSink sink;
+                jam2::PeerMixerConfig config;
+                config.sample_rate = 48000;
+                config.frames_per_block = 64;
+                config.output_max_frames = 8192;
+                config.adaptive_playback_cushion = true;
+                config.adaptive_target_frames = config.adaptive_min_frames = 256;
+                config.adaptive_max_frames = 6144;
+                jam2::PeerMixer mixer(config, &sink);
+                std::array<jam2::PeerStreamPlayback*, 3> peers{};
+                std::array<std::int32_t, 64> block{};
+                for (std::size_t i = 0; i < peers.size(); ++i) {
+                    peers[i] = mixer.addPeer(i + 1, 8192);
+                    expect(peers[i] && mixer.setPeerActive(i + 1, true), "mixed gap fixture has exactly four participants");
+                    if (!peers[i]) return;
+                    peers[i]->pushFrames(block);
+                }
+                mixer.advance(1000);
+                if (underrunFirst) {
+                    sink.consume(sink.depth + 64);
+                    mixer.advance(2000); // same pre-receive ordering as the app
+                }
+                peers[0]->observeDeliveryGap({3000, largerFirst ? 4800U : 3000U});
+                peers[0]->pushFrames(block);
+                if (splitAdvance) mixer.advance(3000);
+                peers[1]->observeDeliveryGap({4000, largerFirst ? 3000U : 4800U});
+                peers[1]->pushFrames(block);
+                mixer.advance(4000);
+                if (!underrunFirst) {
+                    sink.consume(sink.depth + 64);
+                    mixer.advance(5000);
+                }
+                std::cout << "METRIC mixed_gap split=" << splitAdvance << " underrun_first=" << underrunFirst
+                          << " larger_first=" << largerFirst << " target=" << mixer.stats().adaptive_target_frames << '\n';
+                expect(mixer.stats().adaptive_target_frames == 4800,
+                    "smaller newer peer gap cannot replace the larger associated delivery requirement");
+                expect(mixer.stats().adaptive_target_frames <= config.adaptive_max_frames,
+                    "mixed peer learning respects the existing profile ceiling");
+            }
+        }
+    }
+}
+
+void test_four_peer_gap_expiry_and_departure()
+{
+    for (const int mode : {0, 1, 2, 3, 4, 5, 6, 7, 8}) {
+        MixerSink sink;
+        jam2::PeerMixerConfig config;
+        config.sample_rate = 48000;
+        config.frames_per_block = 64;
+        config.output_max_frames = 8192;
+        config.adaptive_playback_cushion = true;
+        config.adaptive_target_frames = config.adaptive_min_frames = 256;
+        config.adaptive_max_frames = 6144;
+        jam2::PeerMixer mixer(config, &sink);
+        std::array<jam2::PeerStreamPlayback*, 3> peers{};
+        std::array<std::int32_t, 64> block{};
+        for (std::size_t i = 0; i < peers.size(); ++i) {
+            peers[i] = mixer.addPeer(i + 1, 8192);
+            expect(peers[i] && mixer.setPeerActive(i + 1, true), "gap lifecycle starts with four participants");
+            if (!peers[i]) return;
+            peers[i]->pushFrames(block);
+        }
+        mixer.advance(1000);
+        peers[0]->observeDeliveryGap({2000, mode == 4 ? 12000U : 4800U});
+        peers[0]->pushFrames(block);
+        mixer.advance(2000);
+        expect(mixer.stats().adaptive_target_frames == 256 && !mixer.stats().adaptive_delivery_gap_hold_active,
+            "a delivery gap alone does not buy extra latency without a real output underrun");
+        if (mode == 1) {
+            mixer.setPeerActive(1, false);
+            mixer.setPeerActive(1, true);
+            peers[0]->pushFrames(block);
+        } else if (mode == 2) {
+            expect(mixer.removePeer(1), "departing source is removed with its unconsumed evidence");
+        }
+        const auto newerTime = mode == 0 || mode == 6 ? 253000ULL : mode == 7 ? 252000ULL : 3000ULL;
+        if (mode >= 6) {
+            // Preserve newer smaller same-source evidence when the original
+            // peak expires; exact 250 ms boundary still includes the peak.
+            peers[0]->observeDeliveryGap({102000, 3000});
+            if (mode == 8) {
+                // Short custom observation thresholds may saturate the fixed
+                // history. Retention is bounded and never renews old ages.
+                for (std::uint64_t i = 0; i < 16; ++i) peers[0]->observeDeliveryGap({103000 + i, 3000});
+            }
+        } else peers[1]->observeDeliveryGap({newerTime, 3000});
+        peers[1]->pushFrames(block);
+        // Consume before advance so actual callback starvation, not injected
+        // counters or a source-only shortage, triggers the association.
+        if (mode != 5) sink.consume(sink.depth + 64);
+        const auto observationTime = mode == 8 ? 104000ULL : newerTime;
+        mixer.advance(observationTime);
+        const auto expected = mode == 5 ? 256U : mode == 4 ? 6144U : mode == 3 || mode == 7 ? 4800U : 3000U;
+        expect(mixer.stats().adaptive_target_frames == expected,
+            "expired/departed evidence cannot inflate learning; live evidence remains profile capped");
+        const auto holds = mixer.stats().adaptive_delivery_gap_hold_events;
+        for (std::uint64_t step = 1; step < 5; ++step) {
+            peers[1]->pushFrames(block);
+            mixer.advance(observationTime + step);
+        }
+        expect(mixer.stats().adaptive_delivery_gap_hold_events == holds,
+            "revisiting unchanged source evidence cannot renew the learned hold");
+        if (mode == 7) {
+            mixer.advance(30002000);
+            expect(!mixer.stats().adaptive_delivery_gap_hold_active,
+                "a smaller same-peer observation cannot refresh the original peak hold timestamp");
+        }
+        mixer.advance(observationTime + 30000001ULL);
+        expect(!mixer.stats().adaptive_delivery_gap_hold_active,
+            "mixed-source learning retains the existing finite hold lifetime");
+    }
+}
+
+void test_four_peer_packet_gap_association()
+{
+    // Production packet acceptance -> delivery evidence -> mixer -> real ring
+    // and callback resampler. Per-datagram timestamps differ even within one
+    // app receive batch; do not quantize them to a single mixer timestamp.
+    for (const bool samePeerSecondGap : {false, true}) {
+        for (const bool splitBatch : {false, true}) {
+            ProfileMixerSink sink(8192, 64);
+            jam2::PeerMixerConfig config;
+            config.sample_rate = 48000;
+            config.frames_per_block = 64;
+            config.deadline_frames = 8192;
+            config.output_max_frames = 8192;
+            config.adaptive_playback_cushion = true;
+            config.adaptive_min_frames = config.adaptive_target_frames = 256;
+            config.adaptive_max_frames = 6144;
+            jam2::PeerMixer mixer(config, &sink);
+            jam2::PeerStreamConfig streamConfig;
+            streamConfig.frames_per_packet = 64;
+            streamConfig.audio_format = jam2::NetworkAudioFormat::Pcm16Mono;
+            streamConfig.playback_queue_capacity_frames = 8192;
+            streamConfig.drift_correction = false;
+            std::array<std::unique_ptr<jam2::PeerStream>, 3> streams;
+            for (std::size_t i = 0; i < streams.size(); ++i) {
+                auto* peer = mixer.addPeer(i + 1, 8192);
+                expect(peer && mixer.setPeerActive(i + 1, true), "packet gap test activates four participants");
+                if (!peer) return;
+                streams[i] = std::make_unique<jam2::PeerStream>(streamConfig, 0, peer);
+            }
+            std::array<std::uint8_t, 128> payload{};
+            payload.fill(1); // audible nonzero PCM, so padded silence cannot pass
+            auto receive = [&](std::size_t peer, std::uint32_t sequence, std::uint64_t time) {
+                const jam2::protocol::Header header{jam2::protocol::PacketType::Audio, 1,
+                    sequence, sequence * 64ULL, 128, 0};
+                expect(streams[peer]->receiveAudio(header, payload, time) == jam2::PeerAudioResult::Accepted,
+                    "heterogeneous gap packets remain contiguous and accepted");
+            };
+            receive(0, 0, 1000);
+            receive(1, 0, 40000);
+            receive(2, 0, 100000);
+            mixer.advance(100000);
+            receive(0, 1, 101000); // 100 ms -> 4864 frames including packet reserve
+            if (splitBatch) { mixer.advance(101000); mixer.finishReceiveBatch(false); }
+            receive(1, 1, 102000); // 62 ms -> 3040, must not replace the 100 ms gap
+            receive(2, 1, 102001); // wired-like peer supplies no long-gap evidence
+            if (samePeerSecondGap) {
+                // A second 61 ms interval on the same source arrives while its
+                // earlier 100 ms evidence is still inside the association window.
+                receive(0, 2, 162000);
+            }
+            const std::uint64_t episodeOffset = samePeerSecondGap ? 60000 : 0;
+            mixer.advance(102001 + episodeOffset);
+            mixer.finishReceiveBatch(false);
+            expect(mixer.stats().adaptive_delivery_gap_raise_events == 0,
+                "real packet evidence alone does not raise latency");
+            expect(mixer.stats().adaptive_delivery_gap_required_max_frames == 4864,
+                "gap peak telemetry preserves the same-batch evidence used by recovery");
+            for (int callback = 0; callback < 8; ++callback) sink.callback();
+            mixer.advance(113000 + episodeOffset);
+            std::cout << "METRIC packet_mixed_gap split=" << splitBatch
+                      << " same_peer=" << samePeerSecondGap
+                      << " target=" << mixer.stats().adaptive_target_frames
+                      << " missing=" << sink.underrunFrames() << '\n';
+            expect(sink.underrunFrames() > 0 && mixer.stats().adaptive_target_frames == 4864,
+                "real callback underrun learns the largest still-relevant accepted packet gap");
+            // Refill with real contiguous catch-up packets, using the app's bounded
+            // 64-datagram drain and pre/post advance. Then revisit a pause shorter
+            // than the measured 100 ms event: the learned cushion must actually
+            // bridge it, not merely publish a larger target statistic.
+            // Render away any explicit recovery padding from the first underrun
+            // before evaluating the next episode. Do not mistake it for real audio.
+            while (sink.depthFrames() != 0) sink.callback(std::min<std::size_t>(64, sink.depthFrames()));
+            const auto recoveryPadding = mixer.stats().adaptive_padding_frames;
+            std::uint64_t now = 114000 + episodeOffset;
+            std::size_t drained = 0;
+            mixer.advance(now);
+            for (std::uint32_t sequence = 2; sequence < 82; ++sequence) {
+                for (std::size_t peer = 0; peer < streams.size(); ++peer) {
+                    receive(peer, sequence + (samePeerSecondGap && peer == 0 ? 1U : 0U), now++);
+                    if (++drained == 64) {
+                        for (auto& stream : streams) stream->advance(now);
+                        mixer.advance(now);
+                        mixer.finishReceiveBatch(true);
+                        drained = 0;
+                        mixer.advance(now);
+                    }
+                }
+            }
+            for (auto& stream : streams) stream->advance(now);
+            mixer.advance(now);
+            mixer.finishReceiveBatch(false);
+            const auto missingBefore = sink.underrunFrames();
+            const auto paddingBefore = mixer.stats().adaptive_padding_frames;
+            const auto outputBefore = sink.depthFrames();
+            bool realAudio = true;
+            for (int callback = 0; callback < 70; ++callback) {
+                now += 1333;
+                sink.callback();
+                realAudio &= std::all_of(sink.callbackOutput.begin(), sink.callbackOutput.begin() + 64,
+                    [](std::int32_t sample) { return sample != 0; });
+                for (auto& stream : streams) stream->advance(now);
+                mixer.advance(now);
+                mixer.finishReceiveBatch(false);
+            }
+            std::cout << "METRIC packet_mixed_repeat split=" << splitBatch << " same_peer=" << samePeerSecondGap
+                      << " output_before=" << outputBefore
+                      << " missing=" << sink.underrunFrames() - missingBefore
+                      << " padding=" << mixer.stats().adaptive_padding_frames - paddingBefore << '\n';
+            expect(realAudio && paddingBefore == recoveryPadding && sink.underrunFrames() == missingBefore &&
+                    mixer.stats().adaptive_padding_frames == paddingBefore,
+                "learned real audio bridges the repeated pause without underruns or replacement silence");
+            for (const auto& stream : streams) {
+                expect(stream->stats().sequence.lost == 0 && stream->stats().missing_audio_frames_inserted == 0,
+                    "delivery adaptation is not masking packet loss or inserted source silence");
+            }
+        }
+    }
+}
+
+void test_profiled_wifi_return_to_clean()
+{
+    for (const auto profileName : {"fast", "moderate", "safe"}) {
+        for (const int variant : {0, 1, 2, 3}) {
+            if (variant != 0 && std::string_view(profileName) != "fast") continue;
+            for (const std::size_t remoteCount : {1U, 3U}) {
+                if (variant == 3 && remoteCount != 1) continue;
+                for (const bool depart : {false, true}) {
+                    if (depart && remoteCount == 1) continue;
+                    const auto& create = *jam2::find_create_profile(profileName);
+                    const auto& profile = *create.local;
+                    const int rate = variant == 1 ? 44100 : 48000;
+                    const std::size_t callbackFrames = variant == 1 ? 32 : 64;
+                    constexpr std::uint64_t endUs = 100000000;
+                    constexpr std::uint64_t cleanUs = 15000000;
+                    const auto packetFrames = static_cast<std::size_t>(create.frame_size);
+                    ProfileMixerSink sink(profile.playback_ring_frames, profile.playback_prefill_frames, rate);
+                    sink.callbackQuantum = callbackFrames;
+                    jam2::PeerMixerConfig config;
+                    config.sample_rate = rate;
+                    config.frames_per_block = create.frame_size;
+                    config.deadline_frames = std::max({packetFrames * 2, profile.playout_delay_frames,
+                        profile.jitter_buffer_frames, profile.jitter_buffer_max_frames});
+                    config.output_max_frames = profile.playback_max_frames;
+                    config.fixed_target_frames = profile.playout_delay_frames;
+                    config.adaptive_playback_cushion = profile.adaptive_playback_cushion;
+                    config.adaptive_target_frames = profile.adaptive_playback_target_frames;
+                    config.adaptive_min_frames = profile.adaptive_playback_min_frames;
+                    config.adaptive_max_frames = profile.adaptive_playback_max_frames;
+                    config.adaptive_release_ppm = profile.adaptive_playback_release_ppm;
+                    if (variant == 3) config.adaptive_surplus_stable_us = 0;
+                    jam2::PeerMixer mixer(config, &sink);
+                    jam2::PeerStreamConfig streamConfig;
+                    streamConfig.sample_rate = rate;
+                    streamConfig.frames_per_packet = create.frame_size;
+                    streamConfig.audio_format = jam2::NetworkAudioFormat::Pcm16Mono;
+                    streamConfig.sample_time_playout = profile.sample_time_playout;
+                    streamConfig.playout_delay_frames = profile.playout_delay_frames;
+                    streamConfig.playback_queue_capacity_frames = profile.playback_ring_frames;
+                    streamConfig.jitter_buffer_frames = profile.jitter_buffer_frames;
+                    streamConfig.jitter_buffer_max_frames = profile.jitter_buffer_max_frames;
+                    streamConfig.drift_correction = profile.drift_correction;
+                    streamConfig.drift_smoothing = profile.drift_smoothing;
+                    streamConfig.drift_deadband_ppm = profile.drift_deadband_ppm;
+                    streamConfig.drift_max_correction_ppm = profile.drift_max_correction_ppm;
+                    std::vector<std::unique_ptr<jam2::PeerStream>> streams;
+                    std::vector<std::uint64_t> indices(remoteCount, 1);
+                    std::vector<bool> active(remoteCount, true);
+                    for (std::size_t peer = 0; peer < remoteCount; ++peer) {
+                        auto* playback = mixer.addPeer(peer + 1,
+                            profile.playback_ring_frames + profile.jitter_buffer_max_frames);
+                        expect(playback && mixer.setPeerActive(peer + 1, true), "return-to-clean fixture activates its real sources");
+                        if (!playback) return;
+                        streams.push_back(std::make_unique<jam2::PeerStream>(streamConfig, 0, playback));
+                    }
+                    std::vector<std::uint8_t> payload(packetFrames * 2);
+                    auto arrival = [&](std::size_t peer) {
+                        if (!active[peer]) return (std::numeric_limits<std::uint64_t>::max)();
+                        auto time = indices[peer] * packetFrames * 1000000ULL / rate + 300 + peer * 250;
+                        // Only peer zero is on Wi-Fi. The receiver worker remains
+                        // live, serving wired contributors and expiring deadlines.
+                        if (peer == 0 && time >= 4000000 && time < cleanUs && time % 1000000 >= 900000) {
+                            time = (time / 1000000 + 1) * 1000000;
+                        }
+                        return static_cast<std::uint64_t>(time);
+                    };
+                    auto nextPeer = [&]() {
+                        std::size_t result = remoteCount;
+                        for (std::size_t peer = 0; peer < remoteCount; ++peer) {
+                            if (active[peer] && (result == remoteCount || arrival(peer) < arrival(result))) result = peer;
+                        }
+                        return result;
+                    };
+                    auto path = [&]() {
+                        std::uint64_t maximum = 0;
+                        for (std::size_t peer = 0; peer < remoteCount; ++peer) {
+                            if (!active[peer]) continue;
+                            maximum = std::max(maximum, sink.depthFrames() + mixer.peerStats(peer + 1)->queue_depth_frames +
+                                streams[peer]->stats().jitter_buffer_depth_frames);
+                        }
+                        return maximum;
+                    };
+                    auto dispatchTime = [&](std::uint64_t time) {
+                        if (variant == 2) {
+                            time = (time + 999) / 1000 * 1000;
+                            if (time % 70000 >= 67000) time = (time / 70000 + 1) * 70000;
+                        }
+                        return time;
+                    };
+                    std::uint64_t now = 0, worker = 1000, callbackIndex = 1, currentPath = 0;
+                    std::uint64_t baseUs = 0, finalUs = 0, peakPath = 0;
+                    long double baseIntegral = 0, finalIntegral = 0;
+                    std::uint64_t cleanUnderruns = 0, cleanPadding = 0, cleanTrims = 0;
+                    std::uint64_t largestSampleStep = 0;
+                    std::int32_t previousSample = 0;
+                    bool havePreviousSample = false;
+                    bool departed = false, cleanSnapshot = false, accepted = true;
+                    while (now < endUs) {
+                        const auto callback = callbackIndex * callbackFrames * 1000000ULL / rate + 137;
+                        const auto next = std::min({callback, worker, endUs});
+                        if (now >= 2000000 && now < 3500000) { baseIntegral += currentPath * (next - now); baseUs += next - now; }
+                        if (now >= 90000000) { finalIntegral += currentPath * (next - now); finalUs += next - now; }
+                        now = next;
+                        if (!cleanSnapshot && now >= 17000000) {
+                            cleanSnapshot = true;
+                            cleanUnderruns = sink.underrunFrames();
+                            cleanPadding = mixer.stats().adaptive_padding_frames;
+                            cleanTrims = mixer.stats().live_tail_trimmed_frames;
+                        }
+                        if (now == callback) {
+                            sink.callback(callbackFrames);
+                            ++callbackIndex;
+                            if (now >= 17000000) {
+                                for (const auto sample : std::span(sink.callbackOutput).first(callbackFrames)) {
+                                    if (havePreviousSample) largestSampleStep = std::max<std::uint64_t>(largestSampleStep,
+                                        static_cast<std::uint64_t>(std::abs(static_cast<std::int64_t>(sample) - previousSample)));
+                                    previousSample = sample;
+                                    havePreviousSample = true;
+                                }
+                            }
+                        }
+                        if (now == worker) {
+                            if (depart && !departed && now >= cleanUs) {
+                                // Destroy the stream before its owned mixer sink.
+                                streams[0].reset();
+                                expect(mixer.removePeer(1), "the impaired peer leaves without removing wired contributors");
+                                active[0] = false;
+                                departed = true;
+                            }
+                            for (std::size_t peer = 0; peer < remoteCount; ++peer) if (active[peer]) streams[peer]->advance(now);
+                            mixer.advance(now);
+                            std::size_t drained = 0;
+                            auto peer = nextPeer();
+                            while (peer < remoteCount && arrival(peer) <= now && drained < 64) {
+                                const auto sequence = indices[peer] - 1;
+                                for (std::size_t frame = 0; frame < packetFrames; ++frame) {
+                                    const auto sample = static_cast<std::uint16_t>(static_cast<std::int16_t>(
+                                        std::sin((sequence * packetFrames + frame) * 2.0 * 3.14159265358979323846 * 220.0 / rate) * 4096.0 / remoteCount));
+                                    payload[2 * frame] = static_cast<std::uint8_t>(sample);
+                                    payload[2 * frame + 1] = static_cast<std::uint8_t>(sample >> 8);
+                                }
+                                const jam2::protocol::Header header{jam2::protocol::PacketType::Audio, 1,
+                                    static_cast<std::uint32_t>(sequence), sequence * packetFrames, static_cast<std::uint16_t>(payload.size()), 0};
+                                accepted &= streams[peer]->receiveAudio(header, payload, now) == jam2::PeerAudioResult::Accepted;
+                                ++indices[peer]; ++drained;
+                                peer = nextPeer();
+                            }
+                            for (std::size_t p = 0; p < remoteCount; ++p) if (active[p]) streams[p]->advance(now);
+                            mixer.advance(now);
+                            mixer.finishReceiveBatch(drained == 64);
+                            worker = peer < remoteCount ? std::max(now + 1, std::min(now + 1000, arrival(peer))) : now + 1000;
+                            worker = dispatchTime(worker);
+                        }
+                        currentPath = path();
+                        peakPath = std::max(peakPath, currentPath);
+                    }
+                    const auto stats = mixer.stats();
+                    const auto baseMs = static_cast<double>(baseIntegral / baseUs / rate * 1000);
+                    const auto finalMs = static_cast<double>(finalIntegral / finalUs / rate * 1000);
+                    std::cout << "METRIC return_clean profile=" << profileName << " remotes=" << remoteCount << " departed=" << depart
+                              << " variant=" << variant << " rate=" << rate << " callback=" << callbackFrames
+                              << " base_ms=" << baseMs << " final_ms=" << finalMs << " target=" << stats.adaptive_target_frames
+                              << " holds=" << stats.adaptive_delivery_gap_hold_events << " hold_active=" << stats.adaptive_delivery_gap_hold_active
+                              << " missing_after_17s=" << sink.underrunFrames() - cleanUnderruns
+                              << " padding_after_17s=" << stats.adaptive_padding_frames - cleanPadding
+                              << " cuts_after_17s=" << stats.live_tail_trimmed_frames - cleanTrims << " peak_frames=" << peakPath
+                              << " final_path_frames=" << currentPath << " final_ring_frames=" << sink.depthFrames()
+                              << " applied_ratio=" << sink.control.playback_ratio_applied_ppm.load()
+                              << " sample_step=" << largestSampleStep << '\n';
+                    expect(accepted && !stats.adaptive_delivery_gap_hold_active && !stats.receive_recovery_active,
+                        "clean delivery or peer departure eventually clears recovery and the learned hold");
+                    expect(stats.adaptive_target_frames <= profile.adaptive_playback_min_frames + packetFrames &&
+                            (variant == 3 ? finalMs > baseMs + 2.0 * packetFrames * 1000.0 / rate :
+                                finalMs <= baseMs + 2.0 * packetFrames * 1000.0 / rate),
+                        variant == 3 ? "disabling minimum-target release reproduces retained real buffering" :
+                            "actual buffered latency returns near the clean baseline, not merely the target statistic");
+                    expect(sink.underrunFrames() == cleanUnderruns && stats.adaptive_padding_frames == cleanPadding &&
+                            stats.live_tail_trimmed_frames == cleanTrims && largestSampleStep < 33554432,
+                        "retiring learned Wi-Fi protection does not create fresh underruns, silence or sample cuts");
+                }
+            }
+        }
+    }
+}
+
 // Independent packet, callback and network-maintenance clocks reproduce the
 // short local scheduling batches missing from the callback-aligned Wi-Fi test.
 // This is a bounded synthetic analogue of the September 11 logs, not a replay:
 // their two-second CSV snapshots do not contain individual packet timestamps.
-void test_profiled_short_scheduler_batches()
+void test_profiled_short_scheduler_batches(bool lowSkew = false, bool releaseOnly = false)
 {
     struct Scenario {
         std::string_view profileName;
@@ -2018,35 +2513,171 @@ void test_profiled_short_scheduler_batches()
         std::uint64_t callbackJitterUs = 0;
         std::size_t packetFrames = 0;
         std::uint64_t durationUs = 60000000;
+        std::size_t senderCallbackFrames = 0;
+        bool startupClockChange = false;
+        std::uint64_t startupClockEndUs = 4000000;
+        bool disableMinimumRelease = false;
+        bool disableDriftDeadband = false;
+        bool disableAllRelease = false;
+        std::size_t outputReleaseGuardFrames = 0;
+        bool instantaneousOutputRatio = false;
+        std::uint64_t releaseStopRampMs = 0;
     };
     std::vector<Scenario> scenarios;
-    for (const auto profileName : {"fast", "moderate", "safe"}) {
-        for (const bool batched : {false, true}) {
+    if (lowSkew) {
+        // Three minutes crosses a complete 64-frame phase slip at 10 ppm.
+        // Use the actual estimator/deadband, not a forced playback ratio.
+        for (const auto profile : {"fast", "safe"}) {
+            for (const std::size_t peers : {1U, 3U}) {
+                for (const std::size_t callback : {32U, 64U}) {
+                    for (const bool batched : {false, true}) {
+                        for (const int ppm : {-10, 0, 10}) {
+                            for (const bool startup : {false, true}) {
+                                if (std::string_view(profile) == "safe" && (ppm == 0 || !startup)) continue;
+                                scenarios.push_back({profile, batched, callback, 137, peers,
+                                    44100, ppm, 0, 0, 180000000, 0, startup});
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for (const int ppm : {-26, -24, 24, 26}) {
+            for (const std::size_t peers : {1U, 3U}) {
+                for (const std::size_t callback : {32U, 64U}) {
+                    scenarios.push_back({"fast", false, callback, 137, peers,
+                        44100, ppm, 0, 64, 180000000});
+                }
+            }
+        }
+        for (const std::uint64_t phase : {0U, 637U, 1137U}) {
+            for (const std::size_t callback : {32U, 64U}) {
+                for (const bool batched : {false, true}) {
+                    scenarios.push_back({"fast", batched, callback, phase, 1,
+                        44100, 0, 0, 64, 180000000, 0, true});
+                }
+            }
+        }
+        // Narrow counterfactual controls use existing configuration seams.
+        // They do not change the production defaults or recommend a setting.
+        for (const std::size_t callback : {32U, 64U}) {
+            scenarios.push_back({"fast", true, callback, 137, 1,
+                44100, 0, 0, 64, 180000000, 0, true, 4000000, true});
+            scenarios.push_back({"fast", true, callback, 137, 1,
+                44100, 0, 0, 64, 180000000, 0, true, 4000000, false, false, true});
+            for (const std::size_t peers : {1U, 3U}) {
+                scenarios.push_back({"fast", false, callback, 137, peers,
+                    44100, -10, 0, 64, 180000000, 0, false, 4000000, false, true});
+            }
+            // Very brief early excursions exercise near-complete remainders
+            // without bypassing the real drift calibration and slew limit.
+            for (const std::uint64_t end : {3350000U, 3500000U}) {
+                for (const bool batched : {false, true}) {
+                    scenarios.push_back({"fast", batched, callback, 137, 1,
+                        44100, 0, 0, 64, 180000000, 0, true, end});
+                }
+            }
+        }
+        // Isolate output stopping runway from source alignment and the
+        // smoother's remaining consumption after a stop request. These are
+        // diagnostic vetoes at the playback seam, NOT proposed app defaults.
+        for (const std::size_t callback : {32U, 64U}) {
+            for (const std::size_t peers : {1U, 3U}) {
+                for (const bool batched : {false, true}) {
+                    for (const bool startup : {false, true}) {
+                        for (const std::size_t guard : {224U, 256U}) {
+                            Scenario probe{"fast", batched, callback, 137, peers,
+                                44100, 0, 0, 64, 180000000, 0, startup};
+                            probe.outputReleaseGuardFrames = guard;
+                            scenarios.push_back(probe);
+                        }
+                    }
+                }
+            }
+            Scenario instant{"fast", true, callback, 137, 1,
+                44100, 0, 0, 64, 180000000, 0, true};
+            instant.instantaneousOutputRatio = true;
+            scenarios.push_back(instant);
+        }
+        // Preserve the production 250 ms acceleration ramp, varying only the
+        // return to unity. This separates stopping lag from abrupt startup.
+        for (const std::uint64_t stopMs : {1U, 5U, 10U, 25U, 50U}) {
+            for (const std::size_t callback : {32U, 64U}) {
+                for (const std::size_t peers : {1U, 3U}) {
+                    for (const bool batched : {false, true}) {
+                        Scenario probe{"fast", batched, callback, 137, peers,
+                            44100, 0, 0, 64, 180000000, 0, true};
+                        probe.releaseStopRampMs = stopMs;
+                        scenarios.push_back(probe);
+                    }
+                }
+            }
+        }
+        for (const std::uint64_t phase : {0U, 637U, 1137U}) {
+            for (const std::uint64_t stopMs : {10U, 50U}) {
+                for (const std::size_t callback : {32U, 64U}) {
+                    Scenario probe{"fast", true, callback, phase, 1,
+                        44100, 0, 0, 64, 180000000, 0, true};
+                    probe.releaseStopRampMs = stopMs;
+                    scenarios.push_back(probe);
+                }
+            }
+        }
+        for (const std::uint64_t stopMs : {75U, 100U, 150U, 200U}) {
+            Scenario probe{"fast", true, 32, 137, 1,
+                44100, 0, 0, 64, 180000000, 0, true};
+            probe.releaseStopRampMs = stopMs;
+            scenarios.push_back(probe);
+        }
+    } else {
+        for (const auto profileName : {"fast", "moderate", "safe"}) {
+            for (const bool batched : {false, true}) {
+                for (const std::size_t callbackFrames : {32U, 64U}) {
+                    scenarios.push_back({profileName, batched, callbackFrames});
+                }
+            }
+        }
+        for (const std::uint64_t phase : {0U, 637U, 1137U}) {
             for (const std::size_t callbackFrames : {32U, 64U}) {
-                scenarios.push_back({profileName, batched, callbackFrames});
+                scenarios.push_back({"fast", true, callbackFrames, phase});
+                // One local receiver plus three remote contributors is exactly
+                // four peers. Include the usual wired 48 kHz sample rate too.
+                scenarios.push_back({"fast", true, callbackFrames, phase, 3, 48000});
+            }
+        }
+        for (const auto profile : {"fast", "moderate", "safe"}) {
+            for (const int ppm : {-100, 100}) {
+                scenarios.push_back({profile, true, 64, 137, 3, 48000, ppm, 400});
+            }
+        }
+        for (const auto profile : {"moderate", "safe"}) {
+            for (const std::size_t callback : {128U, 256U}) {
+                scenarios.push_back({profile, true, callback, 137, 3, 44100, 0, 400, 64});
+            }
+        }
+        scenarios.push_back({"fast", false, 64, 137, 1, 48000, 100, 0, 0, 180000000});
+        // Separate the initial clock-phase transition from recurring release
+        // starvation, and isolate the worker hold from the source clocks.
+        scenarios.push_back({"fast", true, 64, 137, 3, 48000, 100, 400, 0, 180000000});
+        scenarios.push_back({"fast", false, 64, 137, 3, 48000, 100, 400});
+        // Separate callback jitter, independent source clocks and packet granularity;
+        // the two-peer variants protect the primary wired workflow.
+        for (const int ppm : {-100, 100}) {
+            scenarios.push_back({"fast", true, 64, 137, 3, 48000, ppm, 0});
+            scenarios.push_back({"fast", true, 64, 137, 1, 48000, ppm, 400});
+            scenarios.push_back({"safe", true, 64, 137, 3, 48000, ppm, 400, 64});
+        }
+        for (const std::size_t peers : {1U, 3U}) {
+            for (const std::size_t callback : {128U, 256U}) {
+                scenarios.push_back({"fast", false, callback, 137, peers, 48000, 100, 400, 64, 60000000, callback});
             }
         }
     }
-    for (const std::uint64_t phase : {0U, 637U, 1137U}) {
-        for (const std::size_t callbackFrames : {32U, 64U}) {
-            scenarios.push_back({"fast", true, callbackFrames, phase});
-            // One local receiver plus three remote contributors is exactly
-            // four peers. Include the usual wired 48 kHz sample rate too.
-            scenarios.push_back({"fast", true, callbackFrames, phase, 3, 48000});
-        }
-    }
-    for (const auto profile : {"fast", "moderate", "safe"}) {
-        for (const int ppm : {-100, 100}) {
-            scenarios.push_back({profile, true, 64, 137, 3, 48000, ppm, 400});
-        }
-    }
-    for (const auto profile : {"moderate", "safe"}) {
-        for (const std::size_t callback : {128U, 256U}) {
-            scenarios.push_back({profile, true, callback, 137, 3, 44100, 0, 400, 64});
-        }
-    }
-    scenarios.push_back({"fast", false, 64, 137, 1, 48000, 100, 0, 0, 180000000});
     for (const auto& scenario : scenarios) {
+        if (releaseOnly && (scenario.senderPpm != 0 || scenario.disableMinimumRelease ||
+                scenario.disableDriftDeadband || scenario.disableAllRelease ||
+                scenario.outputReleaseGuardFrames != 0 || scenario.instantaneousOutputRatio ||
+                scenario.releaseStopRampMs != 0)) continue;
         const auto profileName = scenario.profileName;
         const auto callbackFrames = scenario.callbackFrames;
         const auto batched = scenario.batched;
@@ -2056,7 +2687,12 @@ void test_profiled_short_scheduler_batches()
         const auto durationUs = scenario.durationUs;
         const auto packetFrames = scenario.packetFrames != 0
             ? scenario.packetFrames : static_cast<std::size_t>(create.frame_size);
-        ProfileMixerSink sink(profile.playback_ring_frames, profile.playback_prefill_frames);
+        ProfileMixerSink sink(profile.playback_ring_frames, profile.playback_prefill_frames, rate);
+        sink.callbackQuantum = callbackFrames;
+        sink.releaseGuardFrames = scenario.outputReleaseGuardFrames;
+        if (scenario.releaseStopRampMs != 0) sink.control.playback_release_return_ramp_frames.store(
+            scenario.releaseStopRampMs * rate / 1000, std::memory_order_relaxed);
+        if (scenario.instantaneousOutputRatio) sink.control.playback_ratio_ramp_frames.store(1, std::memory_order_relaxed);
         jam2::PeerMixerConfig config;
         config.sample_rate = static_cast<int>(rate);
         config.frames_per_block = static_cast<int>(packetFrames);
@@ -2070,6 +2706,8 @@ void test_profiled_short_scheduler_batches()
         config.adaptive_min_frames = profile.adaptive_playback_min_frames;
         config.adaptive_max_frames = profile.adaptive_playback_max_frames;
         config.adaptive_release_ppm = profile.adaptive_playback_release_ppm;
+        if (scenario.disableMinimumRelease) config.adaptive_surplus_stable_us = 0;
+        if (scenario.disableAllRelease) config.adaptive_release_ppm = 0;
         jam2::PeerMixer mixer(config, &sink);
         std::vector<jam2::PeerStreamPlayback*> playbacks;
         for (std::size_t peer = 0; peer < scenario.remotePeers; ++peer) {
@@ -2091,18 +2729,69 @@ void test_profiled_short_scheduler_batches()
         streamConfig.drift_correction = profile.drift_correction;
         streamConfig.drift_smoothing = profile.drift_smoothing;
         streamConfig.drift_deadband_ppm = profile.drift_deadband_ppm;
+        if (scenario.disableDriftDeadband) streamConfig.drift_deadband_ppm = 0;
         streamConfig.drift_max_correction_ppm = profile.drift_max_correction_ppm;
         std::vector<std::unique_ptr<jam2::PeerStream>> streams;
         for (auto* playback : playbacks) {
             streams.push_back(std::make_unique<jam2::PeerStream>(streamConfig, 0, playback));
         }
         std::vector<std::uint8_t> payload(packetFrames * 2);
+        std::vector<std::vector<std::uint64_t>> captureSendTimes(streams.size());
+        if (scenario.senderCallbackFrames != 0) {
+            for (std::size_t peer = 0; peer < streams.size(); ++peer) {
+                const int ppm = peer % 2 == 0 ? scenario.senderPpm : -scenario.senderPpm;
+                const auto pacing = jam2::capture_audio_pacing(static_cast<long>(scenario.senderCallbackFrames), static_cast<int>(packetFrames));
+                jam2::NetworkCapturePacketPacer pacer(pacing, packetFrames);
+                jam2::NetworkPacketSchedule schedule(static_cast<int>(rate), static_cast<int>(packetFrames), 0);
+                auto callbackTime = [&](std::uint64_t index) {
+                    return static_cast<std::uint64_t>(static_cast<long double>(index) * scenario.senderCallbackFrames * 1000000000000.0L /
+                        rate / (1000000 + ppm)) + peer * 250;
+                };
+                std::uint64_t callbackIndex = 1;
+                std::uint64_t senderNow = callbackTime(callbackIndex);
+                std::size_t captured = 0;
+                bool captureOverride = true;
+                while (senderNow <= durationUs + 1000000) {
+                    if (senderNow == callbackTime(callbackIndex)) {
+                        captured += scenario.senderCallbackFrames;
+                        ++callbackIndex;
+                    }
+                    captureOverride |= pacer.captureReady(captured);
+                    std::size_t sent = 0;
+                    while (captured >= packetFrames && schedule.audioSendReady(senderNow, pacing, captureOverride) && sent < 8) {
+                        captureSendTimes[peer].push_back(senderNow);
+                        captured -= packetFrames;
+                        schedule.commitAudioPacket();
+                        pacer.observePacketSent(captured);
+                        captureOverride = pacer.catchupReady(captured);
+                        ++sent;
+                    }
+                    if (captured < packetFrames) captureOverride = true;
+                    senderNow = captured >= packetFrames
+                        ? std::min(callbackTime(callbackIndex), std::max(senderNow + 1, schedule.nextAudioSendUs()))
+                        : callbackTime(callbackIndex);
+                }
+            }
+        }
         auto receiveTime = [&](std::uint64_t index, std::size_t peer) {
             const int ppm = peer % 2 == 0 ? scenario.senderPpm : -scenario.senderPpm;
             std::uint64_t time = static_cast<std::uint64_t>(
                 static_cast<long double>(index) * packetFrames * 1000000000000.0L /
                 rate / (1000000 + ppm)) + 300;
+            if (scenario.startupClockChange) {
+                // Continuous sender sample clock: +/-100 ppm for four nominal
+                // seconds (or the specified shorter excursion), then low skew.
+                // No sample-time jump,
+                // loss, ratio override or estimator warmup shortcut.
+                const auto nominalUs = static_cast<long double>(index) * packetFrames * 1000000.0L / rate;
+                const int startupPpm = peer % 2 == 0 ? 100 : -100;
+                const auto end = static_cast<long double>(scenario.startupClockEndUs);
+                time = static_cast<std::uint64_t>(
+                    std::min(nominalUs, end) * 1000000.0L / (1000000 + startupPpm) +
+                    std::max(nominalUs - end, 0.0L) * 1000000.0L / (1000000 + ppm)) + 300;
+            }
             if (scenario.senderPpm != 0) time += peer * 250;
+            if (scenario.senderCallbackFrames != 0) time = captureSendTimes[peer].at(index - 1) + 300;
             if (batched) {
                 // Normal 1 ms dispatch quantization, plus a 3 ms hold
                 // every 70 ms: ordered, lossless short delivery gaps.
@@ -2154,10 +2843,47 @@ void test_profiled_short_scheduler_batches()
         bool havePreviousSample = false;
         std::int32_t previousSample = 0;
         std::uint64_t maximumSampleStep = 0;
+        struct Window {
+            std::uint64_t begin, end, measuredUs = 0;
+            long double pathIntegral = 0;
+            std::uint64_t underruns = 0, padding = 0, trims = 0, missing = 0, drops = 0;
+            std::uint64_t outputCorrectionUs = 0, sourceCorrectionUs = 0, maximumStep = 0;
+        };
+        std::array<Window, 3> windows{{{5000000, 30000000}, {30000000, 90000000}, {90000000, 180000000}}};
+        std::vector<long double> remainderIntegral(streams.size(), 0);
+        std::vector<std::size_t> minimumRemainder(streams.size(), packetFrames), maximumRemainder(streams.size(), 0);
+        std::vector<bool> corrected(streams.size(), false);
+        std::size_t traceEvents = 0;
         while (now < durationUs) {
             const auto callbackUs = callbackIndex * callbackFrames * 1000000ULL / rate + scenario.callbackPhaseUs +
                 (callbackIndex % 31 == 0 ? scenario.callbackJitterUs : 0);
             const auto next = std::min({callbackUs, workerUs, durationUs});
+            if (lowSkew) {
+                bool sourceCorrection = false;
+                for (const auto& stream : streams) sourceCorrection |= stream->stats().resampler_ratio != 1.0;
+                for (auto& window : windows) {
+                    const auto begin = std::max(now, window.begin), end = std::min(next, window.end);
+                    if (end <= begin) continue;
+                    const auto elapsed = end - begin;
+                    window.measuredUs += elapsed;
+                    window.pathIntegral += static_cast<long double>(path) * elapsed;
+                    window.outputCorrectionUs += sink.control.playback_ratio_ppm.load(std::memory_order_relaxed) != 1000000 ? elapsed : 0;
+                    window.sourceCorrectionUs += sourceCorrection ? elapsed : 0;
+                    if (window.begin == 90000000) {
+                        for (std::size_t peer = 0; peer < streams.size(); ++peer) {
+                            const auto remainder = playbacks[peer]->depthFrames() % packetFrames;
+                            remainderIntegral[peer] += static_cast<long double>(remainder) * elapsed;
+                            minimumRemainder[peer] = std::min(minimumRemainder[peer], remainder);
+                            maximumRemainder[peer] = std::max(maximumRemainder[peer], remainder);
+                        }
+                    }
+                }
+            }
+            const auto beforeUnderruns = sink.underrunFrames();
+            const auto beforeMixer = mixer.stats();
+            const auto beforeDrops = lowSkew ? sink.ring.stats().drop_applied_frames : 0;
+            const auto beforeOutputRatio = sink.control.playback_ratio_ppm.load(std::memory_order_relaxed);
+            const auto beforeOutputDepth = sink.depthFrames();
             if (now >= 5000000) {
                 pathIntegral += static_cast<long double>(path) * (next - now);
                 measuredUs += next - now;
@@ -2172,8 +2898,13 @@ void test_profiled_short_scheduler_batches()
                 sink.callback(callbackFrames);
                 if (now >= 5000000) {
                     for (const auto sample : std::span(sink.callbackOutput).first(callbackFrames)) {
-                        if (havePreviousSample) maximumSampleStep = std::max<std::uint64_t>(maximumSampleStep,
-                            static_cast<std::uint64_t>(std::abs(static_cast<std::int64_t>(sample) - previousSample)));
+                        if (havePreviousSample) {
+                            const auto step = static_cast<std::uint64_t>(std::abs(static_cast<std::int64_t>(sample) - previousSample));
+                            maximumSampleStep = std::max(maximumSampleStep, step);
+                            if (lowSkew) for (auto& window : windows) {
+                                if (now >= window.begin && now < window.end) window.maximumStep = std::max(window.maximumStep, step);
+                            }
+                        }
                         previousSample = sample;
                         havePreviousSample = true;
                     }
@@ -2218,15 +2949,60 @@ void test_profiled_short_scheduler_batches()
                     static_cast<std::size_t>(streams[peer]->stats().jitter_buffer_depth_frames));
             }
             maximumPath = std::max(maximumPath, path);
+            if (lowSkew) {
+                for (std::size_t peer = 0; peer < streams.size(); ++peer) corrected[peer] = corrected[peer] || streams[peer]->stats().resampler_ratio != 1.0;
+                for (auto& window : windows) {
+                    if (now < window.begin || now >= window.end) continue;
+                    window.underruns += sink.underrunFrames() - beforeUnderruns;
+                    window.padding += mixer.stats().adaptive_padding_frames - beforeMixer.adaptive_padding_frames;
+                    window.trims += mixer.stats().live_tail_trimmed_frames - beforeMixer.live_tail_trimmed_frames;
+                    window.missing += mixer.stats().missing_peer_frames - beforeMixer.missing_peer_frames;
+                    window.drops += sink.ring.stats().drop_applied_frames - beforeDrops;
+                }
+                // Bounded event trace for the two-peer phase/release A/B only.
+                // These are test-thread observations, never callback logging.
+                const auto outputRatio = sink.control.playback_ratio_ppm.load(std::memory_order_relaxed);
+                if (profileName == "fast" && callbackFrames == 32 && scenario.remotePeers == 1 &&
+                        scenario.senderPpm == 0 && scenario.startupClockChange &&
+                        scenario.startupClockEndUs == 4000000 && scenario.callbackPhaseUs == 137 &&
+                        batched && now >= 30000000 && traceEvents < 24 &&
+                        (outputRatio != beforeOutputRatio || sink.underrunFrames() != beforeUnderruns ||
+                         mixer.stats().adaptive_padding_frames != beforeMixer.adaptive_padding_frames)) {
+                    ++traceEvents;
+                    std::cout << "TRACE low_skew_release time_us=" << now
+                        << " minimum_release_disabled=" << scenario.disableMinimumRelease
+                        << " all_release_disabled=" << scenario.disableAllRelease
+                        << " output_before=" << beforeOutputDepth << " output_after=" << sink.depthFrames()
+                        << " source=" << playbacks.front()->depthFrames()
+                        << " ratio_before=" << beforeOutputRatio << " ratio_after=" << outputRatio
+                        << " applied_ratio_ppm=" << sink.resampler.ratioSmoother.appliedPpm()
+                        << " target=" << mixer.stats().adaptive_target_frames
+                        << " underruns=" << sink.underrunFrames() - beforeUnderruns
+                        << " padding=" << mixer.stats().adaptive_padding_frames - beforeMixer.adaptive_padding_frames << '\n';
+                }
+            }
         }
         const auto stats = mixer.stats();
         const auto ringStats = sink.ring.stats();
-        std::cout << "METRIC scheduler_" << profileName << '_' << callbackFrames
+        const auto averageMs = static_cast<double>(pathIntegral / measuredUs / rate * 1000);
+        if (!lowSkew && profileName == "fast" && scenario.remotePeers == 1 && callbackFrames <= 64) {
+            // Faster release cancellation leaves this scheduling-phase edge
+            // at 6.012 ms. Allow one sample of rounding around the 6 ms
+            // stress budget, not an extra callback or a wider clean budget.
+            expect(averageMs <= (batched ? 6.0 + 1000.0 / rate : 2.0),
+                "primary two-peer Fast keeps its lean measured latency budget");
+        }
+        if (profileName == "fast" && scenario.remotePeers == 3 && scenario.senderPpm != 0) {
+            expect(averageMs <= (callbackFrames > 128 ? 12.0 : 8.0),
+                "independent-clock protection remains within a small bounded latency budget");
+        }
+        std::cout << "METRIC " << (lowSkew ? "low_skew_" : "scheduler_") << profileName << '_' << callbackFrames
                   << (batched ? "_batched" : "_clean")
                   << " phase_us=" << scenario.callbackPhaseUs
                   << " remote_peers=" << scenario.remotePeers << " rate=" << rate
                   << " sender_ppm=" << scenario.senderPpm << " callback_jitter_us=" << scenario.callbackJitterUs
                   << " packet_frames=" << packetFrames << " duration_us=" << durationUs
+                  << " sender_callback=" << scenario.senderCallbackFrames
                   << " bursts=" << ringStats.underrun_burst_events
                   << " underrun_frames=" << ringStats.underruns
                   << " steady_underrun_frames=" << sink.underrunFrames() - steadyUnderruns
@@ -2240,6 +3016,33 @@ void test_profiled_short_scheduler_batches()
                   << " average_ms=" << static_cast<double>(pathIntegral / measuredUs / rate * 1000)
                   << " max_sample_step=" << maximumSampleStep
                   << " max_frames=" << maximumPath << '\n';
+        if (lowSkew) {
+            std::cout << "METRIC low_skew_setup startup_clock_change=" << scenario.startupClockChange
+                << " startup_clock_end_us=" << scenario.startupClockEndUs
+                << " minimum_release_disabled=" << scenario.disableMinimumRelease
+                << " drift_deadband_disabled=" << scenario.disableDriftDeadband
+                << " all_release_disabled=" << scenario.disableAllRelease
+                << " output_release_guard=" << scenario.outputReleaseGuardFrames
+                << " instantaneous_output_ratio=" << scenario.instantaneousOutputRatio
+                << " release_stop_ramp_ms=" << scenario.releaseStopRampMs << '\n';
+            for (const auto& window : windows) {
+                std::cout << "METRIC low_skew_window from_s=" << window.begin / 1000000
+                    << " to_s=" << window.end / 1000000
+                    << " average_ms=" << static_cast<double>(window.pathIntegral / window.measuredUs / rate * 1000)
+                    << " underruns=" << window.underruns << " padding=" << window.padding
+                    << " trims=" << window.trims << " missing=" << window.missing << " drops=" << window.drops
+                    << " source_correction_ms=" << window.sourceCorrectionUs / 1000.0
+                    << " output_correction_ms=" << window.outputCorrectionUs / 1000.0
+                    << " max_sample_step=" << window.maximumStep << '\n';
+            }
+            for (std::size_t peer = 0; peer < streams.size(); ++peer) {
+                std::cout << "METRIC low_skew_source peer=" << peer << " corrected=" << corrected[peer]
+                    << " final_drift_ppm=" << streams[peer]->stats().drift_ppm
+                    << " final_ratio_ppm=" << (streams[peer]->stats().resampler_ratio - 1.0) * 1000000.0
+                    << " late_remainder_min=" << minimumRemainder[peer] << " late_remainder_max=" << maximumRemainder[peer]
+                    << " late_remainder_mean=" << static_cast<double>(remainderIntegral[peer] / windows.back().measuredUs) << '\n';
+            }
+        }
         bool lossless = true;
         for (const auto& stream : streams) lossless &= stream->stats().sequence.lost == 0;
         std::uint64_t resampledFrames = 0, retainedFrames = 0, requestedDrops = 0;
@@ -2264,15 +3067,42 @@ void test_profiled_short_scheduler_batches()
                 stats.adaptive_delivery_gap_raise_events == 0,
             "short scheduler batches preserve packets without long-gap learning");
         const bool independentClockStress = scenario.senderPpm != 0 && batched;
-        if (independentClockStress && profileName == "fast") {
-            // Characterization, NOT an artifact-free acceptance case: three
-            // independently paced sources plus callback jitter and worker
-            // holds still exceed Fast's usable runway in some phases. Keep
-            // that limitation measured without relaxing the latency ceiling.
-            expect(sink.underrunFrames() - steadyUnderruns <= rate / 10 &&
-                    stats.live_tail_trimmed_frames - steadyTrimmed <= packetFrames * 3 &&
+        if (lowSkew) {
+            // Deliberately strict investigation regressions: remaining
+            // uncovered artifacts must fail, not be silently
+            // reclassified as acceptable startup or widened into a tolerance.
+            for (const auto& window : windows) {
+                expect(window.measuredUs == window.end - window.begin,
+                    "low-skew measurements cover each full declared interval");
+                if (window.begin < 30000000) continue;
+                expect(window.underruns == 0 && window.padding == 0 && window.trims == 0 &&
+                        window.missing == 0 && window.drops == 0 && window.maximumStep < 33554432,
+                    "low-skew settled playback has no missing, padded, trimmed or discontinuous audio");
+            }
+            for (std::size_t peer = 0; peer < streams.size(); ++peer) {
+                expect(streams[peer]->stats().drift_valid,
+                    "low-skew fixture reaches the production drift estimator");
+                if (scenario.startupClockChange) expect(corrected[peer],
+                    "startup clock excursion genuinely exercises source resampling");
+                if (!scenario.disableDriftDeadband && std::abs(scenario.senderPpm) <= 24) {
+                    expect(streams[peer]->stats().resampler_ratio == 1.0,
+                        "inside-deadband source correction returns to unity");
+                }
+            }
+            if (scenario.startupClockChange && scenario.startupClockEndUs == 3350000 && !batched) {
+                expect(minimumRemainder.front() == 63 && maximumRemainder.front() == 63,
+                    "brief real estimator correction leaves a persistent 63-frame source remainder");
+            }
+        } else if (independentClockStress && profileName == "fast") {
+            // A single phase-transition underrun is still possible under the
+            // four-peer stall stress. It must not become a release/raise loop,
+            // and must not be hidden by trimming or repeated silence padding.
+            expect(sink.underrunFrames() - steadyUnderruns <= (scenario.remotePeers > 1 ? packetFrames : 0) &&
+                    stats.live_tail_trimmed_frames == steadyTrimmed &&
                     stats.adaptive_padding_frames == steadyPadding,
-                "known four-peer Fast clock/scheduler stress remains bounded without repeated padding");
+                "independent-clock stress has no recurring release starvation, source cuts or padding");
+            expect(lastUnderrunUs < 20000000,
+                "clock-phase recovery settles rather than repeating throughout the jam");
             expect(stats.adaptive_target_frames <= profile.adaptive_playback_min_frames + packetFrames * 2,
                 "four-peer Fast stress cannot retain a large adaptive cushion");
         } else {
@@ -2280,11 +3110,8 @@ void test_profiled_short_scheduler_batches()
                     stats.adaptive_padding_frames == steadyPadding,
                 "short scheduler batches settle without recurring output underruns or padding");
             if (independentClockStress && profileName == "safe") {
-                // Independent clock convergence can still require small
-                // per-source trims at the strict path cap. Do not describe
-                // this diagnostic case as waveform-continuous.
-                expect(stats.live_tail_trimmed_frames - steadyTrimmed <= packetFrames / 4,
-                    "known Safe independent-clock source trims stay below one quarter packet per minute");
+                expect(stats.live_tail_trimmed_frames == steadyTrimmed && maximumSampleStep < 33554432,
+                    "Safe clock convergence preserves the rendered tone without source cuts");
             } else {
                 expect(stats.live_tail_trimmed_frames == steadyTrimmed && maximumSampleStep < 33554432,
                     "steady rendered tone has no discarded samples or abrupt discontinuities");
@@ -2292,13 +3119,14 @@ void test_profiled_short_scheduler_batches()
             expect(stats.adaptive_target_frames == profile.adaptive_playback_min_frames,
                 "short scheduling batches let the adaptive target return to its profile minimum");
         }
-        expect(stats.live_tail_batch_tolerance_frames == (4 * packetFrames > profile.adaptive_playback_min_frames
-                ? 4 * packetFrames - profile.adaptive_playback_min_frames : 0),
+        const auto batchFrames = std::max(4 * packetFrames, 2 * callbackFrames);
+        expect(stats.live_tail_batch_tolerance_frames == (batchFrames > profile.adaptive_playback_min_frames
+                ? batchFrames - profile.adaptive_playback_min_frames : 0),
             "raw stats expose the lean-profile scheduling allowance and zero for larger profile floors");
         expect(maximumPath <= profile.adaptive_playback_max_frames + packetFrames +
                 stats.live_tail_batch_tolerance_frames + profile.jitter_buffer_max_frames,
             "scheduling tolerance remains inside an explicit bounded receiver path");
-        if (!batched) {
+        if (!lowSkew && !batched && scenario.senderCallbackFrames == 0) {
             expect(ringStats.underruns == 0 && stats.live_tail_trimmed_frames == 0,
                 "clean profile pacing remains free of underruns and trimming");
         }
@@ -2414,8 +3242,19 @@ void test_profiled_recurring_wifi_bursts_match_observed_session()
 
 } // namespace
 
-int main()
+int main(int argc, char** argv)
 {
+    if (argc == 2 && std::string_view(argv[1]) == "--release-return") {
+        test_profiled_short_scheduler_batches(true, true);
+        if (failures == 0) std::cout << "Jam2 release-return tests passed\n";
+        return failures == 0 ? 0 : 1;
+    }
+    if (argc == 2 && std::string_view(argv[1]) == "--low-skew") {
+        test_profiled_short_scheduler_batches(true);
+        if (failures == 0) std::cout << "Jam2 low-skew playback tests passed\n";
+        return failures == 0 ? 0 : 1;
+    }
+    if (argc != 1) return 2;
     test_midi_queue();
     test_midi_block_mapping();
     test_mpe_validation();
@@ -2443,7 +3282,12 @@ int main()
     test_delivery_gap_learning_evidence_is_narrow();
     test_profiled_short_scheduler_batches();
     test_adaptive_release_retires_real_surplus_without_trimming();
+    test_source_rounding_edge_is_fixed_and_bounded();
     test_four_peer_rebase_preserves_unexpired_delivery_learning();
+    test_four_peer_heterogeneous_gap_evidence();
+    test_four_peer_gap_expiry_and_departure();
+    test_four_peer_packet_gap_association();
+    test_profiled_wifi_return_to_clean();
     test_profiled_recurring_wifi_bursts_match_observed_session();
     if (failures == 0) std::cout << "Jam2 core input tests passed\n";
     return failures == 0 ? 0 : 1;

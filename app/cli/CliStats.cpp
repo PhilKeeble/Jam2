@@ -393,6 +393,8 @@ void copy_peer_mixer_stats(
     target.mix_live_tail_batch_tolerance_frames = source.live_tail_batch_tolerance_frames;
     target.mix_normal_output_limit_frames = source.normal_output_limit_frames;
     target.mix_normal_path_limit_frames = source.normal_path_limit_frames;
+    target.mix_live_tail_rounding_tolerance_frames = source.live_tail_rounding_tolerance_frames;
+    target.mix_adaptive_release_alignment_margin_frames = source.adaptive_release_alignment_margin_frames;
     target.mix_capacity_drops = source.capacity_drops;
     target.mix_capacity_dropped_frames = source.capacity_dropped_frames;
     target.mix_clipped_samples = source.clipped_samples;
@@ -825,6 +827,8 @@ void print_periodic_stream_stats(
               << " mix_live_tail_batch_tolerance_frames=" << stats.mix_live_tail_batch_tolerance_frames
               << " mix_normal_output_limit_frames=" << stats.mix_normal_output_limit_frames
               << " mix_normal_path_limit_frames=" << stats.mix_normal_path_limit_frames
+              << " mix_live_tail_rounding_tolerance_frames=" << stats.mix_live_tail_rounding_tolerance_frames
+              << " mix_adaptive_release_alignment_margin_frames=" << stats.mix_adaptive_release_alignment_margin_frames
               << " mix_receive_recovery_active="
               << (stats.mix_receive_recovery_active ? "yes" : "no")
               << " mix_receive_recovery_debt_frames="
@@ -1025,6 +1029,9 @@ void print_audio_packet_stats(const AudioPacketStats& stats, const Options& opti
     std::cout << "Adaptive playback release ppm: " << options.adaptive_playback_release_ppm << "\n";
     std::cout << "Adaptive playback ratio ramp ms: "
               << options.adaptive_playback_ratio_ramp_ms << "\n";
+    std::cout << "Adaptive playback release return ramp ms: "
+              << std::min(options.adaptive_playback_ratio_ramp_ms,
+                  jam2::audio::kPlaybackReleaseReturnRampMs) << "\n";
     std::cout << "Final metronome: " << (stats.final_metronome_enabled ? "on" : "off") << "\n";
     std::cout << "Final BPM: " << stats.final_bpm << "\n";
     std::cout << "Final metronome level: " << stats.final_metronome_level << "\n";
@@ -1155,6 +1162,8 @@ void print_audio_packet_stats(const AudioPacketStats& stats, const Options& opti
     std::cout << "Mixer live-tail batch tolerance frames: " << stats.mix_live_tail_batch_tolerance_frames << "\n";
     std::cout << "Mixer normal output limit frames: " << stats.mix_normal_output_limit_frames << "\n";
     std::cout << "Mixer normal path limit frames: " << stats.mix_normal_path_limit_frames << "\n";
+    std::cout << "Mixer source rounding tolerance frames: " << stats.mix_live_tail_rounding_tolerance_frames << "\n";
+    std::cout << "Mixer release alignment margin frames: " << stats.mix_adaptive_release_alignment_margin_frames << "\n";
     std::cout << "Mixer receive recovery active: "
               << (stats.mix_receive_recovery_active ? "yes" : "no") << "\n";
     std::cout << "Mixer receive recovery events: "

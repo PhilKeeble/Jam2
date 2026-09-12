@@ -34,6 +34,16 @@ add_test(NAME jam2_core_input_units
 set_tests_properties(jam2_core_input_units PROPERTIES
     LABELS "unit;core;network;performance;four-peer"
     TIMEOUT 30)
+add_test(NAME jam2_core_low_skew_units
+    COMMAND $<TARGET_FILE:jam2_core_input_tests> --low-skew)
+set_tests_properties(jam2_core_low_skew_units PROPERTIES
+    LABELS "unit;core;audio;network;performance;four-peer"
+    TIMEOUT 120)
+add_test(NAME jam2_core_release_return_units
+    COMMAND $<TARGET_FILE:jam2_core_input_tests> --release-return)
+set_tests_properties(jam2_core_release_return_units PROPERTIES
+    LABELS "unit;core;audio;network;performance;four-peer"
+    TIMEOUT 60)
 
 add_executable(jam2_core_boundary_tests EXCLUDE_FROM_ALL
     unit/core/CoreBoundaryTests.cpp)

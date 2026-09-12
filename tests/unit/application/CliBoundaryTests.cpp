@@ -264,6 +264,8 @@ void testOptionAndStatsContracts()
     mixerSource.live_tail_batch_tolerance_frames = 128;
     mixerSource.normal_output_limit_frames = 256;
     mixerSource.normal_path_limit_frames = 320;
+    mixerSource.live_tail_rounding_tolerance_frames = 64;
+    mixerSource.adaptive_release_alignment_margin_frames = 64;
     jam2::cli::stats::copy_peer_mixer_stats(copied, mixerSource);
     expect(copied.mix_receive_recovery_active &&
             copied.mix_receive_recovery_events == 11 &&
@@ -280,7 +282,9 @@ void testOptionAndStatsContracts()
             copied.adaptive_delivery_gap_required_frames == 21 &&
             copied.adaptive_delivery_gap_required_max_frames == 22 &&
             copied.mix_live_tail_batch_tolerance_frames == 128 &&
-            copied.mix_normal_output_limit_frames == 256 && copied.mix_normal_path_limit_frames == 320,
+            copied.mix_normal_output_limit_frames == 256 && copied.mix_normal_path_limit_frames == 320 &&
+            copied.mix_live_tail_rounding_tolerance_frames == 64 &&
+            copied.mix_adaptive_release_alignment_margin_frames == 64,
         "CLI diagnostics copy debt-driven recovery and delivery-gap learning state");
 
     jam2::PeerStreamStats firstGap;
@@ -413,9 +417,9 @@ void testOptionAndStatsContracts()
         const bool schemaMatches = opened && lines.size() == 3 &&
                 csvFieldCount(header) == csvFieldCount(finalRow) &&
                 csvFieldCount(header) == csvFieldCount(periodicRow) &&
-                header.endsWith("mix_normal_output_limit_frames,mix_normal_path_limit_frames") &&
-                periodicRow.endsWith(",17,256,yes,18,19,20,21,22,128,256,320") &&
-                finalRow.endsWith(",17,256,yes,18,19,20,21,22,128,256,320");
+                header.endsWith("mix_live_tail_rounding_tolerance_frames,mix_adaptive_release_alignment_margin_frames") &&
+                periodicRow.endsWith(",17,256,yes,18,19,20,21,22,128,256,320,64,64") &&
+                finalRow.endsWith(",17,256,yes,18,19,20,21,22,128,256,320,64,64");
         expect(schemaMatches,
             "final CSV preserves the capture-clock pacing field and schema width");
     }
@@ -451,6 +455,15 @@ void testOptionAndStatsContracts()
             capture.output.str().find("coreaudio_cycle_jitter_max_us=125") !=
                 std::string::npos,
         "periodic CLI diagnostics emit exact raw stream counters");
+    statsOptions.adaptive_playback_ratio_ramp_ms = 250;
+    jam2::cli::stats::print_audio_packet_stats(copied, statsOptions);
+    expect(capture.output.str().find("Adaptive playback ratio ramp ms: 250") != std::string::npos &&
+            capture.output.str().find("Adaptive playback release return ramp ms: 50") != std::string::npos,
+        "CLI diagnostics distinguish configured acceleration from bounded release cancellation");
+    statsOptions.adaptive_playback_ratio_ramp_ms = 10;
+    jam2::cli::stats::print_audio_packet_stats(copied, statsOptions);
+    expect(capture.output.str().find("Adaptive playback release return ramp ms: 10") != std::string::npos,
+        "CLI cancellation diagnostics preserve faster custom ramps");
 
     expect(jam2::cli::os_error_text(0).empty() &&
             jam2::cli::os_error_text(5) == "error 5",
@@ -459,7 +472,7 @@ void testOptionAndStatsContracts()
     jam2::Engine engine;
     jam2::cli::CliPeerStreamPlayback playback(&engine);
     const std::array<std::int32_t, 2> frames{1, 2};
-    expect(playback.acceptsFrames() && playback.depthFrames() == 0 &&
+    expect(playback.acceptsFrames() && playback.depthFrames() == 0 && playback.callbackFrames() == 0 &&
             playback.pushFrames(frames) == 0,
         "CLI playback adapter delegates safely to an unstarted engine");
     playback.requestDropFrames(1);
@@ -467,7 +480,7 @@ void testOptionAndStatsContracts()
     playback.detach();
     playback.requestDropFrames(1);
     playback.setResamplerRatio(1.0);
-    expect(!playback.acceptsFrames() && playback.pushFrames(frames) == 0 &&
+    expect(!playback.acceptsFrames() && playback.pushFrames(frames) == 0 && playback.callbackFrames() == 0 &&
             playback.depthFrames() ==
                 (std::numeric_limits<std::size_t>::max)() / 2U,
         "detached CLI playback adapter is a bounded non-accepting sink");

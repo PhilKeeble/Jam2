@@ -1166,6 +1166,10 @@ void Engine::start(const EngineConfig& requested)
             static_cast<std::uint64_t>(impl_->config.sample_rate) *
                 static_cast<std::uint64_t>(impl_->config.playback_ratio_ramp_ms) / 1000ULL,
             std::memory_order_relaxed);
+        control.playback_release_return_ramp_frames.store(
+            static_cast<std::uint64_t>(impl_->config.sample_rate) *
+                audio::kPlaybackReleaseReturnRampMs / 1000ULL,
+            std::memory_order_relaxed);
         control.metronome_mode.store(static_cast<int>(impl_->config.metronome_mode), std::memory_order_relaxed);
         control.leader_audio_local_click.store(impl_->config.leader_audio_local_click, std::memory_order_relaxed);
         control.metronome_epoch_sample_time.store(0, std::memory_order_relaxed);
@@ -1652,6 +1656,13 @@ std::uint64_t Engine::networkPlaybackUnderrunFrames() const noexcept
     return impl_ != nullptr && impl_->playback_ring != nullptr
         ? impl_->playback_ring->underrun_frames()
         : 0;
+}
+
+std::size_t Engine::networkPlaybackCallbackFrames() const noexcept
+{
+    return impl_ != nullptr
+        ? static_cast<std::size_t>(std::max<long>({0, impl_->stream_info.buffer_size,
+            impl_->stream_info.maximum_callback_frames})) : 0;
 }
 
 NetworkPlaybackTimelineSnapshot Engine::networkPlaybackTimelineSnapshot() const noexcept

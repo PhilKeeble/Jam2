@@ -353,6 +353,8 @@ struct AudioPacketStats {
     std::uint64_t mix_live_tail_batch_tolerance_frames = 0;
     std::uint64_t mix_normal_output_limit_frames = 0;
     std::uint64_t mix_normal_path_limit_frames = 0;
+    std::uint64_t mix_live_tail_rounding_tolerance_frames = 0;
+    std::uint64_t mix_adaptive_release_alignment_margin_frames = 0;
     std::uint64_t metronome_epoch_sample_time = 0;
     std::uint64_t local_metronome_beat = 0;
     std::uint64_t remote_metronome_beat = 0;
@@ -718,7 +720,8 @@ public:
                 "adaptive_delivery_gap_hold_events,adaptive_delivery_gap_hold_remaining_ms,"
                 "adaptive_delivery_gap_required_frames,"
                 "adaptive_delivery_gap_required_max_frames,mix_live_tail_batch_tolerance_frames,"
-                "mix_normal_output_limit_frames,mix_normal_path_limit_frames\n";
+                "mix_normal_output_limit_frames,mix_normal_path_limit_frames,"
+                "mix_live_tail_rounding_tolerance_frames,mix_adaptive_release_alignment_margin_frames\n";
     }
 
     explicit operator bool() const { return out_.is_open(); }
@@ -1276,7 +1279,9 @@ public:
              << stats.adaptive_delivery_gap_required_max_frames << ','
              << stats.mix_live_tail_batch_tolerance_frames << ','
              << stats.mix_normal_output_limit_frames << ','
-             << stats.mix_normal_path_limit_frames;
+             << stats.mix_normal_path_limit_frames << ','
+             << stats.mix_live_tail_rounding_tolerance_frames << ','
+             << stats.mix_adaptive_release_alignment_margin_frames;
         out_ << '\n';
         if (row_type == "final") {
             out_.flush();
@@ -1292,7 +1297,7 @@ public:
         if (!out_) {
             return;
         }
-        std::vector<std::string> fields(505);
+        std::vector<std::string> fields(507);
         auto set = [&](std::size_t index, auto value) {
             std::ostringstream text;
             text << value;
@@ -1778,6 +1783,8 @@ public:
         set(502, stats.mix_live_tail_batch_tolerance_frames);
         set(503, stats.mix_normal_output_limit_frames);
         set(504, stats.mix_normal_path_limit_frames);
+        set(505, stats.mix_live_tail_rounding_tolerance_frames);
+        set(506, stats.mix_adaptive_release_alignment_margin_frames);
 
         for (std::size_t i = 0; i < fields.size(); ++i) {
             if (i != 0) {

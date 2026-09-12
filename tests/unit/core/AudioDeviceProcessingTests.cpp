@@ -502,6 +502,124 @@ void testPlaybackResampler()
         "resampler reset discards all interpolation history");
 }
 
+void testPlaybackReleaseReturnRamp()
+{
+    for (const std::uint64_t rate : {44100U, 48000U}) {
+        for (const std::size_t callback : {32U, 64U}) {
+            for (const std::uint64_t normalMs : {0U, 10U, 250U}) {
+                jam2::audio::MonoRingBuffer ring(512);
+                jam2::audio::StreamControl control;
+                processing::PlaybackResamplerState state;
+                std::array<std::int32_t, 128> input, scratch{};
+                std::array<std::int32_t, 64> output{};
+                input.fill(123456789);
+                const auto normalFrames = rate * normalMs / 1000;
+                const auto returnFrames = std::min(normalFrames,
+                    rate * jam2::audio::kPlaybackReleaseReturnRampMs / 1000);
+                control.playback_ratio_ramp_frames.store(normalFrames);
+                control.playback_release_return_ramp_frames.store(
+                    rate * jam2::audio::kPlaybackReleaseReturnRampMs / 1000);
+                bool continuous = true;
+                auto pump = [&](std::uint64_t frames) {
+                    while (frames > 0) {
+                        const auto count = static_cast<std::size_t>(std::min<std::uint64_t>(frames, callback));
+                        if (ring.available_read() < count + 4) ring.push(input);
+                        processing::pop_resampled_playback(&ring, &control, state, scratch,
+                            std::span(output).first(count));
+                        continuous &= std::all_of(output.begin(), output.begin() + count,
+                            [](auto sample) { return sample == 123456789; });
+                        frames -= count;
+                    }
+                };
+                control.playback_ratio_ppm.store(1005000);
+                if (normalFrames > 1) {
+                    pump(normalFrames - 1);
+                    expect(state.ratioSmoother.ramping(), "release acceleration keeps the full configured ramp");
+                }
+                pump(1);
+                expect(state.ratioSmoother.appliedPpm() == 1005000 && !state.ratioSmoother.ramping(),
+                    "release acceleration reaches the exact requested rate");
+                control.playback_ratio_ppm.store(1000000);
+                if (returnFrames > 1) {
+                    pump(returnFrames - 1);
+                    expect(state.ratioSmoother.ramping(), "release cancellation remains smooth until its last frame");
+                }
+                pump(1);
+                expect(state.ratioSmoother.steadyUnity() && control.playback_ratio_applied_ppm.load() == 1000000,
+                    "release cancellation completes within 50 ms and preserves faster custom ramps");
+                expect(state.hasCurrent && state.hasNext && continuous && ring.underrun_frames() == 0,
+                    "asymmetric release preserves interpolation history, audio continuity and source availability");
+                if (normalMs == 250) {
+                    control.playback_ratio_ppm.store(995000);
+                    pump(normalFrames);
+                    control.playback_ratio_ppm.store(1000000);
+                    pump(returnFrames);
+                    expect(state.ratioSmoother.ramping(),
+                        "return from below-unity is not mistaken for cancelling accelerated playback");
+                    pump(normalFrames - returnFrames);
+                    expect(state.ratioSmoother.steadyUnity(), "below-unity return keeps its normal ramp");
+                    control.playback_ratio_ppm.store(1005000);
+                    pump(normalFrames / 2);
+                    control.playback_ratio_ppm.store(1000000);
+                    pump(returnFrames);
+                    expect(state.ratioSmoother.steadyUnity(), "cancellation also stops a partially completed acceleration");
+                }
+            }
+        }
+    }
+}
+
+void testResampledPlaybackDepthAccounting()
+{
+    std::uint64_t referenceAudioHash = 0;
+    for (const bool batched : {false, true}) {
+        for (const bool diagnostics : {false, true}) {
+            jam2::audio::MonoRingBuffer ring(2048);
+            ring.set_diagnostics_enabled(diagnostics);
+            ring.set_depth_bucket_thresholds(48000);
+            jam2::audio::StreamControl control;
+            processing::PlaybackResamplerState state;
+            control.playback_ratio_ramp_frames.store(12000); // real 250 ms ramp
+            std::array<std::int32_t, 520> scratch{};
+            std::array<std::int32_t, 256> output{};
+            std::array<std::int32_t, 1024> input{};
+            input.fill(1000000);
+            std::uint64_t requested = 0;
+            std::uint64_t audioHash = 14695981039346656037ULL;
+            bool accounting = true;
+            // Unity, acceleration, deceleration and return to unity with live
+            // interpolation history. Alternate plentiful audio and starvation.
+            for (const int ratio : {1000000, 1005000, 995000, 1000000}) {
+                control.playback_ratio_ppm.store(ratio);
+                for (std::size_t callback = 0; callback < 100; ++callback) {
+                    if (callback % 8 == 0) ring.push(input);
+                    const auto before = ring.stats();
+                    const auto depth = ring.available_read();
+                    processing::pop_resampled_playback(&ring, &control, state,
+                        batched ? std::span(scratch) : std::span<std::int32_t>{}, output);
+                    for (const auto sample : output) {
+                        audioHash = (audioHash ^ static_cast<std::uint32_t>(sample)) * 1099511628211ULL;
+                    }
+                    const auto after = ring.stats();
+                    requested += depth - ring.available_read() + after.underruns - before.underruns;
+                    accounting &= after.depth_observed_frames == (diagnostics ? requested : 0);
+                    accounting &= after.depth_under_2ms_frames + after.depth_under_5ms_frames +
+                        after.depth_under_10ms_frames + after.depth_10ms_plus_frames == after.depth_observed_frames;
+                }
+            }
+            expect(accounting, "resampling observes every requested ring source frame exactly once, including return to unity");
+            expect(!diagnostics || (ring.stats().underruns > 0 &&
+                    ring.stats().underruns <= ring.stats().depth_observed_frames),
+                "missing-source percentage has a matching denominator and cannot exceed 100 percent");
+            expect(control.playback_ratio_applied_ppm.load() == 1000000,
+                "depth accounting covers the completed return-to-unity ramp");
+            if (referenceAudioHash == 0) referenceAudioHash = audioHash;
+            expect(audioHash == referenceAudioHash,
+                "diagnostics and scratch fallback preserve bit-identical rendered audio");
+        }
+    }
+}
+
 void testPreparedSourceMixing()
 {
     jam2::audio::StreamControl control;
@@ -908,6 +1026,8 @@ int main()
     testNetworkPlaybackTimelineCoherence();
     testPeakGainAndMixing();
     testPlaybackResampler();
+    testPlaybackReleaseReturnRamp();
+    testResampledPlaybackDepthAccounting();
     testPreparedSourceMixing();
     testCancelledPreparedSwapsReleaseEveryReadySlot();
     testInjectedInput();

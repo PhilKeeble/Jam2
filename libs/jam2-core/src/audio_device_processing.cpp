@@ -82,7 +82,7 @@ std::int32_t pop_one_frame(
     std::int32_t continuity_fallback) noexcept
 {
     std::array<std::int32_t, 1> frame{};
-    if (ring.pop(frame, false) == 1) {
+    if (ring.pop(frame) == 1) {
         state.underrunConcealmentOrigin = 0;
         state.underrunConcealmentFrames = 0;
         return frame[0];
@@ -597,9 +597,16 @@ void pop_resampled_playback(
         std::fill(output.begin(), output.end(), 0);
         return;
     }
-    state.ratioSmoother.setTargetPpm(
-        control->playback_ratio_ppm.load(std::memory_order_relaxed),
-        control->playback_ratio_ramp_frames.load(std::memory_order_relaxed));
+    const auto requestedRatio = control->playback_ratio_ppm.load(std::memory_order_relaxed);
+    auto rampFrames = control->playback_ratio_ramp_frames.load(std::memory_order_relaxed);
+    if (requestedRatio == 1000000 && state.ratioSmoother.appliedPpm() > 1000000) {
+        const auto returnFrames = control->playback_release_return_ramp_frames.load(std::memory_order_relaxed);
+        if (returnFrames != 0) rampFrames = std::min(rampFrames, returnFrames);
+    }
+    // Preserve phase/history and normal acceleration. Only cancellation of
+    // above-unity playback gets the shorter stopping ramp; custom faster or
+    // immediate ramps remain faster. Sizing and rendering share this state.
+    state.ratioSmoother.setTargetPpm(requestedRatio, rampFrames);
     if (state.ratioSmoother.steadyUnity() &&
         !state.hasCurrent && !state.hasNext) {
         playback->pop(output);
@@ -623,8 +630,11 @@ void pop_resampled_playback(
     std::size_t realSourceFrames = 0;
     std::size_t sourceIndex = 0;
     if (batchSource && requiredSourceFrames > 0) {
+        // Ring underruns count requested source frames, not rendered device
+        // frames. Observe that same denominator once per batched read, even
+        // when interpolation history keeps us here after returning to unity.
         realSourceFrames = playback->pop(
-            sourceScratch.first(requiredSourceFrames), false);
+            sourceScratch.first(requiredSourceFrames));
     }
     auto nextSource = [&](std::int32_t continuityFallback) noexcept {
         if (!batchSource) {

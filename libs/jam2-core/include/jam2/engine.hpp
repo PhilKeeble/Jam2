@@ -435,6 +435,7 @@ public:
         std::span<std::int32_t> output) noexcept;
     NetworkPlaybackTimelineSnapshot networkPlaybackTimelineSnapshot() const noexcept;
     std::size_t networkPlaybackDepth() const noexcept;
+    std::size_t networkPlaybackCallbackFrames() const noexcept;
     std::uint64_t networkPlaybackUnderrunFrames() const noexcept;
     std::size_t pushNetworkPlayback(std::span<const std::int32_t> input) noexcept;
     void requestNetworkPlaybackDrop(std::size_t frames) noexcept;

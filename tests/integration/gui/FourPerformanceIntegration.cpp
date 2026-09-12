@@ -10,6 +10,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QThread>
+#include <QScopeGuard>
 
 #include <array>
 #include <chrono>
@@ -966,21 +967,36 @@ int main(int argc, char* argv[])
     if (!send(sharedRecorder, {
             {QStringLiteral("type"), QStringLiteral("looper.file-workers.hold")},
             {QStringLiteral("id"), QStringLiteral("recording-import-worker-hold")},
-        }) || !receive(sharedRecorder, QStringLiteral("command_applied")) ||
-        !invoke(sharedRecorder,
+        }) || !receive(sharedRecorder, QStringLiteral("command_applied"))) return 1;
+    auto releaseHeldWorkers = qScopeGuard([&] {
+        if (send(sharedRecorder, {
+                {QStringLiteral("type"), QStringLiteral("looper.file-workers.release")},
+                {QStringLiteral("id"), QStringLiteral("recording-import-worker-cleanup")},
+            })) (void)receive(sharedRecorder, QStringLiteral("command_applied"));
+    });
+    if (!invoke(sharedRecorder,
             QStringLiteral("shared-recording-stop"),
             QStringLiteral("looper.recording.start-stop"),
             QStringLiteral("click"))) return 1;
 
-    if (!waitForAll(coordinator, QStringLiteral("recorded lane import observes worker saturation"),
+    // Two running workers are occupied, but the bounded outstanding queue is
+    // not saturated: the import must be accepted behind them, without retries.
+    const bool importQueued = waitForAll(coordinator, QStringLiteral("recorded lane import queues behind held workers"),
         [](std::size_t peer, const QJsonObject& state) {
-            return peer != sharedRecordingPeer || state.value(
-                QStringLiteral("content")).toObject().value(
-                    QStringLiteral("lane_recording_import_busy_retries")).toInteger() > 0;
-        }, states, 30s) || !send(sharedRecorder, {
+            const auto content = state.value(QStringLiteral("content")).toObject();
+            return peer != sharedRecordingPeer ||
+                (content.value(QStringLiteral("file_tasks_active")).toInt() == 3 &&
+                 content.value(QStringLiteral("lane_recording_import_busy_retries")).toInteger() == 0 &&
+                 content.value(QStringLiteral("lane_recording_import_status")).toString() == QStringLiteral("staging"));
+        }, states, 30s);
+    // Release even when the evidence predicate fails; never leave the fixture
+    // itself preventing the operation whose completion it is testing.
+    const bool workersReleased = send(sharedRecorder, {
             {QStringLiteral("type"), QStringLiteral("looper.file-workers.release")},
             {QStringLiteral("id"), QStringLiteral("recording-import-worker-release")},
-        }) || !receive(sharedRecorder, QStringLiteral("command_applied")) ||
+        }) && receive(sharedRecorder, QStringLiteral("command_applied"));
+    if (workersReleased) releaseHeldWorkers.dismiss();
+    if (!importQueued || !workersReleased ||
         !waitForAll(coordinator, QStringLiteral("shared lane WAV finalization and convergence"),
         [baselineLaneCount, sharedRecordingLaneId](
             std::size_t peer, const QJsonObject& state) {
@@ -1009,7 +1025,7 @@ int main(int argc, char* argv[])
                 content.value(QStringLiteral("lane_recording_import_failures"))
                     .toInteger() == 0 &&
                 (peer != sharedRecordingPeer || content.value(
-                    QStringLiteral("lane_recording_import_busy_retries")).toInteger() > 0) &&
+                    QStringLiteral("lane_recording_import_busy_retries")).toInteger() == 0) &&
                 performance.value(QStringLiteral("global_transport_playing")).toBool();
         }, states, 90s)) return 1;
     const QJsonObject sharedTake = states[0]
