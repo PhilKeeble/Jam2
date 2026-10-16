@@ -310,6 +310,38 @@ void test_arrangement_validation_reuses_received_assets(const QString& folder)
         "arrangement validation de-duplicates a received local candidate");
 }
 
+void test_send_paths_use_the_project_root(const QString& folder)
+{
+    const QString project = QDir(folder).absoluteFilePath(QStringLiteral("opened-project"));
+    const QString secondProject = QDir(folder).absoluteFilePath(QStringLiteral("second-project"));
+    const QString relative = QStringLiteral("recorded/take.wav");
+    const QString first = QDir(project).absoluteFilePath(relative);
+    const QString second = QDir(secondProject).absoluteFilePath(relative);
+    for (const QString& path : {first, second}) {
+        expect(QDir().mkpath(QFileInfo(path).absolutePath()), "send-path fixture directory exists");
+        QFile wav(path);
+        expect(wav.open(QIODevice::WriteOnly) && wav.write(pcm16Wav(16, 1000)) > 44,
+            "send-path fixture WAV exists");
+    }
+    using jam2::gui::looper_asset_files::sendPath;
+    expect(sendPath(project, relative, {}) == first,
+        "a cached relative WAV path resolves against the opened JamJar folder");
+    expect(sendPath(project, {}, {relative}) == first,
+        "an uncached relative lane WAV uses the same project base");
+    expect(sendPath(project, first, {}) == first && sendPath({}, first, {}) == first,
+        "absolute published paths remain usable without a project base");
+    expect(sendPath(project, QStringLiteral("missing.wav"), {QStringLiteral("missing-lane.wav"), relative}) == first,
+        "a missing cached file falls back to an existing current lane WAV");
+    expect(sendPath(project, project, {relative}) == first,
+        "a cached directory is not a sendable WAV and cannot mask a live lane");
+    expect(sendPath(secondProject, relative, {}) == second,
+        "changing projects changes the base for saved relative paths");
+    expect(sendPath({}, relative, {}).isEmpty() &&
+            sendPath(project, QStringLiteral("missing.wav"), {}).isEmpty() &&
+            sendPath(project, {}, {}).isEmpty(),
+        "relative paths without a project base and unavailable files fail closed");
+}
+
 void test_chunk_without_active_transfer_has_a_reason(const QString& folder)
 {
     const QByteArray wav = pcm16Wav(8, 1000);
@@ -1166,6 +1198,7 @@ int main(int argc, char* argv[])
     if (folder.isValid()) {
         test_chunk_sequence_rejects_duplicate_and_wrong_source();
         test_arrangement_validation_reuses_received_assets(folder.path());
+        test_send_paths_use_the_project_root(folder.path());
         test_chunk_without_active_transfer_has_a_reason(folder.path());
         test_cancelled_incoming_completion_stays_stale(folder.path());
         test_superseded_incoming_completion_cannot_replace_current(folder.path());

@@ -1,4 +1,5 @@
 #include "TrackWorkspaceController.hpp"
+#include "LooperAssetFiles.hpp"
 
 #include <QDir>
 #include <QFileInfo>
@@ -116,23 +117,16 @@ int TrackWorkspaceController::sessionSampleRate() const noexcept
 
 QString TrackWorkspaceController::assetPathForSend(const QString& hash) const
 {
-    QString path = trackOfferAssetPaths.value(hash);
+    QStringList lanePaths;
     for (const LooperBank& bank : looperProject.banks()) {
-        if (!path.isEmpty()) {
-            break;
-        }
         for (const LooperLane& lane : bank.lanes) {
-            if (lane.assetHash != hash) {
-                continue;
+            if (lane.assetHash == hash && !lane.assetPath.isEmpty()) {
+                lanePaths.append(lane.assetPath);
             }
-            path = lane.assetPath;
-            if (!QFileInfo(path).isAbsolute() && !persistence.projectFolder().isEmpty()) {
-                path = QDir(persistence.projectFolder()).absoluteFilePath(path);
-            }
-            break;
         }
     }
-    return path;
+    return jam2::gui::looper_asset_files::sendPath(
+        persistence.projectFolder(), trackOfferAssetPaths.value(hash), lanePaths);
 }
 
 QString TrackWorkspaceController::incomingAssetPath(const QString& hash) const

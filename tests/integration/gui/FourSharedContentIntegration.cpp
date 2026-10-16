@@ -97,6 +97,38 @@ bool writeFixture(
     return true;
 }
 
+QString copySavedProject(const QString& sourceJar, const QString& destination)
+{
+    QFile source(sourceJar);
+    if (!source.open(QIODevice::ReadOnly)) return {};
+    const QByteArray bytes = source.readAll();
+    const QJsonObject project = QJsonDocument::fromJson(bytes).object();
+    if (project.isEmpty() || !QDir().mkpath(destination)) return {};
+    const QDir sourceFolder(QFileInfo(sourceJar).absolutePath());
+    const QDir targetFolder(destination);
+    const auto copyAsset = [&](const QString& relative) {
+        if (relative.isEmpty()) return true;
+        if (QFileInfo(relative).isAbsolute()) return false;
+        const QString target = QDir::cleanPath(targetFolder.absoluteFilePath(relative));
+        if (!target.startsWith(targetFolder.absolutePath() + QLatin1Char('/'), Qt::CaseInsensitive)) return false;
+        return QDir().mkpath(QFileInfo(target).absolutePath()) &&
+            (QFileInfo::exists(target) || QFile::copy(sourceFolder.absoluteFilePath(relative), target));
+    };
+    for (const QJsonValue& bank : project.value(QStringLiteral("looper")).toObject()
+            .value(QStringLiteral("banks")).toArray()) {
+        for (const QJsonValue& lane : bank.toObject().value(QStringLiteral("lanes")).toArray()) {
+            if (!copyAsset(lane.toObject().value(QStringLiteral("asset_path")).toString())) return {};
+        }
+    }
+    const QString track = project.value(QStringLiteral("track")).toObject()
+        .value(QStringLiteral("file_path")).toString();
+    if (!track.isEmpty() && QFileInfo::exists(sourceFolder.absoluteFilePath(track)) && !copyAsset(track)) return {};
+    const QString path = targetFolder.absoluteFilePath(QStringLiteral("reopened.jamjar"));
+    QFile output(path);
+    return output.open(QIODevice::WriteOnly | QIODevice::NewOnly) &&
+        output.write(bytes) == bytes.size() ? path : QString{};
+}
+
 int assetIndex(const QJsonObject& state, const QString& hash)
 {
     const QJsonArray hashes = state.value(QStringLiteral("content")).toObject()
@@ -189,7 +221,10 @@ bool verifyAssetFiles(
             fail(QStringLiteral("peer %1 omitted the transferred asset path").arg(peer + 1));
             return false;
         }
-        QFile file(paths.at(index).toString());
+        const QString storedPath = paths.at(index).toString();
+        const QString filePath = QFileInfo(storedPath).isAbsolute() ? storedPath
+            : QDir(content.value(QStringLiteral("project_folder")).toString()).absoluteFilePath(storedPath);
+        QFile file(filePath);
         if (!file.open(QIODevice::ReadOnly) ||
             QString::fromLatin1(QCryptographicHash::hash(
                 file.readAll(), QCryptographicHash::Sha256).toHex()) != expectedHash) {
@@ -783,6 +818,7 @@ int main(int argc, char* argv[])
             {QStringLiteral("type"), QStringLiteral("jam.create")},
             {QStringLiteral("id"), QStringLiteral("create")},
             {QStringLiteral("port"), ports[0]},
+            {QStringLiteral("test_input"), QStringLiteral("tone-440")},
         })) return 1;
     const auto created = receive(coordinator.peer(0), QStringLiteral("command_applied"));
     if (!created) return 1;
@@ -1575,6 +1611,200 @@ int main(int argc, char* argv[])
             conflictWavHashB,
             conflictWavHashC,
         }) || !verifyNoPartialFiles(coordinator)) return 1;
+
+    // Reopen a portable saved JamJar while all four peers are still connected.
+    // Remove only isolated recipient copies to force real byte transfers rather
+    // than satisfying the test from the earlier transfer cache.
+    QStringList reopenHashes;
+    for (const QJsonValue& value : stableHashOrder) {
+        if (!value.toString().isEmpty() && !reopenHashes.contains(value.toString())) {
+            reopenHashes.append(value.toString());
+        }
+    }
+    for (bool automatic : {true, false}) {
+        const QString mode = automatic ? QStringLiteral("auto") : QStringLiteral("manual");
+        if (!apply(coordinator, 0, policyCommand(
+                QStringLiteral("reopen-policy-") + mode, QStringLiteral("full"), automatic)) ||
+            !waitForAll(coordinator, QStringLiteral("reopen sharing policy"),
+                [automatic](std::size_t, const QJsonObject& state) {
+                    return state.value(QStringLiteral("jam")).toObject()
+                        .value(QStringLiteral("policy")).toObject()
+                        .value(QStringLiteral("auto_share_wavs")).toBool() == automatic && transferIdle(state);
+                }, states) ||
+            !apply(coordinator, 0, {
+                {QStringLiteral("type"), QStringLiteral("invoke")},
+                {QStringLiteral("id"), QStringLiteral("reopen-save-") + mode},
+                {QStringLiteral("control"), QStringLiteral("session.save")},
+                {QStringLiteral("operation"), QStringLiteral("click")},
+            }) || !waitForAll(coordinator, QStringLiteral("saved project before reopening"),
+                [](std::size_t peer, const QJsonObject& state) {
+                    const QJsonObject content = state.value(QStringLiteral("content")).toObject();
+                    return peer != 0 || (!content.value(QStringLiteral("unsaved_changes")).toBool() &&
+                        content.value(QStringLiteral("file_tasks_active")).toInt() == 0 && transferIdle(state));
+                }, states)) return 1;
+        const QString oldPath = states[0].value(QStringLiteral("content")).toObject()
+            .value(QStringLiteral("project_path")).toString();
+        const QString projectFolder = QDir(coordinator.storageRoot(0)).absoluteFilePath(
+            QStringLiteral("songs/reopen-") + mode);
+        const QString openedPath = copySavedProject(oldPath, projectFolder);
+        if (openedPath.isEmpty()) {
+            fail(QStringLiteral("could not construct portable saved JamJar reopen fixture"));
+            return 1;
+        }
+        for (const QString& hash : reopenHashes) {
+            std::array<QString, FourPeerCoordinator::kPeerCount> paths;
+            for (std::size_t peer = 0; peer < states.size(); ++peer) {
+                const int index = assetIndex(states[peer], hash);
+                if (index < 0) return 1;
+                const QJsonObject content = states[peer].value(QStringLiteral("content")).toObject();
+                const QString storedPath = content.value(QStringLiteral("lane_paths")).toArray().at(index).toString();
+                paths[peer] = QFileInfo(storedPath).isAbsolute() ? storedPath
+                    : QDir(content.value(QStringLiteral("project_folder")).toString()).absoluteFilePath(storedPath);
+            }
+            if (!removeIsolatedCopies(coordinator, paths, 0)) return 1;
+        }
+        const auto openDialog = [&](const QString& id) {
+            return apply(coordinator, 0, {
+                {QStringLiteral("type"), QStringLiteral("invoke")},
+                {QStringLiteral("id"), id},
+                {QStringLiteral("control"), QStringLiteral("session.open")},
+                {QStringLiteral("operation"), QStringLiteral("click-async")},
+            });
+        };
+        if (automatic) {
+            if (!openDialog(QStringLiteral("reopen-cancel-open")) ||
+                !apply(coordinator, 0, {
+                    {QStringLiteral("type"), QStringLiteral("file.dialog.cancel")},
+                    {QStringLiteral("id"), QStringLiteral("reopen-cancel")},
+                })) return 1;
+            const auto cancelled = snapshot(coordinator.peer(0), 1, 0);
+            if (!cancelled || cancelled->value(QStringLiteral("content")).toObject()
+                    .value(QStringLiteral("project_path")).toString() != oldPath) {
+                fail(QStringLiteral("cancelling Open must retain the current workspace"));
+                return 1;
+            }
+        }
+        if (!openDialog(QStringLiteral("reopen-open-") + mode)) return 1;
+        if (!send(coordinator.peer(0), {
+                {QStringLiteral("type"), QStringLiteral("file.dialog.select")},
+                {QStringLiteral("id"), QStringLiteral("reopen-invalid-selection-") + mode},
+                {QStringLiteral("path"), QDir(projectFolder).absoluteFilePath(QStringLiteral("missing.jamjar"))},
+            }) || !receive(coordinator.peer(0), QStringLiteral("command_rejected")) ||
+            !apply(coordinator, 0, {
+                {QStringLiteral("type"), QStringLiteral("file.dialog.select")},
+                {QStringLiteral("id"), QStringLiteral("reopen-select-") + mode},
+                {QStringLiteral("path"), openedPath},
+            }) || !waitForAll(coordinator, QStringLiteral("opened saved JamJar during active jam"),
+                [&openedPath](std::size_t peer, const QJsonObject& state) {
+                    const QJsonObject jam = state.value(QStringLiteral("jam")).toObject();
+                    return jam.value(QStringLiteral("remote_peer_count")).toInt() == 3 &&
+                        jam.value(QStringLiteral("active_remote_peer_count")).toInt() == 3 &&
+                        jam.value(QStringLiteral("network_running")).toBool() &&
+                        jam.value(QStringLiteral("failure")).toString().isEmpty() &&
+                        transferIdle(state) && (peer != 0 ||
+                        state.value(QStringLiteral("content")).toObject()
+                            .value(QStringLiteral("project_path")).toString() == openedPath) &&
+                        state.value(QStringLiteral("content")).toObject()
+                            .value(QStringLiteral("file_tasks_active")).toInt() == 0;
+                }, states)) return 1;
+        if (!automatic && !apply(coordinator, 0, {
+                {QStringLiteral("type"), QStringLiteral("invoke")},
+                {QStringLiteral("id"), QStringLiteral("reopen-share-manual")},
+                {QStringLiteral("control"), QStringLiteral("looper.share-now")},
+                {QStringLiteral("operation"), QStringLiteral("click")},
+            })) return 1;
+        if (!waitForAll(coordinator, QStringLiteral("saved relative WAVs reach all four peers: ") + mode,
+                [&reopenHashes, &stableLaneOrder](std::size_t, const QJsonObject& state) {
+                    if (state.value(QStringLiteral("content")).toObject()
+                            .value(QStringLiteral("lane_ids")).toArray() != stableLaneOrder) return false;
+                    for (const QString& hash : reopenHashes) {
+                        if (!assetReady(state, hash, true)) return false;
+                    }
+                    return true;
+                }, states)) return 1;
+        for (const QString& hash : reopenHashes) {
+            if (!verifyAssetFiles(states, hash)) return 1;
+        }
+    }
+
+    const QString reopenedRoot = states[0].value(QStringLiteral("content")).toObject()
+        .value(QStringLiteral("project_folder")).toString();
+    const int recordingIndex = activeBankLaneCount(states[0]);
+    const auto invokeCreator = [&](const QString& id, const QString& control,
+                                   const QString& operation, QJsonValue value = {}) {
+        return apply(coordinator, 0, {
+            {QStringLiteral("type"), QStringLiteral("invoke")},
+            {QStringLiteral("id"), id},
+            {QStringLiteral("control"), control},
+            {QStringLiteral("operation"), operation},
+            {QStringLiteral("value"), value},
+        });
+    };
+    if (recordingIndex < 0 || !apply(coordinator, 0, policyCommand(
+            QStringLiteral("reopen-record-auto"), QStringLiteral("full"))) ||
+        !invokeCreator(QStringLiteral("reopen-record-add"), QStringLiteral("looper.lane.add-empty"),
+            QStringLiteral("click")) ||
+        !waitForAll(coordinator, QStringLiteral("new recording lane after reopening"),
+            [recordingIndex](std::size_t, const QJsonObject& state) {
+                return state.value(QStringLiteral("content")).toObject()
+                    .value(QStringLiteral("active_bank_lane_ids")).toArray().size() == recordingIndex + 1;
+            }, states)) return 1;
+    const QString recordingLaneId = states[0].value(QStringLiteral("content")).toObject()
+        .value(QStringLiteral("active_bank_lane_ids")).toArray().at(recordingIndex).toString();
+    if (!invokeCreator(QStringLiteral("reopen-record-arm-open"),
+            QStringLiteral("looper.lane.%1.arm").arg(recordingIndex), QStringLiteral("click-async")) ||
+        !invokeCreator(QStringLiteral("reopen-record-input"), QStringLiteral("looper.recording-dialog.mode"),
+            QStringLiteral("set-index"), 0) ||
+        !invokeCreator(QStringLiteral("reopen-record-arm"), QStringLiteral("looper.recording-dialog.arm"),
+            QStringLiteral("click")) ||
+        !invokeCreator(QStringLiteral("reopen-record-manual"), QStringLiteral("looper.recording.manual-stop"),
+            QStringLiteral("set-checked"), true) ||
+        !invokeCreator(QStringLiteral("reopen-record-count-in"), QStringLiteral("looper.recording.count-in"),
+            QStringLiteral("set-checked"), false) ||
+        !invokeCreator(QStringLiteral("reopen-record-start"), QStringLiteral("looper.recording.start-stop"),
+            QStringLiteral("click")) ||
+        !waitForAll(coordinator, QStringLiteral("recording in the opened workspace"),
+            [](std::size_t peer, const QJsonObject& state) {
+                return peer != 0 || state.value(QStringLiteral("content")).toObject()
+                    .value(QStringLiteral("lane_recording_local_phase")).toString() == QStringLiteral("recording");
+            }, states)) return 1;
+    const qint64 startFrame = states[0].value(QStringLiteral("performance")).toObject()
+        .value(QStringLiteral("engine_frame")).toInteger();
+    if (!waitForAll(coordinator, QStringLiteral("recorded fake input spans measurable frames"),
+            [startFrame](std::size_t peer, const QJsonObject& state) {
+                return peer != 0 || state.value(QStringLiteral("performance")).toObject()
+                    .value(QStringLiteral("engine_frame")).toInteger() >= startFrame + 24000;
+            }, states) ||
+        !invokeCreator(QStringLiteral("reopen-record-stop"), QStringLiteral("looper.recording.start-stop"),
+            QStringLiteral("click")) ||
+        !waitForAll(coordinator, QStringLiteral("new recording and old saved WAVs synchronize together"),
+            [&recordingLaneId, &reopenHashes](std::size_t, const QJsonObject& state) {
+                const QJsonObject content = state.value(QStringLiteral("content")).toObject();
+                const QJsonArray ids = content.value(QStringLiteral("lane_ids")).toArray();
+                for (const QString& hash : reopenHashes) {
+                    if (!assetReady(state, hash, true)) return false;
+                }
+                for (int index = 0; index < ids.size(); ++index) {
+                    if (ids.at(index).toString() == recordingLaneId) {
+                        const QString hash = content.value(QStringLiteral("asset_hashes")).toArray().at(index).toString();
+                        return hash.size() == 64 && assetReady(state, hash, true) &&
+                            !content.value(QStringLiteral("lane_recording_protected")).toBool();
+                    }
+                }
+                return false;
+            }, states)) return 1;
+    const QJsonObject recordedContent = states[0].value(QStringLiteral("content")).toObject();
+    const QJsonArray recordedIds = recordedContent.value(QStringLiteral("lane_ids")).toArray();
+    for (int index = 0; index < recordedIds.size(); ++index) {
+        if (recordedIds.at(index).toString() != recordingLaneId) continue;
+        const QString path = recordedContent.value(QStringLiteral("lane_paths")).toArray().at(index).toString();
+        const QString hash = recordedContent.value(QStringLiteral("asset_hashes")).toArray().at(index).toString();
+        if (!QDir::cleanPath(path).startsWith(QDir(reopenedRoot).absoluteFilePath(QStringLiteral("recorded/")),
+                Qt::CaseInsensitive) || !verifyAssetFiles(states, hash)) {
+            fail(QStringLiteral("new recording must be saved inside the opened project's recorded folder"));
+            return 1;
+        }
+    }
 
     if (!shutDown(coordinator) || !verifyNoPartialFiles(coordinator)) return 1;
     if (failures != 0) {

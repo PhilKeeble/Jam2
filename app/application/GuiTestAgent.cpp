@@ -24,6 +24,7 @@
 #include <QDir>
 #include <QEvent>
 #include <QFileDialog>
+#include <QFileInfo>
 #include <QHeaderView>
 #include <QJsonArray>
 #include <QLineEdit>
@@ -155,7 +156,8 @@ QJsonArray controlOperations(QObject* object)
     QJsonArray operations;
     if (const auto* button = qobject_cast<QAbstractButton*>(object)) {
         operations.push_back(QStringLiteral("click"));
-        if (jam2::gui::guiControlAvailability(*object) == QStringLiteral("modal")) {
+        if (jam2::gui::guiControlAvailability(*object) == QStringLiteral("modal") ||
+            jam2::gui::guiControlAvailability(*object) == QStringLiteral("file-dialog")) {
             operations.push_back(QStringLiteral("click-async"));
         }
         if (button->isCheckable()) operations.push_back(QStringLiteral("set-checked"));
@@ -749,6 +751,34 @@ void GuiTestAgent::handle(const QJsonObject& command)
         emitEvent(QStringLiteral("command_applied"), {
             {QStringLiteral("id"), command.value(QStringLiteral("id"))},
             {QStringLiteral("test_input"), testInput},
+        });
+        return;
+    }
+    if (type == QStringLiteral("file.dialog.select") || type == QStringLiteral("file.dialog.cancel")) {
+        const bool select = type == QStringLiteral("file.dialog.select");
+        const QString path = command.value(QStringLiteral("path")).toString();
+        if (!(select ? onlyFields(command, {"format", "type", "id", "path"})
+                     : onlyFields(command, {"format", "type", "id"})) ||
+            (select && (path.isEmpty() || path.toUtf8().size() > kMaximumCommandTextBytes ||
+                        !QDir::isAbsolutePath(path) || !QFileInfo(path).isFile()))) {
+            reject(command, QStringLiteral("file dialog selection is invalid"));
+            return;
+        }
+        auto* dialog = qobject_cast<QFileDialog*>(QApplication::activeModalWidget());
+        if (dialog == nullptr) {
+            reject(command, QStringLiteral("no file dialog is active"));
+            return;
+        }
+        if (select) {
+            dialog->setDirectory(QFileInfo(path).absolutePath());
+            dialog->selectFile(path);
+        }
+        if (!QMetaObject::invokeMethod(dialog, select ? "accept" : "reject", Qt::DirectConnection)) {
+            reject(command, QStringLiteral("could not complete file dialog"));
+            return;
+        }
+        emitEvent(QStringLiteral("command_applied"), {
+            {QStringLiteral("id"), command.value(QStringLiteral("id"))},
         });
         return;
     }
@@ -1405,6 +1435,7 @@ bool GuiTestAgent::invokeControl(
         }
         if (operation == QStringLiteral("click-async") &&
             (jam2::gui::guiControlAvailability(*button) == QStringLiteral("modal") ||
+             jam2::gui::guiControlAvailability(*button) == QStringLiteral("file-dialog") ||
              jam2::gui::guiControlAvailability(*button) ==
                  QStringLiteral("hardware-profile"))) {
             const QPointer<QAbstractButton> target(button);

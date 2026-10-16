@@ -12216,7 +12216,7 @@ void MainWindow::publishLocalTrackBatch(const QString& requestedBatchId)
             };
             tracks.append(track);
             batchHashes.insert(lane.assetHash);
-            trackOfferAssetPaths_.insert(lane.assetHash, lane.assetPath);
+            trackOfferAssetPaths_.insert(lane.assetHash, looperAssetAbsolutePath(lane));
             localTrackOffers_.insert(contributionId, track);
         }
     }
@@ -15622,6 +15622,9 @@ void MainWindow::openSong()
             jamStorage_.openSaved(path, validatedSong.title());
             projectPersistence_.setProjectLocation(path);
             projectPersistence_.initializeWorkspace(jamStorage_.rootFolder());
+            // Published file locations belong to the previous project root.
+            // Keep the live jam/session state while adopting this workspace.
+            trackOfferAssetPaths_.clear();
             if (!loadSongJson(*root)) {
                 QMessageBox::warning(
                     this, QStringLiteral("Jam2"), QStringLiteral("Invalid JamJar file."));

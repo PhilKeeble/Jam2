@@ -37,11 +37,7 @@ user preference schema keeps growing to account for odler profiles, make sure re
 Jack
 When switching from section A to B one person hears the old section, can switch who it is ut someone always does
 
-remove wav is deleting lane
-
 someitme jacks audio doesnt recover
-
-opened a jamjar already in a jam and the audio didnt sync over
 
 maybe look at bringing track seeking back in
 
@@ -59,7 +55,6 @@ Generate wav is saying 12 sections - Sections A-D, confusing
 
 Update.sh wasnt being clear that it was failing, make it easy for the user 
 
-stereo wav gets imported but cant be analysed - done i think
 loopback recording doesnt work on mac 
 
 
@@ -67,6 +62,8 @@ loopback recording doesnt work on mac
 
 - stretching time not affecting pitch 
 - delete wav on track only deleting the wav 
+- opening a jamjar during a jam and seeing if tracks sync 
+- check import of stereo wav and analysing it 
 
 
 
