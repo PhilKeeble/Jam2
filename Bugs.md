@@ -28,11 +28,7 @@ look into what python is left, cpp might still be calling some like the fuzzer
 
 need to make it fit better on smaller screens like the macbook neo
 
-in a jam it shows RTT but that is not actually taht useful, show the estimate time for instrument -> peer instead 
-- maybe have data show the breakdown of each part as well from data so people can see which settings are causing timing adds with real metrics
 
-
-Slowing down track changes down, not sur eit used to do taht
 ## Bugs
 
 user preference schema keeps growing to account for odler profiles, make sure removed before release
@@ -48,6 +44,8 @@ someitme jacks audio doesnt recover
 opened a jamjar already in a jam and the audio didnt sync over
 
 maybe look at bringing track seeking back in
+
+cant manually sync when auto is on - wanted it when open jamjar didnt sync
 
 ## Bugs - MacOS
 listening tools gets cut off by the tracks so you cant see it when its expanded 
@@ -65,9 +63,10 @@ stereo wav gets imported but cant be analysed - done i think
 loopback recording doesnt work on mac 
 
 
-## jamtaster
+# TEST
 
-
+- stretching time not affecting pitch 
+- delete wav on track only deleting the wav 
 
 
 

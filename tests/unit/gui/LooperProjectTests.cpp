@@ -236,8 +236,21 @@ void testValidatedLaneMutations()
             project.banks().at(0).lanes.at(0).loopEndFrame == -1,
         "a complete-source placement retains canonical crop sentinels");
 
+    LooperLane neighbor;
+    neighbor.id = QStringLiteral("neighbor-lane");
+    neighbor.name = QStringLiteral("Neighbor");
+    expect(project.appendLane(0, neighbor), "neighbor lane fixture is accepted");
     const QString retainedName = project.banks().at(0).lanes.at(0).name;
+    const int retainedLaneCount = project.banks().at(0).lanes.size();
+    const QString retainedId = project.banks().at(0).lanes.at(0).id;
+    const QJsonObject retainedOtherLane =
+        project.toJson().value(QStringLiteral("banks")).toArray().at(0).toObject()
+            .value(QStringLiteral("lanes")).toArray().at(1).toObject();
     expect(project.clearLaneAsset(0, 0) &&
+            project.banks().at(0).lanes.size() == retainedLaneCount &&
+            project.banks().at(0).lanes.at(0).id == retainedId &&
+            project.toJson().value(QStringLiteral("banks")).toArray().at(0).toObject()
+                .value(QStringLiteral("lanes")).toArray().at(1).toObject() == retainedOtherLane &&
             project.banks().at(0).lanes.at(0).assetPath.isEmpty() &&
             project.banks().at(0).lanes.at(0).assetHash.isEmpty() &&
             project.banks().at(0).lanes.at(0).sourceFrames == 0 &&
@@ -246,7 +259,7 @@ void testValidatedLaneMutations()
             project.banks().at(0).lanes.at(0).muted &&
             project.banks().at(0).lanes.at(0).solo &&
             project.banks().at(0).lanes.at(0).name == retainedName,
-        "clearing WAV ownership preserves track name, mixer state, and placement start");
+        "clearing WAV ownership preserves lane identity, order, other lanes, name, mixer state, and placement start");
     expect(project.clearLaneAsset(0, 0, true) &&
             project.banks().at(0).lanes.at(0).startFrame == 0 &&
             !project.clearLaneAsset(99, 0),

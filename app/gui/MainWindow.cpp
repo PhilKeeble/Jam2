@@ -10113,7 +10113,7 @@ void MainWindow::removeSelectedLooperLane()
         }
     }
     QMessageBox dialog(QMessageBox::Question, QStringLiteral("Remove lane"),
-        QStringLiteral("Remove '%1' from this section?").arg(lane.name), QMessageBox::Cancel, this);
+        QStringLiteral("Remove the lane or delete the WAV for '%1'?").arg(lane.name), QMessageBox::Cancel, this);
     QPushButton* removeOnly = dialog.addButton(QStringLiteral("Remove lane only"), QMessageBox::AcceptRole);
     QPushButton* deleteAsset = dialog.addButton(QStringLiteral("Delete WAV from disk"), QMessageBox::DestructiveRole);
     jam2::gui::registerGuiControl(
@@ -10144,8 +10144,12 @@ void MainWindow::removeSelectedLooperLane()
     } else if (references > 1) {
 
         dialog.setInformativeText(QStringLiteral(
+            "Deleting the WAV keeps this lane, its name and mixer settings. "
             "This WAV is referenced by %1 lanes. Deleting it from disk will leave the other references without audio.")
             .arg(references));
+    } else {
+        dialog.setInformativeText(QStringLiteral(
+            "Deleting the WAV keeps this lane, its name and mixer settings."));
     }
     dialog.exec();
     if (dialog.clickedButton() != removeOnly && dialog.clickedButton() != deleteAsset) {
@@ -10161,7 +10165,15 @@ void MainWindow::removeSelectedLooperLane()
             return;
         }
         validatedTrackAssetHashes_.remove(lane.assetHash);
+        if (!looperProject_.clearLaneAsset(bankIndex, row)) return;
+        cancelUnreferencedLooperAssetTransfer(lane.assetHash);
+        looperWaveformCache_.remove(assetPath);
         projectPersistence_.pruneEmptyWorkspaceDirectories();
+        selectedLooperLane_ = row;
+        refreshLooperLanes();
+        regeneratePreparedMix();
+        syncLooperArrangement();
+        return;
     }
     const bool armedInBank = trackRecordingWorkflow_.laneArmed() &&
         trackRecordingWorkflow_.armedBank() == bankIndex;

@@ -1305,6 +1305,108 @@ int main(int argc, char* argv[])
             return 1;
         }
     }
+    // The lane-removal dialog's Delete WAV action must delete only the attached
+    // file, retain the lane on all four peers, and preserve its local mix state.
+    const QString manualLaneControl = QStringLiteral("looper.lane.%1").arg(manualLaneIndex);
+    const auto invokeLane = [&](const QString& id, const QString& control,
+                                const QString& operation, QJsonValue value = {}) {
+        QJsonObject command{
+            {QStringLiteral("type"), QStringLiteral("invoke")},
+            {QStringLiteral("id"), id},
+            {QStringLiteral("control"), control},
+            {QStringLiteral("operation"), operation},
+        };
+        if (!value.isUndefined()) command.insert(QStringLiteral("value"), value);
+        return apply(coordinator, 2, std::move(command));
+    };
+    if (!invokeLane(QStringLiteral("delete-wav-set-gain"), manualLaneControl + QStringLiteral(".gain"),
+            QStringLiteral("set-value"), -9.0) ||
+        !invokeLane(QStringLiteral("delete-wav-set-mute"), manualLaneControl + QStringLiteral(".mute"),
+            QStringLiteral("click")) ||
+        !invokeLane(QStringLiteral("delete-wav-set-solo"), manualLaneControl + QStringLiteral(".solo"),
+            QStringLiteral("click"))) return 1;
+    std::array<QJsonObject, FourPeerCoordinator::kPeerCount> beforeDeleteViews;
+    std::array<QString, FourPeerCoordinator::kPeerCount> beforeDeletePaths;
+    for (std::size_t peer = 0; peer < states.size(); ++peer) {
+        const auto view = controlState(coordinator.peer(peer), manualDropControl,
+            QStringLiteral("before-delete-view-%1").arg(peer));
+        if (!view) return 1;
+        beforeDeleteViews[peer] = *view;
+        const int index = assetIndex(states[peer], manualWavHash);
+        beforeDeletePaths[peer] = states[peer].value(QStringLiteral("content")).toObject()
+            .value(QStringLiteral("lane_paths")).toArray().at(index).toString();
+    }
+    if (!invokeLane(QStringLiteral("delete-wav-open-cancel"), manualLaneControl + QStringLiteral(".remove"),
+            QStringLiteral("click-async")) ||
+        !invokeLane(QStringLiteral("delete-wav-cancel"), QStringLiteral("looper.lane-remove-dialog.cancel"),
+            QStringLiteral("click")) ||
+        !waitForAll(coordinator, QStringLiteral("cancelled disk deletion preserves WAV and lane"),
+            [&manualWavHash, &beforeRemoveLaneIds](std::size_t, const QJsonObject& state) {
+                return assetReady(state, manualWavHash, true) &&
+                    state.value(QStringLiteral("content")).toObject()
+                        .value(QStringLiteral("lane_ids")).toArray() == beforeRemoveLaneIds;
+            }, states) || !verifyAssetFiles(states, manualWavHash)) return 1;
+    if (!invokeLane(QStringLiteral("delete-wav-open"), manualLaneControl + QStringLiteral(".remove"),
+            QStringLiteral("click-async"))) return 1;
+    const auto deleteButton = controlState(coordinator.peer(2),
+        QStringLiteral("looper.lane-remove-dialog.delete-wav"), QStringLiteral("delete-wav-action"));
+    if (!deleteButton || !deleteButton->value(QStringLiteral("enabled")).toBool()) {
+        fail(QStringLiteral("Delete WAV from disk must be enabled for the attached test WAV"));
+        return 1;
+    }
+    if (!invokeLane(QStringLiteral("delete-wav-confirm"), QStringLiteral("looper.lane-remove-dialog.delete-wav"),
+            QStringLiteral("click"))) return 1;
+    const auto deletedState = snapshot(coordinator.peer(2), 3, 0);
+    if (!deletedState || deletedState->value(QStringLiteral("content")).toObject()
+            .value(QStringLiteral("lane_ids")).toArray() != beforeRemoveLaneIds ||
+        QFileInfo::exists(beforeDeletePaths[2])) {
+        fail(QStringLiteral("Delete WAV from disk must delete the file while retaining the exact lane order"));
+        return 1;
+    }
+    if (!waitForAll(coordinator, QStringLiteral("disk WAV deletion retains lanes on all four peers"),
+            [&manualWavHash, &beforeRemoveLaneIds, &beforeRemoveLaneNames, beforeRemoveLaneCount](
+                std::size_t, const QJsonObject& state) {
+                const QJsonObject content = state.value(QStringLiteral("content")).toObject();
+                return transferIdle(state) && assetCount(state, manualWavHash) == 0 &&
+                    content.value(QStringLiteral("lane_count")).toInt() == beforeRemoveLaneCount &&
+                    content.value(QStringLiteral("lane_ids")).toArray() == beforeRemoveLaneIds &&
+                    content.value(QStringLiteral("lane_names")).toArray() == beforeRemoveLaneNames;
+            }, states)) return 1;
+    for (std::size_t peer = 0; peer < states.size(); ++peer) {
+        const auto view = controlState(coordinator.peer(peer), manualDropControl,
+            QStringLiteral("after-delete-view-%1").arg(peer));
+        if (!view || view->value(QStringLiteral("has_wav")).toBool() ||
+            view->value(QStringLiteral("gain_db")) != beforeDeleteViews[peer].value(QStringLiteral("gain_db")) ||
+            view->value(QStringLiteral("muted")) != beforeDeleteViews[peer].value(QStringLiteral("muted")) ||
+            view->value(QStringLiteral("solo")) != beforeDeleteViews[peer].value(QStringLiteral("solo")) ||
+            view->value(QStringLiteral("armed")) != beforeDeleteViews[peer].value(QStringLiteral("armed"))) {
+            fail(QStringLiteral("WAV deletion must retain the lane's view and mix state"));
+            return 1;
+        }
+    }
+    // Restore the fixture for the subsequent transfer and portable-save checks.
+    if (!removeIsolatedCopies(coordinator, beforeDeletePaths, 2) ||
+        !invokeLane(QStringLiteral("delete-wav-restore-gain"), manualLaneControl + QStringLiteral(".gain"),
+            QStringLiteral("set-value"), 0.0) ||
+        !invokeLane(QStringLiteral("delete-wav-restore-mute"), manualLaneControl + QStringLiteral(".mute"),
+            QStringLiteral("click")) ||
+        !invokeLane(QStringLiteral("delete-wav-restore-solo"), manualLaneControl + QStringLiteral(".solo"),
+            QStringLiteral("click")) ||
+        !invokeLane(QStringLiteral("delete-wav-redrop"), manualDropControl,
+            QStringLiteral("drop-file"), manualWavPath) ||
+        !waitForAll(coordinator, QStringLiteral("disk-deleted lane accepts a replacement WAV"),
+            [&manualWavHash, &beforeRemoveLaneIds](std::size_t peer, const QJsonObject& state) {
+                return assetReady(state, manualWavHash, peer == 2) &&
+                    state.value(QStringLiteral("content")).toObject()
+                        .value(QStringLiteral("lane_ids")).toArray() == beforeRemoveLaneIds;
+            }, states) ||
+        !invokeLane(QStringLiteral("delete-wav-reshare"), QStringLiteral("looper.share-now"),
+            QStringLiteral("click")) ||
+        !waitForAll(coordinator, QStringLiteral("replacement WAV re-share after disk deletion"),
+            [&manualWavHash](std::size_t, const QJsonObject& state) {
+                return assetReady(state, manualWavHash, true);
+            }, states) || !verifyAssetFiles(states, manualWavHash)) return 1;
+
     if (!apply(coordinator, 0, policyCommand(
             QStringLiteral("wav-auto-restored"), QStringLiteral("full"))) ||
         !waitForAll(coordinator, QStringLiteral("automatic WAV policy restoration"),
