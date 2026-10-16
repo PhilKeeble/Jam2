@@ -27,6 +27,7 @@
 #include <QFileInfo>
 #include <QHeaderView>
 #include <QJsonArray>
+#include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
 #include <QMessageBox>
@@ -228,11 +229,37 @@ QJsonObject controlState(QObject* object)
     if (const auto* widget = qobject_cast<QWidget*>(object)) {
         state.insert(QStringLiteral("enabled"), widget->isEnabled());
         state.insert(QStringLiteral("visible"), widget->isVisible());
+        const QWidget* window = widget->window();
+        const QRect bounds(widget->mapTo(window, QPoint{}), widget->size());
+        state.insert(QStringLiteral("bounds"), QJsonObject{
+            {QStringLiteral("x"), bounds.x()}, {QStringLiteral("y"), bounds.y()},
+            {QStringLiteral("width"), bounds.width()},
+            {QStringLiteral("height"), bounds.height()},
+        });
+        state.insert(QStringLiteral("minimum_height"), widget->minimumSizeHint().height());
+        state.insert(QStringLiteral("minimum_width"), widget->minimumSizeHint().width());
+        bool unobscured = widget->isVisible() && !bounds.isEmpty();
+        for (const QWidget* ancestor = widget; unobscured && ancestor != nullptr;
+             ancestor = ancestor->isWindow() ? nullptr : ancestor->parentWidget()) {
+            unobscured = QRect(ancestor->mapTo(window, QPoint{}), ancestor->size())
+                .contains(bounds);
+        }
+        // Include composite-control children when checking the actual hit target.
+        const QRect interior = widget->rect().adjusted(2, 2, -2, -2);
+        for (const QPoint& point : {interior.topLeft(), interior.topRight(),
+                 interior.center(), interior.bottomLeft(), interior.bottomRight()}) {
+            if (!unobscured) break;
+            const QWidget* hit = window->childAt(widget->mapTo(window, point));
+            unobscured = hit != nullptr && (hit == widget || widget->isAncestorOf(hit));
+        }
+        state.insert(QStringLiteral("unobscured"), unobscured);
     }
     if (const auto* button = qobject_cast<QAbstractButton*>(object)) {
         state.insert(QStringLiteral("text"), boundedText(button->text()));
         state.insert(QStringLiteral("checkable"), button->isCheckable());
         if (button->isCheckable()) state.insert(QStringLiteral("checked"), button->isChecked());
+    } else if (const auto* label = qobject_cast<QLabel*>(object)) {
+        state.insert(QStringLiteral("text"), boundedText(label->text()));
     } else if (const auto* combo = qobject_cast<QComboBox*>(object)) {
         state.insert(QStringLiteral("index"), combo->currentIndex());
         state.insert(QStringLiteral("text"), boundedText(combo->currentText()));
@@ -591,6 +618,8 @@ void GuiTestAgent::handle(const QJsonObject& command)
                 {QStringLiteral("title"), boundedText(window_.windowTitle())},
                 {QStringLiteral("visible"), window_.isVisible()},
                 {QStringLiteral("enabled"), window_.isEnabled()},
+                {QStringLiteral("width"), window_.width()},
+                {QStringLiteral("height"), window_.height()},
                 {QStringLiteral("active_modal"), QApplication::activeModalWidget() != nullptr},
             });
             page.insert(QStringLiteral("jam"), window_.automationJamSnapshot());
@@ -630,6 +659,41 @@ void GuiTestAgent::handle(const QJsonObject& command)
         QPointer<MainWindow> window(&window_);
         QTimer::singleShot(0, this, [window] {
             if (window) window->close();
+        });
+        return;
+    }
+    if (type == QStringLiteral("window.resize")) {
+        int width = 0;
+        int height = 0;
+        if (!onlyFields(command, {"format", "type", "id", "width", "height"}) ||
+            !exactInteger(command.value(QStringLiteral("width")), 320, 8192, width) ||
+            !exactInteger(command.value(QStringLiteral("height")), 240, 8192, height)) {
+            reject(command, QStringLiteral("window.resize requires integer width/height within 320..8192/240..8192"));
+            return;
+        }
+        window_.resize(width, height);
+        emitEvent(QStringLiteral("command_applied"), {
+            {QStringLiteral("id"), command.value(QStringLiteral("id"))},
+            {QStringLiteral("width"), window_.width()},
+            {QStringLiteral("height"), window_.height()},
+        });
+        return;
+    }
+    if (type == QStringLiteral("widget.inspect")) {
+        const QString name = command.value(QStringLiteral("object_name")).toString();
+        if (!onlyFields(command, {"format", "type", "id", "object_name"}) ||
+            name.isEmpty() || name.size() > 128) {
+            reject(command, QStringLiteral("widget.inspect requires a bounded object_name"));
+            return;
+        }
+        const auto matches = window_.findChildren<QWidget*>(name);
+        if (matches.size() != 1) {
+            reject(command, QStringLiteral("widget object_name must identify exactly one widget"));
+            return;
+        }
+        emitEvent(QStringLiteral("command_applied"), {
+            {QStringLiteral("id"), command.value(QStringLiteral("id"))},
+            {QStringLiteral("state"), controlState(matches.first())},
         });
         return;
     }

@@ -217,6 +217,28 @@ The Track tab can:
 - Sync collaborative arrangement snapshots and missing managed WAV assets by content hash when Track Sync is enabled.
 - Use **Share Tracks** to explicitly reconcile all asset-backed local lanes with the jam.
 
+The coloured idea-action buttons adapt their padding, spacing, and text size to
+the available width. Chord, Beat, and Track headers stay on one row. At very
+narrow widths, labels use ellipsis with the full action name in a tooltip.
+The main view preserves the core chord display's size as window height changes.
+When its action tiles would crowd the visualiser, they form two rows to its
+right, with **Generate New Idea**, **Continue Idea**, and **Clear Idea** on the
+bottom row. The WAV generation indicator sits below both rows when wrapped,
+and below **Generate WAV** in its usual position when unwrapped.
+
+The Track view's **Listening Tools** and **Sharing** sections start collapsed to
+leave more room for lanes on smaller screens. Click either header to expand or
+collapse it independently. Open **Sharing** for its sync status, **Share with Jam
+Now**, and **Export...** controls.
+The armed recording panel and expanded tools keep their content height. The
+track lanes scroll within the remaining space, so they cannot cover those panels.
+If the window is too short to fit everything, the Track page also scrolls;
+opening tools or arming a track brings the relevant panel into view.
+
+The bottom mixer keeps its sections side by side. Its meters and
+sliders shorten as the window narrows, while gain values and **Monitor input**
+retain space for their text.
+
 Perform prepared-cache playback uses the engine's ASIO/CoreAudio output path. Imported PCM16 WAVs are resampled offline to the active project rate before Jam2 stores and prepares its managed copy.
 
 The Performance bank strip launches a bank. While Global Play is running, a

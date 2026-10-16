@@ -515,6 +515,7 @@ endif()
 
 add_executable(jam2_gui_widget_boundary_tests EXCLUDE_FROM_ALL
     unit/gui/GuiWidgetBoundaryTests.cpp
+    "${CMAKE_SOURCE_DIR}/app/gui/ActionTileRow.cpp"
     "${CMAKE_SOURCE_DIR}/app/gui/AudioDeviceUiSupport.cpp"
     "${CMAKE_SOURCE_DIR}/app/gui/BeatGridModel.cpp"
     "${CMAKE_SOURCE_DIR}/app/gui/BeatGridWidget.cpp"

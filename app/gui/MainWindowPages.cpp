@@ -1,6 +1,7 @@
 #include "MainWindowPages.hpp"
 
 #include "MainWindow.hpp"
+#include "ActionTileRow.hpp"
 
 #include "DetailSectionEdit.hpp"
 #include "GuiPresentation.hpp"
@@ -84,9 +85,9 @@ enum class IdeaHeaderAction {
     Details,
 };
 
-void styleIdeaHeaderAction(QPushButton* button, IdeaHeaderAction action)
+int styleIdeaHeaderAction(QPushButton* button, IdeaHeaderAction action)
 {
-    if (!button) return;
+    if (!button) return 0;
     QString outline;
     QString fill;
     QString hover;
@@ -123,13 +124,14 @@ void styleIdeaHeaderAction(QPushButton* button, IdeaHeaderAction action)
         width = 112;
         break;
     }
-    button->setFixedSize(width, 31);
+    button->setFont(jam2::gui::actionTileFont());
     button->setStyleSheet(QStringLiteral(
         "QPushButton { color:#f3e6cf;background:%1;border:1px solid %2;border-radius:4px;"
-        "padding:0 9px;font-family:Bahnschrift;font-size:9pt;font-weight:600;letter-spacing:0.45px; }"
+        "padding:0 9px; }"
         "QPushButton:hover { background:%3;border-color:%2; }"
         "QPushButton:pressed { background:#241c20;border-color:#ffd68e; }")
         .arg(fill, outline, hover));
+    return width;
 }
 
 class AnimatedBrandIcon final : public QWidget {
@@ -790,7 +792,7 @@ void MainWindowPages::build(MainWindow& w)
     transport->setObjectName(QStringLiteral("PerformanceTransport"));
     auto* transportLayout = new QHBoxLayout(transport);
     transportLayout->setContentsMargins(12, 8, 12, 8);
-    transportLayout->setSpacing(18);
+    transportLayout->setSpacing(12);
 
     auto* localStrip = new QWidget(transport);
     auto* localLayout = new QVBoxLayout(localStrip);
@@ -887,13 +889,14 @@ void MainWindowPages::build(MainWindow& w)
     w.selectedPeerGainSlider_->setRange(-60, 12);
     w.selectedPeerGainSlider_->setValue(0);
     w.selectedPeerGainSlider_->setEnabled(false);
-    w.selectedPeerGainSlider_->setMinimumWidth(240);
+    w.selectedPeerGainSlider_->setMinimumWidth(64);
     applyJamSliderStyle(w.selectedPeerGainSlider_);
     jam2::gui::registerGuiControl(
         *w.selectedPeerGainSlider_, QStringLiteral("performance.peer-gain"),
         QStringLiteral("performance.peer-mix"),
         jam2::gui::GuiControlAvailability::StateGated);
     w.selectedPeerGainLabel_ = new QLabel(QStringLiteral("+0.0 dB"), w.performancePeerControls_);
+    w.selectedPeerGainLabel_->setObjectName(QStringLiteral("PerformancePeerGainValue"));
     QObject::connect(w.selectedPeerGainSlider_, &QSlider::valueChanged, &w, [&w](int value) {
         w.applySelectedPeerGain(value);
     });
@@ -975,7 +978,7 @@ void MainWindowPages::build(MainWindow& w)
     clickLevelLabel->setObjectName(QStringLiteral("StripTitle"));
     clickLevelLabel->setFixedWidth(38);
     clickLevel->addWidget(clickLevelLabel);
-    w.metronomeLevelSlider_->setMinimumWidth(120);
+    w.metronomeLevelSlider_->setMinimumWidth(64);
     clickLevel->addWidget(w.metronomeLevelSlider_, 1);
     clickLevel->addWidget(w.mixMetronomeLevelLabel_);
     tempoLayout->addLayout(clickLevel);
@@ -1118,22 +1121,17 @@ QWidget* MainWindowPages::buildSongPage(MainWindow& w)
     registerChordAction(*reference, "generate-wav", "idea.reference-wav");
     registerChordAction(*jamTaster, "jam-taster", "idea.jam-taster");
     registerChordAction(*details, "details", "idea.details");
-    styleIdeaHeaderAction(generate, IdeaHeaderAction::Generate);
-    styleIdeaHeaderAction(browse, IdeaHeaderAction::Browse);
-    styleIdeaHeaderAction(continueIdea, IdeaHeaderAction::Continue);
-    styleIdeaHeaderAction(reference, IdeaHeaderAction::Wav);
-    styleIdeaHeaderAction(jamTaster, IdeaHeaderAction::Browse);
-    styleIdeaHeaderAction(details, IdeaHeaderAction::Details);
+    auto* ideaActions = new jam2::gui::ActionTileRow(page);
+    ideaActions->addButton(generate, styleIdeaHeaderAction(generate, IdeaHeaderAction::Generate));
+    ideaActions->addButton(browse, styleIdeaHeaderAction(browse, IdeaHeaderAction::Browse));
+    ideaActions->addButton(continueIdea, styleIdeaHeaderAction(continueIdea, IdeaHeaderAction::Continue));
+    ideaActions->addButton(reference, styleIdeaHeaderAction(reference, IdeaHeaderAction::Wav));
+    ideaActions->addButton(jamTaster, styleIdeaHeaderAction(jamTaster, IdeaHeaderAction::Browse));
+    ideaActions->addButton(details, styleIdeaHeaderAction(details, IdeaHeaderAction::Details));
     auto* top = new QHBoxLayout();
     addBankControls(w, page, top, false, "chords");
     top->addSpacing(12);
-    top->addWidget(generate);
-    top->addWidget(browse);
-    top->addWidget(continueIdea);
-    top->addWidget(reference);
-    top->addWidget(jamTaster);
-    top->addWidget(details);
-    top->addStretch(1);
+    top->addWidget(ideaActions, 1);
     top->addWidget(w.chordGrid_->createOverviewPagination(page));
     QObject::connect(generate, &QPushButton::clicked, &w, [&w] { w.generatePracticeIdea(); });
     QObject::connect(browse, &QPushButton::clicked, &w, [&w] { w.browseCuratedIdeas(); });
@@ -1231,22 +1229,17 @@ QWidget* MainWindowPages::buildBeatPage(MainWindow& w)
     registerBeatAction(*reference, "generate-wav", "idea.reference-wav");
     registerBeatAction(*jamTaster, "jam-taster", "idea.jam-taster");
     registerBeatAction(*details, "details", "idea.details");
-    styleIdeaHeaderAction(generate, IdeaHeaderAction::Generate);
-    styleIdeaHeaderAction(browse, IdeaHeaderAction::Browse);
-    styleIdeaHeaderAction(continueIdea, IdeaHeaderAction::Continue);
-    styleIdeaHeaderAction(reference, IdeaHeaderAction::Wav);
-    styleIdeaHeaderAction(jamTaster, IdeaHeaderAction::Browse);
-    styleIdeaHeaderAction(details, IdeaHeaderAction::Details);
+    auto* ideaActions = new jam2::gui::ActionTileRow(page);
+    ideaActions->addButton(generate, styleIdeaHeaderAction(generate, IdeaHeaderAction::Generate));
+    ideaActions->addButton(browse, styleIdeaHeaderAction(browse, IdeaHeaderAction::Browse));
+    ideaActions->addButton(continueIdea, styleIdeaHeaderAction(continueIdea, IdeaHeaderAction::Continue));
+    ideaActions->addButton(reference, styleIdeaHeaderAction(reference, IdeaHeaderAction::Wav));
+    ideaActions->addButton(jamTaster, styleIdeaHeaderAction(jamTaster, IdeaHeaderAction::Browse));
+    ideaActions->addButton(details, styleIdeaHeaderAction(details, IdeaHeaderAction::Details));
     auto* top = new QHBoxLayout();
     addBankControls(w, page, top, false, "beats");
     top->addSpacing(12);
-    top->addWidget(generate);
-    top->addWidget(browse);
-    top->addWidget(continueIdea);
-    top->addWidget(reference);
-    top->addWidget(jamTaster);
-    top->addWidget(details);
-    top->addStretch(1);
+    top->addWidget(ideaActions, 1);
     top->addWidget(w.beatGrid_->createOverviewPagination(page));
     auto* layout = new QVBoxLayout(page);
     layout->addLayout(top);
@@ -1262,7 +1255,16 @@ QWidget* MainWindowPages::buildBeatPage(MainWindow& w)
 
 QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
 {
-    auto* page = new QWidget(&w);
+    auto* pageScroll = new QScrollArea(&w);
+    pageScroll->setObjectName(QStringLiteral("TrackPageScroll"));
+    pageScroll->setWidgetResizable(true);
+    pageScroll->setFrameShape(QFrame::NoFrame);
+    auto* page = new QWidget();
+    const auto revealPanel = [pageScroll](QWidget* panel) {
+        QTimer::singleShot(0, pageScroll, [pageScroll, panel] {
+            if (panel->isVisible()) pageScroll->ensureWidgetVisible(panel, 0, 0);
+        });
+    };
     const auto registerTrack = [](
                                    QObject& control,
                                    const char* id,
@@ -1279,6 +1281,7 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
     };
     w.recordingContextFrame_ = new QFrame(page);
     w.recordingContextFrame_->setObjectName(QStringLiteral("RecordingContext"));
+    w.recordingContextFrame_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Minimum);
     w.recordingContextFrame_->setStyleSheet(QStringLiteral(
         "QFrame#RecordingContext { background: #15130f; border: 1px solid #986d36; border-radius: 3px; }"
         "QLabel#RecordingContextTitle { color: #fff1d5; font-size: 15px; font-weight: 600; }"
@@ -1590,16 +1593,18 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
         jam2::gui::GuiControlAvailability::Modal, "idea.header-action");
     registerTrack(*jamTasterButton, "idea.jam-taster", "idea.jam-taster",
         jam2::gui::GuiControlAvailability::StateGated, "idea.header-action");
-    styleIdeaHeaderAction(generateIdeaButton, IdeaHeaderAction::Generate);
-    styleIdeaHeaderAction(browseIdeasButton, IdeaHeaderAction::Browse);
-    styleIdeaHeaderAction(continueIdeaButton, IdeaHeaderAction::Continue);
-    styleIdeaHeaderAction(generateWavButton, IdeaHeaderAction::Wav);
-    styleIdeaHeaderAction(jamTasterButton, IdeaHeaderAction::Browse);
-    sectionRow->addWidget(generateIdeaButton);
-    sectionRow->addWidget(browseIdeasButton);
-    sectionRow->addWidget(continueIdeaButton);
-    sectionRow->addWidget(generateWavButton);
-    sectionRow->addWidget(jamTasterButton);
+    auto* ideaActions = new jam2::gui::ActionTileRow(page);
+    ideaActions->addButton(generateIdeaButton,
+        styleIdeaHeaderAction(generateIdeaButton, IdeaHeaderAction::Generate));
+    ideaActions->addButton(browseIdeasButton,
+        styleIdeaHeaderAction(browseIdeasButton, IdeaHeaderAction::Browse));
+    ideaActions->addButton(continueIdeaButton,
+        styleIdeaHeaderAction(continueIdeaButton, IdeaHeaderAction::Continue));
+    ideaActions->addButton(generateWavButton,
+        styleIdeaHeaderAction(generateWavButton, IdeaHeaderAction::Wav));
+    ideaActions->addButton(jamTasterButton,
+        styleIdeaHeaderAction(jamTasterButton, IdeaHeaderAction::Browse));
+    sectionRow->addWidget(ideaActions, 1);
     QObject::connect(generateIdeaButton, &QPushButton::clicked, &w, [&w] {
         w.generatePracticeIdea();
     });
@@ -1615,7 +1620,6 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
     QObject::connect(jamTasterButton, &QPushButton::clicked, &w, [&w] {
         w.showJamTasterDialog();
     });
-    sectionRow->addStretch(1);
     w.launchBankButton_ = new QPushButton(QStringLiteral("Queue Section"), page);
     registerTrack(*w.launchBankButton_, "section.queue", "looper.arrangement-playback");
     QObject::connect(w.launchBankButton_, &QPushButton::clicked, &w, [&w] {
@@ -1642,7 +1646,12 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
     loopRow->addStretch(1);
     loopRow->addWidget(loopOptionsControl);
 
-    auto* listeningGroup = new QWidget(page);
+    auto* toolsGroup = new QWidget(page);
+    toolsGroup->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Minimum);
+    auto* toolsLayout = new QVBoxLayout(toolsGroup);
+    toolsLayout->setContentsMargins(0, 0, 0, 0);
+    auto* listeningGroup = new QWidget(toolsGroup);
+    listeningGroup->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Minimum);
     auto* listeningContent = new QWidget(listeningGroup);
     listeningContent->setLayout(form);
     listeningContent->hide();
@@ -1664,17 +1673,38 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
     listeningLayout->addWidget(listeningToggle);
     listeningLayout->addWidget(listeningContent);
     QObject::connect(listeningToggle, &QPushButton::clicked, listeningGroup,
-        [listeningContent, setListeningToggleText] {
+        [toolsGroup, listeningContent, setListeningToggleText, revealPanel] {
             const bool open = !listeningContent->isVisible();
             listeningContent->setVisible(open);
             setListeningToggleText(open);
+            if (open) revealPanel(toolsGroup);
         });
 
-    auto* sharingGroup = new QGroupBox(QStringLiteral("Sharing"), page);
+    auto* sharingGroup = new QWidget(toolsGroup);
     sharingGroup->setObjectName(QStringLiteral("TrackSharingCard"));
-    auto* sharingLayout = new QHBoxLayout(sharingGroup);
+    sharingGroup->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Minimum);
+    auto* sharingGroupLayout = new QVBoxLayout(sharingGroup);
+    sharingGroupLayout->setContentsMargins(0, 0, 0, 0);
+    sharingGroupLayout->setSpacing(0);
+    auto* sharingToggle = new QPushButton(sharingGroup);
+    registerTrack(*sharingToggle, "sharing-tools", "looper.sharing-tools");
+    sharingToggle->setCheckable(true);
+    sharingToggle->setStyleSheet(listeningToggle->styleSheet());
+    sharingToggle->setText(QStringLiteral("\u25b8  SHARING"));
+    auto* sharingContent = new QWidget(sharingGroup);
+    auto* sharingLayout = new QHBoxLayout(sharingContent);
+    sharingContent->hide();
+    sharingGroupLayout->addWidget(sharingToggle);
+    sharingGroupLayout->addWidget(sharingContent);
+    QObject::connect(sharingToggle, &QPushButton::toggled, sharingGroup,
+        [toolsGroup, sharingToggle, sharingContent, revealPanel](bool open) {
+            sharingContent->setVisible(open);
+            sharingToggle->setText(QStringLiteral("%1  SHARING")
+                .arg(open ? QStringLiteral("\u25be") : QStringLiteral("\u25b8")));
+            if (open) revealPanel(toolsGroup);
+        });
     w.trackSharingStatusLabel_ = new QLabel(
-        QStringLiteral("LANES: SYNCED  ·  WAVS: AUTOMATIC"), sharingGroup);
+        QStringLiteral("LANES: SYNCED  ·  WAVS: AUTOMATIC"), sharingContent);
     w.trackSharingStatusLabel_->setObjectName(QStringLiteral("TrackSharingStatus"));
     sharingLayout->addWidget(w.trackSharingStatusLabel_, 1);
     sharingLayout->addWidget(w.shareTracksButton_);
@@ -1687,13 +1717,17 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
         w.exportLooperAudio();
     });
     sharingLayout->addWidget(exportButton);
+    toolsLayout->addWidget(listeningGroup);
+    toolsLayout->addWidget(sharingGroup);
 
     auto* laneScroll = new QScrollArea(page);
     laneScroll->setWidgetResizable(true);
     laneScroll->setFrameShape(QFrame::NoFrame);
     laneScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
-    laneScroll->setMinimumHeight(280);
-    laneScroll->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    // Let lanes yield space while keeping one lane's controls usable. If the
+    // panels still cannot fit, the page scrolls instead of compressing text.
+    laneScroll->setMinimumHeight(180);
+    laneScroll->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Ignored);
     laneScroll->setWidget(w.looperStack_);
 
     const auto applyTimelineZoom = [laneScroll, fitTimelineButton, zoomOutButton, zoomInButton, &w](int level) {
@@ -1714,12 +1748,13 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
         });
 
     auto* layout = new QVBoxLayout(page);
+    layout->setSizeConstraint(QLayout::SetMinimumSize);
     layout->addLayout(sectionRow);
     layout->addLayout(loopRow);
     layout->addWidget(w.recordingContextFrame_);
     layout->addWidget(laneScroll, 1);
-    layout->addWidget(listeningGroup);
-    layout->addWidget(sharingGroup);
+    layout->addWidget(toolsGroup);
+    pageScroll->setWidget(page);
 
     QObject::connect(w.trackSpeedSlider_, &QSlider::valueChanged, &w, [&w](int value) {
         const double speed = static_cast<double>(value) / 100.0;
@@ -1865,7 +1900,7 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
     };
     w.looperStack_->onMute = [&w](int lane) { if (!w.sharedRecordingProtected()) { w.selectedLooperLane_ = lane; w.toggleSelectedLooperLaneMute(); } };
     w.looperStack_->onSolo = [&w](int lane) { if (!w.sharedRecordingProtected()) { w.selectedLooperLane_ = lane; w.toggleSelectedLooperLaneSolo(); } };
-    w.looperStack_->onArm = [&w](int lane) {
+    w.looperStack_->onArm = [&w, revealPanel](int lane) {
         if (w.sharedRecordingProtected()) return;
         w.selectedLooperLane_ = lane;
         if (w.trackRecordingWorkflow_.laneArmedAt(w.viewedBankIndex_, lane)) {
@@ -1875,7 +1910,7 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
             w.appendLog(QStringLiteral("disarmed lane recording"));
             return;
         }
-        (void)w.armSelectedLooperLaneRecording();
+        if (w.armSelectedLooperLaneRecording()) revealPanel(w.recordingContextFrame_);
     };
     w.looperStack_->onRename = [&w](int lane) { if (!w.sharedRecordingProtected()) { w.selectedLooperLane_ = lane; w.renameSelectedLooperLane(); } };
     w.looperStack_->onRemove = [&w](int lane) { if (!w.sharedRecordingProtected()) { w.selectedLooperLane_ = lane; w.removeSelectedLooperLane(); } };
@@ -1892,7 +1927,7 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
     w.regeneratePreparedMix();
     w.syncLooperArrangement();
 
-    return page;
+    return pageScroll;
 }
 
 void MainWindowPages::addBankControls(
@@ -2364,17 +2399,18 @@ void MainWindowPages::buildAudioControls(MainWindow& w)
         auto* label = new QLabel(text, page);
         label->setFrameShape(QFrame::StyledPanel);
         label->setAlignment(Qt::AlignCenter);
-        label->setMinimumWidth(82);
+        label->ensurePolished();
+        label->setMinimumWidth(qMax(label->fontMetrics().horizontalAdvance(QStringLiteral("-60.0 dB")),
+            label->fontMetrics().horizontalAdvance(QStringLiteral("+12.0 dB"))) + 12);
+        label->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Fixed);
         return label;
     };
     auto makeRow = [page](const QString& name, QSlider* slider, QLabel* valueLabel) {
         auto* row = new QWidget(page);
         auto* rowLayout = new QHBoxLayout(row);
         rowLayout->setContentsMargins(0, 0, 0, 0);
-        rowLayout->setSpacing(10);
-        auto* nameLabel = new QLabel(name, row);
-        nameLabel->setMinimumWidth(120);
-        rowLayout->addWidget(nameLabel);
+        rowLayout->setSpacing(6);
+        if (!name.isEmpty()) rowLayout->addWidget(new QLabel(name, row));
         rowLayout->addWidget(slider, 1);
         rowLayout->addWidget(valueLabel);
         return row;
@@ -2383,9 +2419,8 @@ void MainWindowPages::buildAudioControls(MainWindow& w)
         auto* row = new QWidget(page);
         auto* rowLayout = new QHBoxLayout(row);
         rowLayout->setContentsMargins(0, 0, 0, 0);
-        rowLayout->setSpacing(10);
+        rowLayout->setSpacing(6);
         auto* nameLabel = new QLabel(name, row);
-        nameLabel->setMinimumWidth(120);
         rowLayout->addWidget(nameLabel);
         rowLayout->addWidget(meter, 1);
         if (valueLabel != nullptr) {
@@ -2401,18 +2436,26 @@ void MainWindowPages::buildAudioControls(MainWindow& w)
     w.mixInputMeter_ = new LevelMeterWidget(page);
     w.mixOutputMeter_ = new LevelMeterWidget(page);
     w.mixRemotePeerMeter_ = new LevelMeterWidget(page);
+    w.mixInputMeter_->setObjectName(QStringLiteral("PerformanceInputMeter"));
+    w.mixOutputMeter_->setObjectName(QStringLiteral("PerformanceOutputMeter"));
+    w.mixRemotePeerMeter_->setObjectName(QStringLiteral("PerformancePeerMeter"));
+    for (auto* meter : {w.mixInputMeter_, w.mixOutputMeter_, w.mixRemotePeerMeter_}) {
+        meter->setMinimumWidth(48);
+    }
     w.mixOutputClipLabel_ = makeValueLabel(QStringLiteral("clip 0"));
+    w.mixOutputClipLabel_->setObjectName(QStringLiteral("PerformanceClipValue"));
 
     w.mixSendLevelSlider_ = new QSlider(Qt::Horizontal, page);
     w.mixSendLevelSlider_->setRange(-60, 12);
     w.mixSendLevelSlider_->setValue(0);
     applyJamSliderStyle(w.mixSendLevelSlider_);
-    w.mixSendLevelSlider_->setMinimumWidth(220);
+    w.mixSendLevelSlider_->setMinimumWidth(64);
     w.mixSendLevelSlider_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     jam2::gui::registerGuiControl(
         *w.mixSendLevelSlider_, QStringLiteral("performance.send-level"),
         QStringLiteral("performance.local-mix"));
     w.mixSendLevelLabel_ = makeValueLabel(QStringLiteral("+0.0 dB"));
+    w.mixSendLevelLabel_->setObjectName(QStringLiteral("PerformanceSendValue"));
 
     w.mixMonitorCheck_ = new QCheckBox(QStringLiteral("Monitor input"), page);
     w.mixMonitorCheck_->setChecked(false);
@@ -2423,7 +2466,7 @@ void MainWindowPages::buildAudioControls(MainWindow& w)
     w.mixMonitorLevelSlider_->setRange(-60, 12);
     w.mixMonitorLevelSlider_->setValue(0);
     applyJamSliderStyle(w.mixMonitorLevelSlider_);
-    w.mixMonitorLevelSlider_->setMinimumWidth(220);
+    w.mixMonitorLevelSlider_->setMinimumWidth(64);
     w.mixMonitorLevelSlider_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     jam2::gui::registerGuiControl(
         *w.mixMonitorLevelSlider_, QStringLiteral("performance.monitor-level"),
@@ -2431,12 +2474,13 @@ void MainWindowPages::buildAudioControls(MainWindow& w)
         jam2::gui::GuiControlAvailability::StateGated);
 
     w.mixMonitorLevelLabel_ = makeValueLabel(QStringLiteral("+0.0 dB"));
+    w.mixMonitorLevelLabel_->setObjectName(QStringLiteral("PerformanceMonitorValue"));
 
     w.metronomeLevelSlider_ = new QSlider(Qt::Horizontal, page);
     w.metronomeLevelSlider_->setRange(-60, 12);
     w.metronomeLevelSlider_->setValue(-10);
     applyJamSliderStyle(w.metronomeLevelSlider_);
-    w.metronomeLevelSlider_->setMinimumWidth(220);
+    w.metronomeLevelSlider_->setMinimumWidth(64);
     w.metronomeLevelSlider_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     jam2::gui::registerGuiControl(
         *w.metronomeLevelSlider_, QStringLiteral("performance.metronome-level"),
@@ -2444,18 +2488,20 @@ void MainWindowPages::buildAudioControls(MainWindow& w)
     w.localMetronomeLevelSlider_ = w.metronomeLevelSlider_;
     w.mixMetronomeLevelSlider_ = w.metronomeLevelSlider_;
     w.mixMetronomeLevelLabel_ = makeValueLabel(QStringLiteral("-10.0 dB"));
+    w.mixMetronomeLevelLabel_->setObjectName(QStringLiteral("PerformanceMetronomeValue"));
 
     w.masterOutputLevelSlider_ = new QSlider(Qt::Horizontal, page);
     w.masterOutputLevelSlider_->setRange(-60, 12);
     w.masterOutputLevelSlider_->setValue(0);
     applyJamSliderStyle(w.masterOutputLevelSlider_);
-    w.masterOutputLevelSlider_->setMinimumWidth(240);
+    w.masterOutputLevelSlider_->setMinimumWidth(64);
     w.masterOutputLevelSlider_->setSizePolicy(
         QSizePolicy::Expanding, QSizePolicy::Fixed);
     jam2::gui::registerGuiControl(
         *w.masterOutputLevelSlider_, QStringLiteral("performance.master-output-level"),
         QStringLiteral("performance.master-output"));
     w.masterOutputLevelLabel_ = makeValueLabel(QStringLiteral("+0.0 dB"));
+    w.masterOutputLevelLabel_->setObjectName(QStringLiteral("PerformanceMasterOutputValue"));
 
     w.mixLocalInputSection_ = makeSectionLabel(QStringLiteral("Local input"));
     w.mixInputMeterRow_ = makeMeterRow(QStringLiteral("Input"), w.mixInputMeter_);
@@ -2467,12 +2513,9 @@ void MainWindowPages::buildAudioControls(MainWindow& w)
     w.mixMonitorEnableRow_ = new QWidget(page);
     auto* monitorEnableLayout = new QHBoxLayout(w.mixMonitorEnableRow_);
     monitorEnableLayout->setContentsMargins(0, 0, 0, 0);
-    monitorEnableLayout->setSpacing(10);
-    auto* monitorName = new QLabel(QStringLiteral("Monitoring"), w.mixMonitorEnableRow_);
-    monitorName->setMinimumWidth(120);
-    monitorEnableLayout->addWidget(monitorName);
-    monitorEnableLayout->addWidget(w.mixMonitorCheck_, 1);
-    w.mixMonitorRow_ = makeRow(QStringLiteral("Monitor"), w.mixMonitorLevelSlider_, w.mixMonitorLevelLabel_);
+    monitorEnableLayout->setSpacing(6);
+    monitorEnableLayout->addWidget(w.mixMonitorCheck_);
+    w.mixMonitorRow_ = makeRow(QString{}, w.mixMonitorLevelSlider_, w.mixMonitorLevelLabel_);
     layout->addWidget(w.mixMonitorEnableRow_);
     layout->addWidget(w.mixMonitorRow_);
 

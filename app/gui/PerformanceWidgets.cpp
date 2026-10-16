@@ -1,9 +1,11 @@
 #include "PerformanceWidgets.hpp"
+#include "ActionTileRow.hpp"
 
 #include "GuiPresentation.hpp"
 #include "GuiTheme.hpp"
 
 #include <QFontMetricsF>
+#include <QHelpEvent>
 #include <QKeyEvent>
 #include <QLinearGradient>
 #include <QMenu>
@@ -16,6 +18,7 @@
 #include <QRegion>
 #include <QResizeEvent>
 #include <QThreadPool>
+#include <QToolTip>
 #include <QWheelEvent>
 
 #include <algorithm>
@@ -1611,7 +1614,6 @@ void PerformanceHomeWidget::paintHtmlStage()
                 lyrics.second, Qt::ElideRight, lyricsHitRect_.width() - 28));
     }
 
-    paintGenerationActions(painter, 17, width() - margin);
     const int previewGap = 8;
     const int previewHeight = beatPreviewVisible_
         ? qBound(160, height() / 3, 260)
@@ -1624,19 +1626,15 @@ void PerformanceHomeWidget::paintHtmlStage()
     const int previewWidth = qMax(
         180,
         (previewRight - previewLeft - previewGap) / 2);
+    const auto visual = chordVisualLayout(previewTop, true);
+    paintGenerationActions(painter, 17, width() - margin,
+        chordPreviewVisible_ ? visual.exclusion : QRect{});
 
     chordHitRect_ = {};
     chordRunwayRect_ = {};
     if (chordPreviewVisible_) {
-    const double orbitCenterY = qBound(
-        150.0,
-        static_cast<double>(previewTop - 210),
-        height() * 0.40);
-    const QPointF orbitCenter(width() * 0.50, orbitCenterY);
-    const double orbitRadius = qBound(
-        128.0,
-        qMin(width() * 0.16, qMax(128.0, (previewTop - 96.0) * 0.46)),
-        175.0);
+    const double orbitRadius = visual.radius;
+    const QPointF orbitCenter = visual.center;
 
     painter.setBrush(Qt::NoBrush);
     painter.setPen(QPen(QColor(102, 212, 207, 30), 18));
@@ -1751,7 +1749,8 @@ void PerformanceHomeWidget::paintHtmlStage()
     painter.drawText(
         chordHitRect_.adjusted(0, 25, 0, 0),
         Qt::AlignHCenter | Qt::AlignTop,
-        QStringLiteral("CURRENT CHORD"));
+        QFontMetrics(lensLabel).elidedText(QStringLiteral("CURRENT CHORD"),
+            Qt::ElideRight, lensDiameter - 12));
 
     const QString currentChord = chordAt(position);
     QFont chordFont(QStringLiteral("Georgia"));
@@ -1817,13 +1816,18 @@ void PerformanceHomeWidget::paintHtmlStage()
     }
 
     const QVector<QPair<QString, QString>> upcoming = upcomingChords(position);
-    const int runwayWidth = qMin(500, qMax(390, width() / 2));
     constexpr int runwayHeight = 60;
-    const int runwayTop = qMin(
-        previewTop - runwayHeight - 8,
-        chordHitRect_.bottom() + 17);
+    const bool sideRunway = chordHitRect_.bottom() + 17 + runwayHeight + 8 > previewTop;
+    const int runwayLeft = sideRunway ? chordHitRect_.right() + 18
+        : static_cast<int>(orbitCenter.x()) - qMin(500, qMax(390, width() / 2)) / 2;
+    const int runwayWidth = sideRunway ? qMax(0, qMin(500, width() - margin - runwayLeft))
+        : qMin(500, qMax(390, width() / 2));
+    const int runwayTop = sideRunway
+        ? qMax(static_cast<int>(orbitCenter.y()) - runwayHeight / 2,
+            wavGenerationStatusRect_.isEmpty() ? 0 : wavGenerationStatusRect_.bottom() + 8)
+        : chordHitRect_.bottom() + 17;
     chordRunwayRect_ = QRect(
-        static_cast<int>(orbitCenter.x() - runwayWidth / 2.0),
+        runwayLeft,
         runwayTop,
         runwayWidth,
         runwayHeight);
@@ -2128,22 +2132,20 @@ void PerformanceHomeWidget::paintEvent(QPaintEvent*)
             lyrics.second);
     }
 
-    paintGenerationActions(painter, 18, width() - margin);
     const int previewGap = 14;
     const int previewHeight = beatPreviewVisible_
         ? qBound(150, height() / 3, 320)
         : 0;
     const int previewTop = height() - margin - previewHeight;
     const int previewWidth = (width() - margin * 2 - previewGap) / 2;
+    const auto visual = chordVisualLayout(previewTop, false);
+    paintGenerationActions(painter, 18, width() - margin,
+        chordPreviewVisible_ ? visual.exclusion : QRect{});
     chordHitRect_ = {};
     chordRunwayRect_ = {};
     if (chordPreviewVisible_) {
-    const QPointF orbitCenter(
-        width() * 0.50,
-        (170.0 + static_cast<double>(previewTop)) / 2.0);
-    const double orbitRadius = qMin(
-        width() * 0.20,
-        qMax(70.0, (static_cast<double>(previewTop) - 178.0) * 0.47));
+    const QPointF orbitCenter = visual.center;
+    const double orbitRadius = visual.radius;
     painter.setPen(QPen(QColor(203, 176, 220, 55), 1));
     painter.setBrush(Qt::NoBrush);
     painter.drawEllipse(orbitCenter, orbitRadius * 1.18, orbitRadius * 1.18);
@@ -2253,12 +2255,15 @@ void PerformanceHomeWidget::paintEvent(QPaintEvent*)
 
     jamRecordingHitRect_ = QRect(margin, 118, 132, 48);
     paintJamRecordingButton(painter, jamRecordingHitRect_);
-    peerRailRect_ = QRect(
-        jamRecordingHitRect_.right() + 8,
-        118,
-        qMax(0, qMin(width() - margin - jamRecordingHitRect_.right() - 8, 1080)),
-        48);
-    paintPeerRail(painter, peerRailRect_);
+    peerRailRect_ = QRect(jamRecordingHitRect_.right() + 8, 118,
+        qMax(0, qMin(width() - margin - jamRecordingHitRect_.right() - 8, 1080)), 48);
+    if (peerRailRect_.intersects(chordHitRect_)) {
+        peerRailRect_ = QRect(margin, jamRecordingHitRect_.bottom() + 8, 112,
+            qMax(40, height() - margin - jamRecordingHitRect_.bottom() - 8));
+        paintVerticalPeerRail(painter, peerRailRect_);
+    } else {
+        paintPeerRail(painter, peerRailRect_);
+    }
 
     currentBeatHitRect_ = beatPreviewVisible_
         ? QRect(margin, previewTop, previewWidth, previewHeight)
@@ -2512,53 +2517,92 @@ void PerformanceHomeWidget::paintBeatPreview(
     }
 }
 
+PerformanceHomeWidget::ChordVisualLayout PerformanceHomeWidget::chordVisualLayout(
+    int previewTop, bool wide) const
+{
+    // The core chord display scales with width, never with the action rows,
+    // generation indicator, or a short window's height.
+    const double radius = wide ? qBound(128.0, width() * 0.16, 175.0)
+                               : qBound(150.0, width() * 0.16, 170.0);
+    const double outerRadius = wide ? radius + 14.0 : radius * 1.18 + 8.0;
+    const double preferredY = wide
+        ? qMin(static_cast<double>(previewTop - 210), height() * 0.40)
+        : (170.0 + static_cast<double>(previewTop)) / 2.0;
+    const double halfCore = wide ? qBound(184, static_cast<int>(radius * 1.27), 224) / 2.0
+                                 : radius * 0.62;
+    const double latestCenter = qMax(halfCore + 60.0, previewTop - halfCore - 8.0);
+    const QPointF center(width() * 0.50, qMin(latestCenter, qMax(outerRadius + 12.0, preferredY)));
+    return {center, radius, QRectF(center.x() - outerRadius, center.y() - outerRadius,
+        outerRadius * 2, outerRadius * 2).toAlignedRect()};
+}
+
 void PerformanceHomeWidget::paintGenerationActions(
     QPainter& painter,
     int top,
-    int right)
+    int right,
+    const QRect& chordExclusion)
 {
-    constexpr int height = 31;
     constexpr int gap = 8;
-    constexpr int wavWidth = 116;
-    constexpr int jamTasterWidth = 126;
-    constexpr int clearWidth = 96;
-    constexpr int continueWidth = 124;
-    constexpr int browseWidth = 132;
-    constexpr int ideaWidth = 154;
-    generateWavHitRect_ = QRect(right - wavWidth, top, wavWidth, height);
-    clearIdeaHitRect_ = QRect(
-        generateWavHitRect_.left() - gap - clearWidth,
-        top,
-        clearWidth,
-        height);
-    continueIdeaHitRect_ = QRect(
-        clearIdeaHitRect_.left() - gap - continueWidth,
-        top,
-        continueWidth,
-        height);
-    browseIdeasHitRect_ = QRect(
-        continueIdeaHitRect_.left() - gap - browseWidth,
-        top,
-        browseWidth,
-        height);
-    generateIdeaHitRect_ = QRect(
-        browseIdeasHitRect_.left() - gap - ideaWidth,
-        top,
-        ideaWidth,
-        height);
-    jamTasterHitRect_ = QRect(
-        generateIdeaHitRect_.left() - gap - jamTasterWidth,
-        top,
-        jamTasterWidth,
-        height);
-
-    QFont actionFont(QStringLiteral("Bahnschrift"));
-    actionFont.setPointSizeF(9.0);
-    actionFont.setWeight(QFont::DemiBold);
-    actionFont.setLetterSpacing(QFont::AbsoluteSpacing, 0.45);
-    painter.setFont(actionFont);
-
-    const auto drawAction = [&painter](
+    static const QVector<jam2::gui::ActionTileSpec> actions{
+        {QStringLiteral("JAMTASTER"), 126},
+        {QStringLiteral("GENERATE NEW IDEA"), 154},
+        {QStringLiteral("GROOVE LIBRARY"), 132},
+        {QStringLiteral("CONTINUE IDEA"), 124},
+        {QStringLiteral("CLEAR IDEA"), 96},
+        {QStringLiteral("GENERATE WAV"), 116},
+    };
+    const int left = qMin(right, bankStripRight_ + 12);
+    const QRect available(left, top, qMax(0, right - left), 31);
+    if (generationActionAvailable_ != available || generationChordExclusion_ != chordExclusion ||
+        generationActionDpi_ != logicalDpiY()) {
+        generationActionLayout_ = jam2::gui::layoutActionTiles(
+            available, actions, jam2::gui::actionTileFont(), this);
+        const int singleOffset = right - generationActionLayout_.bounds.back().right() - 1;
+        for (auto& bounds : generationActionLayout_.bounds) bounds.translate(singleOffset, 0);
+        const QRect protectedChord = chordExclusion.isEmpty()
+            ? QRect{} : chordExclusion.adjusted(-12, -12, 12, 12);
+        generationActionsWrapped_ = !protectedChord.isEmpty() && std::any_of(
+            generationActionLayout_.bounds.cbegin(), generationActionLayout_.bounds.cend(),
+            [&protectedChord](const QRect& bounds) { return bounds.intersects(protectedChord); });
+        if (generationActionsWrapped_) {
+            const int sideLeft = qMin(right, qMax(left, protectedChord.right() + 1));
+            const QRect rowAvailable(sideLeft, top, qMax(0, right - sideLeft), 31);
+            const auto upper = jam2::gui::layoutActionTiles(rowAvailable,
+                {actions[0], actions[2], actions[5]}, jam2::gui::actionTileFont(), this);
+            const auto lower = jam2::gui::layoutActionTiles(rowAvailable,
+                {actions[1], actions[3], actions[4]}, jam2::gui::actionTileFont(), this);
+            auto& combined = generationActionLayout_;
+            combined.font = upper.font.pointSizeF() < lower.font.pointSizeF() ? upper.font : lower.font;
+            combined.padding = qMin(upper.padding, lower.padding);
+            combined.height = qMax(upper.height, lower.height);
+            const auto placeRow = [&](const jam2::gui::ActionTileLayout& row,
+                                      const std::array<int, 3>& indices, int y) {
+                const int offset = right - row.bounds.back().right() - 1;
+                for (int i = 0; i < 3; ++i) {
+                    QRect bounds = row.bounds[i].translated(offset, 0);
+                    bounds.moveTop(y);
+                    bounds.setHeight(combined.height);
+                    combined.bounds[indices[i]] = bounds;
+                }
+            };
+            placeRow(upper, {0, 2, 5}, top);
+            placeRow(lower, {1, 3, 4}, top + combined.height + 6);
+        }
+        generationActionAvailable_ = available;
+        generationChordExclusion_ = chordExclusion;
+        generationActionDpi_ = logicalDpiY();
+    }
+    const auto& sizing = generationActionLayout_;
+    jamTasterHitRect_ = sizing.bounds[0];
+    generateIdeaHitRect_ = sizing.bounds[1];
+    browseIdeasHitRect_ = sizing.bounds[2];
+    continueIdeaHitRect_ = sizing.bounds[3];
+    clearIdeaHitRect_ = sizing.bounds[4];
+    generateWavHitRect_ = sizing.bounds[5];
+    wavGenerationStatusRect_ = {};
+    painter.setFont(sizing.font);
+    const QFontMetrics metrics(sizing.font, this);
+    const auto drawAction = [&painter, &metrics, &sizing](
                                 const QRect& bounds,
                                 const QString& text,
                                 const QColor& outline,
@@ -2567,10 +2611,10 @@ void PerformanceHomeWidget::paintGenerationActions(
         painter.setBrush(fill);
         painter.drawRoundedRect(bounds, 4, 4);
         painter.setPen(QColor(243, 230, 207));
-        painter.drawText(
-            bounds.adjusted(9, 1, -9, -1),
-            Qt::AlignCenter,
-            text);
+        painter.drawText(bounds.adjusted(sizing.padding, 1, -sizing.padding, -1),
+            Qt::AlignCenter | Qt::TextSingleLine,
+            metrics.elidedText(text, Qt::ElideRight,
+                qMax(0, bounds.width() - 2 * sizing.padding - 2)));
     };
     drawAction(
         generateIdeaHitRect_,
@@ -2606,11 +2650,12 @@ void PerformanceHomeWidget::paintGenerationActions(
     if (wavGenerationActive_) {
         constexpr int statusWidth = 164;
         constexpr int statusHeight = 56;
-        const QRect statusRect(
+        wavGenerationStatusRect_ = QRect(
             right - statusWidth,
-            generateWavHitRect_.bottom() + gap,
+            (generationActionsWrapped_ ? clearIdeaHitRect_ : generateWavHitRect_).bottom() + gap,
             statusWidth,
             statusHeight);
+        const QRect& statusRect = wavGenerationStatusRect_;
         painter.setPen(QPen(QColor(176, 139, 228, 210), 1));
         painter.setBrush(QColor(12, 10, 19, 238));
         painter.drawRoundedRect(statusRect, 8, 8);
@@ -2825,7 +2870,11 @@ void PerformanceHomeWidget::paintBankStrip(QPainter& painter, int left, int top)
         : bankLocalOnly_ ? QStringLiteral("LOCAL") : QStringLiteral("LIVE %1")
             .arg(QChar(QLatin1Char('A').unicode() + liveBank_));
     painter.setPen(pendingBank_ >= 0 ? QColor(255, 202, 126) : QColor(132, 151, 153));
-    painter.drawText(QRect(x + 4, top, 250, 24), Qt::AlignVCenter, status);
+    const QRect statusRect(x + 4, top,
+        qBound(56, painter.fontMetrics().horizontalAdvance(status) + 8, 150), 24);
+    painter.drawText(statusRect, Qt::AlignVCenter | Qt::TextSingleLine,
+        painter.fontMetrics().elidedText(status, Qt::ElideRight, statusRect.width()));
+    bankStripRight_ = statusRect.right();
 }
 
 void PerformanceHomeWidget::paintLooperLaunch(QPainter& painter, const QRect& bounds)
@@ -3135,6 +3184,28 @@ void PerformanceHomeWidget::paintPeerRail(QPainter& painter, const QRect& bounds
     }
 }
 
+bool PerformanceHomeWidget::event(QEvent* event)
+{
+    if (event->type() == QEvent::ToolTip) {
+        const auto* help = static_cast<QHelpEvent*>(event);
+        const QPair<QRect, QString> actions[]{
+            {generateIdeaHitRect_, QStringLiteral("GENERATE NEW IDEA")},
+            {browseIdeasHitRect_, QStringLiteral("GROOVE LIBRARY")},
+            {continueIdeaHitRect_, QStringLiteral("CONTINUE IDEA")},
+            {clearIdeaHitRect_, QStringLiteral("CLEAR IDEA")},
+            {generateWavHitRect_, QStringLiteral("GENERATE WAV")},
+            {jamTasterHitRect_, QStringLiteral("JAMTASTER")},
+        };
+        for (const auto& action : actions) {
+            if (action.first.contains(help->pos())) {
+                QToolTip::showText(help->globalPos(), action.second, this, action.first);
+                return true;
+            }
+        }
+    }
+    return QWidget::event(event);
+}
+
 void PerformanceHomeWidget::resizeEvent(QResizeEvent* event)
 {
     QWidget::resizeEvent(event);
@@ -3162,28 +3233,45 @@ QVector<jam2::gui::GuiVirtualControl> PerformanceHomeWidget::guiVirtualControls(
     const QVariantMap commonState{
         {QStringLiteral("live_bank"), liveBank_},
         {QStringLiteral("running"), running_},
+        {QStringLiteral("actions_wrapped"), generationActionsWrapped_},
+    };
+    const auto withBounds = [](QVariantMap state, const QRect& bounds) {
+        state.insert(QStringLiteral("bounds"), QVariantMap{
+            {QStringLiteral("x"), bounds.x()}, {QStringLiteral("y"), bounds.y()},
+            {QStringLiteral("width"), bounds.width()}, {QStringLiteral("height"), bounds.height()},
+        });
+        return state;
     };
     addClick(
         QStringLiteral("performance.home.idea.generate"), QStringLiteral("idea.generate"),
-        GuiControlAvailability::Modal, QStringLiteral("performance.home.idea"), commonState);
+        GuiControlAvailability::Modal, QStringLiteral("performance.home.idea"),
+        withBounds(commonState, generateIdeaHitRect_));
     addClick(
         QStringLiteral("performance.home.idea.browse"), QStringLiteral("idea.catalog"),
-        GuiControlAvailability::Modal, QStringLiteral("performance.home.idea"), commonState);
+        GuiControlAvailability::Modal, QStringLiteral("performance.home.idea"),
+        withBounds(commonState, browseIdeasHitRect_));
     addClick(
         QStringLiteral("performance.home.idea.continue"), QStringLiteral("idea.continue"),
-        GuiControlAvailability::Modal, QStringLiteral("performance.home.idea"), commonState);
+        GuiControlAvailability::Modal, QStringLiteral("performance.home.idea"),
+        withBounds(commonState, continueIdeaHitRect_));
     addClick(
         QStringLiteral("performance.home.idea.clear"), QStringLiteral("idea.clear"),
-        GuiControlAvailability::Modal, QStringLiteral("performance.home.idea"), commonState);
+        GuiControlAvailability::Modal, QStringLiteral("performance.home.idea"),
+        withBounds(commonState, clearIdeaHitRect_));
+    QVariantMap wavState = withBounds(commonState, generateWavHitRect_);
+    wavState.insert(QStringLiteral("generation_status_bounds"),
+        withBounds({}, wavGenerationStatusRect_).value(QStringLiteral("bounds")));
     addClick(
         QStringLiteral("performance.home.idea.generate-wav"), QStringLiteral("idea.reference-wav"),
-        GuiControlAvailability::Modal, QStringLiteral("performance.home.idea"), commonState);
+        GuiControlAvailability::Modal, QStringLiteral("performance.home.idea"), std::move(wavState));
     addClick(
         QStringLiteral("performance.home.idea.jam-taster"), QStringLiteral("idea.jam-taster"),
-        GuiControlAvailability::Modal, QStringLiteral("performance.home.idea"), commonState);
+        GuiControlAvailability::Modal, QStringLiteral("performance.home.idea"),
+        withBounds(commonState, jamTasterHitRect_));
     addClick(
         QStringLiteral("performance.home.arrangement"), QStringLiteral("looper.arrangement-dialog"),
-        GuiControlAvailability::Modal, QStringLiteral("performance.home.session"), commonState);
+        GuiControlAvailability::Modal, QStringLiteral("performance.home.session"),
+        withBounds(commonState, arrangementHitRect_));
     addClick(
         QStringLiteral("performance.home.section.add"), QStringLiteral("song.section-structure"),
         GuiControlAvailability::StateGated, QStringLiteral("performance.home.section"), commonState);
@@ -3198,20 +3286,21 @@ QVector<jam2::gui::GuiVirtualControl> PerformanceHomeWidget::guiVirtualControls(
             {QStringLiteral("active"), jamRecordingActive_},
             {QStringLiteral("take"), jamRecordingTake_},
         });
-    for (const auto& target : QList<QPair<QString, QString>>{
-             {QStringLiteral("performance.home.open.chords.current"), QStringLiteral("chords")},
-             {QStringLiteral("performance.home.open.chords.runway"), QStringLiteral("chords")},
-             {QStringLiteral("performance.home.open.lyrics"), QStringLiteral("lyrics")},
-             {QStringLiteral("performance.home.open.beats.current"), QStringLiteral("beats")},
-             {QStringLiteral("performance.home.open.beats.next"), QStringLiteral("beats")},
-             {QStringLiteral("performance.home.open.looper"), QStringLiteral("looper")},
+    struct NavigationTarget { QString id; QString workspace; QRect bounds; };
+    for (const auto& target : {
+             NavigationTarget{QStringLiteral("performance.home.open.chords.current"), QStringLiteral("chords"), chordHitRect_},
+             NavigationTarget{QStringLiteral("performance.home.open.chords.runway"), QStringLiteral("chords"), chordRunwayRect_},
+             NavigationTarget{QStringLiteral("performance.home.open.lyrics"), QStringLiteral("lyrics"), lyricsHitRect_},
+             NavigationTarget{QStringLiteral("performance.home.open.beats.current"), QStringLiteral("beats"), currentBeatHitRect_},
+             NavigationTarget{QStringLiteral("performance.home.open.beats.next"), QStringLiteral("beats"), nextBeatHitRect_},
+             NavigationTarget{QStringLiteral("performance.home.open.looper"), QStringLiteral("looper"), looperHitRect_},
          }) {
         addClick(
-            target.first,
+            target.id,
             QStringLiteral("workspace.navigation"),
             GuiControlAvailability::StateGated,
             QStringLiteral("performance.home.navigation"),
-            {{QStringLiteral("workspace"), target.second}});
+            withBounds({{QStringLiteral("workspace"), target.workspace}}, target.bounds));
     }
     controls.push_back(makeGuiVirtualControl(
         QStringLiteral("performance.home.track-gain"),

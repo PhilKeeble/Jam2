@@ -1,6 +1,7 @@
 #pragma once
 
 #include "BeatGridModel.hpp"
+#include "ActionTileRow.hpp"
 #include "GuiControlContract.hpp"
 #include "RuntimeContracts.hpp"
 #include "engine.hpp"
@@ -161,6 +162,7 @@ public:
     std::function<void()> onManageArrangement;
 
 protected:
+    bool event(QEvent* event) override;
     void paintEvent(QPaintEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
     void mousePressEvent(QMouseEvent* event) override;
@@ -199,7 +201,13 @@ private:
         int previewBeatsPerBar,
         quint64 barStart,
         bool current);
-    void paintGenerationActions(QPainter& painter, int top, int right);
+    struct ChordVisualLayout {
+        QPointF center;
+        double radius;
+        QRect exclusion;
+    };
+    ChordVisualLayout chordVisualLayout(int previewTop, bool wide) const;
+    void paintGenerationActions(QPainter& painter, int top, int right, const QRect& chordExclusion);
     void paintPeerRail(QPainter& painter, const QRect& bounds);
     void paintVerticalPeerRail(QPainter& painter, const QRect& bounds);
     void paintJamRecordingButton(QPainter& painter, const QRect& bounds);
@@ -274,6 +282,13 @@ private:
     QPointF novaPosition_{0.78, 0.24};
     int peerScrollOffset_ = 0;
     bool trackSliderDragging_ = false;
+    int bankStripRight_ = 0;
+    QRect generationActionAvailable_;
+    QRect generationChordExclusion_;
+    bool generationActionsWrapped_ = false;
+    QRect wavGenerationStatusRect_;
+    int generationActionDpi_ = 0;
+    jam2::gui::ActionTileLayout generationActionLayout_;
     QRect chordHitRect_;
     QRect chordRunwayRect_;
     QRect lyricsHitRect_;

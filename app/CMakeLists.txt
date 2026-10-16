@@ -480,6 +480,8 @@ add_executable(jam2 MACOSX_BUNDLE
     gui/MainWindow.hpp
     gui/MainWindowPages.cpp
     gui/MainWindowPages.hpp
+    gui/ActionTileRow.cpp
+    gui/ActionTileRow.hpp
     gui/SessionStartupDialogs.cpp
     gui/SessionStartupDialogs.hpp
     gui/SettingsDialog.cpp

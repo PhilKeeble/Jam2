@@ -259,6 +259,24 @@ int main(int argc, char* argv[])
                 fail(QStringLiteral("exact snapshot mixed-field rejection omitted a reason"));
             }
         }
+        if (index == 0) {
+            for (const QJsonObject& command : {
+                     QJsonObject{{QStringLiteral("type"), QStringLiteral("window.resize")},
+                         {QStringLiteral("id"), QStringLiteral("resize-fractional")},
+                         {QStringLiteral("width"), 1280.5}, {QStringLiteral("height"), 720}},
+                     QJsonObject{{QStringLiteral("type"), QStringLiteral("widget.inspect")},
+                         {QStringLiteral("id"), QStringLiteral("inspect-absent")},
+                         {QStringLiteral("object_name"), QStringLiteral("MissingWidget")}},
+                 }) {
+                if (!send(peer, command)) continue;
+                QJsonObject rejected;
+                if (receive(peer, QStringLiteral("command_rejected"), rejected) &&
+                    (rejected.value(QStringLiteral("id")) != command.value(QStringLiteral("id")) ||
+                     rejected.value(QStringLiteral("reason")).toString().isEmpty())) {
+                    fail(QStringLiteral("Layout diagnostic rejection omitted its id or reason"));
+                }
+            }
+        }
 
         QString initialBeatFingerprint;
         if (send(peer, {

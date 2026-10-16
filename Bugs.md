@@ -40,19 +40,12 @@ maybe look at bringing track seeking back in
 cant manually sync when auto is on - wanted it when open jamjar didnt sync
 
 ## Bugs - MacOS
-listening tools gets cut off by the tracks so you cant see it when its expanded 
-
-need to make it more efficient for small screen
-- track view sharing tile can be smaller or collapsable 
-- the coloured buttons need to be able to shrink to accomodate for longer sections
-- performance view needs to re arrange buttons to allow a more compressed view
 
 Generate wav is saying 12 sections - Sections A-D, confusing 
 
 Update.sh wasnt being clear that it was failing, make it easy for the user 
 
 loopback recording doesnt work on mac 
-
 
 # TEST
 
@@ -61,8 +54,10 @@ loopback recording doesnt work on mac
 - opening a jamjar during a jam and seeing if tracks sync 
 - check import of stereo wav and analysing it 
 - check section changes during a jam and making sure that old section is unloaded
-
-
+- check headless usage 
+- check spawning cli when opening
+- check buttons look ok on macos and shorten correctly 
+- check sharing close down bar shows on macos track view
 
 
 # DAW mode

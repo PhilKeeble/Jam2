@@ -1,4 +1,5 @@
 #include "BeatGridWidget.hpp"
+#include "ActionTileRow.hpp"
 #include "AudioDeviceUiSupport.hpp"
 #include "ConnectionGuidance.hpp"
 #include "GuiControlContract.hpp"
@@ -13,6 +14,7 @@
 #include <QClipboard>
 #include <QCheckBox>
 #include <QComboBox>
+#include <QDir>
 #include <QListWidget>
 #include <QDragEnterEvent>
 #include <QDragLeaveEvent>
@@ -34,16 +36,21 @@
 #include <QTextEdit>
 #include <QThreadPool>
 #include <QTimer>
+#include <QToolTip>
+#include <QHelpEvent>
+#include <QHBoxLayout>
 #include <QUrl>
 #include <QVariantMap>
 #include <QVBoxLayout>
 #include <QWheelEvent>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <iostream>
 #include <limits>
+#include <map>
 #include <vector>
 
 namespace {
@@ -120,6 +127,96 @@ bool clickControl(QObject& root, const QString& id)
     button->click();
     QApplication::processEvents();
     return true;
+}
+
+void testActionTileRow()
+{
+    const QVector<jam2::gui::ActionTileSpec> actions{
+        {QStringLiteral("GENERATE NEW IDEA"), 154},
+        {QStringLiteral("GROOVE LIBRARY"), 132},
+        {QStringLiteral("CONTINUE IDEA"), 124},
+        {QStringLiteral("GENERATE WAV"), 116},
+        {QStringLiteral("JAMTASTER"), 132},
+        {QStringLiteral("IDEA DETAILS"), 112},
+    };
+    QWidget header;
+    header.setAttribute(Qt::WA_DontShowOnScreen, true);
+    header.setStyleSheet(QStringLiteral("QWidget { font-size:10.5pt;font-family:Arial; }"));
+    auto* layout = new QHBoxLayout(&header);
+    layout->setContentsMargins(0, 0, 0, 0);
+    auto* section = new QPushButton(QStringLiteral("SECTION A B C D"), &header);
+    section->setFixedWidth(180);
+    auto* row = new jam2::gui::ActionTileRow(&header);
+    auto* pagination = new QPushButton(QStringLiteral("1 / 4"), &header);
+    pagination->setFixedWidth(80);
+    layout->addWidget(section);
+    layout->addWidget(row, 1);
+    layout->addWidget(pagination);
+    QVector<QPushButton*> buttons;
+    std::array<int, 6> clicks{};
+    for (qsizetype i = 0; i < actions.size(); ++i) {
+        auto* button = new QPushButton(actions[i].label, &header);
+        button->setStyleSheet(QStringLiteral(
+            "QPushButton { border:1px solid #e2ac53;border-radius:4px;color:#f3e6cf;background:#231b14; }"));
+        row->addButton(button, actions[i].preferredWidth);
+        QObject::connect(button, &QPushButton::clicked, &header, [&, i] { ++clicks[i]; });
+        buttons.push_back(button);
+    }
+    for (int width : {1440, 1100, 900, 760, 1100, 1440}) {
+        header.resize(width, 42);
+        processPaint(header);
+        expect(header.width() == width, "action row does not force a wide parent minimum");
+        int previousRight = -1;
+        int rowY = -1;
+        for (qsizetype i = 0; i < buttons.size(); ++i) {
+            auto* button = buttons[i];
+            const QRect bounds(button->mapTo(row, QPoint()), button->size());
+            if (rowY < 0) rowY = bounds.y();
+            expect(row->rect().contains(bounds) && bounds.left() > previousRight && bounds.y() == rowY,
+                "sub-view action tiles remain inside one non-overlapping row");
+            expect(button->font().pointSizeF() >= 7.99 && button->font().pointSizeF() <= 9.01 &&
+                    button->accessibleName() == actions[i].label && button->toolTip() == actions[i].label,
+                "compact tiles retain readable fonts and full accessible labels");
+            const int textWidth = bounds.width() - 2 *
+                jam2::gui::layoutActionTiles(row->rect(), actions).padding - 2;
+            expect(QFontMetrics(button->font()).horizontalAdvance(button->text()) <= textWidth,
+                "displayed tile labels fit the actual selected platform font");
+            button->click();
+            previousRight = bounds.right();
+        }
+        if (width == 1440) {
+            if (buttons.front()->text() != actions.front().label) {
+                std::cerr << "wide row=" << row->width() << " button=" << buttons.front()->width()
+                          << " text=" << buttons.front()->text().toStdString()
+                          << " font=" << buttons.front()->font().pointSizeF()
+                          << " measured=" << QFontMetrics(buttons.front()->font())
+                              .horizontalAdvance(actions.front().label) << '\n';
+            }
+            expect(buttons.front()->text() == actions.front().label,
+                "full labels restore when the header grows again");
+        }
+        const QString previewRoot = qEnvironmentVariable("JAM2_TEST_LAYOUT_PREVIEW_ROOT");
+        if (!previewRoot.isEmpty()) {
+            expect(QDir().mkpath(previewRoot) && header.grab().save(QDir(previewRoot).filePath(
+                QStringLiteral("action-header-%1.png").arg(width))),
+                "requested single-row header preview is written");
+        }
+    }
+    for (int count : clicks) expect(count == 6, "responsive Qt buttons retain their original actions");
+
+    QFont widerFallback = jam2::gui::actionTileFont();
+    widerFallback.setFamily(QStringLiteral("Arial"));
+    widerFallback.setStretch(125);
+    for (int width : {0, 32, 360, 640, 900}) {
+        const auto sizing = jam2::gui::layoutActionTiles(QRect(11, 7, width, 31), actions, widerFallback);
+        int right = 10;
+        for (const QRect& bounds : sizing.bounds) {
+            expect(bounds.left() >= 11 && bounds.right() < 11 + width && bounds.left() > right &&
+                    bounds.top() == 7 && bounds.width() >= 0,
+                "font-aware sizing stays bounded without wrapping, including tiny widths");
+            right = bounds.right();
+        }
+    }
 }
 
 void testTimelineHelpers()
@@ -1104,6 +1201,142 @@ void testBeatGridWidgets()
     processPaint(lyrics);
 }
 
+void testResponsivePerformanceActions()
+{
+    BeatGridModel model;
+    model.setCell(0, QStringLiteral("chord"), 0, QStringLiteral("Cmaj7"));
+    PerformanceHomeWidget widget;
+    widget.setAttribute(Qt::WA_DontShowOnScreen, true);
+    widget.setSongModel(&model);
+    std::array<int, 6> clicks{};
+    widget.onGenerateIdea = [&] { ++clicks[0]; };
+    widget.onBrowseIdeas = [&] { ++clicks[1]; };
+    widget.onContinueIdea = [&] { ++clicks[2]; };
+    widget.onClearIdea = [&] { ++clicks[3]; };
+    widget.onGenerateWav = [&] { ++clicks[4]; };
+    widget.onJamTaster = [&] { ++clicks[5]; };
+    const QStringList actionIds{
+        QStringLiteral("performance.home.idea.generate"),
+        QStringLiteral("performance.home.idea.browse"),
+        QStringLiteral("performance.home.idea.continue"),
+        QStringLiteral("performance.home.idea.clear"),
+        QStringLiteral("performance.home.idea.generate-wav"),
+        QStringLiteral("performance.home.idea.jam-taster"),
+    };
+    const auto boundsFor = [](const QVector<jam2::gui::GuiVirtualControl>& controls, const QString& id,
+                             const QString& field = QStringLiteral("bounds")) {
+        for (const auto& control : controls) {
+            if (control.id != id) continue;
+            const auto bounds = control.state.value(field).toMap();
+            return QRect(bounds.value(QStringLiteral("x")).toInt(), bounds.value(QStringLiteral("y")).toInt(),
+                bounds.value(QStringLiteral("width")).toInt(), bounds.value(QStringLiteral("height")).toInt());
+        }
+        return QRect{};
+    };
+    int cases = 0;
+    int wrappedCases = 0;
+    int unwrappedCases = 0;
+    std::map<int, QSize> coreSizes;
+    for (const QSize size : {QSize(1680, 950), QSize(1280, 900), QSize(1280, 720), QSize(1280, 500),
+             QSize(1100, 620), QSize(900, 500), QSize(850, 650), QSize(850, 500),
+             QSize(820, 500), QSize(1440, 900), QSize(1280, 900)}) {
+        QRect idleChord;
+        bool idleWrapped = false;
+        for (bool generating : {false, true}) {
+            widget.resize(size);
+            widget.setWavGenerationActive(generating);
+            processPaint(widget);
+            const auto controls = widget.guiVirtualControls();
+            const QRect chord = boundsFor(controls, QStringLiteral("performance.home.open.chords.current"));
+            const QRect runway = boundsFor(controls, QStringLiteral("performance.home.open.chords.runway"));
+            const QRect beatPreview = boundsFor(controls, QStringLiteral("performance.home.open.beats.current"));
+            const QRect arrangement = boundsFor(controls, QStringLiteral("performance.home.arrangement"));
+            expect(!chord.isEmpty() && widget.rect().contains(chord),
+                "central chord visualiser stays inside the resized main view");
+            expect(chord.width() >= 184, "short windows retain a full-size core chord display");
+            expect(!chord.intersects(runway) && !chord.intersects(beatPreview),
+                "upcoming chords and beat previews do not cover the preserved core chord display");
+            const auto [core, inserted] = coreSizes.emplace(size.width(), chord.size());
+            expect(inserted || core->second == chord.size(),
+                "reducing window height never shrinks the current-chord display");
+            const auto wav = std::find_if(controls.cbegin(), controls.cend(), [&](const auto& control) {
+                return control.id == actionIds[4];
+            });
+            expect(wav != controls.cend(), "WAV action exposes its layout state");
+            const bool wrapped = wav != controls.cend() &&
+                wav->state.value(QStringLiteral("actions_wrapped")).toBool();
+            const int upperY = boundsFor(controls, actionIds[1]).top();
+            const int lowerY = boundsFor(controls, actionIds[0]).top();
+            if (wrapped) {
+                ++wrappedCases;
+                expect(lowerY > upperY &&
+                        boundsFor(controls, actionIds[5]).left() < boundsFor(controls, actionIds[1]).left() &&
+                        boundsFor(controls, actionIds[1]).left() < boundsFor(controls, actionIds[4]).left() &&
+                        boundsFor(controls, actionIds[0]).left() < boundsFor(controls, actionIds[2]).left() &&
+                        boundsFor(controls, actionIds[2]).left() < boundsFor(controls, actionIds[3]).left(),
+                    "wrapped tiles put Generate New Idea, Continue Idea and Clear Idea on the bottom row in order");
+            } else {
+                ++unwrappedCases;
+                expect(lowerY == upperY, "unwrapped main-view actions occupy one row");
+            }
+            if (!generating) {
+                idleChord = chord;
+                idleWrapped = wrapped;
+            } else {
+                expect(chord == idleChord && wrapped == idleWrapped,
+                    "starting WAV generation preserves chord size, position and tile wrapping");
+            }
+            QVector<QRect> actionBounds;
+            for (qsizetype i = 0; i < actionIds.size(); ++i) {
+                const QRect bounds = boundsFor(controls, actionIds[i]);
+                const bool lowerAction = i == 0 || i == 2 || i == 3;
+                const int expectedY = wrapped && lowerAction ? lowerY : upperY;
+                expect(!bounds.isEmpty() && widget.rect().contains(bounds) && bounds.y() == expectedY &&
+                        !bounds.intersects(chord) && !bounds.intersects(runway) &&
+                        !bounds.intersects(arrangement),
+                    "painted action tiles stay clear of the chord visualiser and section controls");
+                for (const QRect& other : actionBounds) expect(!bounds.intersects(other),
+                    "painted action tiles have non-overlapping click targets");
+                actionBounds.push_back(bounds);
+                const int before = clicks[i];
+                sendMouse(widget, QEvent::MouseButtonPress, bounds.center(), Qt::LeftButton, Qt::LeftButton);
+                expect(clicks[i] == before + 1, "resized painted tile dispatches through its actual click target");
+            }
+            const QRect status = boundsFor(controls, actionIds[4], QStringLiteral("generation_status_bounds"));
+            if (generating) {
+                const int anchor = wrapped ? actionBounds[3].bottom() : actionBounds[4].bottom();
+                expect(status.top() == anchor + 8 && status.right() == widget.width() - 25 &&
+                        widget.rect().contains(status) && !status.intersects(chord) && !status.intersects(runway),
+                    "WAV generation indicator stays below both wrapped rows or in its existing unwrapped position");
+                for (const QRect& bounds : actionBounds) expect(!status.intersects(bounds),
+                    "generation indicator never covers an action tile");
+            } else {
+                expect(status.isEmpty(), "inactive WAV generation has no status tile");
+            }
+            QHelpEvent help(QEvent::ToolTip, actionBounds.front().center(),
+                widget.mapToGlobal(actionBounds.front().center()));
+            QApplication::sendEvent(&widget, &help);
+            expect(QToolTip::text() == QStringLiteral("GENERATE NEW IDEA"),
+                "painted compact tiles expose their complete label in a tooltip");
+            QToolTip::hideText();
+            const QString previewRoot = qEnvironmentVariable("JAM2_TEST_LAYOUT_PREVIEW_ROOT");
+            if (!previewRoot.isEmpty()) {
+                expect(QDir().mkpath(previewRoot) && widget.grab().save(QDir(previewRoot).filePath(
+                    QStringLiteral("performance-%1x%2-generating-%3.png")
+                        .arg(size.width()).arg(size.height()).arg(generating))),
+                    "requested responsive-layout preview is written");
+            }
+            ++cases;
+        }
+    }
+    expect(wrappedCases > 0 && unwrappedCases > 0,
+        "vertical resize coverage exercises wrapping and restoring the main-view row");
+    for (int count : clicks) expect(count == cases, "every main-view action survives repeated shrink and grow");
+    widget.hide();
+    expect(QThreadPool::globalInstance()->waitForDone(10000),
+        "responsive main-view fixture drains its background render work");
+}
+
 void testPerformanceWidget()
 {
     BeatGridModel model;
@@ -1326,6 +1559,11 @@ void testPerformanceWidget()
 int main(int argc, char** argv)
 {
     QApplication app(argc, argv);
+    testActionTileRow();
+    testResponsivePerformanceActions();
+    if (argc == 2 && QString::fromLocal8Bit(argv[1]) == QStringLiteral("--responsive-actions")) {
+        return failures == 0 ? 0 : 1;
+    }
     testTimelineHelpers();
     testGuiInteractionPolicy();
     testLocalEngineDialogState();

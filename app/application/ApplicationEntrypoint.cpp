@@ -375,7 +375,7 @@ void applyCustomTheme(QApplication& app)
             color: #9ca9ab; background: transparent; font-family: Bahnschrift;
             font-size: 8.5pt; letter-spacing: 1px;
         }
-        QGroupBox#TrackSharingCard QLabel#TrackSharingStatus {
+        QWidget#TrackSharingCard QLabel#TrackSharingStatus {
             background: transparent;
         }
         QWidget#DataOverlay { background: rgba(3, 5, 6, 150); }

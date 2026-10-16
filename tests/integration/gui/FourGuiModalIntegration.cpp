@@ -9,6 +9,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QRect>
 #include <QSet>
 
 #include <algorithm>
@@ -125,6 +126,7 @@ bool completionGate(
 
 struct Snapshot {
     QHash<QString, QJsonObject> controls;
+    QJsonObject window;
     QJsonObject jam;
     QJsonObject content;
     QJsonObject performance;
@@ -150,6 +152,7 @@ Snapshot snapshotAll(AutomationProcess& process, const QString& prefix)
         }
         result.activeModal = result.activeModal || event.value(QStringLiteral("window"))
             .toObject().value(QStringLiteral("active_modal")).toBool();
+        if (result.window.isEmpty()) result.window = event.value(QStringLiteral("window")).toObject();
         if (result.jam.isEmpty()) result.jam = event.value(QStringLiteral("jam")).toObject();
         if (result.content.isEmpty()) {
             result.content = event.value(QStringLiteral("content")).toObject();
@@ -262,6 +265,139 @@ void closeModal(
 QJsonObject controlState(const Snapshot& snapshot, const QString& id)
 {
     return snapshot.controls.value(id).value(QStringLiteral("state")).toObject();
+}
+
+void resizeWindow(AutomationProcess& process, const QString& id, int width, int height)
+{
+    QJsonObject applied;
+    if (!send(process, {
+            {QStringLiteral("type"), QStringLiteral("window.resize")},
+            {QStringLiteral("id"), id},
+            {QStringLiteral("width"), width},
+            {QStringLiteral("height"), height},
+        }) || !receiveApplied(process, id, &applied)) return;
+    if (applied.value(QStringLiteral("width")).toInt() != width ||
+        applied.value(QStringLiteral("height")).toInt() != height) {
+        fail(QStringLiteral("%1 could not resize to %2x%3: %4")
+            .arg(id).arg(width).arg(height)
+            .arg(QString::fromUtf8(QJsonDocument(applied).toJson(QJsonDocument::Compact))));
+    }
+}
+
+void requireUnobscured(const QJsonObject& state, const QString& context)
+{
+    if (!state.value(QStringLiteral("visible")).toBool() ||
+        !state.value(QStringLiteral("unobscured")).toBool() ||
+        state.value(QStringLiteral("bounds")).toObject()
+            .value(QStringLiteral("height")).toInt() <
+                state.value(QStringLiteral("minimum_height")).toInt()) {
+        fail(QStringLiteral("%1 was clipped, covered, or compressed: %2").arg(context,
+            QString::fromUtf8(QJsonDocument(state).toJson(QJsonDocument::Compact))));
+    }
+}
+
+void requireTrackToolsUnobscured(AutomationProcess& process, const QString& prefix,
+    bool listeningOpen, bool sharingOpen)
+{
+    const Snapshot snapshot = snapshotAll(process, prefix);
+    for (const char* id : {"looper.listening-tools", "looper.sharing-tools"}) {
+        requireUnobscured(controlState(snapshot, QString::fromLatin1(id)), prefix + id);
+    }
+    if (listeningOpen) {
+        for (const char* id : {"looper.speed.value", "looper.pitch.value", "looper.focus.value"}) {
+            requireUnobscured(controlState(snapshot, QString::fromLatin1(id)), prefix + id);
+        }
+    }
+    if (sharingOpen) {
+        for (const char* id : {"looper.share-now", "looper.export"}) {
+            requireUnobscured(controlState(snapshot, QString::fromLatin1(id)), prefix + id);
+        }
+    }
+}
+
+QJsonObject inspectWidget(AutomationProcess& process, const QString& id, const QString& name)
+{
+    QJsonObject inspected;
+    if (!send(process, {
+            {QStringLiteral("type"), QStringLiteral("widget.inspect")},
+            {QStringLiteral("id"), id},
+            {QStringLiteral("object_name"), name},
+        }) || !receiveApplied(process, id, &inspected)) return {};
+    return inspected.value(QStringLiteral("state")).toObject();
+}
+
+QRect widgetBounds(const QJsonObject& state)
+{
+    const QJsonObject bounds = state.value(QStringLiteral("bounds")).toObject();
+    return {bounds.value(QStringLiteral("x")).toInt(), bounds.value(QStringLiteral("y")).toInt(),
+        bounds.value(QStringLiteral("width")).toInt(), bounds.value(QStringLiteral("height")).toInt()};
+}
+
+void exerciseResponsiveTransport(AutomationProcess& peer, const QString& prefix)
+{
+    const Snapshot initial = snapshotAll(peer, prefix + QStringLiteral("initial"));
+    const QString monitor = QStringLiteral("performance.monitor-enabled");
+    const bool originalMonitor = controlState(initial, monitor).value(QStringLiteral("checked")).toBool();
+    (void)invokeAndReceive(peer, prefix + QStringLiteral("monitor-on"), monitor,
+        QStringLiteral("set-checked"), true);
+    const std::array<std::pair<QString, QString>, 4> gains{{
+        {QStringLiteral("performance.send-level"), QStringLiteral("PerformanceSendValue")},
+        {QStringLiteral("performance.monitor-level"), QStringLiteral("PerformanceMonitorValue")},
+        {QStringLiteral("performance.metronome-level"), QStringLiteral("PerformanceMetronomeValue")},
+        {QStringLiteral("performance.master-output-level"), QStringLiteral("PerformanceMasterOutputValue")},
+    }};
+    QHash<QString, int> wideWidths;
+    for (int width : {1920, 1440, 1280}) {
+        const QString phase = prefix + QString::number(width);
+        resizeWindow(peer, phase, width, 720);
+        const Snapshot snapshot = snapshotAll(peer, phase + QStringLiteral("controls"));
+        const QJsonObject checkbox = controlState(snapshot, monitor);
+        requireUnobscured(checkbox, phase + monitor);
+        if (widgetBounds(checkbox).width() < checkbox.value(QStringLiteral("minimum_width")).toInt()) {
+            fail(phase + QStringLiteral(" clipped Monitor input text"));
+        }
+        for (const auto& [slider, label] : gains) {
+            const QJsonObject sliderState = controlState(snapshot, slider);
+            const QJsonObject labelState = inspectWidget(peer, phase + label, label);
+            requireUnobscured(sliderState, phase + slider);
+            requireUnobscured(labelState, phase + label);
+            if (widgetBounds(labelState).width() < labelState.value(QStringLiteral("minimum_width")).toInt() ||
+                widgetBounds(sliderState).intersects(widgetBounds(labelState))) {
+                fail(phase + label + QStringLiteral(" overlapped its slider or clipped its gain text"));
+            }
+        }
+        for (const char* name : {"PerformanceInputMeter", "PerformanceOutputMeter"}) {
+            const QString meter = QString::fromLatin1(name);
+            const QJsonObject state = inspectWidget(peer, phase + meter, meter);
+            requireUnobscured(state, phase + meter);
+            const int meterWidth = widgetBounds(state).width();
+            if (width == 1920) wideWidths.insert(meter, meterWidth);
+            else if (meterWidth >= wideWidths.value(meter)) {
+                fail(phase + meter + QStringLiteral(" did not shrink with the transport"));
+            }
+        }
+    }
+    // Gain text must still fit at both ends of the real control's range.
+    for (const auto& [slider, label] : gains) {
+        for (int value : {-60, 12}) {
+            const QString id = prefix + slider + QString::number(value);
+            (void)invokeAndReceive(peer, id, slider, QStringLiteral("set-value"), value);
+            const QJsonObject state = inspectWidget(peer, id + label, label);
+            requireUnobscured(state, id + label);
+            if (state.value(QStringLiteral("text")).toString() !=
+                    (value == -60 ? QStringLiteral("-60.0 dB") : QStringLiteral("+12.0 dB")) ||
+                widgetBounds(state).width() < state.value(QStringLiteral("minimum_width")).toInt()) {
+                fail(id + QStringLiteral(" did not display its gain without clipping"));
+            }
+        }
+        (void)invokeAndReceive(peer, prefix + slider + QStringLiteral("restore"), slider,
+            QStringLiteral("set-value"), controlState(initial, slider).value(QStringLiteral("value")));
+    }
+    (void)invokeAndReceive(peer, prefix + QStringLiteral("monitor-restore"), monitor,
+        QStringLiteral("set-checked"), originalMonitor);
+    resizeWindow(peer, prefix + QStringLiteral("restore-window"),
+        initial.window.value(QStringLiteral("width")).toInt(),
+        initial.window.value(QStringLiteral("height")).toInt());
 }
 
 QJsonObject inputSourceSlot(
@@ -1131,6 +1267,7 @@ int main(int argc, char* argv[])
             peerPrefix + QStringLiteral("cancel-local"),
             QStringLiteral("application.local-engine.cancel"),
             QStringLiteral("click"));
+        exerciseResponsiveTransport(peer, peerPrefix + QStringLiteral("transport-layout-"));
 
         const QString startOpen = peerPrefix + QStringLiteral("open-start");
         openModal(peer, startOpen, QStringLiteral("session.start"));
@@ -1993,6 +2130,45 @@ int main(int argc, char* argv[])
             QStringLiteral("set-index"),
             originalModeIndex);
 
+        (void)invokeAndReceive(peer, peerPrefix + QStringLiteral("open-sharing-page"),
+            QStringLiteral("workspace.open.looper"), QStringLiteral("click"));
+        const QString sharingToggle = QStringLiteral("looper.sharing-tools");
+        const QString shareNow = QStringLiteral("looper.share-now");
+        const QString exportAudio = QStringLiteral("looper.export");
+        const QString listeningToggle = QStringLiteral("looper.listening-tools");
+        const QString speedValue = QStringLiteral("looper.speed.value");
+        const Snapshot initialSharing = snapshotAll(
+            peer, peerPrefix + QStringLiteral("initial-sharing"));
+        resizeWindow(peer, peerPrefix + QStringLiteral("small-track-window"), 1280, 720);
+        const bool initialShareEnabled = enabled(initialSharing, shareNow);
+        const auto checkSharing = [&](const QString& phase, bool open, bool listeningOpen) {
+            const Snapshot sharing = snapshotAll(peer, peerPrefix + phase);
+            const QJsonObject toggle = controlState(sharing, sharingToggle);
+            if (!sharing.controls.contains(sharingToggle) ||
+                !toggle.value(QStringLiteral("checkable")).toBool() ||
+                !visible(sharing, sharingToggle) || checked(sharing, sharingToggle) != open ||
+                !toggle.value(QStringLiteral("text")).toString().startsWith(
+                    open ? QChar(0x25be) : QChar(0x25b8)) ||
+                !sharing.controls.contains(shareNow) || !sharing.controls.contains(exportAudio) ||
+                visible(sharing, shareNow) != open || visible(sharing, exportAudio) != open ||
+                enabled(sharing, shareNow) != initialShareEnabled ||
+                !enabled(sharing, exportAudio) || visible(sharing, speedValue) != listeningOpen) {
+                fail(QStringLiteral("Sharing expansion state or independent listening tools mismatch: %1")
+                    .arg(phase));
+            }
+            requireTrackToolsUnobscured(peer, peerPrefix + phase + QStringLiteral("-layout"),
+                listeningOpen, open);
+        };
+        checkSharing(QStringLiteral("sharing-default-collapsed"), false, false);
+        (void)invokeAndReceive(peer, peerPrefix + QStringLiteral("expand-sharing"),
+            sharingToggle, QStringLiteral("click"));
+        checkSharing(QStringLiteral("sharing-expanded"), true, false);
+        (void)invokeAndReceive(peer, peerPrefix + QStringLiteral("leave-sharing-page"),
+            QStringLiteral("workspace.close"), QStringLiteral("click"));
+        (void)invokeAndReceive(peer, peerPrefix + QStringLiteral("return-sharing-page"),
+            QStringLiteral("workspace.open.looper"), QStringLiteral("click"));
+        checkSharing(QStringLiteral("sharing-still-expanded"), true, false);
+
         openModal(
             peer,
             peerPrefix + QStringLiteral("open-export-cancel"),
@@ -2017,6 +2193,24 @@ int main(int argc, char* argv[])
             peer,
             peerPrefix + QStringLiteral("cancel-export"),
             QStringLiteral("looper.export-dialog.cancel"));
+
+        checkSharing(QStringLiteral("sharing-after-export-cancel"), true, false);
+        (void)invokeAndReceive(peer, peerPrefix + QStringLiteral("expand-listening"),
+            listeningToggle, QStringLiteral("click"));
+        (void)invokeAndReceive(peer, peerPrefix + QStringLiteral("collapse-sharing"),
+            sharingToggle, QStringLiteral("click"));
+        checkSharing(QStringLiteral("sharing-collapsed-listening-open"), false, true);
+        (void)invokeAndReceive(peer, peerPrefix + QStringLiteral("reexpand-sharing"),
+            sharingToggle, QStringLiteral("click"));
+        checkSharing(QStringLiteral("sharing-reexpanded-listening-open"), true, true);
+        (void)invokeAndReceive(peer, peerPrefix + QStringLiteral("restore-sharing"),
+            sharingToggle, QStringLiteral("click"));
+        (void)invokeAndReceive(peer, peerPrefix + QStringLiteral("restore-listening"),
+            listeningToggle, QStringLiteral("click"));
+        checkSharing(QStringLiteral("sharing-restored-collapsed"), false, false);
+        resizeWindow(peer, peerPrefix + QStringLiteral("restore-sharing-window"),
+            initialSharing.window.value(QStringLiteral("width")).toInt(),
+            initialSharing.window.value(QStringLiteral("height")).toInt());
 
         Snapshot beforeArrangement = snapshotAll(
             peer, peerPrefix + QStringLiteral("before-arrangement"));
@@ -2465,6 +2659,57 @@ int main(int argc, char* argv[])
             peer,
             peerPrefix + QStringLiteral("cancel-reopened-arm-recording"),
             QStringLiteral("looper.recording-dialog.cancel"));
+
+        // Exercise the actual modal-to-armed transition, then compete for space
+        // with both expanded tool panels at the minimum supported window size.
+        resizeWindow(peer, peerPrefix + QStringLiteral("small-armed-window"), 1280, 720);
+        openModal(peer, peerPrefix + QStringLiteral("open-layout-arm"),
+            QStringLiteral("looper.lane.0.arm"));
+        (void)invokeAndReceive(peer, peerPrefix + QStringLiteral("layout-loopback-mode"),
+            QStringLiteral("looper.recording-dialog.mode"), QStringLiteral("set-index"), 2);
+        closeModal(peer, peerPrefix + QStringLiteral("accept-layout-arm"),
+            QStringLiteral("looper.recording-dialog.arm"));
+        const Snapshot armed = snapshotAll(peer, peerPrefix + QStringLiteral("armed-layout"));
+        for (const char* id : {"looper.recording.start-stop", "looper.recording.manual-stop",
+                 "looper.recording.count-in"}) {
+            requireUnobscured(controlState(armed, QString::fromLatin1(id)), peerPrefix + id);
+        }
+        for (const char* name : {"RecordingContextTitle", "RecordingContextDetail",
+                 "RecordingPeerStates", "RecordingPhase"}) {
+            const QString id = peerPrefix + QStringLiteral("inspect-") + name;
+            QJsonObject inspected;
+            if (send(peer, {
+                    {QStringLiteral("type"), QStringLiteral("widget.inspect")},
+                    {QStringLiteral("id"), id},
+                    {QStringLiteral("object_name"), QString::fromLatin1(name)},
+                }) && receiveApplied(peer, id, &inspected)) {
+                const QJsonObject state = inspected.value(QStringLiteral("state")).toObject();
+                requireUnobscured(state, id);
+                if (state.value(QStringLiteral("text")).toString().isEmpty()) {
+                    fail(id + QStringLiteral(" had no recording information"));
+                }
+            }
+        }
+        for (const char* id : {"looper.listening-tools", "looper.sharing-tools"}) {
+            (void)invokeAndReceive(peer, peerPrefix + QStringLiteral("armed-expand-") + id,
+                QString::fromLatin1(id), QStringLiteral("click"));
+        }
+        requireTrackToolsUnobscured(peer, peerPrefix + QStringLiteral("armed-tools-layout"),
+            true, true);
+        (void)invokeAndReceive(peer, peerPrefix + QStringLiteral("layout-disarm"),
+            QStringLiteral("looper.lane.0.arm"), QStringLiteral("click"));
+        const Snapshot disarmed = snapshotAll(peer, peerPrefix + QStringLiteral("disarmed-layout"));
+        if (visible(disarmed, QStringLiteral("looper.recording.start-stop")) ||
+            visible(disarmed, QStringLiteral("looper.recording.manual-stop"))) {
+            fail(QStringLiteral("Disarming did not hide the recording panel"));
+        }
+        for (const char* id : {"looper.listening-tools", "looper.sharing-tools"}) {
+            (void)invokeAndReceive(peer, peerPrefix + QStringLiteral("armed-collapse-") + id,
+                QString::fromLatin1(id), QStringLiteral("click"));
+        }
+        resizeWindow(peer, peerPrefix + QStringLiteral("restore-armed-window"),
+            initialSharing.window.value(QStringLiteral("width")).toInt(),
+            initialSharing.window.value(QStringLiteral("height")).toInt());
         openModal(
             peer,
             peerPrefix + QStringLiteral("open-remove-recording-lane"),
