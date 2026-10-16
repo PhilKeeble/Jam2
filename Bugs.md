@@ -31,9 +31,23 @@ need to make it fit better on smaller screens like the macbook neo
 in a jam it shows RTT but that is not actually taht useful, show the estimate time for instrument -> peer instead 
 - maybe have data show the breakdown of each part as well from data so people can see which settings are causing timing adds with real metrics
 
+
+Slowing down track changes down, not sur eit used to do taht
 ## Bugs
 
 user preference schema keeps growing to account for odler profiles, make sure removed before release
+
+
+Jack
+When switching from section A to B one person hears the old section, can switch who it is ut someone always does
+
+remove wav is deleting lane
+
+someitme jacks audio doesnt recover
+
+opened a jamjar already in a jam and the audio didnt sync over
+
+maybe look at bringing track seeking back in
 
 ## Bugs - MacOS
 listening tools gets cut off by the tracks so you cant see it when its expanded 

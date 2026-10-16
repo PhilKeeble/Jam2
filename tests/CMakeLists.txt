@@ -323,6 +323,26 @@ if(WIN32)
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
 endif()
 
+add_executable(jam2_prepared_mix_renderer_tests EXCLUDE_FROM_ALL
+    unit/gui/PreparedMixRendererTests.cpp
+    "${CMAKE_SOURCE_DIR}/app/gui/PreparedMixRenderer.cpp")
+jam2_configure_test_target(jam2_prepared_mix_renderer_tests)
+target_include_directories(jam2_prepared_mix_renderer_tests PRIVATE
+    "${CMAKE_SOURCE_DIR}/app/gui"
+    "${CMAKE_SOURCE_DIR}/libs/third_party")
+target_link_libraries(jam2_prepared_mix_renderer_tests PRIVATE
+    jam2_core jam2_looper_model Qt6::Core)
+add_test(NAME jam2_prepared_mix_renderer_units
+    COMMAND $<TARGET_FILE:jam2_prepared_mix_renderer_tests>)
+set_tests_properties(jam2_prepared_mix_renderer_units PROPERTIES
+    LABELS "unit;gui;audio;performance;shared-content;wav"
+    TIMEOUT 30)
+if(WIN32)
+    set_tests_properties(jam2_prepared_mix_renderer_units PROPERTIES
+        ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
+endif()
+
 add_executable(jam2_project_persistence_tests EXCLUDE_FROM_ALL
     unit/gui/ProjectPersistenceCoordinatorTests.cpp
     "${CMAKE_SOURCE_DIR}/app/gui/ProjectPersistenceCoordinator.cpp")
@@ -1324,6 +1344,7 @@ add_custom_target(jam2_tests_unit
         jam2_worker_entrypoint_tests
         jam2_looper_project_tests
         jam2_prepared_mix_lifecycle_tests
+        jam2_prepared_mix_renderer_tests
         jam2_project_persistence_tests
         jam2_workspace_state_tests
         jam2_gui_loopback_recorder_tests
@@ -1376,6 +1397,7 @@ add_custom_target(jam2_tests_gui
         jam2_input_plugin_backend_tests
         jam2_looper_project_tests
         jam2_prepared_mix_lifecycle_tests
+        jam2_prepared_mix_renderer_tests
         jam2_project_persistence_tests
         jam2_workspace_state_tests
         jam2_gui_loopback_recorder_tests
@@ -1413,6 +1435,7 @@ add_custom_target(jam2_tests_performance
         jam2_metronome_transport_controller_tests
         jam2_prepared_mix_lifecycle_tests
         jam2_shared_bank_launch_tests
+        jam2_prepared_mix_renderer_tests
         jam2_four_performance_integration
         jam2_four_session_command_integration
         jam2_four_metronome_impairment)
@@ -1429,6 +1452,7 @@ add_custom_target(jam2_tests_shared_content
         jam2_asset_channel_lifecycle_tests
         jam2_looper_project_tests
         jam2_prepared_mix_lifecycle_tests
+        jam2_prepared_mix_renderer_tests
         jam2_project_persistence_tests
         jam2_workspace_state_tests
         jam2_track_workspace_support_tests

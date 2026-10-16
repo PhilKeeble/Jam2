@@ -16,6 +16,7 @@
 #include <QtGlobal>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
@@ -95,27 +96,36 @@ std::vector<float> processTrack(std::vector<float> input, int sampleRate, const 
         return {};
     }
 
-    std::vector<float> output(static_cast<std::size_t>(outputFrames), 0.0f);
-    if (pitchCents == 0) {
-        for (qint64 frame = 0; frame < outputFrames; ++frame) {
-            const double source = static_cast<double>(frame) * speed;
-            const qint64 left = static_cast<qint64>(std::floor(source));
-            const qint64 right = left + 1;
-            const double frac = source - static_cast<double>(left);
-            const double a = left >= 0 && left < static_cast<qint64>(input.size()) ? input[static_cast<std::size_t>(left)] : 0.0;
-            const double b = right >= 0 && right < static_cast<qint64>(input.size()) ? input[static_cast<std::size_t>(right)] : a;
-            output[static_cast<std::size_t>(frame)] = static_cast<float>(a + (b - a) * frac);
-        }
+    std::vector<float> output;
+    if (speed == 1.0 && pitchCents == 0) {
+        output = std::move(input);
     } else {
+        // Speed changes always require time stretching, even with no requested
+        // transposition. Resampling here would change speed and pitch together.
         signalsmith::stretch::SignalsmithStretch<float> stretch;
-        stretch.presetDefault(1, static_cast<float>(std::max(1, sampleRate)), true);
+        stretch.presetDefault(1, static_cast<float>(std::max(1, sampleRate)));
         stretch.setTransposeSemitones(static_cast<float>(pitchCents) / 100.0f);
-        std::vector<std::vector<float>> inputBlock(1);
-        std::vector<std::vector<float>> outputBlock(1);
-        inputBlock[0] = std::move(input);
-        outputBlock[0].assign(static_cast<std::size_t>(outputFrames), 0.0f);
-        stretch.process(inputBlock, static_cast<int>(inputBlock[0].size()), outputBlock, static_cast<int>(outputFrames));
-        output = std::move(outputBlock[0]);
+        const int inputLatency = stretch.inputLatency();
+        const int outputLatency = stretch.outputLatency();
+        if (inputLatency < 0 || outputLatency < 0) {
+            error = QStringLiteral("Signalsmith reported invalid latency");
+            return {};
+        }
+        const int inputFrames = static_cast<int>(input.size());
+        input.resize(input.size() + static_cast<std::size_t>(inputLatency), 0.0f);
+        output.resize(static_cast<std::size_t>(outputFrames + outputLatency), 0.0f);
+        // Prime from the beginning, flush the tail, and discard processor
+        // latency. The requested length includes only the audible track.
+        const double playbackRate = inputFrames / static_cast<double>(outputFrames);
+        const std::array<const float*, 1> inputStart{input.data()};
+        stretch.seek(inputStart, inputLatency, playbackRate);
+        const std::array<const float*, 1> inputAfterLatency{input.data() + inputLatency};
+        const std::array<float*, 1> outputStart{output.data()};
+        stretch.process(inputAfterLatency, inputFrames, outputStart, static_cast<int>(outputFrames));
+        const std::array<float*, 1> outputTail{output.data() + outputFrames};
+        stretch.flush(outputTail, outputLatency);
+        std::move(output.begin() + outputLatency, output.end(), output.begin());
+        output.resize(static_cast<std::size_t>(outputFrames));
     }
     applyFocus(output, sampleRate, track);
     return output;

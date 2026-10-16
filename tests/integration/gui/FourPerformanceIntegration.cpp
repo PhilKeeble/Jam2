@@ -1081,6 +1081,66 @@ int main(int argc, char* argv[])
                         "global_transport_playing")).toBool() &&
                     !performance.value(QStringLiteral("prepared_source_playing")).toBool();
             }, states)) return 1;
+
+    // Exercise the real speed/pitch editors and their asynchronous renderer on
+    // exactly four peers. Waveform pitch is measured by the renderer unit test;
+    // this covers control wiring, paired slider state, publication, and restore.
+    std::array<qint64, FourPeerCoordinator::kPeerCount> normalFrames{};
+    for (std::size_t peer = 0; peer < states.size(); ++peer) {
+        normalFrames[peer] = states[peer].value(QStringLiteral("content")).toObject()
+            .value(QStringLiteral("prepared_mix_frames")).toInteger();
+        const auto speed = controlState(coordinator.peer(peer),
+            QStringLiteral("looper.speed.value"), QStringLiteral("initial-speed-%1").arg(peer));
+        const auto pitch = controlState(coordinator.peer(peer),
+            QStringLiteral("looper.pitch.value"), QStringLiteral("initial-pitch-%1").arg(peer));
+        if (!speed || !pitch || speed->value(QStringLiteral("value")).toDouble() != 1.0 ||
+            pitch->value(QStringLiteral("value")).toInt() != 0) {
+            fail(QStringLiteral("playback transform fixture must start at normal speed and zero pitch"));
+            return 1;
+        }
+    }
+    struct PlaybackSetting { double speed; int semitones; };
+    const PlaybackSetting playbackSettings[] = {
+        {0.5, 0}, {0.5, 7}, {1.0, 7}, {1.0, 0},
+    };
+    for (const PlaybackSetting setting : playbackSettings) {
+        std::array<qint64, FourPeerCoordinator::kPeerCount> previousRevision{};
+        for (std::size_t peer = 0; peer < states.size(); ++peer) {
+            previousRevision[peer] = states[peer].value(QStringLiteral("content")).toObject()
+                .value(QStringLiteral("prepared_mix_revision")).toInteger();
+            if (!invoke(coordinator.peer(peer),
+                    QStringLiteral("track-speed-%1-%2-%3").arg(peer).arg(setting.speed).arg(setting.semitones),
+                    QStringLiteral("looper.speed.value"), QStringLiteral("set-value"), setting.speed) ||
+                !invoke(coordinator.peer(peer),
+                    QStringLiteral("track-pitch-%1-%2-%3").arg(peer).arg(setting.speed).arg(setting.semitones),
+                    QStringLiteral("looper.pitch.value"), QStringLiteral("set-value"), setting.semitones)) return 1;
+        }
+        if (!waitForAll(coordinator, QStringLiteral("four prepared speed/pitch transformations"),
+                [&normalFrames, &previousRevision, setting](std::size_t peer, const QJsonObject& state) {
+                    const QJsonObject content = state.value(QStringLiteral("content")).toObject();
+                    const QJsonObject performance = state.value(QStringLiteral("performance")).toObject();
+                    const qint64 expectedFrames = setting.speed == 0.5
+                        ? normalFrames[peer] * 2 : normalFrames[peer];
+                    return content.value(QStringLiteral("prepared_mix_frames")).toInteger() == expectedFrames &&
+                        content.value(QStringLiteral("prepared_mix_revision")).toInteger() > previousRevision[peer] &&
+                        !content.value(QStringLiteral("prepared_mix_worker_running")).toBool() &&
+                        content.value(QStringLiteral("prepared_mix_failures")).toInteger() == 0 &&
+                        content.value(QStringLiteral("track_file_available")).toBool() &&
+                        !performance.value(QStringLiteral("prepared_source_playing")).toBool();
+                }, states)) return 1;
+        for (std::size_t peer = 0; peer < states.size(); ++peer) {
+            const auto speedSlider = controlState(coordinator.peer(peer),
+                QStringLiteral("looper.speed.slider"), QStringLiteral("speed-view-%1").arg(peer));
+            const auto pitchSlider = controlState(coordinator.peer(peer),
+                QStringLiteral("looper.pitch.slider"), QStringLiteral("pitch-view-%1").arg(peer));
+            if (!speedSlider || !pitchSlider ||
+                speedSlider->value(QStringLiteral("value")).toInt() != static_cast<int>(setting.speed * 100) ||
+                pitchSlider->value(QStringLiteral("value")).toInt() != setting.semitones) {
+                fail(QStringLiteral("speed and pitch sliders must independently reflect their editor values"));
+                return 1;
+            }
+        }
+    }
     if (!send(coordinator.peer(0), {
             {QStringLiteral("type"), QStringLiteral("performance.transport")},
             {QStringLiteral("id"), QStringLiteral("loop-fixture-play")},
