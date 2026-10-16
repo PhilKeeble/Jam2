@@ -2,6 +2,22 @@
 
 `jam2` is one unified GUI and command-line application. With no arguments it opens the GUI; its subcommands use the same engine and network implementation for headless operation, diagnostics, and automated testing.
 
+On Windows, opening `jam2.exe` starts the GUI without creating a console window.
+CLI commands attach to the terminal that launched them and preserve redirected
+input, output, and error streams. They do not create a new console when launched
+by an automation tool or another process without a terminal.
+
+Windows treats this executable as a GUI application, so interactive shells may
+return their prompt before a CLI command finishes. In interactive Command Prompt,
+use `start "" /wait jam2.exe <command>`. In PowerShell, use
+`Start-Process -FilePath .\release\jam2.exe -ArgumentList '--help' -NoNewWindow -Wait -PassThru`
+when explicit waiting or the process exit code is needed (`.ExitCode` on the
+returned process). Batch files and tools that launch and wait on a process handle
+can continue to use the same executable. Bounded headless use remains available,
+for example `jam2.exe local --headless-audio on --stream-ms 1000`.
+
+macOS keeps its existing `Jam2.app` GUI launch and command-line behavior.
+
 ## Commands
 
 ```text

@@ -384,8 +384,8 @@ if(WIN32)
     )
 endif()
 
-# The unified Windows binary uses the console subsystem so shells wait for
-# command-line invocations. The no-argument GUI path detaches immediately.
+# Windows starts without a console; CLI invocations attach to their parent
+# terminal while preserving inherited redirected streams.
 add_executable(jam2 MACOSX_BUNDLE
     Jam2Resources.qrc
     application/ApplicationEntrypoint.cpp
@@ -542,7 +542,7 @@ if(JAM2_IDEA_PREVIEW_FILES)
 endif()
 
 if(WIN32)
-    set_target_properties(jam2 PROPERTIES WIN32_EXECUTABLE FALSE)
+    set_target_properties(jam2 PROPERTIES WIN32_EXECUTABLE TRUE)
     target_sources(jam2 PRIVATE
         "${CMAKE_CURRENT_BINARY_DIR}/Jam2.rc"
         "${JAM2_GUI_WINDOWS_ICON}"

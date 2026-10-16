@@ -9,7 +9,12 @@
 #include <QCoreApplication>
 #include <QIcon>
 
+#include <array>
+#include <cstdint>
+#include <cstdio>
 #include <iostream>
+#include <memory>
+#include <string>
 #include <string_view>
 
 #if defined(_WIN32)
@@ -17,21 +22,109 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <fcntl.h>
+#include <io.h>
 #endif
 
 namespace {
 
 #if defined(_WIN32)
-void detachConsoleForGui() noexcept
+struct CloseWindowsHandle {
+    void operator()(void* handle) const noexcept { (void)CloseHandle(handle); }
+};
+using OwnedWindowsHandle = std::unique_ptr<void, CloseWindowsHandle>;
+
+struct ScopedDescriptor {
+    int value;
+    ~ScopedDescriptor() { if (value >= 0) (void)_close(value); }
+};
+
+bool attachConsoleForCli(std::string& error)
 {
-    DWORD processIds[2]{};
-    const DWORD attachedProcessCount = GetConsoleProcessList(processIds, 2);
-    if (attachedProcessCount == 1) {
-        if (const HWND consoleWindow = GetConsoleWindow(); consoleWindow != nullptr) {
-            ShowWindow(consoleWindow, SW_HIDE);
+    struct Stream {
+        DWORD id;
+        FILE* file;
+        const char* mode;
+        int flags;
+        OwnedWindowsHandle inherited;
+    };
+    std::array<Stream, 3> streams{{
+        {STD_INPUT_HANDLE, stdin, "r", _O_RDONLY | _O_TEXT, {}},
+        {STD_OUTPUT_HANDLE, stdout, "w", _O_WRONLY | _O_TEXT, {}},
+        {STD_ERROR_HANDLE, stderr, "w", _O_WRONLY | _O_TEXT, {}},
+    }};
+
+    // AttachConsole can replace standard handles. Keep owned duplicates so
+    // shell redirection and automation pipes survive attaching and freopen.
+    for (auto& stream : streams) {
+        HANDLE handle = GetStdHandle(stream.id);
+        if (handle == nullptr || handle == INVALID_HANDLE_VALUE ||
+            GetFileType(handle) == FILE_TYPE_UNKNOWN) continue;
+        HANDLE duplicate = nullptr;
+        if (!DuplicateHandle(GetCurrentProcess(), handle, GetCurrentProcess(),
+                &duplicate, 0, FALSE, DUPLICATE_SAME_ACCESS)) {
+            error = "Could not preserve CLI standard handle: " + std::to_string(GetLastError());
+            return false;
+        }
+        stream.inherited.reset(duplicate);
+    }
+
+    if (!AttachConsole(ATTACH_PARENT_PROCESS)) {
+        const DWORD reason = GetLastError();
+        // Automation/services can have pipes without a parent console. A
+        // short-lived launcher may also have exited. Never allocate a console.
+        if (reason != ERROR_ACCESS_DENIED && reason != ERROR_INVALID_HANDLE &&
+            reason != ERROR_INVALID_PARAMETER) {
+            error = "Could not attach CLI terminal: " + std::to_string(reason);
+            return false;
         }
     }
-    (void)FreeConsole();
+
+    for (auto& stream : streams) {
+        if (!stream.inherited) {
+            HANDLE handle = GetStdHandle(stream.id);
+            HANDLE duplicate = nullptr;
+            if (handle != nullptr && handle != INVALID_HANDLE_VALUE &&
+                GetFileType(handle) != FILE_TYPE_UNKNOWN) {
+                if (!DuplicateHandle(GetCurrentProcess(), handle, GetCurrentProcess(),
+                        &duplicate, 0, FALSE, DUPLICATE_SAME_ACCESS)) {
+                    error = "Could not open CLI terminal stream: " + std::to_string(GetLastError());
+                    return false;
+                }
+                stream.inherited.reset(duplicate);
+            }
+        }
+        // GUI-subsystem CRT streams can have descriptor -2. Reopen first to
+        // obtain a real descriptor, then bind the saved pipe/file/console.
+        FILE* reopened = nullptr;
+        if (freopen_s(&reopened, "NUL", stream.mode, stream.file) != 0) {
+            error = "Could not initialize CLI standard stream";
+            return false;
+        }
+        if (stream.inherited) {
+            ScopedDescriptor descriptor{_open_osfhandle(
+                reinterpret_cast<std::intptr_t>(stream.inherited.get()), stream.flags)};
+            if (descriptor.value < 0) {
+                error = "Could not bind CLI standard handle";
+                return false;
+            }
+            (void)stream.inherited.release(); // CRT descriptor now owns it.
+            if (_dup2(descriptor.value, _fileno(stream.file)) != 0) {
+                error = "Could not bind CLI standard stream";
+                return false;
+            }
+        }
+        if (!SetStdHandle(stream.id,
+                reinterpret_cast<HANDLE>(_get_osfhandle(_fileno(stream.file))))) {
+            error = "Could not publish CLI standard handle: " + std::to_string(GetLastError());
+            return false;
+        }
+    }
+    std::cin.clear();
+    std::cout.clear();
+    std::cerr.clear();
+    std::clog.clear();
+    return true;
 }
 #endif
 
@@ -573,6 +666,15 @@ void setApplicationIdentity()
 
 int jam2ApplicationMain(int argc, char* argv[])
 {
+#if defined(_WIN32)
+    if (argc > 1) {
+        std::string error;
+        if (!attachConsoleForCli(error)) {
+            std::cerr << error << '\n';
+            return 1;
+        }
+    }
+#endif
     const bool hasAutomationHandle =
         qEnvironmentVariableIsSet("JAM2_AUTOMATION_COMMAND_HANDLE") ||
         qEnvironmentVariableIsSet("JAM2_AUTOMATION_EVENT_HANDLE");
@@ -607,7 +709,6 @@ int jam2ApplicationMain(int argc, char* argv[])
     }
 
 #if defined(_WIN32)
-    detachConsoleForGui();
     (void)SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS);
 #endif
     QApplication app(argc, argv);

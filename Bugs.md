@@ -28,7 +28,7 @@ look into what python is left, cpp might still be calling some like the fuzzer
 
 need to make it fit better on smaller screens like the macbook neo
 
-
+make recording set the default length to the length of the current section rather than 8 bars
 ## Bugs
 
 user preference schema keeps growing to account for odler profiles, make sure removed before release
@@ -65,7 +65,11 @@ loopback recording doesnt work on mac
 
 
 
-
+# DAW mode
+make a new daw mode for complex editing local only, can take comps, fade, punch in, quick and not waiting on syncs etc 
+keep current mode as loop and listen
+look into track seeking workflows whilst syncing, same as loop workflows
+make the loop start and end markers lock to bar so its cleaner perhaps 
 
 
 

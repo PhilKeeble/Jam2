@@ -24,6 +24,14 @@
 #include <utility>
 #include <vector>
 
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <memory>
+#endif
+
 namespace {
 
 int failures = 0;
@@ -516,6 +524,181 @@ ProcessResult runProcess(const QString& executable, const QStringList& arguments
     return result;
 }
 
+#if defined(_WIN32)
+struct CloseTestHandle {
+    void operator()(void* handle) const noexcept { (void)CloseHandle(handle); }
+};
+using TestHandle = std::unique_ptr<void, CloseTestHandle>;
+
+int runConsoleChild(const QString& executable, const QString& arguments)
+{
+    std::wstring command = (QStringLiteral("\"") + QDir::toNativeSeparators(executable) +
+        QStringLiteral("\" ") + arguments).toStdWString();
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    PROCESS_INFORMATION process{};
+    // Deliberately supply no inherited streams: Jam2 must attach to this
+    // parent's console and initialize its own CRT streams.
+    const BOOL started = CreateProcessW(nullptr, command.data(), nullptr, nullptr,
+        FALSE, 0, nullptr, nullptr, &startup, &process);
+    expect(started != FALSE, "terminal starts staged GUI-subsystem executable");
+    if (!started) return -1;
+    TestHandle processHandle(process.hProcess);
+    TestHandle threadHandle(process.hThread);
+    const DWORD waited = WaitForSingleObject(processHandle.get(), 15000);
+    expect(waited == WAIT_OBJECT_0, "attached CLI command exits within its deadline");
+    if (waited != WAIT_OBJECT_0) {
+        (void)TerminateProcess(processHandle.get(), 1);
+        (void)WaitForSingleObject(processHandle.get(), 5000);
+        return -1;
+    }
+    DWORD code = 0;
+    expect(GetExitCodeProcess(processHandle.get(), &code) != FALSE,
+        "attached CLI exit code is available to its caller");
+    return static_cast<int>(code);
+}
+
+int testParentConsole(const QString& executable)
+{
+    TestHandle console(CreateFileW(L"CONOUT$", GENERIC_READ | GENERIC_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr));
+    if (console.get() == INVALID_HANDLE_VALUE) {
+        (void)console.release();
+        expect(false, "terminal fixture has its own console");
+        return 1;
+    }
+    expect(runConsoleChild(executable, QStringLiteral("--help")) == 0,
+        "CLI help succeeds when launched directly from a terminal");
+    expect(runConsoleChild(executable, QStringLiteral("unknown-command")) == 2,
+        "CLI invalid command preserves its nonzero exit code");
+    expect(runConsoleChild(executable,
+        QStringLiteral("local --headless-audio on --stream-ms 150 --test-input tone-440")) == 0,
+        "bounded headless audio succeeds from a terminal");
+    CONSOLE_SCREEN_BUFFER_INFO info{};
+    expect(GetConsoleScreenBufferInfo(console.get(), &info) != FALSE,
+        "terminal fixture can inspect actual console output");
+    const int length = info.dwSize.X * (info.dwCursorPosition.Y + 1);
+    QByteArray screen(length, '\0');
+    DWORD read = 0;
+    expect(length > 0 && ReadConsoleOutputCharacterA(console.get(), screen.data(),
+        static_cast<DWORD>(screen.size()), COORD{0, 0}, &read) != FALSE,
+        "terminal fixture reads attached CLI output");
+    screen.resize(read);
+    expect(screen.contains("Usage:") && screen.contains("Unknown command: unknown-command") &&
+            screen.contains("\"mode\":\"local\""),
+        "help, stderr and headless startup reach the launching terminal");
+
+    // Redirection must also survive attachment to a real parent console.
+    const ProcessResult redirected = runProcess(executable, {QStringLiteral("--help")});
+    expect(redirected.finished && redirected.code == 0 && redirected.output.contains("Usage:"),
+        "inherited output pipe survives attaching to a parent console");
+
+    QProcess gui;
+    gui.setProgram(executable);
+    gui.setCreateProcessArgumentsModifier([](QProcess::CreateProcessArguments* args) {
+        args->startupInfo->dwFlags |= STARTF_USESHOWWINDOW;
+        args->startupInfo->wShowWindow = SW_HIDE;
+    });
+    gui.start();
+    const bool guiStarted = gui.waitForStarted(10000);
+    expect(guiStarted, "no-argument launch starts the actual GUI");
+    if (guiStarted) {
+        const DWORD guiId = static_cast<DWORD>(gui.processId());
+        TestHandle process(OpenProcess(SYNCHRONIZE | PROCESS_QUERY_INFORMATION, FALSE, guiId));
+        expect(process && WaitForInputIdle(process.get(), 15000) == 0,
+            "no-argument launch reaches the GUI event loop");
+        console.reset();
+        expect(FreeConsole() != FALSE, "terminal fixture detaches before probing GUI console state");
+        const BOOL attached = AttachConsole(guiId);
+        const DWORD attachError = attached ? ERROR_SUCCESS : GetLastError();
+        expect(!attached && attachError == ERROR_INVALID_HANDLE,
+            "actual no-argument GUI has neither a new console nor the parent terminal");
+        if (attached) (void)FreeConsole();
+
+        struct WindowSearch { DWORD processId; HWND window = nullptr; } search{guiId};
+        EnumWindows([](HWND window, LPARAM context) -> BOOL {
+            auto& found = *reinterpret_cast<WindowSearch*>(context);
+            DWORD owner = 0;
+            GetWindowThreadProcessId(window, &owner);
+            wchar_t title[128]{};
+            GetWindowTextW(window, title, 128);
+            if (owner == found.processId && std::wstring_view(title) == L"Jam2gether" &&
+                GetWindow(window, GW_OWNER) == nullptr) {
+                found.window = window;
+                return FALSE;
+            }
+            return TRUE;
+        }, reinterpret_cast<LPARAM>(&search));
+        expect(search.window != nullptr, "no-argument GUI creates its main window");
+        // This fixture tests startup only. Avoid the separate project-save
+        // close workflow and ensure the hidden GUI cannot outlive the fixture.
+        gui.kill();
+        expect(gui.waitForFinished(5000), "startup fixture cleans up its GUI process");
+    }
+    return failures == 0 ? 0 : 1;
+}
+
+void testWindowsStartup(const QString& executable)
+{
+    QFile binary(executable);
+    IMAGE_DOS_HEADER dos{};
+    IMAGE_NT_HEADERS64 headers{};
+    const bool opened = binary.open(QIODevice::ReadOnly);
+    const bool validHeaders = opened &&
+        binary.read(reinterpret_cast<char*>(&dos), sizeof(dos)) == sizeof(dos) &&
+        dos.e_magic == IMAGE_DOS_SIGNATURE && dos.e_lfanew >= sizeof(dos) &&
+        binary.seek(dos.e_lfanew) &&
+        binary.read(reinterpret_cast<char*>(&headers), sizeof(headers)) == sizeof(headers) &&
+        headers.Signature == IMAGE_NT_SIGNATURE;
+    expect(validHeaders && headers.OptionalHeader.Subsystem == IMAGE_SUBSYSTEM_WINDOWS_GUI,
+        "public executable starts as a Windows GUI without creating a console");
+
+    QProcess terminal;
+    terminal.setProgram(QCoreApplication::applicationFilePath());
+    terminal.setArguments({QStringLiteral("--console-parent"), executable});
+    terminal.setCreateProcessArgumentsModifier([](QProcess::CreateProcessArguments* args) {
+        args->flags = (args->flags & ~CREATE_NO_WINDOW) | CREATE_NEW_CONSOLE;
+        args->startupInfo->dwFlags |= STARTF_USESHOWWINDOW;
+        args->startupInfo->wShowWindow = SW_HIDE;
+    });
+    terminal.start();
+    const bool started = terminal.waitForStarted(10000);
+    const bool finished = started && terminal.waitForFinished(30000);
+    expect(finished && terminal.exitStatus() == QProcess::NormalExit && terminal.exitCode() == 0,
+        "native terminal attachment and headless regression checks pass");
+    if (!finished) {
+        terminal.kill();
+        terminal.waitForFinished(5000);
+    }
+    if (terminal.exitCode() != 0) std::cerr << terminal.readAllStandardError().toStdString();
+
+    QTemporaryDir root;
+    expect(root.isValid(), "redirected CLI fixture creates a temporary directory");
+    if (!root.isValid()) return;
+    const QString outputPath = QDir(root.path()).filePath(QStringLiteral("stdout.txt"));
+    const QString errorPath = QDir(root.path()).filePath(QStringLiteral("stderr.txt"));
+    QProcess redirected;
+    redirected.setProgram(executable);
+    redirected.setArguments({QStringLiteral("unknown-command")});
+    redirected.setStandardOutputFile(outputPath);
+    redirected.setStandardErrorFile(errorPath);
+    redirected.start();
+    const bool redirectedStarted = redirected.waitForStarted(10000);
+    const bool redirectedFinished = redirectedStarted && redirected.waitForFinished(10000);
+    if (!redirectedFinished) {
+        redirected.kill();
+        redirected.waitForFinished(5000);
+    }
+    QFile output(outputPath);
+    QFile error(errorPath);
+    expect(redirectedFinished && redirected.exitStatus() == QProcess::NormalExit &&
+            redirected.exitCode() == 2 && output.open(QIODevice::ReadOnly) &&
+            error.open(QIODevice::ReadOnly) && output.readAll().isEmpty() &&
+            error.readAll().contains("Unknown command: unknown-command"),
+        "file redirection preserves separate stdout/stderr and nonzero exit codes");
+}
+#endif
+
 void testStagedLocalRuntime(const QString& executable)
 {
     const ProcessResult createHelp = runProcess(executable, {
@@ -602,6 +785,11 @@ int runLocal(int, char**)
 int main(int argc, char** argv)
 {
     QCoreApplication application(argc, argv);
+#if defined(_WIN32)
+    if (argc == 3 && std::string_view(argv[1]) == "--console-parent") {
+        return testParentConsole(QString::fromLocal8Bit(argv[2]));
+    }
+#endif
     if (argc != 2) {
         std::cerr << "usage: jam2_cli_boundary_tests <release-jam2>\n";
         return 2;
@@ -611,6 +799,9 @@ int main(int argc, char** argv)
         testFrontendAndHelpContracts();
         testOptionAndStatsContracts();
         testStagedLocalRuntime(QString::fromLocal8Bit(argv[1]));
+#if defined(_WIN32)
+        testWindowsStartup(QString::fromLocal8Bit(argv[1]));
+#endif
     } catch (const std::exception& exception) {
         ++failures;
         std::cerr << "FAIL: unexpected CLI-boundary exception: "
