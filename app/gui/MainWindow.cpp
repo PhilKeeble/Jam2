@@ -8996,8 +8996,6 @@ bool MainWindow::showLaneRecordingDialog(
     const LoopbackRecordingPreference& loopbackDraft = result.loopback;
     captureManualStopCheck_->setChecked(
         loopback ? loopbackDraft.recordUntilStopped : inputDraft.recordUntilStopped);
-    captureDurationSpin_->setValue(
-        loopback ? loopbackDraft.durationBars : inputDraft.durationBars);
     captureCountInCheck_->setChecked(inputDraft.countIn);
     captureCountInBarsSpin_->setValue(inputDraft.countInBars);
     captureCountInMetronomeCheck_->setChecked(inputDraft.countInMetronome);
@@ -9062,6 +9060,10 @@ bool MainWindow::showLaneRecordingDialog(
         return false;
     }
     selectedLooperLane_ = resolved.lane;
+    const int sectionBars = jam2::gui::recording_bars_for_section(
+        chordModel_.section(resolved.bank).beats, sectionBeatsPerBar(resolved.bank));
+    captureDurationSpin_->setMaximum(qMax(captureDurationSpin_->maximum(), sectionBars));
+    captureDurationSpin_->setValue(sectionBars);
     trackRecordingWorkflow_.armLane(
         resolved.bank,
         resolved.lane,

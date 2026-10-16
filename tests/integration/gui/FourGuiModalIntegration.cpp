@@ -2662,6 +2662,30 @@ int main(int argc, char* argv[])
 
         // Exercise the actual modal-to-armed transition, then compete for space
         // with both expanded tool panels at the minimum supported window size.
+        (void)invokeAndReceive(peer, peerPrefix + QStringLiteral("record-length-metronome"),
+            QStringLiteral("workspace.open.metronome"), QStringLiteral("click"));
+        const QString meterControl = QStringLiteral("metronome.beats-per-bar");
+        const int originalMeter = controlState(snapshotControl(peer,
+            peerPrefix + QStringLiteral("record-length-original-meter"), meterControl), meterControl)
+            .value(QStringLiteral("index")).toInt();
+        const std::array<int, 4> recordingMeters{4, 3, 5, 1};
+        const int recordingMeter = recordingMeters.at(index);
+        (void)invokeAndReceive(peer, peerPrefix + QStringLiteral("record-length-meter"),
+            meterControl, QStringLiteral("set-index"), recordingMeter - 1);
+        (void)invokeAndReceive(peer, peerPrefix + QStringLiteral("record-length-chords"),
+            QStringLiteral("workspace.open.chords"), QStringLiteral("click"));
+        const Snapshot beforeRecordingExpansion = snapshotAll(peer,
+            peerPrefix + QStringLiteral("record-length-before-expand"));
+        const int originalSectionBeats = beforeRecordingExpansion.content
+            .value(QStringLiteral("first_section")).toObject().value(QStringLiteral("beats")).toInt();
+        for (std::size_t bar = 0; bar <= index; ++bar) {
+            (void)invokeAndReceive(peer, peerPrefix + QStringLiteral("record-length-expand-%1").arg(bar),
+                QStringLiteral("grid.chord.section.expand"), QStringLiteral("click"));
+        }
+        const int expectedRecordingBars = (originalSectionBeats + recordingMeter - 1) /
+            recordingMeter + static_cast<int>(index) + 1;
+        (void)invokeAndReceive(peer, peerPrefix + QStringLiteral("record-length-track"),
+            QStringLiteral("workspace.open.looper"), QStringLiteral("click"));
         resizeWindow(peer, peerPrefix + QStringLiteral("small-armed-window"), 1280, 720);
         openModal(peer, peerPrefix + QStringLiteral("open-layout-arm"),
             QStringLiteral("looper.lane.0.arm"));
@@ -2670,6 +2694,29 @@ int main(int argc, char* argv[])
         closeModal(peer, peerPrefix + QStringLiteral("accept-layout-arm"),
             QStringLiteral("looper.recording-dialog.arm"));
         const Snapshot armed = snapshotAll(peer, peerPrefix + QStringLiteral("armed-layout"));
+        const QString manualStop = QStringLiteral("looper.recording.manual-stop");
+        const QString duration = QStringLiteral("looper.recording.duration");
+        (void)invokeAndReceive(peer, peerPrefix + QStringLiteral("record-length-bounded"),
+            manualStop, QStringLiteral("set-checked"), false);
+        const Snapshot bounded = snapshotControl(peer, peerPrefix + QStringLiteral("record-length-default"), duration);
+        if (!enabled(bounded, duration) ||
+            controlState(bounded, duration).value(QStringLiteral("value")).toInt() != expectedRecordingBars) {
+            fail(QStringLiteral("Bounded recording did not default to the armed section's bar count"));
+        }
+        const int customRecordingBars = expectedRecordingBars == 3 ? 2 : 3;
+        (void)invokeAndReceive(peer, peerPrefix + QStringLiteral("record-length-custom"),
+            duration, QStringLiteral("set-value"), customRecordingBars);
+        (void)invokeAndReceive(peer, peerPrefix + QStringLiteral("record-length-manual"),
+            manualStop, QStringLiteral("set-checked"), true);
+        const Snapshot manual = snapshotControl(peer, peerPrefix + QStringLiteral("record-length-disabled"), duration);
+        if (enabled(manual, duration)) fail(QStringLiteral("Manual-stop recording left the bar limit enabled"));
+        (void)invokeAndReceive(peer, peerPrefix + QStringLiteral("record-length-bounded-again"),
+            manualStop, QStringLiteral("set-checked"), false);
+        const Snapshot custom = snapshotControl(peer, peerPrefix + QStringLiteral("record-length-preserved"), duration);
+        if (!enabled(custom, duration) ||
+            controlState(custom, duration).value(QStringLiteral("value")).toInt() != customRecordingBars) {
+            fail(QStringLiteral("Toggling manual stop overwrote the custom recording length"));
+        }
         for (const char* id : {"looper.recording.start-stop", "looper.recording.manual-stop",
                  "looper.recording.count-in"}) {
             requireUnobscured(controlState(armed, QString::fromLatin1(id)), peerPrefix + id);
@@ -2707,6 +2754,24 @@ int main(int argc, char* argv[])
             (void)invokeAndReceive(peer, peerPrefix + QStringLiteral("armed-collapse-") + id,
                 QString::fromLatin1(id), QStringLiteral("click"));
         }
+        openModal(peer, peerPrefix + QStringLiteral("record-length-rearm"),
+            QStringLiteral("looper.lane.0.arm"));
+        (void)invokeAndReceive(peer, peerPrefix + QStringLiteral("record-length-rearm-loopback"),
+            QStringLiteral("looper.recording-dialog.mode"), QStringLiteral("set-index"), 2);
+        closeModal(peer, peerPrefix + QStringLiteral("record-length-rearm-accept"),
+            QStringLiteral("looper.recording-dialog.arm"));
+        const Snapshot rearmed = snapshotControl(peer, peerPrefix + QStringLiteral("record-length-reset"), duration);
+        if (controlState(rearmed, duration).value(QStringLiteral("value")).toInt() != expectedRecordingBars) {
+            fail(QStringLiteral("Rearming did not restore the section-length recording default"));
+        }
+        (void)invokeAndReceive(peer, peerPrefix + QStringLiteral("record-length-disarm"),
+            QStringLiteral("looper.lane.0.arm"), QStringLiteral("click"));
+        (void)invokeAndReceive(peer, peerPrefix + QStringLiteral("record-length-restore-metronome"),
+            QStringLiteral("workspace.open.metronome"), QStringLiteral("click"));
+        (void)invokeAndReceive(peer, peerPrefix + QStringLiteral("record-length-restore-meter"),
+            meterControl, QStringLiteral("set-index"), originalMeter);
+        (void)invokeAndReceive(peer, peerPrefix + QStringLiteral("record-length-return-track"),
+            QStringLiteral("workspace.open.looper"), QStringLiteral("click"));
         resizeWindow(peer, peerPrefix + QStringLiteral("restore-armed-window"),
             initialSharing.window.value(QStringLiteral("width")).toInt(),
             initialSharing.window.value(QStringLiteral("height")).toInt());

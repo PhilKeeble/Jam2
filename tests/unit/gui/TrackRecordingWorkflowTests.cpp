@@ -1,4 +1,5 @@
 #include "TrackRecordingWorkflow.hpp"
+#include "RecordingTiming.hpp"
 
 #include <QCoreApplication>
 #include <QDir>
@@ -102,6 +103,17 @@ void requireTypes(
 
 void testPureTimingBoundaries()
 {
+    require(jam2::gui::recording_bars_for_section(16, 4) == 4 &&
+            jam2::gui::recording_bars_for_section(48, 4) == 12 &&
+            jam2::gui::recording_bars_for_section(15, 3) == 5 &&
+            jam2::gui::recording_bars_for_section(16, 3) == 6 &&
+            jam2::gui::recording_bars_for_section(512, 3) == 171,
+        "recording duration follows the section length, including partial bars and long sections");
+    require(jam2::gui::recording_bars_for_section(0, 4) == 1 &&
+            jam2::gui::recording_bars_for_section(16, 0) == 1 &&
+            jam2::gui::recording_bars_for_section((std::numeric_limits<int>::max)(), 1) ==
+                (std::numeric_limits<int>::max)(),
+        "recording section bars have a safe minimum and do not overflow");
     using Limits = std::numeric_limits<std::uint64_t>;
     require(jam2::gui::recording_count_in_start_beat(10, 1000, 12000, 48000) == 11 &&
             jam2::gui::recording_count_in_start_beat(10, 1000, 2000, 48000) == 12 &&

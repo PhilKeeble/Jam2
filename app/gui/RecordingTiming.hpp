@@ -6,6 +6,12 @@
 
 namespace jam2::gui {
 
+inline int recording_bars_for_section(int sectionBeats, int beatsPerBar) noexcept
+{
+    if (sectionBeats <= 0 || beatsPerBar <= 0) return 1;
+    return 1 + (sectionBeats - 1) / beatsPerBar;
+}
+
 inline std::uint64_t recording_frames_for_bars(
     int bars,
     int beatsPerBar,

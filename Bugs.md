@@ -26,9 +26,6 @@ python test cases and benchmarks are getting a bit lost, not being kept up to da
 
 look into what python is left, cpp might still be calling some like the fuzzer
 
-need to make it fit better on smaller screens like the macbook neo
-
-make recording set the default length to the length of the current section rather than 8 bars
 ## Bugs
 
 user preference schema keeps growing to account for odler profiles, make sure removed before release

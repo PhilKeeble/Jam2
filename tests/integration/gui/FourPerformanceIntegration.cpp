@@ -1075,11 +1075,17 @@ int main(int argc, char* argv[])
             [](std::size_t, const QJsonObject& state) {
                 const QJsonObject performance = state.value(
                     QStringLiteral("performance")).toObject();
+                const QJsonObject content = state.value(QStringLiteral("content")).toObject();
                 return !performance.value(QStringLiteral(
                         "global_transport_requested_playing")).toBool() &&
                     !performance.value(QStringLiteral(
                         "global_transport_playing")).toBool() &&
-                    !performance.value(QStringLiteral("prepared_source_playing")).toBool();
+                    !performance.value(QStringLiteral("prepared_source_playing")).toBool() &&
+                    content.value(QStringLiteral("prepared_mix_frames")).toInteger() > 1 &&
+                    content.value(QStringLiteral("prepared_mix_sample_rate")).toInt() > 0 &&
+                    content.value(QStringLiteral("track_file_available")).toBool() &&
+                    !content.value(QStringLiteral("prepared_mix_worker_running")).toBool() &&
+                    content.value(QStringLiteral("prepared_mix_failures")).toInteger() == 0;
             }, states)) return 1;
 
     // Exercise the real speed/pitch editors and their asynchronous renderer on
@@ -1127,7 +1133,20 @@ int main(int argc, char* argv[])
                         content.value(QStringLiteral("prepared_mix_failures")).toInteger() == 0 &&
                         content.value(QStringLiteral("track_file_available")).toBool() &&
                         !performance.value(QStringLiteral("prepared_source_playing")).toBool();
-                }, states)) return 1;
+                }, states)) {
+            for (std::size_t peer = 0; peer < states.size(); ++peer) {
+                const QJsonObject content = states[peer].value(QStringLiteral("content")).toObject();
+                const QJsonObject performance = states[peer].value(QStringLiteral("performance")).toObject();
+                std::cerr << "  transform peer=" << peer + 1 << " speed=" << setting.speed
+                    << " pitch=" << setting.semitones << " normal_frames=" << normalFrames[peer]
+                    << " previous_revision=" << previousRevision[peer]
+                    << " current_revision=" << content.value(QStringLiteral("prepared_mix_revision")).toInteger()
+                    << " file_available=" << content.value(QStringLiteral("track_file_available")).toBool()
+                    << " source_playing=" << performance.value(QStringLiteral("prepared_source_playing")).toBool()
+                    << '\n';
+            }
+            return 1;
+        }
         for (std::size_t peer = 0; peer < states.size(); ++peer) {
             const auto speedSlider = controlState(coordinator.peer(peer),
                 QStringLiteral("looper.speed.slider"), QStringLiteral("speed-view-%1").arg(peer));

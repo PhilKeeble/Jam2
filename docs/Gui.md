@@ -336,6 +336,11 @@ threshold, tail duration, and leading/trailing trim controls; it has no Perform 
 count-in, metronome, latency, or ASIO controls. Arm-dialog changes apply to that
 take only and do not overwrite the saved defaults.
 
+Arming a Track lane sets its bar limit to the length of that Section, using the
+Section's time signature and rounding any partial bar up. Untick **Record until
+stopped** to use that limit. You can edit the bar count for the take; toggling
+manual stop preserves that edit, and rearming restores the Section-length default.
+
 Finite Perform Input takes schedule their stop at an exact engine frame measured
 from the scheduled recording start, after any count-in. Finite System Loopback
 takes convert the chosen bar count to source frames and begin capturing immediately.
