@@ -470,9 +470,11 @@ bool TrackRecordingWorkflow::scheduleBankRestart(
 {
     if (targetFrame == 0) return false;
     jam2::EngineCommand source;
+    // Stop leaves the previous Section's samples loaded, so a received shared
+    // restart can play them again. Clear the source at the launch boundary.
     source.type = preparedAvailable
         ? jam2::EngineCommandType::PreparedSeek
-        : jam2::EngineCommandType::PreparedStop;
+        : jam2::EngineCommandType::UnloadPreparedTrack;
     source.frame = targetFrame;
     source.frame_end = 0;
     if (!submit(source)) return false;

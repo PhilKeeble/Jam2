@@ -1161,6 +1161,100 @@ int main(int argc, char* argv[])
                         .toInteger() == 0 &&
                     content.value(QStringLiteral("prepared_mix_failures")).toInteger() == 0;
             }, states)) return 1;
+    // A populated Section A must not remain loaded when empty B becomes active.
+    // Cover both quantized and stopped switches through the real GUI controls,
+    // then restart from every peer: received transport must not revive A's WAV.
+    const auto emptySectionState = [](const QJsonObject& state, bool playing) {
+        const QJsonObject content = state.value(QStringLiteral("content")).toObject();
+        const QJsonObject performance = state.value(QStringLiteral("performance")).toObject();
+        return content.value(QStringLiteral("active_bank")).toInt(-1) == 1 &&
+            content.value(QStringLiteral("pending_bank")).toInt(-2) == -1 &&
+            !content.value(QStringLiteral("shared_bank_launch_active")).toBool() &&
+            content.value(QStringLiteral("prepared_mix_frames")).toInteger(-1) == 0 &&
+            !content.value(QStringLiteral("track_file_available")).toBool() &&
+            performance.value(QStringLiteral("global_transport_requested_playing")).toBool() == playing &&
+            performance.value(QStringLiteral("global_transport_playing")).toBool() == playing &&
+            !performance.value(QStringLiteral("prepared_source_playing")).toBool() &&
+            performance.value(QStringLiteral("prepared_source_frame")).toInteger(-1) == 0 &&
+            performance.value(QStringLiteral("prepared_source_actual_start_frame")).toInteger(-1) == 0;
+    };
+    const auto toggleSectionTransport = [&](std::size_t peer, const QString& id) {
+        return invoke(coordinator.peer(peer), id,
+            QStringLiteral("performance.track-toggle"), QStringLiteral("click"));
+    };
+    for (const bool scheduledSwitch : {true, false}) {
+        const QString mode = scheduledSwitch ? QStringLiteral("scheduled") : QStringLiteral("immediate");
+        std::array<qint64, FourPeerCoordinator::kPeerCount> sectionEpochs{};
+        for (std::size_t peer = 0; peer < states.size(); ++peer) {
+            sectionEpochs[peer] = states[peer].value(QStringLiteral("performance")).toObject()
+                .value(QStringLiteral("metronome_epoch_frame")).toInteger();
+        }
+        if (!scheduledSwitch) {
+            if (!toggleSectionTransport(0, QStringLiteral("section-fixture-stop-a")) ||
+                !waitForAll(coordinator, QStringLiteral("stopped A before immediate empty switch"),
+                    [](std::size_t, const QJsonObject& state) {
+                        const QJsonObject performance = state.value(QStringLiteral("performance")).toObject();
+                        return !performance.value(QStringLiteral("global_transport_requested_playing")).toBool() &&
+                            !performance.value(QStringLiteral("global_transport_playing")).toBool() &&
+                            !performance.value(QStringLiteral("prepared_source_playing")).toBool();
+                    }, states)) return 1;
+        }
+        if (!invoke(coordinator.peer(scheduledSwitch ? 2 : 0),
+                mode + QStringLiteral("-empty-section-b"),
+                QStringLiteral("performance.home.section.queue.1"), QStringLiteral("click")) ||
+            !waitForAll(coordinator, mode + QStringLiteral(" switch unloads A on all four peers"),
+                [&](std::size_t peer, const QJsonObject& state) {
+                    return emptySectionState(state, scheduledSwitch) &&
+                        state.value(QStringLiteral("performance")).toObject()
+                            .value(QStringLiteral("metronome_epoch_frame")).toInteger() == sectionEpochs[peer];
+                }, states, 15s)) return 1;
+
+        for (std::size_t initiator = 0; initiator < states.size(); ++initiator) {
+            if (scheduledSwitch || initiator != 0) {
+                if (!toggleSectionTransport(initiator,
+                        mode + QStringLiteral("-empty-stop-%1").arg(initiator)) ||
+                    !waitForAll(coordinator, QStringLiteral("empty B stopped on every peer"),
+                        [&](std::size_t, const QJsonObject& state) {
+                            return emptySectionState(state, false);
+                        }, states, 15s)) return 1;
+            }
+            if (!toggleSectionTransport(initiator,
+                    mode + QStringLiteral("-empty-play-%1").arg(initiator)) ||
+                !waitForAll(coordinator, QStringLiteral("peer %1 restart cannot revive A in B").arg(initiator + 1),
+                    [&](std::size_t, const QJsonObject& state) {
+                        return emptySectionState(state, true);
+                    }, states, 15s)) return 1;
+        }
+        if (!scheduledSwitch &&
+            (!toggleSectionTransport(1, QStringLiteral("section-fixture-stop-b")) ||
+             !waitForAll(coordinator, QStringLiteral("stopped B before immediate A restoration"),
+                [&](std::size_t, const QJsonObject& state) {
+                    return emptySectionState(state, false);
+                }, states, 15s))) return 1;
+        if (!invoke(coordinator.peer(1), mode + QStringLiteral("-restore-section-a"),
+                QStringLiteral("performance.home.section.queue.0"), QStringLiteral("click")) ||
+            !waitForAll(coordinator, QStringLiteral("A cache and lane identity survive B unloading"),
+                [&](std::size_t peer, const QJsonObject& state) {
+                    const QJsonObject content = state.value(QStringLiteral("content")).toObject();
+                    const QJsonObject performance = state.value(QStringLiteral("performance")).toObject();
+                    return content.value(QStringLiteral("active_bank")).toInt(-1) == 0 &&
+                        content.value(QStringLiteral("pending_bank")).toInt(-2) == -1 &&
+                        !content.value(QStringLiteral("prepared_mix_worker_running")).toBool() &&
+                        content.value(QStringLiteral("prepared_mix_frames")).toInteger() == normalFrames[peer] &&
+                        content.value(QStringLiteral("track_file_available")).toBool() &&
+                        content.value(QStringLiteral("lane_ids")) == sharedTake.value(QStringLiteral("lane_ids")) &&
+                        performance.value(QStringLiteral("global_transport_playing")).toBool() == scheduledSwitch &&
+                        performance.value(QStringLiteral("prepared_source_playing")).toBool() == scheduledSwitch;
+                }, states, 15s)) return 1;
+        if (!scheduledSwitch &&
+            (!toggleSectionTransport(1, QStringLiteral("section-fixture-replay-a")) ||
+             !waitForAll(coordinator, QStringLiteral("all four peers replay the restored A WAV"),
+                [](std::size_t, const QJsonObject& state) {
+                    const QJsonObject performance = state.value(QStringLiteral("performance")).toObject();
+                    return performance.value(QStringLiteral("global_transport_playing")).toBool() &&
+                        performance.value(QStringLiteral("prepared_source_playing")).toBool();
+                }, states, 15s))) return 1;
+    }
     for (std::size_t peer = 0; peer < states.size(); ++peer) {
         if (!invoke(
                 coordinator.peer(peer),

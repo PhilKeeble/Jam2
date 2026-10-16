@@ -33,10 +33,6 @@ need to make it fit better on smaller screens like the macbook neo
 
 user preference schema keeps growing to account for odler profiles, make sure removed before release
 
-
-Jack
-When switching from section A to B one person hears the old section, can switch who it is ut someone always does
-
 someitme jacks audio doesnt recover
 
 maybe look at bringing track seeking back in
@@ -64,7 +60,7 @@ loopback recording doesnt work on mac
 - delete wav on track only deleting the wav 
 - opening a jamjar during a jam and seeing if tracks sync 
 - check import of stereo wav and analysing it 
-
+- check section changes during a jam and making sure that old section is unloaded
 
 
 

@@ -242,13 +242,19 @@ void testPreparedAndTransportCommands()
     require(!workflow.scheduleBankRestart(0, 10, true),
         "bank restart must reject a zero target");
     require(workflow.scheduleBankRestart(500, 600, false),
-        "bank restart without prepared audio must submit stop and transport");
+        "bank restart without prepared audio must unload the old WAV and retain transport");
     requireTypes(fake.commands, {
-        jam2::EngineCommandType::PreparedStop,
+        jam2::EngineCommandType::UnloadPreparedTrack,
         jam2::EngineCommandType::ScheduleTransport}, "empty-bank restart");
-    require(fake.commands[1].transport_target_frame == 500 &&
+    require(fake.commands[0].frame == 500 && fake.commands[0].apply_frame == 0 &&
+            fake.commands[1].transport_target_frame == 500 &&
             fake.commands[1].transport_musical_frame == 600,
-        "empty-bank restart must retain distinct raw/musical targets");
+        "empty-bank restart must unload at the launch boundary and retain raw/musical targets");
+    fake.clearCommands();
+
+    fake.rejectAt = 0;
+    require(!workflow.scheduleBankRestart(500, 600, false) && fake.commands.size() == 1,
+        "rejected empty-bank unload must not publish a restart");
     fake.clearCommands();
 
     require(workflow.scheduleBankRestart(700, 800, true),

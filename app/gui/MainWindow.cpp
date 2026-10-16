@@ -6705,10 +6705,10 @@ void MainWindow::schedulePreparedBankLaunch(
         } else {
             adoptPreparedBankCache(bankIndex);
             if (jam2_.isRunning()) {
-                jam2::EngineCommand stop;
-                stop.type = jam2::EngineCommandType::PreparedStop;
-                stop.frame = position.rawCurrentFrame;
-                (void)submitEngineCommand(stop, QStringLiteral("empty bank silence"));
+                jam2::EngineCommand unload;
+                unload.type = jam2::EngineCommandType::UnloadPreparedTrack;
+                unload.frame = position.rawCurrentFrame;
+                (void)submitEngineCommand(unload, QStringLiteral("empty bank unload"));
             }
         }
         refreshLooperLanes();
