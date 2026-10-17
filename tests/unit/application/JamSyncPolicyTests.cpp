@@ -36,6 +36,14 @@ int main(int argc, char* argv[])
     QCoreApplication application(argc, argv);
 
     const JamSyncPolicy defaults;
+    expect(defaults.listeningTools && jam2JamSyncAllows(defaults, JamSyncRoute::ListeningTools),
+        "listening tools and musical clock sync default on");
+    JamSyncPolicy localListening = defaults;
+    localListening.listeningTools = false;
+    expect(!jam2JamSyncAllows(localListening, JamSyncRoute::ListeningTools), "listening controls can remain local");
+    localListening.listeningTools = true;
+    localListening.globalPlayback = false;
+    expect(!jam2JamSyncAllows(localListening, JamSyncRoute::ListeningTools), "listening sync requires Global Playback");
     expect(defaults.trackLanes && defaults.autoShareWavs && defaults.globalPlayback &&
         defaults.generatedIdeas == GeneratedIdeaSyncMode::Full &&
         !defaults.metronomeState && defaults.recordings,
@@ -124,6 +132,13 @@ int main(int argc, char* argv[])
     request.insert(QStringLiteral("revision"), 3);
     expect(!jam2ParseJamSyncPolicyMessage(request, parsed, error),
         "policy request cannot assign authority revision");
+    QJsonObject older = set;
+    older.remove(QStringLiteral("listening_tools"));
+    expect(jam2ParseJamSyncPolicyMessage(older, parsed, error) && parsed.listeningTools,
+        "older policies default listening tools on");
+    older.insert(QStringLiteral("listening_tools"), QStringLiteral("true"));
+    expect(!jam2ParseJamSyncPolicyMessage(older, parsed, error),
+        "listening tools policy requires a boolean");
     QJsonObject extra = set;
     extra.insert(QStringLiteral("legacy_mode"), true);
     expect(!jam2ParseJamSyncPolicyMessage(extra, parsed, error),

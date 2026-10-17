@@ -5,20 +5,11 @@
 #include "LooperProject.hpp"
 #include "PracticeIdeaGenerator.hpp"
 #include "PracticeReferenceRenderer.hpp"
+#include "PracticeReferenceSelection.hpp"
 
 #include <optional>
 
 namespace jam2::practice {
-
-struct ReferenceLayerAvailability {
-    bool chords = false;
-    bool drums = false;
-    bool melody = false;
-    bool bass = false;
-    bool support = false;
-
-    bool any() const noexcept { return chords || drums || melody || bass || support; }
-};
 
 class PracticeIdeaController final {
 public:
@@ -41,6 +32,8 @@ public:
         const BeatGridModel& model,
         const QString& kind);
     static ReferenceLayerAvailability referenceLayers(const SongSection& section);
+    static QVector<ReferenceRenderSection> referenceSections(
+        const BeatGridModel& model, const LooperProject& project);
     static void clearReferences(LooperProject& project);
     static void clearReferences(LooperProject& project, int bankIndex);
     static bool applyReferences(

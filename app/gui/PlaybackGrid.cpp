@@ -69,8 +69,10 @@ void PlaybackGrid::updateEngine(
     std::uint64_t epochFrame,
     std::int64_t renderOffsetFrames,
     int sampleRate,
-    bool running)
+    bool running,
+    jam2::PlaybackTempo tempo)
 {
+    tempo_ = tempo;
     engineFrame_ = rawFrame;
     engineMusicalFrame_ = musicalFrame;
     engineEpochFrame_ = epochFrame;
@@ -92,6 +94,7 @@ void PlaybackGrid::clearEngine()
 PlaybackGrid::Position PlaybackGrid::position() const
 {
     Position result;
+    result.tempo = tempo_;
     double seconds = 0.0;
     if (engineValid_) {
         std::uint64_t rawFrame = engineFrame_;
@@ -111,7 +114,7 @@ PlaybackGrid::Position PlaybackGrid::position() const
         result.renderOffsetFrames = engineRenderOffsetFrames_;
         result.sampleRate = engineSampleRate_;
         if (engineRunning_ && musicalFrame >= epochFrame) {
-            seconds = static_cast<double>(musicalFrame - epochFrame) / engineSampleRate_;
+            seconds = std::max(0.0, tempo_.position(musicalFrame) - static_cast<double>(epochFrame)) / engineSampleRate_;
         }
         result.running = engineRunning_;
     } else {
@@ -119,9 +122,9 @@ PlaybackGrid::Position PlaybackGrid::position() const
     }
 
     result.secondsPerBeat =
-        60.0 / bpm_ / static_cast<double>(tempoPulseUnits_);
+        60.0 / bpm_ / static_cast<double>(tempoPulseUnits_) / tempo_.rate();
     result.secondsPerStep = result.secondsPerBeat / static_cast<double>(division_);
-    const double steps = seconds / result.secondsPerStep;
+    const double steps = seconds / (result.secondsPerStep * tempo_.rate());
     result.absoluteStep = static_cast<std::uint64_t>(std::floor(qMax(0.0, steps)));
     result.absoluteBeat = result.absoluteStep / static_cast<std::uint64_t>(division_);
     result.beat = static_cast<int>((result.absoluteBeat) %
@@ -133,5 +136,5 @@ PlaybackGrid::Position PlaybackGrid::position() const
 
 double PlaybackGrid::bpm() const
 {
-    return bpm_;
+    return bpm_ * tempo_.rate();
 }

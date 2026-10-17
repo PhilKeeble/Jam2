@@ -99,6 +99,12 @@ JamSyncDialog::JamSyncDialog(
     globalPlayback_->setToolTip(QStringLiteral(
         "Share play, stop, restart and queued Section changes"));
     performanceLayout->addRow(globalPlayback_);
+    listeningTools_ = new QCheckBox(QStringLiteral("Listening Tools / Metronome Sync"), performanceGroup);
+    listeningTools_->setChecked(initialPolicy_.listeningTools);
+    listeningTools_->setToolTip(QStringLiteral(
+        "Share listening tools across the jam. Speed also adjusts the metronome and playhead. "
+        "When disabled, changes are local; speed can diverge from the global playhead. Requires Sync Global Playback."));
+    performanceLayout->addRow(listeningTools_);
 
     metronomeState_ = new QCheckBox(
         QStringLiteral("Sync Metronome State"), performanceGroup);
@@ -122,9 +128,9 @@ JamSyncDialog::JamSyncDialog(
     connect(globalPlayback_, &QCheckBox::toggled, this,
         [this](bool) { updateDependencies(); });
 
-    const std::array<QWidget*, 6> policyControls{
+    const std::array<QWidget*, 7> policyControls{
         trackLanes_, automaticWavs_, generatedIdeas_,
-        globalPlayback_, metronomeState_, recordings_,
+        globalPlayback_, listeningTools_, metronomeState_, recordings_,
     };
     for (QWidget* control : policyControls) {
         if (policyLocked_) control->setEnabled(false);
@@ -139,6 +145,7 @@ JamSyncDialog::JamSyncDialog(
     registerSyncControl(*automaticWavs_, "automatic-wavs", "jam-sync.automatic-wavs");
     registerSyncControl(*generatedIdeas_, "generated-ideas", "jam-sync.generated-ideas");
     registerSyncControl(*globalPlayback_, "global-playback", "jam-sync.global-playback");
+    registerSyncControl(*listeningTools_, "listening-tools", "jam-sync.listening-tools");
     registerSyncControl(*metronomeState_, "metronome-state", "jam-sync.metronome-state");
     registerSyncControl(*recordings_, "recordings", "jam-sync.recordings");
     registerSyncControl(*apply, "apply", "jam-sync.apply-policy");
@@ -156,6 +163,7 @@ JamSyncPolicy JamSyncDialog::policy() const noexcept
     result.trackLanes = trackLanes_->isChecked();
     result.autoShareWavs = automaticWavs_->isChecked();
     result.globalPlayback = globalPlayback_->isChecked();
+    result.listeningTools = listeningTools_->isChecked();
     result.generatedIdeas = static_cast<GeneratedIdeaSyncMode>(
         generatedIdeas_->currentData().toInt());
     result.metronomeState = metronomeState_->isChecked();
@@ -169,6 +177,7 @@ void JamSyncDialog::updateDependencies()
     const bool recordingDependencies = lanesEnabled && globalPlayback_->isChecked();
     automaticWavs_->setEnabled(lanesEnabled && !policyLocked_);
     recordings_->setEnabled(recordingDependencies && !policyLocked_);
+    listeningTools_->setEnabled(globalPlayback_->isChecked() && !policyLocked_);
     if (!recordingDependencies) recordings_->setChecked(false);
     metronomeState_->setEnabled(!leaderAudio_ && !policyLocked_);
     automaticWavs_->setToolTip(lanesEnabled

@@ -15,6 +15,7 @@ TrackWorkspaceController::TrackWorkspaceController(
     ApplicationRuntime& runtime,
     QObject* parent)
     : QObject(parent)
+    , listeningTools(this)
     , recordingWorkflow(runtime)
     , assetTransfer(*this)
 {

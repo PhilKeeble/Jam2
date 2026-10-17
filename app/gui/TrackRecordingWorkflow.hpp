@@ -137,7 +137,8 @@ public:
         qint64 durationMs) const noexcept;
     PreparedAttachPlan preparedAttachPlan(
         const PlaybackGrid::Position& enginePosition,
-        qint64 preparedFrames) const noexcept;
+        qint64 preparedFrames,
+        double preparedSpeed = 1.0) const noexcept;
 
     void consumeSnapshot(
         const jam2::EngineSnapshot& snapshot,
@@ -312,6 +313,7 @@ private:
     std::uint64_t observed_transport_revision_ = 0;
     std::uint64_t observed_transport_commit_count_ = 0;
     std::uint64_t global_transport_start_frame_ = 0;
+    double global_transport_source_origin_ = 0.0;
     std::uint64_t pending_global_transport_countdown_start_frame_ = 0;
     std::uint64_t pending_global_transport_start_frame_ = 0;
     std::uint64_t pending_global_transport_stop_frame_ = 0;

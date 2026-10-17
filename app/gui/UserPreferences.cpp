@@ -480,6 +480,7 @@ UserPreferences UserPreferencesStore::load()
             QStringLiteral("auto_share_wavs"), out.sync.autoShareWavs).toBool();
         out.sync.globalPlayback = settings.value(
             QStringLiteral("global_playback"), out.sync.globalPlayback).toBool();
+        out.sync.listeningTools = settings.value(QStringLiteral("listening_tools"), out.sync.listeningTools).toBool();
         out.sync.generatedIdeas = qBound(0, settings.value(
             QStringLiteral("generated_ideas"), out.sync.generatedIdeas).toInt(), 3);
         out.sync.metronomeState = settings.value(
@@ -632,6 +633,7 @@ void UserPreferencesStore::save(const UserPreferences& p)
     settings.setValue(QStringLiteral("track_lanes"), p.sync.trackLanes);
     settings.setValue(QStringLiteral("auto_share_wavs"), p.sync.autoShareWavs);
     settings.setValue(QStringLiteral("global_playback"), p.sync.globalPlayback);
+    settings.setValue(QStringLiteral("listening_tools"), p.sync.listeningTools);
     settings.setValue(QStringLiteral("generated_ideas"), p.sync.generatedIdeas);
     settings.setValue(QStringLiteral("metronome_state"), p.sync.metronomeState);
     settings.setValue(QStringLiteral("recordings"), p.sync.recordings);

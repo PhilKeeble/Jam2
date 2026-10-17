@@ -156,6 +156,10 @@ void testIndependentSpeedAndPitch(const QString& root, const LooperProject& proj
         require(result.error.isEmpty(), result.error.toStdString());
         require(result.frames == static_cast<qint64>(std::ceil(kInputFrames / setting.speed)),
             "only speed must determine rendered duration");
+        require(result.listeningSpeed == setting.speed &&
+            result.sourcePositionMs(2000) == qRound64(2000 * setting.speed) &&
+            result.sourcePositionMs(-1) == -1,
+            "rendered metadata maps audible and loop markers between prepared and original lane time");
         const auto samples = readSamples(result);
         const double measured = frequency(samples);
         const double expected = kFrequency * std::pow(2.0, setting.pitchCents / 1200.0);

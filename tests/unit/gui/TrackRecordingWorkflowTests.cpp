@@ -184,6 +184,35 @@ void testPureTimingBoundaries()
         "engine sample-rate matching must enforce finite positive one-Hz tolerance");
 }
 
+void testListeningTempoTransportPosition()
+{
+    FakeRuntime fake;
+    auto workflow = fake.workflow();
+    jam2::EngineSnapshot snapshot;
+    snapshot.sample_rate = 48000;
+    snapshot.engine_frame = 48000;
+    snapshot.transport_revision = snapshot.transport_commit_count = 1;
+    snapshot.transport_action = jam2::EngineTransportAction::TrackPlay;
+    snapshot.transport_target_frame = 48000;
+    workflow.consumeSnapshot(snapshot, {});
+    auto position = runningPosition();
+    position.rawCurrentFrame = position.currentFrame = 144000;
+    position.tempo = {500000, 96000, 96000.0};
+    position.secondsPerBeat = 1.0;
+    position.absoluteBeat = 5;
+    require(jam2::gui::synced_recording_countdown_beat(position, 4) == 6,
+        "recording count-in maps source beats through the slowed musical clock");
+    require(workflow.currentTransportPositionMs(position, 10000) == 1500,
+        "global playhead preserves elapsed source position across a half-speed change");
+    const auto attach = workflow.preparedAttachPlan(position, 480000, 0.5);
+    require(attach.alignToTransport && attach.targetFrame == 192000 && attach.sourceFrame == 192000,
+        "prepared attachment uses musical source time and the processed WAV speed");
+    position.tempo = {1000000, 144000, 120000.0};
+    position.currentFrame = position.rawCurrentFrame = 192000;
+    require(workflow.currentTransportPositionMs(position, 10000) == 2500,
+        "disabling listening sync restores clock rate without jumping source position");
+}
+
 void testPreparedAndTransportCommands()
 {
     FakeRuntime fake;
@@ -849,6 +878,7 @@ int main(int argc, char** argv)
     try {
         QCoreApplication application(argc, argv);
         testPureTimingBoundaries();
+        testListeningTempoTransportPosition();
         testPreparedAndTransportCommands();
         testSnapshotsAndCountdown();
         testInputTakeLifecycle();

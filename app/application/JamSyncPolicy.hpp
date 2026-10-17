@@ -18,6 +18,7 @@ enum class JamSyncRoute : std::uint8_t {
     AutomaticWav,
     ManualWav,
     GlobalPlayback,
+    ListeningTools,
     Recording,
     MetronomeState,
     IdeaFull,
@@ -33,6 +34,7 @@ struct JamSyncPolicy {
     bool metronomeState = false;
     bool recordings = true;
     int revision = 0;
+    bool listeningTools = true;
 
     friend bool operator==(const JamSyncPolicy&, const JamSyncPolicy&) = default;
 };

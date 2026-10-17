@@ -29,6 +29,7 @@ private:
     QCheckBox* automaticWavs_ = nullptr;
     QComboBox* generatedIdeas_ = nullptr;
     QCheckBox* globalPlayback_ = nullptr;
+    QCheckBox* listeningTools_ = nullptr;
     QCheckBox* metronomeState_ = nullptr;
     QCheckBox* recordings_ = nullptr;
     QLabel* dependencyNote_ = nullptr;

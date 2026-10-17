@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QElapsedTimer>
+#include "playback_tempo.hpp"
 
 #include <cstdint>
 
@@ -32,6 +33,11 @@ public:
         std::uint64_t currentFrame = 0;
         std::int64_t renderOffsetFrames = 0;
         int sampleRate = 0;
+        jam2::PlaybackTempo tempo{};
+        std::uint64_t frameAtBeat(std::uint64_t absoluteBeatValue) const noexcept {
+            return tempo.frame(static_cast<double>(epochFrame) +
+                static_cast<double>(absoluteBeatValue) * secondsPerBeat * tempo.rate() * sampleRate);
+        }
     };
 
     void setPattern(double bpm, int beatsPerBar, int division, int tempoPulseUnits);
@@ -41,7 +47,8 @@ public:
         std::uint64_t epochFrame,
         std::int64_t renderOffsetFrames,
         int sampleRate,
-        bool running);
+        bool running,
+        jam2::PlaybackTempo tempo = {});
     void clearEngine();
     Position position() const;
     double bpm() const;
@@ -59,4 +66,5 @@ private:
     std::int64_t engineRenderOffsetFrames_ = 0;
     int engineSampleRate_ = 0;
     QElapsedTimer engineReportTime_;
+    jam2::PlaybackTempo tempo_{};
 };

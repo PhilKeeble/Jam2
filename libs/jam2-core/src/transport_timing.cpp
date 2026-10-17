@@ -97,7 +97,8 @@ std::optional<QuantizedTransportSchedule> next_bar_transport_schedule(
     std::int64_t renderOffsetFrames,
     bool epochValid,
     std::uint64_t epochMusicalFrame,
-    int countInBars) noexcept
+    int countInBars,
+    PlaybackTempo tempo) noexcept
 {
     if (!std::isfinite(sampleRate) ||
         sampleRate < static_cast<double>(limits::kMinimumSampleRate) ||
@@ -134,6 +135,23 @@ std::optional<QuantizedTransportSchedule> next_bar_transport_schedule(
         return std::nullopt;
     }
     const std::uint64_t epoch = epochValid ? epochMusicalFrame : 0ULL;
+    if (tempo.rate_ppm != 1000000 || tempo.anchor_frame != 0 || tempo.anchor_position != 0.0) {
+        const double elapsedSource = std::max(0.0, tempo.position(musicalNow) - static_cast<double>(epoch));
+        double next = static_cast<double>(epoch) + (std::floor(elapsedSource / barFrames) + 1.0) * barFrames;
+        std::uint64_t minimum = 0;
+        if (!checked_add(rawCurrentFrame, static_cast<std::uint64_t>(integerSampleRate) / 5ULL, minimum)) return std::nullopt;
+        auto countdown = transport_raw_frame_from_musical(tempo.frame(next), renderOffsetFrames);
+        if (countdown <= minimum) {
+            const auto minimumMusical = transport_musical_frame_from_raw(minimum, renderOffsetFrames);
+            next = static_cast<double>(epoch) + (std::floor(std::max(0.0,
+                tempo.position(minimumMusical) - epoch) / barFrames) + 1.0) * barFrames;
+            countdown = transport_raw_frame_from_musical(tempo.frame(next), renderOffsetFrames);
+        }
+        const auto targetMusical = tempo.frame(next + static_cast<double>(countInBars) * barFrames);
+        const auto target = transport_raw_frame_from_musical(targetMusical, renderOffsetFrames);
+        if (targetMusical == kMaximumFrame || target <= rawCurrentFrame || target < countdown) return std::nullopt;
+        return QuantizedTransportSchedule{countdown, target, targetMusical};
+    }
     const std::uint64_t elapsed = musicalNow >= epoch
         ? musicalNow - epoch
         : 0ULL;
@@ -195,7 +213,8 @@ std::optional<QuantizedTransportSchedule> align_received_transport_to_grid(
     bool epochValid,
     std::uint64_t epochMusicalFrame,
     std::uint64_t estimatedTargetRawFrame,
-    std::uint64_t countInFrames) noexcept
+    std::uint64_t countInFrames,
+    PlaybackTempo tempo) noexcept
 {
     if (!epochValid || !std::isfinite(sampleRate) ||
         sampleRate < static_cast<double>(limits::kMinimumSampleRate) ||
@@ -232,6 +251,22 @@ std::optional<QuantizedTransportSchedule> align_received_transport_to_grid(
             estimatedMusical) ||
         estimatedMusical < epochMusicalFrame) {
         return std::nullopt;
+    }
+    if (tempo.rate_ppm != 1000000 || tempo.anchor_frame != 0 || tempo.anchor_position != 0.0) {
+        const double estimatedSource = std::max(0.0, tempo.position(estimatedMusical) - epochMusicalFrame);
+        double boundary = static_cast<double>(epochMusicalFrame) + std::floor(estimatedSource / barFrames + 0.5) * barFrames;
+        auto musical = tempo.frame(boundary);
+        auto raw = transport_raw_frame_from_musical(musical, renderOffsetFrames);
+        if (raw < countInFrames || raw - countInFrames <= rawCurrentFrame) {
+            if (rawCurrentFrame > kMaximumFrame - countInFrames) return std::nullopt;
+            const auto safeMusical = transport_musical_frame_from_raw(rawCurrentFrame + countInFrames, renderOffsetFrames);
+            boundary = static_cast<double>(epochMusicalFrame) + (std::floor(std::max(0.0,
+                tempo.position(safeMusical) - epochMusicalFrame) / barFrames) + 1.0) * barFrames;
+            musical = tempo.frame(boundary);
+            raw = transport_raw_frame_from_musical(musical, renderOffsetFrames);
+        }
+        if (musical == kMaximumFrame || raw < countInFrames || raw - countInFrames <= rawCurrentFrame) return std::nullopt;
+        return QuantizedTransportSchedule{raw - countInFrames, raw, musical};
     }
     const std::uint64_t elapsed = estimatedMusical - epochMusicalFrame;
     const std::uint64_t completedBars = elapsed / barFrames;

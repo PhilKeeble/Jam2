@@ -194,6 +194,7 @@ struct SyncPreference {
     int generatedIdeas = 1;
     bool metronomeState = false;
     bool recordings = true;
+    bool listeningTools = true;
 };
 
 struct UserPreferences {

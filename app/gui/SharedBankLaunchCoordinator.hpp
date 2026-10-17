@@ -1,4 +1,5 @@
 #pragma once
+#include "playback_tempo.hpp"
 
 #include <QSet>
 #include <QString>
@@ -87,6 +88,7 @@ std::optional<BankLaunchFrameSchedule> bankLaunchFrameSchedule(
     double secondsPerBeat,
     std::int64_t renderOffsetFrames,
     std::optional<std::uint64_t> requestedTargetBeat,
-    int beatsPerBar) noexcept;
+    int beatsPerBar,
+    jam2::PlaybackTempo tempo = {}) noexcept;
 
 } // namespace jam2::gui

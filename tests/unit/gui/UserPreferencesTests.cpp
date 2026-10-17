@@ -28,6 +28,9 @@ int main(int argc, char** argv)
             "test preference path was rejected");
 
         UserPreferences expected;
+        require(UserPreferencesStore::load().sync.listeningTools,
+            "missing listening sync preference defaults on");
+        expected.sync.listeningTools = false;
         expected.recording.preferredMode = QStringLiteral("loopback");
         expected.recording.input.outputFolder = QStringLiteral("input-folder");
         expected.recording.input.recordUntilStopped = false;
@@ -49,6 +52,7 @@ int main(int argc, char** argv)
         UserPreferencesStore::save(expected);
 
         const UserPreferences actual = UserPreferencesStore::load();
+        require(!actual.sync.listeningTools, "listening sync preference round-trips disabled state");
         require(actual.recording.preferredMode == expected.recording.preferredMode &&
                 actual.recording.input.outputFolder == expected.recording.input.outputFolder &&
                 actual.recording.input.recordUntilStopped ==

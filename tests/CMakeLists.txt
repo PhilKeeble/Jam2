@@ -25,6 +25,22 @@ function(jam2_configure_test_target target)
     endif()
 endfunction()
 
+add_executable(jam2_release_build_configuration_tests EXCLUDE_FROM_ALL
+    unit/build/ReleaseBuildConfigurationTests.cpp)
+jam2_configure_test_target(jam2_release_build_configuration_tests)
+target_link_libraries(jam2_release_build_configuration_tests PRIVATE Qt6::Core)
+add_test(NAME jam2_release_build_configuration_units
+    COMMAND $<TARGET_FILE:jam2_release_build_configuration_tests>
+        "${CMAKE_COMMAND}" "${CMAKE_BINARY_DIR}/CMakeCache.txt"
+        "${PROJECT_SOURCE_DIR}" "${CMAKE_GENERATOR}")
+set_tests_properties(jam2_release_build_configuration_units PROPERTIES
+    LABELS "unit;build" TIMEOUT 60)
+if(WIN32)
+    set_tests_properties(jam2_release_build_configuration_units PROPERTIES
+        ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
+endif()
+
 add_executable(jam2_audio_flow_interaction_tests EXCLUDE_FROM_ALL
     integration/network/AudioFlowInteractionTests.cpp)
 jam2_configure_test_target(jam2_audio_flow_interaction_tests)
@@ -470,6 +486,27 @@ if(WIN32)
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
 endif()
 
+add_executable(jam2_listening_tools_tests EXCLUDE_FROM_ALL
+    unit/gui/ListeningToolsControllerTests.cpp
+    "${CMAKE_SOURCE_DIR}/app/application/ControlMessageValidation.cpp"
+    "${CMAKE_SOURCE_DIR}/app/application/ControlProtocol.cpp"
+    "${CMAKE_SOURCE_DIR}/app/gui/GenerationRecipe.cpp"
+    "${CMAKE_SOURCE_DIR}/app/gui/ListeningToolsController.cpp"
+    "${CMAKE_SOURCE_DIR}/app/gui/JamSyncDialog.cpp"
+    "${CMAKE_SOURCE_DIR}/app/gui/GuiControlContract.cpp")
+jam2_configure_test_target(jam2_listening_tools_tests)
+target_include_directories(jam2_listening_tools_tests PRIVATE
+    "${CMAKE_SOURCE_DIR}/app/gui" "${CMAKE_SOURCE_DIR}/app/application")
+target_link_libraries(jam2_listening_tools_tests PRIVATE jam2_core jam2_jam_sync Qt6::Widgets)
+add_test(NAME jam2_listening_tools_units COMMAND $<TARGET_FILE:jam2_listening_tools_tests>)
+set_tests_properties(jam2_listening_tools_units PROPERTIES
+    LABELS "unit;gui;listening-tools;metronome;transport;network;four-peer"
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 30)
+if(WIN32)
+    set_tests_properties(jam2_listening_tools_units PROPERTIES ENVIRONMENT_MODIFICATION
+        "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
+endif()
+
 add_executable(jam2_shared_bank_launch_tests EXCLUDE_FROM_ALL
     unit/gui/SharedBankLaunchCoordinatorTests.cpp
     "${CMAKE_SOURCE_DIR}/app/gui/SharedBankLaunchCoordinator.cpp")
@@ -516,6 +553,7 @@ endif()
 add_executable(jam2_gui_widget_boundary_tests EXCLUDE_FROM_ALL
     unit/gui/GuiWidgetBoundaryTests.cpp
     "${CMAKE_SOURCE_DIR}/app/gui/ActionTileRow.cpp"
+    "${CMAKE_SOURCE_DIR}/app/gui/IdeaHeaderRow.cpp"
     "${CMAKE_SOURCE_DIR}/app/gui/AudioDeviceUiSupport.cpp"
     "${CMAKE_SOURCE_DIR}/app/gui/BeatGridModel.cpp"
     "${CMAKE_SOURCE_DIR}/app/gui/BeatGridWidget.cpp"
@@ -1154,6 +1192,22 @@ if(WIN32)
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
 endif()
 
+add_executable(jam2_four_listening_tools_integration EXCLUDE_FROM_ALL
+    integration/gui/FourListeningToolsIntegration.cpp)
+jam2_configure_test_target(jam2_four_listening_tools_integration)
+target_link_libraries(jam2_four_listening_tools_integration PRIVATE
+    jam2_test_process_support Qt6::Core Qt6::Network)
+add_test(NAME jam2_four_listening_tools_integration
+    COMMAND $<TARGET_FILE:jam2_four_listening_tools_integration>
+        "${JAM2_TEST_PUBLIC_EXECUTABLE}")
+set_tests_properties(jam2_four_listening_tools_integration PROPERTIES
+    LABELS "integration;gui;four-peer;jam-sync;listening-tools;metronome;fake-audio"
+    TIMEOUT 240)
+if(WIN32)
+    set_tests_properties(jam2_four_listening_tools_integration PROPERTIES
+        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
+endif()
+
 add_executable(jam2_four_shared_content_integration EXCLUDE_FROM_ALL
     integration/gui/FourSharedContentIntegration.cpp)
 jam2_configure_test_target(jam2_four_shared_content_integration)
@@ -1336,6 +1390,7 @@ endforeach()
 
 add_custom_target(jam2_tests_unit
     DEPENDS
+        jam2_release_build_configuration_tests
         jam2
         jam2_automation_contract_tests
         jam2_jam_sync_policy_tests
@@ -1352,6 +1407,7 @@ add_custom_target(jam2_tests_unit
         jam2_track_workspace_support_tests
         jam2_track_recording_workflow_tests
         jam2_metronome_transport_controller_tests
+        jam2_listening_tools_tests
         jam2_shared_bank_launch_tests
         jam2_asset_transfer_tests
         jam2_core_input_tests
@@ -1405,6 +1461,7 @@ add_custom_target(jam2_tests_gui
         jam2_track_workspace_support_tests
         jam2_track_recording_workflow_tests
         jam2_metronome_transport_controller_tests
+        jam2_listening_tools_tests
         jam2_shared_bank_launch_tests
         jam2_asset_transfer_tests
         jam2_debug_diagnostic_tests
@@ -1418,6 +1475,7 @@ add_custom_target(jam2_tests_gui
         jam2_four_gui_agent_smoke
         jam2_four_gui_modal_integration
         jam2_four_jam_sync_integration
+        jam2_four_listening_tools_integration
         jam2_four_shared_content_integration
         jam2_four_wav_interruption_integration
         jam2_four_performance_integration)
@@ -1438,6 +1496,7 @@ add_custom_target(jam2_tests_performance
         jam2_shared_bank_launch_tests
         jam2_prepared_mix_renderer_tests
         jam2_four_performance_integration
+        jam2_four_listening_tools_integration
         jam2_four_session_command_integration
         jam2_four_metronome_impairment)
 
@@ -1445,6 +1504,8 @@ add_custom_target(jam2_tests_jam_sync
     DEPENDS
         jam2
         jam2_jam_sync_policy_tests
+        jam2_listening_tools_tests
+        jam2_four_listening_tools_integration
         jam2_four_jam_sync_integration)
 
 add_custom_target(jam2_tests_shared_content
@@ -1575,18 +1636,3 @@ foreach(test_name IN LISTS JAM2_ALL_TESTS)
         set_tests_properties("${test_name}" PROPERTIES TIMEOUT 300)
     endif()
 endforeach()
-
-if(JAM2_ENABLE_COVERAGE)
-    # Coverage instrumentation and an unoptimized app are intentionally slower
-    # than the distribution build. Keep the behavioral deadlines inside each
-    # test unchanged, but allow the test processes enough wall-clock time to
-    # report their own precise failure instead of being killed by CTest first.
-    foreach(test_name IN LISTS JAM2_ALL_TESTS)
-        get_property(test_timeout TEST "${test_name}" PROPERTY TIMEOUT)
-        if(test_timeout)
-            math(EXPR coverage_timeout "${test_timeout} * 3")
-            set_tests_properties("${test_name}" PROPERTIES
-                TIMEOUT "${coverage_timeout}")
-        endif()
-    endforeach()
-endif()

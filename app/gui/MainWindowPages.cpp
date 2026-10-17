@@ -1,7 +1,7 @@
 #include "MainWindowPages.hpp"
 
 #include "MainWindow.hpp"
-#include "ActionTileRow.hpp"
+#include "IdeaHeaderRow.hpp"
 
 #include "DetailSectionEdit.hpp"
 #include "GuiPresentation.hpp"
@@ -75,63 +75,6 @@ QIcon settingsIcon()
     painter.setRenderHint(QPainter::Antialiasing);
     painter.fillPath(path, jam2::gui::theme::text);
     return QIcon(pixmap);
-}
-
-enum class IdeaHeaderAction {
-    Generate,
-    Browse,
-    Continue,
-    Wav,
-    Details,
-};
-
-int styleIdeaHeaderAction(QPushButton* button, IdeaHeaderAction action)
-{
-    if (!button) return 0;
-    QString outline;
-    QString fill;
-    QString hover;
-    int width = 116;
-    switch (action) {
-    case IdeaHeaderAction::Generate:
-        outline = QStringLiteral("#e2ac53");
-        fill = QStringLiteral("rgba(35,27,20,232)");
-        hover = QStringLiteral("#302317");
-        width = 154;
-        break;
-    case IdeaHeaderAction::Browse:
-        outline = QStringLiteral("#9fb56f");
-        fill = QStringLiteral("rgba(28,36,21,232)");
-        hover = QStringLiteral("#26331c");
-        width = 132;
-        break;
-    case IdeaHeaderAction::Continue:
-        outline = QStringLiteral("#66d4cf");
-        fill = QStringLiteral("rgba(13,42,43,232)");
-        hover = QStringLiteral("#123638");
-        width = 124;
-        break;
-    case IdeaHeaderAction::Wav:
-        outline = QStringLiteral("#b08be4");
-        fill = QStringLiteral("rgba(27,20,37,232)");
-        hover = QStringLiteral("#261b34");
-        width = 116;
-        break;
-    case IdeaHeaderAction::Details:
-        outline = QStringLiteral("#56a4f4");
-        fill = QStringLiteral("rgba(17,31,50,232)");
-        hover = QStringLiteral("#172c46");
-        width = 112;
-        break;
-    }
-    button->setFont(jam2::gui::actionTileFont());
-    button->setStyleSheet(QStringLiteral(
-        "QPushButton { color:#f3e6cf;background:%1;border:1px solid %2;border-radius:4px;"
-        "padding:0 9px; }"
-        "QPushButton:hover { background:%3;border-color:%2; }"
-        "QPushButton:pressed { background:#241c20;border-color:#ffd68e; }")
-        .arg(fill, outline, hover));
-    return width;
 }
 
 class AnimatedBrandIcon final : public QWidget {
@@ -1101,12 +1044,13 @@ QWidget* MainWindowPages::buildSongPage(MainWindow& w)
     auto* page = new QWidget(&w);
     w.chordGrid_ = new BeatGridWidget(&w.chordModel_, QStringLiteral("chord"), page);
 
-    auto* generate = new QPushButton(QStringLiteral("GENERATE NEW IDEA"), page);
-    auto* browse = new QPushButton(QStringLiteral("GROOVE LIBRARY"), page);
-    auto* continueIdea = new QPushButton(QStringLiteral("CONTINUE IDEA"), page);
-    auto* reference = new QPushButton(QStringLiteral("GENERATE WAV"), page);
-    auto* jamTaster = new QPushButton(QStringLiteral("JAMTASTER"), page);
-    auto* details = new QPushButton(QStringLiteral("IDEA DETAILS"), page);
+    auto* ideaActions = new jam2::gui::IdeaHeaderRow(page);
+    auto* generate = ideaActions->button(jam2::gui::IdeaHeaderRow::Action::Generate);
+    auto* browse = ideaActions->button(jam2::gui::IdeaHeaderRow::Action::Browse);
+    auto* continueIdea = ideaActions->button(jam2::gui::IdeaHeaderRow::Action::Continue);
+    auto* reference = ideaActions->button(jam2::gui::IdeaHeaderRow::Action::Wav);
+    auto* jamTaster = ideaActions->button(jam2::gui::IdeaHeaderRow::Action::JamTaster);
+    auto* details = ideaActions->button(jam2::gui::IdeaHeaderRow::Action::Details);
     const auto registerChordAction = [](QObject& control, const char* id, const char* contract) {
         jam2::gui::registerGuiControl(
             control,
@@ -1121,13 +1065,7 @@ QWidget* MainWindowPages::buildSongPage(MainWindow& w)
     registerChordAction(*reference, "generate-wav", "idea.reference-wav");
     registerChordAction(*jamTaster, "jam-taster", "idea.jam-taster");
     registerChordAction(*details, "details", "idea.details");
-    auto* ideaActions = new jam2::gui::ActionTileRow(page);
-    ideaActions->addButton(generate, styleIdeaHeaderAction(generate, IdeaHeaderAction::Generate));
-    ideaActions->addButton(browse, styleIdeaHeaderAction(browse, IdeaHeaderAction::Browse));
-    ideaActions->addButton(continueIdea, styleIdeaHeaderAction(continueIdea, IdeaHeaderAction::Continue));
-    ideaActions->addButton(reference, styleIdeaHeaderAction(reference, IdeaHeaderAction::Wav));
-    ideaActions->addButton(jamTaster, styleIdeaHeaderAction(jamTaster, IdeaHeaderAction::Browse));
-    ideaActions->addButton(details, styleIdeaHeaderAction(details, IdeaHeaderAction::Details));
+    w.ideaHeaderRows_[0] = ideaActions;
     auto* top = new QHBoxLayout();
     addBankControls(w, page, top, false, "chords");
     top->addSpacing(12);
@@ -1209,12 +1147,13 @@ QWidget* MainWindowPages::buildBeatPage(MainWindow& w)
 {
     auto* page = new QWidget(&w);
     w.beatGrid_ = new BeatGridWidget(&w.beatModel_, QStringLiteral("beat"), page);
-    auto* generate = new QPushButton(QStringLiteral("GENERATE NEW IDEA"), page);
-    auto* browse = new QPushButton(QStringLiteral("GROOVE LIBRARY"), page);
-    auto* continueIdea = new QPushButton(QStringLiteral("CONTINUE IDEA"), page);
-    auto* reference = new QPushButton(QStringLiteral("GENERATE WAV"), page);
-    auto* jamTaster = new QPushButton(QStringLiteral("JAMTASTER"), page);
-    auto* details = new QPushButton(QStringLiteral("IDEA DETAILS"), page);
+    auto* ideaActions = new jam2::gui::IdeaHeaderRow(page);
+    auto* generate = ideaActions->button(jam2::gui::IdeaHeaderRow::Action::Generate);
+    auto* browse = ideaActions->button(jam2::gui::IdeaHeaderRow::Action::Browse);
+    auto* continueIdea = ideaActions->button(jam2::gui::IdeaHeaderRow::Action::Continue);
+    auto* reference = ideaActions->button(jam2::gui::IdeaHeaderRow::Action::Wav);
+    auto* jamTaster = ideaActions->button(jam2::gui::IdeaHeaderRow::Action::JamTaster);
+    auto* details = ideaActions->button(jam2::gui::IdeaHeaderRow::Action::Details);
     const auto registerBeatAction = [](QObject& control, const char* id, const char* contract) {
         jam2::gui::registerGuiControl(
             control,
@@ -1229,13 +1168,7 @@ QWidget* MainWindowPages::buildBeatPage(MainWindow& w)
     registerBeatAction(*reference, "generate-wav", "idea.reference-wav");
     registerBeatAction(*jamTaster, "jam-taster", "idea.jam-taster");
     registerBeatAction(*details, "details", "idea.details");
-    auto* ideaActions = new jam2::gui::ActionTileRow(page);
-    ideaActions->addButton(generate, styleIdeaHeaderAction(generate, IdeaHeaderAction::Generate));
-    ideaActions->addButton(browse, styleIdeaHeaderAction(browse, IdeaHeaderAction::Browse));
-    ideaActions->addButton(continueIdea, styleIdeaHeaderAction(continueIdea, IdeaHeaderAction::Continue));
-    ideaActions->addButton(reference, styleIdeaHeaderAction(reference, IdeaHeaderAction::Wav));
-    ideaActions->addButton(jamTaster, styleIdeaHeaderAction(jamTaster, IdeaHeaderAction::Browse));
-    ideaActions->addButton(details, styleIdeaHeaderAction(details, IdeaHeaderAction::Details));
+    w.ideaHeaderRows_[1] = ideaActions;
     auto* top = new QHBoxLayout();
     addBankControls(w, page, top, false, "beats");
     top->addSpacing(12);
@@ -1331,7 +1264,6 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
     recordingContextLayout->addWidget(w.recordingCountdownLabel_);
     w.recordingContextFrame_->hide();
 
-    w.trackWaveform_ = nullptr;
     w.looperStack_ = new LooperLaneStackWidget(page);
     w.trackSpeedSlider_ = new QSlider(Qt::Horizontal, page);
     w.trackSpeedSlider_->setRange(10, 200);
@@ -1573,16 +1505,12 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
         w.trimViewedSection();
     });
     sectionRow->addSpacing(12);
-    auto* generateIdeaButton = new QPushButton(
-        QStringLiteral("GENERATE NEW IDEA"), page);
-    auto* browseIdeasButton = new QPushButton(
-        QStringLiteral("GROOVE LIBRARY"), page);
-    auto* continueIdeaButton = new QPushButton(
-        QStringLiteral("CONTINUE IDEA"), page);
-    auto* generateWavButton = new QPushButton(
-        QStringLiteral("GENERATE WAV"), page);
-    auto* jamTasterButton = new QPushButton(
-        QStringLiteral("JAMTASTER"), page);
+    auto* ideaActions = new jam2::gui::IdeaHeaderRow(page, false);
+    auto* generateIdeaButton = ideaActions->button(jam2::gui::IdeaHeaderRow::Action::Generate);
+    auto* browseIdeasButton = ideaActions->button(jam2::gui::IdeaHeaderRow::Action::Browse);
+    auto* continueIdeaButton = ideaActions->button(jam2::gui::IdeaHeaderRow::Action::Continue);
+    auto* generateWavButton = ideaActions->button(jam2::gui::IdeaHeaderRow::Action::Wav);
+    auto* jamTasterButton = ideaActions->button(jam2::gui::IdeaHeaderRow::Action::JamTaster);
     registerTrack(*generateIdeaButton, "idea.generate", "idea.generate",
         jam2::gui::GuiControlAvailability::Modal, "idea.header-action");
     registerTrack(*browseIdeasButton, "idea.browse", "idea.catalog",
@@ -1593,17 +1521,6 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
         jam2::gui::GuiControlAvailability::Modal, "idea.header-action");
     registerTrack(*jamTasterButton, "idea.jam-taster", "idea.jam-taster",
         jam2::gui::GuiControlAvailability::StateGated, "idea.header-action");
-    auto* ideaActions = new jam2::gui::ActionTileRow(page);
-    ideaActions->addButton(generateIdeaButton,
-        styleIdeaHeaderAction(generateIdeaButton, IdeaHeaderAction::Generate));
-    ideaActions->addButton(browseIdeasButton,
-        styleIdeaHeaderAction(browseIdeasButton, IdeaHeaderAction::Browse));
-    ideaActions->addButton(continueIdeaButton,
-        styleIdeaHeaderAction(continueIdeaButton, IdeaHeaderAction::Continue));
-    ideaActions->addButton(generateWavButton,
-        styleIdeaHeaderAction(generateWavButton, IdeaHeaderAction::Wav));
-    ideaActions->addButton(jamTasterButton,
-        styleIdeaHeaderAction(jamTasterButton, IdeaHeaderAction::Browse));
     sectionRow->addWidget(ideaActions, 1);
     QObject::connect(generateIdeaButton, &QPushButton::clicked, &w, [&w] {
         w.generatePracticeIdea();
@@ -1763,9 +1680,10 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
             const QSignalBlocker blocker(w.trackSpeedSpin_);
             w.trackSpeedSpin_->setValue(speed);
         }
+        if (!w.trackSpeedSlider_->isSliderDown()) w.editListeningTools();
     });
     QObject::connect(w.trackSpeedSlider_, &QSlider::sliderReleased, &w, [&w] {
-        w.regeneratePreparedMix();
+        w.editListeningTools(true);
     });
     QObject::connect(w.trackSpeedSpin_, qOverload<double>(&QDoubleSpinBox::valueChanged), &w, [&w](double value) {
         w.trackController_.model().speed = value;
@@ -1773,7 +1691,7 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
             const QSignalBlocker blocker(w.trackSpeedSlider_);
             w.trackSpeedSlider_->setValue(qBound(10, qRound(value * 100.0), 200));
         }
-        w.regeneratePreparedMix();
+        w.editListeningTools();
     });
     QObject::connect(w.trackPitchSlider_, &QSlider::valueChanged, &w, [&w](int value) {
         w.trackController_.model().pitchCents = value * 100;
@@ -1781,9 +1699,10 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
             const QSignalBlocker blocker(w.trackPitchSpin_);
             w.trackPitchSpin_->setValue(value);
         }
+        if (!w.trackPitchSlider_->isSliderDown()) w.editListeningTools();
     });
     QObject::connect(w.trackPitchSlider_, &QSlider::sliderReleased, &w, [&w] {
-        w.regeneratePreparedMix();
+        w.editListeningTools(true);
     });
     QObject::connect(w.trackPitchSpin_, qOverload<int>(&QSpinBox::valueChanged), &w, [&w](int value) {
         w.trackController_.model().pitchCents = value * 100;
@@ -1791,7 +1710,7 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
             const QSignalBlocker blocker(w.trackPitchSlider_);
             w.trackPitchSlider_->setValue(value);
         }
-        w.regeneratePreparedMix();
+        w.editListeningTools();
     });
     QObject::connect(w.loopStartButton_, &QPushButton::clicked, &w, [&w] {
         w.setLoopStartAtCurrentPosition();
@@ -1807,7 +1726,7 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
     });
     QObject::connect(w.focusFrequencyCheck_, &QCheckBox::toggled, &w, [&w](bool checked) {
         w.trackController_.model().focusEnabled = checked;
-        w.regeneratePreparedMix();
+        w.editListeningTools(true);
     });
     QObject::connect(w.focusPresetBox_, qOverload<int>(&QComboBox::currentIndexChanged), &w, [&w](int) {
         QString key = w.focusPresetBox_->currentData().toString();
@@ -1824,7 +1743,7 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
             model.focusQ = preset.q;
         }
         w.updateTrackControls();
-        w.regeneratePreparedMix();
+        w.editListeningTools(true);
     });
     QObject::connect(w.focusFrequencySlider_, &QSlider::valueChanged, &w, [&w](int value) {
         auto& model = w.trackController_.model();
@@ -1844,9 +1763,10 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
             const QSignalBlocker blocker(w.focusFrequencySpin_);
             w.focusFrequencySpin_->setValue(value);
         }
+        if (!w.focusFrequencySlider_->isSliderDown()) w.editListeningTools();
     });
     QObject::connect(w.focusFrequencySlider_, &QSlider::sliderReleased, &w, [&w] {
-        w.regeneratePreparedMix();
+        w.editListeningTools(true);
     });
     QObject::connect(w.focusFrequencySpin_, qOverload<int>(&QSpinBox::valueChanged), &w, [&w](int value) {
         auto& model = w.trackController_.model();
@@ -1866,7 +1786,7 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
             const QSignalBlocker blocker(w.focusFrequencySlider_);
             w.focusFrequencySlider_->setValue(value);
         }
-        w.regeneratePreparedMix();
+        w.editListeningTools();
     });
     QObject::connect(w.trackGridLockCheck_, &QCheckBox::toggled, &w, [&w](bool checked) {
         w.looperProject_.setGridLockEnabled(checked);

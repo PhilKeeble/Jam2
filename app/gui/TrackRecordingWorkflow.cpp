@@ -138,7 +138,7 @@ std::uint64_t jam2::gui::next_safe_grid_beat_raw_frame(
             return (std::numeric_limits<std::uint64_t>::max)();
         }
         return rawFrameFromMusicalFrame(
-            position.epochFrame + static_cast<std::uint64_t>(std::llround(offset)),
+            position.frameAtBeat(beat),
             position.renderOffsetFrames);
     };
     std::uint64_t beat = position.absoluteBeat + 1ULL;
@@ -170,6 +170,12 @@ std::uint64_t jam2::gui::synced_recording_countdown_beat(
     }
     const std::uint64_t countdownMusicalFrame = musicalFrameFromRawFrame(
         countdownRawFrame, position.renderOffsetFrames);
+    if (position.tempo.rate_ppm != 1000000 || position.tempo.anchor_frame != 0 || position.tempo.anchor_position != 0.0) {
+        const double elapsed = position.tempo.position(countdownMusicalFrame) - position.epochFrame;
+        const double sourceBeatFrames = position.secondsPerBeat * position.tempo.rate() * position.sampleRate;
+        return elapsed >= 0.0 && sourceBeatFrames > 0.0
+            ? static_cast<std::uint64_t>(std::floor(elapsed / sourceBeatFrames + 0.5)) : 0;
+    }
     if (countdownMusicalFrame < position.epochFrame) return 0;
     const std::uint64_t elapsed = countdownMusicalFrame - position.epochFrame;
     return elapsed > (std::numeric_limits<std::uint64_t>::max)() - beatFrames / 2ULL
@@ -265,7 +271,7 @@ bool quantizedRecordingSchedule(
         return false;
     }
     const std::uint64_t countdownMusicalFrame =
-        position.epochFrame + countdownBeat * beatFrames;
+        position.frameAtBeat(countdownBeat);
     const std::uint64_t countInBeats =
         static_cast<std::uint64_t>(qMax(0, countInBars)) * beats;
     if (countInBeats >
@@ -275,7 +281,7 @@ bool quantizedRecordingSchedule(
             "recording start target exceeds the engine clock range");
         return false;
     }
-    targetMusicalFrame = countdownMusicalFrame + countInBeats * beatFrames;
+    targetMusicalFrame = position.frameAtBeat(countdownBeat + countInBeats);
     countdownStartFrame = rawFrameFromMusicalFrame(
         countdownMusicalFrame, position.renderOffsetFrames);
     targetFrame = rawFrameFromMusicalFrame(
@@ -594,6 +600,12 @@ qint64 TrackRecordingWorkflow::currentTransportPositionMs(
     if (enginePosition.sampleRate <= 0) {
         return 0;
     }
+    if (global_transport_playing_ && enginePosition.engineAnchored &&
+        (enginePosition.tempo.rate_ppm != 1000000 || enginePosition.tempo.anchor_frame != 0 || enginePosition.tempo.anchor_position != 0.0)) {
+        const double sourceElapsed = std::max(0.0, enginePosition.tempo.position(enginePosition.currentFrame) - global_transport_source_origin_);
+        return static_cast<qint64>(std::min(sourceElapsed * 1000.0 / enginePosition.sampleRate,
+            static_cast<double>((std::numeric_limits<qint64>::max)() - 1024LL)));
+    }
     const std::uint64_t elapsedFrames = jam2::gui::global_transport_elapsed_frames(
         global_transport_playing_,
         enginePosition.engineAnchored,
@@ -615,7 +627,8 @@ qint64 TrackRecordingWorkflow::currentTransportPositionMs(
 TrackRecordingWorkflow::PreparedAttachPlan
 TrackRecordingWorkflow::preparedAttachPlan(
     const PlaybackGrid::Position& enginePosition,
-    qint64 preparedFrames) const noexcept
+    qint64 preparedFrames,
+    double preparedSpeed) const noexcept
 {
     if (!global_transport_requested_playing_ || preparedFrames <= 0) {
         return {};
@@ -635,6 +648,15 @@ TrackRecordingWorkflow::preparedAttachPlan(
     const std::uint64_t elapsed = targetFrame >= songStart
         ? targetFrame - songStart
         : 0ULL;
+    if (enginePosition.tempo.rate_ppm != 1000000 || enginePosition.tempo.anchor_frame != 0 ||
+        enginePosition.tempo.anchor_position != 0.0 || preparedSpeed != 1.0) {
+        const auto targetMusical = jam2::transport_musical_frame_from_raw(targetFrame, enginePosition.renderOffsetFrames);
+        const double origin = global_transport_playing_ ? global_transport_source_origin_ : enginePosition.tempo.position(
+            jam2::transport_musical_frame_from_raw(songStart, enginePosition.renderOffsetFrames));
+        const double source = std::max(0.0, enginePosition.tempo.position(targetMusical) - origin) /
+            std::clamp(preparedSpeed, 0.10, 2.0);
+        return {true, targetFrame, static_cast<std::uint64_t>(std::fmod(source, static_cast<double>(preparedFrames)))};
+    }
     return {
         true,
         targetFrame,
@@ -690,6 +712,8 @@ void TrackRecordingWorkflow::consumeSnapshot(
             global_transport_requested_playing_ = true;
             global_transport_playing_ = true;
             global_transport_start_frame_ = snapshot.transport_target_frame;
+            global_transport_source_origin_ = snapshot.playback_tempo.position(jam2::transport_musical_frame_from_raw(
+                snapshot.transport_target_frame, snapshot.metronome_render_offset_frames));
             pending_global_transport_countdown_start_frame_ = 0;
             pending_global_transport_start_frame_ = 0;
             pending_global_transport_stop_frame_ = 0;

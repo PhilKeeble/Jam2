@@ -3,6 +3,7 @@
 #include "ControlProtocol.hpp"
 #include "GenerationRecipe.hpp"
 #include "JamSyncPolicy.hpp"
+#include "ListeningToolsController.hpp"
 #include "protocol.hpp"
 
 #include <QJsonArray>
@@ -550,6 +551,9 @@ bool jam2::application::validateControlMessage(
         return isBoundedString(message.value(QStringLiteral("message")), 4096)
             ? true : (reason = QStringLiteral("session error text is invalid"), false);
     }
+    if (type.startsWith(QStringLiteral("jam.listening."))) {
+        return jam2::gui::validateListeningMessage(message, reason);
+    }
     if (type == QStringLiteral("jam.sync.set") ||
         type == QStringLiteral("jam.sync.request")) {
         JamSyncPolicy policy;
@@ -868,6 +872,11 @@ jam2::application::ControlMessageDecision jam2::application::evaluateControlMess
         type == QStringLiteral("session.end") ||
         type == QStringLiteral("jam.sync.set") ||
         type == QStringLiteral("jam.metronome.state.set") ||
+        type == QStringLiteral("jam.listening.prepare") ||
+        type == QStringLiteral("jam.listening.commit") ||
+        type == QStringLiteral("jam.listening.cancel") ||
+        type == QStringLiteral("jam.listening.state") ||
+        type == QStringLiteral("jam.listening.reset") ||
         type == QStringLiteral("bank.prepare") ||
         type == QStringLiteral("bank.cancel") ||
         type == QStringLiteral("bank.switch") ||
@@ -880,6 +889,9 @@ jam2::application::ControlMessageDecision jam2::application::evaluateControlMess
         type == QStringLiteral("session.endpoint.update") ||
         type == QStringLiteral("jam.sync.request") ||
         type == QStringLiteral("jam.metronome.state.request") ||
+        type == QStringLiteral("jam.listening.request") ||
+        type == QStringLiteral("jam.listening.ready") ||
+        type == QStringLiteral("jam.listening.failed") ||
         type == QStringLiteral("bank.ready") ||
         type == QStringLiteral("bank.request") ||
         type == QStringLiteral("looper.recording.group.recover.request") ||

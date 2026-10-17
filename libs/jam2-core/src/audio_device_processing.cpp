@@ -890,6 +890,23 @@ void mix_metronome_click(
     std::uint64_t patternOrigin = patternOriginValid
         ? control->metronome_pattern_origin_frame.load(std::memory_order_relaxed)
         : epoch;
+    double patternOriginPosition = patternOriginValid && control->metronome_pattern_origin_position_valid.load(std::memory_order_relaxed)
+        ? control->metronome_pattern_origin_position.load(std::memory_order_relaxed)
+        : static_cast<double>(patternOrigin);
+    const auto tempoRevision = control->musical_rate_revision.load(std::memory_order_acquire);
+    if ((tempoRevision & 1ULL) == 0) {
+        const auto target = control->musical_rate_commit_raw_frame.load(std::memory_order_acquire);
+        const auto before = current_playback_tempo(*control);
+        const auto after = pending_playback_tempo(*control);
+        if (tempoRevision == control->musical_rate_revision.load(std::memory_order_acquire)) {
+            control->render_tempo_before = before;
+            control->render_tempo_after = after;
+            control->render_tempo_commit_raw_frame = target;
+        }
+    }
+    const auto tempoBefore = control->render_tempo_before;
+    const auto tempoAfter = control->render_tempo_after;
+    const auto tempoTargetFrame = control->render_tempo_commit_raw_frame;
     std::uint64_t scheduledPatternOrigin =
         control->metronome_pattern_scheduled_origin_raw_frame.load(
             std::memory_order_relaxed);
@@ -911,20 +928,30 @@ void mix_metronome_click(
         }
         const std::uint64_t musicalFrame = metronome_musical_frame_from_raw(
             rawFrame, renderOffset);
+        const auto& tempo = tempoTargetFrame != 0 && rawFrame >= tempoTargetFrame ? tempoAfter : tempoBefore;
+        double sourcePosition = 0.0;
         std::uint64_t position = 0;
         const bool inCountIn = countInActive &&
             rawFrame >= countInStart && rawFrame < countInTarget;
         if (inCountIn) {
-            position = rawFrame - countInStart;
+            if (tempo.rate_ppm == 1000000) position = rawFrame - countInStart;
+            else {
+                sourcePosition = static_cast<double>(rawFrame - countInStart) * tempo.rate();
+                position = static_cast<std::uint64_t>(std::min(sourcePosition,
+                    static_cast<double>((std::numeric_limits<std::uint64_t>::max)() - 2048ULL)));
+            }
         } else {
             if (scheduledPatternOrigin != 0 &&
                 rawFrame >= scheduledPatternOrigin) {
                 patternOrigin = metronome_musical_frame_from_raw(
                     scheduledPatternOrigin, renderOffset);
                 patternOriginValid = true;
+                patternOriginPosition = tempo.position(patternOrigin);
                 scheduledPatternOrigin = 0;
                 control->metronome_pattern_origin_frame.store(
                     patternOrigin, std::memory_order_relaxed);
+                control->metronome_pattern_origin_position.store(patternOriginPosition, std::memory_order_relaxed);
+                control->metronome_pattern_origin_position_valid.store(true, std::memory_order_relaxed);
                 control->metronome_pattern_origin_valid.store(
                     true, std::memory_order_relaxed);
                 control->metronome_pattern_scheduled_origin_raw_frame.store(
@@ -934,9 +961,14 @@ void mix_metronome_click(
                 musicalFrame < patternOrigin) {
                 continue;
             }
-            position = patternOriginValid || epochValid
-                ? musicalFrame - patternOrigin
-                : musicalFrame;
+            if (tempo.rate_ppm == 1000000 && tempo.anchor_frame == 0 && tempo.anchor_position == 0.0)
+                position = musicalFrame - (patternOriginValid || epochValid ? patternOrigin : 0ULL);
+            else {
+                sourcePosition = std::max(0.0, tempo.position(musicalFrame) -
+                    (patternOriginValid || epochValid ? patternOriginPosition : 0.0));
+                position = static_cast<std::uint64_t>(std::min(sourcePosition,
+                    static_cast<double>((std::numeric_limits<std::uint64_t>::max)() - 2048ULL)));
+            }
         }
         double rendered = 0.0;
         if (interval > 0) {
@@ -944,7 +976,12 @@ void mix_metronome_click(
                 previousInCountIn == inCountIn &&
                 previousPosition != (std::numeric_limits<std::uint64_t>::max)() &&
                 position == previousPosition + 1ULL;
-            if (sequential) {
+            if (tempo.rate_ppm != 1000000) {
+                stepIndex = position / interval;
+                stepOffset = static_cast<std::uint64_t>(std::max(0.0,
+                    (sourcePosition - static_cast<double>(stepIndex) * interval) / tempo.rate()));
+                patternStep = static_cast<int>(stepIndex % static_cast<std::uint64_t>(pattern.step_count));
+            } else if (sequential) {
                 ++stepOffset;
                 if (stepOffset == interval) {
                     stepOffset = 0;

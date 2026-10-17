@@ -1,5 +1,12 @@
 # Jam2 macOS Test Completion Handoff
 
+Current validation policy: add/update relevant native CTests and run only tests
+directly relevant to the change in optimized Release. Run the full suite only
+on explicit user instruction and report failures without automatic repairs.
+Source coverage is no longer collected. Historical coverage/gate notes below
+are superseded by `AGENTS.md` and `docs/Validation.md`.
+
+
 Windows completion of the native test initiative does not complete macOS. When
 Codex is next run on a macOS endpoint, it must read `AGENTS.md`, `TEST-PLAN.md`, `TEST-LOG.md`, and `TEST-REVIEW.md` completely
 before making changes.
@@ -1155,7 +1162,8 @@ VST3/VFX3 profiles remain deferred.
 
 - Quick builds omit all test targets.
 - Selected suites build only their required targets.
-- The normal Release app is built into the single staged bundle and passes the
-  complete four-peer suite through `compile.sh --tests-full`.
+- The optimized Release app is built into the single staged bundle. Run only
+  relevant CTests for each change. Run `compile.sh --tests-full` only when the
+  user explicitly requests it; report failures and measurements for review.
 - No source-coverage collector or coverage gate runs on macOS.
 - No alternate Jam2 executable or app bundle is created or tested.

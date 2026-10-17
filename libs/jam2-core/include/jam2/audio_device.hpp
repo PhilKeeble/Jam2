@@ -16,6 +16,7 @@
 #include "audio_clock.hpp"
 #include "input_source.hpp"
 #include "metronome.hpp"
+#include "playback_tempo.hpp"
 #include "output_recorder.hpp"
 #include "prepared_track_source.hpp"
 #include "track_take_recorder.hpp"
@@ -384,9 +385,24 @@ struct StreamControl {
     std::atomic<std::uint64_t> metronome_epoch_sample_time{0};
     std::atomic<bool> metronome_epoch_valid{false};
     std::atomic<std::int64_t> metronome_render_offset_frames{0};
+    std::atomic<int> musical_rate_ppm{1000000};
+    std::atomic<std::uint64_t> musical_rate_anchor_frame{0};
+    std::atomic<double> musical_rate_anchor_position{0.0};
+    std::atomic<int> pending_musical_rate_ppm{1000000};
+    std::atomic<std::uint64_t> pending_musical_rate_anchor_frame{0};
+    std::atomic<double> pending_musical_rate_anchor_position{0.0};
+    std::atomic<std::uint64_t> musical_rate_commit_raw_frame{0};
+    std::atomic<std::uint64_t> musical_rate_revision{0};
+    // Click-render-thread cache. A concurrent publication is skipped for one
+    // block instead of waiting or observing a partially written tempo pair.
+    PlaybackTempo render_tempo_before{};
+    PlaybackTempo render_tempo_after{};
+    std::uint64_t render_tempo_commit_raw_frame = 0;
     // The network epoch remains continuous. Prepared Play establishes a
     // separate song-relative 1.1 used only for local click-pattern phase.
     std::atomic<std::uint64_t> metronome_pattern_origin_frame{0};
+    std::atomic<double> metronome_pattern_origin_position{0.0};
+    std::atomic<bool> metronome_pattern_origin_position_valid{false};
     std::atomic<bool> metronome_pattern_origin_valid{false};
     std::atomic<std::uint64_t> metronome_pattern_scheduled_origin_raw_frame{0};
     std::atomic<std::uint64_t> metronome_pattern_source_start_seen{0};
@@ -472,6 +488,27 @@ struct StreamControl {
     std::atomic<std::uint64_t> prepared_source_busy_events{0};
 };
 
+inline PlaybackTempo current_playback_tempo(const StreamControl& control) noexcept
+{
+    return {control.musical_rate_ppm.load(std::memory_order_relaxed),
+        control.musical_rate_anchor_frame.load(std::memory_order_relaxed),
+        control.musical_rate_anchor_position.load(std::memory_order_relaxed)};
+}
+
+inline PlaybackTempo pending_playback_tempo(const StreamControl& control) noexcept
+{
+    return {control.pending_musical_rate_ppm.load(std::memory_order_relaxed),
+        control.pending_musical_rate_anchor_frame.load(std::memory_order_relaxed),
+        control.pending_musical_rate_anchor_position.load(std::memory_order_relaxed)};
+}
+
+inline PlaybackTempo playback_tempo_at(const StreamControl& control, std::uint64_t rawFrame) noexcept
+{
+    const auto target = control.musical_rate_commit_raw_frame.load(std::memory_order_acquire);
+    return target != 0 && rawFrame >= target ? pending_playback_tempo(control)
+        : current_playback_tempo(control);
+}
+
 inline std::uint64_t metronome_musical_frame_from_raw(
     std::uint64_t rawFrame,
     std::int64_t renderOffsetFrames) noexcept
@@ -508,6 +545,10 @@ inline bool metronome_pattern_position(
         control.metronome_pattern_origin_frame.store(
             metronome_musical_frame_from_raw(scheduledOrigin, offset),
             std::memory_order_relaxed);
+        control.metronome_pattern_origin_position.store(
+            playback_tempo_at(control, scheduledOrigin).position(
+                metronome_musical_frame_from_raw(scheduledOrigin, offset)), std::memory_order_relaxed);
+        control.metronome_pattern_origin_position_valid.store(true, std::memory_order_relaxed);
         control.metronome_pattern_origin_valid.store(true, std::memory_order_relaxed);
         control.metronome_pattern_scheduled_origin_raw_frame.store(
             0, std::memory_order_relaxed);
@@ -527,6 +568,7 @@ inline bool metronome_pattern_position(
 
 inline void reset_metronome_pattern_origin(StreamControl& control) noexcept
 {
+    control.metronome_pattern_origin_position_valid.store(false, std::memory_order_relaxed);
     control.metronome_pattern_origin_valid.store(false, std::memory_order_relaxed);
     control.metronome_pattern_scheduled_origin_raw_frame.store(
         0, std::memory_order_relaxed);

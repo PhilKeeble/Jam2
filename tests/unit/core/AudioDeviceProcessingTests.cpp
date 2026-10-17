@@ -11,9 +11,12 @@
 #include <cstddef>
 #include <cmath>
 #include <cstdint>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <limits>
 #include <span>
+#include <string>
 #include <string_view>
 #include <thread>
 
@@ -819,6 +822,63 @@ void testCancelledPreparedSwapsReleaseEveryReadySlot()
     }
 }
 
+void testListeningTempoAndSpecificCancellation()
+{
+    jam2::audio::StreamControl control;
+    control.metronome_enabled.store(true);
+    control.metronome_epoch_valid.store(true);
+    control.pending_musical_rate_ppm.store(500000);
+    control.pending_musical_rate_anchor_frame.store(48000);
+    control.pending_musical_rate_anchor_position.store(48000.0);
+    control.musical_rate_commit_raw_frame.store(48000);
+    std::vector<std::int32_t> output(192000), stem(192000);
+    std::uint64_t beatIndex = 0;
+    processing::mix_metronome_click(&control, 48000.0, 0, beatIndex, output, stem);
+    const auto energyAt = [&stem](std::size_t frame) {
+        return std::any_of(stem.cbegin() + frame, stem.cbegin() + frame + 1024,
+            [](std::int32_t sample) { return sample != 0; });
+    };
+    expect(energyAt(0) && energyAt(24000) && energyAt(48000) && energyAt(96000) && energyAt(144000) &&
+        !energyAt(72000) && !energyAt(120000),
+        "scheduled listening tempo changes audible click spacing at the exact boundary without resetting phase");
+    expect(jam2::audio::playback_tempo_at(control, 47999).rate_ppm == 1000000 &&
+        jam2::audio::playback_tempo_at(control, 48000).rate_ppm == 500000,
+        "tempo snapshot selects the same boundary as the real callback");
+    control.musical_rate_revision.store(1);
+    control.musical_rate_commit_raw_frame.store(0);
+    std::array<std::int32_t, 1024> interruptedOutput{}, interruptedStem{};
+    processing::mix_metronome_click(&control, 48000.0, 168000, beatIndex, interruptedOutput, interruptedStem);
+    expect(std::all_of(interruptedStem.begin(), interruptedStem.end(), [](std::int32_t value) { return value == 0; }),
+        "callback retains its coherent half-speed clock during a concurrent tempo publication without waiting");
+    control.musical_rate_revision.store(2);
+
+    jam2::audio::PreparedTrackSource source(8);
+    const int cancelled = source.claimLoadingSlot();
+    source.loadingData(cancelled)[0] = 3000;
+    expect(source.publishReady(cancelled, 1, 48000), "listening cancellation fixture stages a source");
+    jam2::audio::PreparedTrackSource::Command replacement;
+    replacement.type = jam2::audio::PreparedTrackSource::CommandType::Swap;
+    replacement.slot = static_cast<std::uint32_t>(cancelled);
+    replacement.targetFrame = 10;
+    replacement.listeningGeneration = 1;
+    expect(source.enqueue(replacement), "listening replacement is tagged for its own cancellation");
+    const int retained = source.claimLoadingSlot();
+    source.loadingData(retained)[0] = 1000;
+    expect(source.publishReady(retained, 1, 48000), "ordinary source fixture stages its own slot");
+    const std::array normal{
+        jam2::audio::PreparedTrackSource::Command{jam2::audio::PreparedTrackSource::CommandType::Swap, static_cast<std::uint32_t>(retained)},
+        jam2::audio::PreparedTrackSource::Command{jam2::audio::PreparedTrackSource::CommandType::Play}};
+    expect(source.enqueueBatch(normal), "ordinary commands can follow a listening transaction");
+    source.cancelListeningScheduled();
+    std::array<std::int32_t, 1> mixed{};
+    source.mix(mixed.data(), mixed.size(), 0);
+    expect(mixed[0] == 65536000 && source.actualStartFrame() == 0,
+        "cancelling listening changes preserves unrelated source/play commands");
+    const int reclaimed = source.claimLoadingSlot();
+    expect(reclaimed == cancelled, "cancelled listening swaps release the owned Ready slot");
+    source.abandonLoadingSlot(reclaimed);
+}
+
 void testInjectedInput()
 {
     const double nan = (std::numeric_limits<double>::quiet_NaN)();
@@ -1043,6 +1103,86 @@ void testMetronomeOutput()
         stem);
 }
 
+void testEngineLocalCancellationPreservesClockReset()
+{
+    try {
+        struct Fixture {
+            std::filesystem::path path = std::filesystem::temp_directory_path() /
+                ("jam2-listening-cancel-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".wav");
+            ~Fixture() { std::error_code error; std::filesystem::remove(path, error); }
+        } fixture;
+        // Two mono PCM16 samples at 48 kHz, played in a tight deterministic loop.
+        const std::array<unsigned char, 48> wav{{
+            'R','I','F','F',40,0,0,0,'W','A','V','E','f','m','t',' ',
+            16,0,0,0,1,0,1,0,128,187,0,0,0,119,1,0,2,0,16,0,
+            'd','a','t','a',4,0,0,0,232,3,24,252}};
+        std::ofstream file(fixture.path, std::ios::binary);
+        file.write(reinterpret_cast<const char*>(wav.data()), wav.size());
+        file.close();
+        if (!file) { expect(false, "listening cancellation WAV fixture writes successfully"); return; }
+        jam2::Engine engine;
+        jam2::EngineConfig config;
+        config.backend = jam2::EngineAudioBackend::Headless;
+        config.sample_rate = 48000; config.audio_buffer_frames = 64;
+        config.prepared_track_max_frames = 64;
+        engine.start(config);
+        const auto wait = [&](auto predicate) {
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+            while (std::chrono::steady_clock::now() < deadline) {
+                if (predicate()) return true;
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            }
+            return false;
+        };
+        jam2::EngineCommand command;
+        command.type = jam2::EngineCommandType::LoadPreparedTrack;
+        if (!jam2::engine_command_set_text(command, fixture.path.string()) || !engine.submit(command)) {
+            expect(false, "initial prepared source load submits"); return;
+        }
+        command = {}; command.type = jam2::EngineCommandType::PreparedSetLoop; command.signed_value = 2;
+        expect(engine.submit(command), "initial source loop submits");
+        command = {}; command.type = jam2::EngineCommandType::PreparedPlay;
+        expect(engine.submit(command), "initial source play submits");
+        expect(wait([&] { return engine.snapshot().prepared_source_playing; }), "initial source starts");
+        const auto originalStart = engine.snapshot().prepared_source_actual_start_frame;
+        command = {}; command.type = jam2::EngineCommandType::CommitListeningTools;
+        command.cookie = 90; command.frame = engine.snapshot().engine_frame + 4800;
+        command.playback_tempo = {500000, command.frame, static_cast<double>(command.frame)};
+        expect(engine.submit(command), "initial slowed clock submits");
+        expect(wait([&] { return engine.snapshot().playback_tempo.rate_ppm == 500000; }), "initial slowed clock commits");
+        command = {}; command.type = jam2::EngineCommandType::StageListeningTrack; command.cookie = 100;
+        expect(jam2::engine_command_set_text(command, fixture.path.string()) && engine.submit(command), "local source stages");
+        expect(wait([&] {
+            jam2::EngineEvent event;
+            while (engine.pollEvent(event)) if (event.type == jam2::EngineEventType::ListeningTrackStaged && event.cookie == 100) return true;
+            return false;
+        }), "local staged source publishes readiness");
+        const auto slowed = engine.snapshot();
+        const auto resetFrame = slowed.engine_frame + 24000;
+        const jam2::PlaybackTempo unity{1000000, resetFrame, slowed.playback_tempo.position(resetFrame)};
+        command = {}; command.type = jam2::EngineCommandType::CommitListeningTools;
+        command.frame = resetFrame; command.playback_tempo = unity;
+        expect(engine.submit(command), "authority unity reset submits");
+        command = {}; command.type = jam2::EngineCommandType::CommitListeningTools;
+        command.cookie = 100; command.signed_value = 100; command.frame = resetFrame + 24000;
+        command.enabled = true; command.update_playback_tempo = false;
+        command.prepared_loop_enabled = true; command.prepared_loop_end_frame = 2;
+        expect(engine.submit(command), "local-only future source swap submits");
+        const auto audioTarget = command.frame;
+        command = {}; command.type = jam2::EngineCommandType::CancelListeningTools; command.cookie = 100;
+        expect(engine.submit(command), "local source cancellation submits");
+        expect(wait([&] { return engine.snapshot().engine_frame > audioTarget + 64; }), "engine crosses both future boundaries");
+        const auto final = engine.snapshot();
+        engine.requestStop(); engine.join();
+        expect(final.playback_tempo.rate_ppm == 1000000 && final.playback_tempo.anchor_frame == unity.anchor_frame,
+            "local cancellation preserves the authority's pending clock reset");
+        expect(final.prepared_source_playing && final.prepared_source_actual_start_frame == originalStart,
+            "local-only cancellation removes the scheduled swap/play while retaining current playback");
+    } catch (const std::exception& error) {
+        ++failures; std::cerr << "FAIL: engine listening cancellation: " << error.what() << '\n';
+    }
+}
+
 void testHeadlessUsesSharedPipeline()
 {
     jam2::Engine engine;
@@ -1130,6 +1270,8 @@ int main()
     testResampledPlaybackDepthAccounting();
     testPreparedSourceMixing();
     testCancelledPreparedSwapsReleaseEveryReadySlot();
+    testListeningTempoAndSpecificCancellation();
+    testEngineLocalCancellationPreservesClockReset();
     testInjectedInput();
     testMetronomeOutput();
     testHeadlessUsesSharedPipeline();

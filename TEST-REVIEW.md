@@ -1,5 +1,12 @@
 # Jam2 Manual Review Register
 
+Current validation policy: add/update relevant native CTests and run only tests
+directly relevant to the change in optimized Release. Run the full suite only
+on explicit user instruction and report failures without automatic repairs.
+Source coverage is no longer collected. Historical coverage/gate notes below
+are superseded by `AGENTS.md` and `docs/Validation.md`.
+
+
 This file contains only decisions that still require genuine product or design
 review. Approved, implemented, or explicitly retained items are recorded in
 `TEST-LOG.md` and are removed from this register.

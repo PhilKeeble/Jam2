@@ -21,6 +21,7 @@
 #include "TrackWorkspaceController.hpp"
 #include "UserPreferences.hpp"
 #include "InputPluginBackend.hpp"
+#include "IdeaHeaderRow.hpp"
 
 #include "metronome.hpp"
 #include "midi.hpp"
@@ -70,7 +71,6 @@ class QStackedWidget;
 class QTableWidget;
 class QToolButton;
 class QVBoxLayout;
-class WaveformWidget;
 class LooperLaneStackWidget;
 class LevelMeterWidget;
 class JamTasterService;
@@ -359,6 +359,10 @@ private:
     void applySelectedLooperLaneRegion(qint64 startFrame, qint64 sourceStartFrame, qint64 sourceEndFrame);
     void applyLooperLaneGain(int laneIndex, double gainDb);
     void regeneratePreparedMix(int bankIndex = -1);
+    void initializeListeningTools();
+    void editListeningTools(bool commitNow = false);
+    bool prepareListeningMix(const jam2::gui::ListeningToolsSettings& settings, int revision, int bank);
+    void adoptListeningMix(const jam2::gui::ListeningToolsSettings& settings, const std::optional<PreparedMixResult>& result);
     void applyPreparedMixResult(PreparedMixResult result);
     void adoptPreparedBankCache(int bankIndex);
     bool startFileWorkerTask(
@@ -635,7 +639,6 @@ private:
     QLabel* trackSharingStatusLabel_ = nullptr;
     QWidget* recordingGlobalControls_ = nullptr;
     LooperLaneStackWidget* looperStack_ = nullptr;
-    WaveformWidget* trackWaveform_ = nullptr;
     QLineEdit* songTitleEdit_ = nullptr;
     QCheckBox* captureManualStopCheck_ = nullptr;
     QSpinBox* captureDurationSpin_ = nullptr;
@@ -727,6 +730,7 @@ private:
     std::unique_ptr<QFile> guiLogFile_;
     QString guiLogPath_;
     BeatGridWidget* chordGrid_ = nullptr;
+    std::array<jam2::gui::IdeaHeaderRow*, 2> ideaHeaderRows_{};
     BeatGridWidget* beatGrid_ = nullptr;
     BeatGridWidget* lyricGrid_ = nullptr;
     QTabWidget* tabs_ = nullptr;

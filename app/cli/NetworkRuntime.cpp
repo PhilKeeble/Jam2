@@ -4041,7 +4041,8 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                                             std::memory_order_relaxed),
                                     estimated_target_raw,
                                     transport.target_sender_frame -
-                                        transport.countdown_start_sender_frame);
+                                        transport.countdown_start_sender_frame,
+                                    audio.engine ? audio.engine->snapshot().playback_tempo : jam2::PlaybackTempo{});
                         } else if (!quantized_shared_grid_action) {
                             const std::uint64_t countdown_start_raw = std::min(
                                 estimated_target_raw,

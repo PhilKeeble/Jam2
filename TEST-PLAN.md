@@ -1,10 +1,14 @@
 # Jam2 Automated Test and Refactor Plan
 
+The current policy is in `AGENTS.md` and `docs/Validation.md`. Historical
+iteration notes below describe earlier work; their coverage audits and
+automatic distribution gates are superseded by the current user-directed policy.
+
 ## Goal
 
 Build a Windows-complete, cross-platform C++/CTest validation system for Jam2.
-The normal build remains test-free. Selected suites and a full pre-distribution
-gate build their private test binaries on demand and test the one staged
+The normal build remains test-free. Selected suites and an explicitly requested full
+suite build their private test binaries on demand and test the one staged
 `release/jam2.exe`.
 
 Automated real-jam coverage always uses four Jam2 peers. Cross-machine and soak
@@ -25,10 +29,13 @@ and bounded real-process tests cover the automatable behavior instead.
   section merely to reduce its line count.
 - Every slice follows implement, test, self-review, gap-fix, and retest before
   the next slice starts.
-- While slice 7 work remains, use only the smallest relevant selected suite or
-  exact CTest for each component cluster. Do not rerun the full instrumented
-  and optimized catalogue after every cluster. Run one final two-pass Windows
-  distribution gate only after the planned coverage and review work is done.
+- Run only CTests directly relevant to the current change, using optimized
+  Release. Run the full suite only when the user explicitly requests it.
+  Do not collect source coverage.
+- Full-suite failures are reports for user review, not authorization to fix
+  tests or product code. Explain expected and observed behavior, measurement
+  methods, assertions and thresholds, and distinguish confirmed causes from
+  hypotheses. The user decides what needs changing.
 - Every discovered defect is entered in the structured bug register in
   `TEST-LOG.md`, including its observed symptom, root cause, production or test
   change, regression proof, and remaining test need. Unresolved behavior or a
@@ -36,7 +43,7 @@ and bounded real-process tests cover the automatable behavior instead.
 - Do not change a wire-protocol field, version, payload shape, encoding,
   decoder, authentication rule, or compatibility behavior without first
   describing the proposed change to the user and receiving approval.
-- Fix safely isolated bugs found during the work. Record ambiguous changes,
+- Fix only bugs within the authorized task; report full-suite failures for user direction. Record ambiguous changes,
   functionality risks, manual-review needs, and possible feature removals in
   `TEST-REVIEW.md` without removing the feature.
 - Accept one current format at each persistence/protocol boundary. Remove
@@ -57,7 +64,7 @@ and bounded real-process tests cover the automatable behavior instead.
 | 5B. WAV-sharing hardening | Complete | Exactly four isolated peers pass concurrent same/different offers, reconnect/retry, policy transitions, partial/stale transfers, conflicts, deduplication, source handoff, session reset, and exact-byte convergence |
 | 6. Network/security | Complete | Native UDP impairment, authentication, malformed input, and bounded resource stress covered |
 | 7. Remaining app audit | Complete | Every control/view/action/function inventoried; justified refactors and current-format/dependency cleanup complete |
-| 8. Distribution gate | In progress | Windows two-pass coverage and normal Release full suite pass; superseded Python validation/stress removed |
+| 8. Full-suite review | User-directed | Run optimized Release CTests only when requested; report failures and measurements for user evaluation |
 
 ## WAV-sharing hardening matrix
 
@@ -908,7 +915,6 @@ compile.cmd --tests <suite> --test-name <exact-ctest-name>
 compile.sh --tests <suite> --test-name <exact-ctest-name>
 compile.cmd --tests-full [--show-gui] [--hardware-profile <path>]
 compile.sh --tests-full [--show-gui] [--hardware-profile <path>]
-compile.cmd --coverage [--test-name <exact-ctest-name>] [--hardware-profile <path>]
 ```
 
 Implemented suite names are `unit`, `plugin`, `gui`, `jam-sync`,
@@ -921,27 +927,17 @@ on and build only the selected suite target. GUI tests are hidden by default;
 `--show-gui` makes the same tests visible. Hardware is included only when an
 explicit profile is supplied.
 
-## Coverage and completion
+## Validation and completion
 
-The Windows coverage audit is separate from the optimized full-test gate.
-Maintained functions, controls, actions, views, messages, and critical
-transitions must be covered or appear in an explicitly reviewed exemption.
-Every uncovered item is emitted for review; new unreviewed gaps fail the audit.
-Run it from the repository root after implementing major features:
+Every feature, behavior change and bug fix adds or updates relevant native C++
+tests registered with CTest. Run only those directly relevant to the change
+against the optimized Release build. Full-suite runs require an explicit user
+request, including before distribution. Report failures with their measurements
+and assertions; the user decides whether tests or product code need changing.
+Source-coverage tooling and the instrumented build path have been removed.
 
-```text
-compile.cmd --in-dev-shell --coverage --hardware-profile build\hardware-profile.json
-```
-
-Its reports supersede the 172-uncovered/42-skipped baseline. A passing coverage
-audit must report zero unreviewed missing sources, wholly uncovered functions,
-and collector-skipped functions. Run `--tests-full` separately to pass the
-optimized Release catalogue with the same hardware profile.
-
-Windows completion does not claim macOS completion. The exact later macOS work
-is maintained in `TEST-MACOS.md`. Source coverage is a Windows-only optional
-audit: macOS `compile.sh --tests-full` runs the normal Release test catalogue
-without PowerShell, instrumentation, or an Apple coverage substitute.
+Windows validation does not imply macOS validation. Apple-specific work remains
+in `TEST-MACOS.md`. Both platforms use optimized Release and the same test policy.
 
 ## Iteration 48 overview
 

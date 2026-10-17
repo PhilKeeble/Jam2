@@ -1,5 +1,12 @@
 # Jam2 Test Initiative Log
 
+Current validation policy: add/update relevant native CTests and run only tests
+directly relevant to the change in optimized Release. Run the full suite only
+on explicit user instruction and report failures without automatic repairs.
+Source coverage is no longer collected. Historical coverage/gate notes below
+are superseded by `AGENTS.md` and `docs/Validation.md`.
+
+
 This is the append-only implementation and verification log. Each slice records
 its implementation pass, commands and results, self-review findings, gap fixes,
 and final retest before its status changes in `TEST-PLAN.md`.

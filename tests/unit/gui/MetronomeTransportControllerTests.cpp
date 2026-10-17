@@ -203,6 +203,18 @@ int main(int argc, char** argv)
         testTapTempo();
         testPlaybackGrid();
         testTransportController();
+        MetronomeTransportController slowed([](const jam2::EngineCommand&) { return true; });
+        jam2::EngineSnapshot snapshot;
+        snapshot.sample_rate = 48000;
+        snapshot.engine_frame = 96000;
+        snapshot.metronome_epoch_valid = true;
+        snapshot.metronome_pattern.bpm = 120;
+        snapshot.playback_tempo = {500000, 48000, 48000.0};
+        slowed.consume(snapshot);
+        const auto position = slowed.grid().position();
+        require(std::abs(position.secondsPerBeat - 1.0) < 0.00001 && position.absoluteBeat == 3 &&
+                position.frameAtBeat(4) == 144000 && slowed.grid().bpm() == 60.0,
+            "slowed GUI clock retains beat position and schedules future beats through the anchored mapping");
         std::cout << "Metronome transport controller tests passed\n";
         return 0;
     } catch (const std::exception& error) {

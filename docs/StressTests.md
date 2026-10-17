@@ -23,10 +23,11 @@ bash ./compile.sh --tests shared-content
 ```
 
 Use `--test-name <registered-name>` after a suite to isolate one CTest while
-developing. On both platforms, `--tests-full` runs the complete normal Release
-test catalogue once. Windows source coverage is the separate, optional
-`--coverage` audit used after major feature work; it is not part of the baseline
-full-test command.
+developing, and run only cases directly relevant to the change. On both
+platforms, `--tests-full` runs the complete optimized Release catalogue only
+when explicitly requested by the user. Report full-suite failures and their
+measurements for user review; do not automatically fix tests or product code.
+Source coverage is not collected.
 
 ## What the native stress matrix proves
 

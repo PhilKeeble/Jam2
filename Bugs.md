@@ -38,8 +38,6 @@ cant manually sync when auto is on - wanted it when open jamjar didnt sync
 
 ## Bugs - MacOS
 
-Generate wav is saying 12 sections - Sections A-D, confusing 
-
 Update.sh wasnt being clear that it was failing, make it easy for the user 
 
 loopback recording doesnt work on mac 
@@ -55,6 +53,7 @@ loopback recording doesnt work on mac
 - check spawning cli when opening
 - check buttons look ok on macos and shorten correctly 
 - check sharing close down bar shows on macos track view
+- changing speed in jam does for everyone, change pitch, frequency etc, check with length and loop
 
 
 # DAW mode

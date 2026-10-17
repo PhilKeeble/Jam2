@@ -204,7 +204,8 @@ std::optional<BankLaunchFrameSchedule> bankLaunchFrameSchedule(
     double secondsPerBeat,
     std::int64_t renderOffsetFrames,
     std::optional<std::uint64_t> requestedTargetBeat,
-    int beatsPerBar) noexcept
+    int beatsPerBar,
+    jam2::PlaybackTempo tempo) noexcept
 {
     if (!jam2::limits::valid_sample_rate(sampleRate) ||
         !std::isfinite(secondsPerBeat) || secondsPerBeat <= 0.0) {
@@ -216,8 +217,9 @@ std::optional<BankLaunchFrameSchedule> bankLaunchFrameSchedule(
         static_cast<long double>(targetBeat) *
         static_cast<long double>(secondsPerBeat) *
         static_cast<long double>(sampleRate);
-    const std::uint64_t targetMusicalFrame = saturatingAdd(
-        epochMusicalFrame, roundedFrameCount(exactFrames));
+    const std::uint64_t targetMusicalFrame = tempo.rate_ppm == 1000000 && tempo.anchor_frame == 0 && tempo.anchor_position == 0.0
+        ? saturatingAdd(epochMusicalFrame, roundedFrameCount(exactFrames))
+        : tempo.frame(static_cast<double>(epochMusicalFrame) + static_cast<double>(exactFrames * tempo.rate()));
     return BankLaunchFrameSchedule{
         targetBeat,
         targetMusicalFrame,

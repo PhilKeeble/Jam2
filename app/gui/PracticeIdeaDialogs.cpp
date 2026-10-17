@@ -14,9 +14,6 @@
 #include <QSpinBox>
 #include <QVBoxLayout>
 
-#include <numeric>
-#include <cmath>
-
 namespace jam2::practice {
 namespace {
 
@@ -399,30 +396,33 @@ std::optional<ContinueIdeaRequest> askForIdeaContinuation(
 std::optional<ReferenceRenderSettings> askForReferenceRender(
     QWidget* parent,
     ReferenceRenderSettings defaults,
-    int chordBeats,
-    int beatBeats,
-    int melodyBeats,
-    int bassBeats,
-    int supportBeats,
-    int sectionCount)
+    const QVector<ReferenceRenderSection>& sections)
 {
+    ReferenceLayerAvailability available;
+    for (const auto& section : sections) {
+        available.chords = available.chords || section.layers.chords;
+        available.drums = available.drums || section.layers.drums;
+        available.melody = available.melody || section.layers.melody;
+        available.bass = available.bass || section.layers.bass;
+        available.support = available.support || section.layers.support;
+    }
     QDialog dialog(parent);
     dialog.setWindowTitle(QStringLiteral("Generate Reference WAVs"));
     auto* drums = new QCheckBox(QStringLiteral("Drum reference"), &dialog);
-    drums->setChecked(defaults.renderDrums && beatBeats > 0);
-    drums->setEnabled(beatBeats > 0);
+    drums->setChecked(defaults.renderDrums && available.drums);
+    drums->setEnabled(available.drums);
     auto* chords = new QCheckBox(QStringLiteral("Chord reference"), &dialog);
-    chords->setChecked(defaults.renderChords && chordBeats > 0);
-    chords->setEnabled(chordBeats > 0);
+    chords->setChecked(defaults.renderChords && available.chords);
+    chords->setEnabled(available.chords);
     auto* bass = new QCheckBox(QStringLiteral("Bass reference"), &dialog);
-    bass->setChecked(defaults.renderBass && bassBeats > 0);
-    bass->setEnabled(bassBeats > 0);
+    bass->setChecked(defaults.renderBass && available.bass);
+    bass->setEnabled(available.bass);
     auto* support = new QCheckBox(QStringLiteral("Supporting line reference"), &dialog);
-    support->setChecked(defaults.renderSupport && supportBeats > 0);
-    support->setEnabled(supportBeats > 0);
+    support->setChecked(defaults.renderSupport && available.support);
+    support->setEnabled(available.support);
     auto* melody = new QCheckBox(QStringLiteral("Melody reference"), &dialog);
-    melody->setChecked(defaults.renderMelody && melodyBeats > 0);
-    melody->setEnabled(melodyBeats > 0);
+    melody->setChecked(defaults.renderMelody && available.melody);
+    melody->setEnabled(available.melody);
     auto* voicing = new QComboBox(&dialog);
     voicing->addItem(QStringLiteral("Style default"), static_cast<int>(ChordVoicing::StyleDefault));
     voicing->addItem(QStringLiteral("Close"), static_cast<int>(ChordVoicing::Close));
@@ -448,27 +448,8 @@ std::optional<ReferenceRenderSettings> askForReferenceRender(
     registerIdeaControl(*melody, "reference-dialog.melody", "idea.reference-wav");
     registerIdeaControl(*voicing, "reference-dialog.voicing", "idea.reference-wav");
     registerIdeaControl(*drumKit, "reference-dialog.drum-kit", "idea.reference-wav");
-    int commonBeats = 0;
-    for (int beats : {chordBeats, beatBeats, melodyBeats, bassBeats, supportBeats}) {
-        if (beats <= 0) continue;
-        commonBeats = commonBeats > 0 ? std::lcm(commonBeats, beats) : beats;
-    }
-    const double seconds = defaults.bpm > 0.0
-        ? commonBeats * 60.0 / defaults.bpm *
-            (1.0 / qMax(1, defaults.tempoPulseUnits))
-        : 0.0;
-    const qint64 frames = static_cast<qint64>(std::ceil(seconds * defaults.sampleRate));
-    auto* summary = new QLabel(
-        sectionCount > 1
-            ? QStringLiteral("%1 sections -> Sections A-%2 | %3 BPM | %4 Hz")
-                .arg(sectionCount)
-                .arg(QChar(static_cast<ushort>('A' + qBound(1, sectionCount, 4) - 1)))
-                .arg(defaults.bpm, 0, 'f', 1)
-                .arg(defaults.sampleRate)
-            : QStringLiteral("%1 BPM | %2 Hz | %3 beats | %4 s | %5 frames")
-                .arg(defaults.bpm, 0, 'f', 1).arg(defaults.sampleRate).arg(commonBeats)
-                .arg(seconds, 0, 'f', 2).arg(frames),
-        &dialog);
+    auto* summary = new QLabel(&dialog);
+    summary->setObjectName(QStringLiteral("PracticeReferenceSummary"));
     auto* form = new QFormLayout();
     form->addRow(QStringLiteral("Layers"), drums);
     form->addRow(QString(), chords);
@@ -483,6 +464,27 @@ std::optional<ReferenceRenderSettings> askForReferenceRender(
         "reference-dialog.accept", "idea.reference-wav");
     registerIdeaControl(*buttons->button(QDialogButtonBox::Cancel),
         "reference-dialog.cancel", "idea.reference-wav");
+    const auto updateSelection = [&] {
+        ReferenceRenderSettings selected = defaults;
+        selected.renderChords = chords->isChecked();
+        selected.renderDrums = drums->isChecked();
+        selected.renderMelody = melody->isChecked();
+        selected.renderBass = bass->isChecked();
+        selected.renderSupport = support->isChecked();
+        QStringList ids;
+        for (const auto& section : sections) {
+            if (section.layers.selected(selected)) ids.push_back(section.bankId);
+        }
+        summary->setText(ids.size() == 1
+            ? QStringLiteral("1 section -> Section %1").arg(ids.front())
+            : QStringLiteral("%1 sections -> Sections %2")
+                .arg(ids.size()).arg(ids.isEmpty() ? QStringLiteral("-") : ids.join(QLatin1Char(','))));
+        buttons->button(QDialogButtonBox::Ok)->setEnabled(!ids.isEmpty());
+    };
+    for (QCheckBox* layer : {drums, chords, bass, support, melody}) {
+        QObject::connect(layer, &QCheckBox::toggled, &dialog, updateSelection);
+    }
+    updateSelection();
     QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
     QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
     auto* layout = new QVBoxLayout(&dialog);

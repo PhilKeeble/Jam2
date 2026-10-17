@@ -1,5 +1,6 @@
 #include "BeatGridWidget.hpp"
 #include "ActionTileRow.hpp"
+#include "IdeaHeaderRow.hpp"
 #include "AudioDeviceUiSupport.hpp"
 #include "ConnectionGuidance.hpp"
 #include "GuiControlContract.hpp"
@@ -127,6 +128,76 @@ bool clickControl(QObject& root, const QString& id)
     button->click();
     QApplication::processEvents();
     return true;
+}
+
+void testIdeaHeaderRows()
+{
+    using Row = jam2::gui::IdeaHeaderRow;
+    const QStringList labels{QStringLiteral("GENERATE NEW IDEA"), QStringLiteral("CONTINUE IDEA"),
+        QStringLiteral("IDEA DETAILS"), QStringLiteral("GENERATE WAV"), QStringLiteral("GROOVE LIBRARY"), QStringLiteral("JAMTASTER")};
+    const QStringList tooltips{
+        QStringLiteral("Generate a new procedural idea to populate the chord and beat views"),
+        QStringLiteral("Pick a source section and generate a related idea in another section to spark new ideas"),
+        QStringLiteral("Explore how this section's generated idea works, including its chords, groove and musical parts"),
+        QStringLiteral("Render the selected sections and musical parts into WAV backing tracks"),
+        QStringLiteral("Browse and preview drum grooves, then import one into the active section"),
+        QStringLiteral("Analyse a WAV to detect tempo, separate stems and extract chords, beats, bass and song structure")};
+    BeatGridModel chords, beats;
+    chords.addSection(); beats.addSection();
+    auto& recipe = chords.section(0).generatedRecipe;
+    recipe.styleId = QStringLiteral("rock"); recipe.profileId = QStringLiteral("rock");
+    recipe.variationId = QStringLiteral("standard"); recipe.tonic = QStringLiteral("C"); recipe.mode = QStringLiteral("Major");
+    recipe.progressionId = QStringLiteral("tonic"); recipe.grooveId = QStringLiteral("straight"); recipe.grooveFeelName = QStringLiteral("Straight");
+    recipe.formSections = {{QStringLiteral("A"), 1, 16, QStringLiteral("main"), {}}};
+    jam2::practice::DrumPerformanceEvent kick;
+    kick.laneId = QStringLiteral("kick");
+    kick.velocity = 88;
+    recipe.drumEvents = {kick};
+    expect(recipe.isValid(), "idea header fixture contains valid generated metadata");
+    for (bool includeDetails : {true, false}) {
+        Row row(nullptr, includeDetails);
+        row.setAttribute(Qt::WA_DontShowOnScreen, true);
+        expect(row.findChildren<QPushButton*>().size() == (includeDetails ? 6 : 5),
+            "Track omits Idea Details without creating an orphaned button");
+        row.updateSection(chords, beats, 0);
+        for (int width : {1000, 760, 1100}) {
+            row.resize(width, 42); processPaint(row);
+            int previousRight = -1;
+            for (int i = 0; i < 6; ++i) {
+                auto* button = row.button(static_cast<Row::Action>(i));
+                if (i == 2 && !includeDetails) { expect(!button, "Track has no Idea Details action"); continue; }
+                expect(button && button->accessibleName() == labels[i] && button->toolTip() == tooltips[i] &&
+                        !button->toolTip().endsWith(QLatin1Char('.')),
+                    "real view buttons use approved descriptive tooltips without full stops");
+                if (!button) continue;
+                const QRect bounds(button->mapTo(&row, QPoint()), button->size());
+                expect(bounds.left() > previousRight && row.rect().contains(bounds),
+                    "Chord, Beat and Track retain requested non-overlapping action order");
+                previousRight = bounds.right();
+            }
+        }
+        if (!includeDetails) continue;
+        auto* details = row.button(Row::Action::Details);
+        int opened = 0;
+        QObject::connect(details, &QPushButton::clicked, &row, [&] { ++opened; });
+        details->click();
+        expect(opened == 1 && details->isEnabled(), "Idea Details activates for the selected generated section");
+        row.updateSection(chords, beats, 1);
+        details->click();
+        expect(!details->isEnabled() && opened == 1 &&
+                details->toolTip() == QStringLiteral("Generate an idea in this section to view its details"),
+            "an empty selected section disables Details even when another section has an idea");
+        beats.section(1).generatedRecipe = recipe;
+        row.updateSection(chords, beats, 1);
+        expect(details->isEnabled() && jam2::gui::ideaDetailsSection(chords, beats, 1) == &beats.section(1),
+            "beat-only generated metadata enables Details for that same section");
+        beats.clearSection(1); row.updateSection(chords, beats, 1);
+        expect(!details->isEnabled(), "clearing the section disables Idea Details again");
+        row.updateSection(chords, beats, -1);
+        expect(!details->isEnabled() && !jam2::gui::ideaDetailsSection(chords, beats, 99),
+            "invalid section selection cannot display another section's idea");
+        row.hide();
+    }
 }
 
 void testActionTileRow()
@@ -610,52 +681,8 @@ void testConnectionGuidance()
         "joiner diagnostics distinguish coordinator and local firewall checks");
 }
 
-void testWaveformAndMeterWidgets()
+void testMeterWidget()
 {
-    WaveformWidget waveform;
-    waveform.resize(640, 240);
-    qint64 seek = -1;
-    int seekCount = 0;
-    waveform.onSeekMs = [&](qint64 value) {
-        seek = value;
-        ++seekCount;
-    };
-    waveform.clear();
-    waveform.setDurationMs(-10);
-    waveform.setPlayheadMs(100);
-    waveform.setBpm(0.0);
-    waveform.setGridPosition(-5, true, 0, 3);
-    processPaint(waveform);
-
-    waveform.setDurationMs(4000);
-    waveform.setDurationMs(4000);
-    waveform.setBpm(500.0);
-    waveform.setBpm(120.0);
-    waveform.setGridPosition(4500, true, 4, 1);
-    waveform.setGridPosition(4750, true, 4, 1);
-    waveform.setGridPosition(4750, true, 3, 3);
-    waveform.setPlayheadMs(5000);
-    waveform.setPlayheadMs(4000);
-    waveform.setLoop(-1, -1);
-    waveform.setLoop(1000, 3000);
-    waveform.setPeaks({0.0f, 0.25f, 1.0f, 0.5f}, true);
-    processPaint(waveform);
-
-    sendMouse(
-        waveform, QEvent::MouseButtonPress, QPointF(160, 120),
-        Qt::LeftButton, Qt::LeftButton);
-    sendMouse(
-        waveform, QEvent::MouseMove, QPointF(480, 120),
-        Qt::NoButton, Qt::LeftButton);
-    sendMouse(
-        waveform, QEvent::MouseButtonPress, QPointF(10, 10),
-        Qt::RightButton, Qt::RightButton);
-    expect(seekCount == 2 && seek > 2900 && seek < 3100,
-        "waveform press and drag seek through bounded millisecond coordinates");
-    waveform.setPeaks({}, false);
-    waveform.clear();
-    processPaint(waveform);
-
     LevelMeterWidget meter;
     meter.resize(220, 18);
     meter.setLevel(-1.0);
@@ -1210,17 +1237,17 @@ void testResponsivePerformanceActions()
     widget.setSongModel(&model);
     std::array<int, 6> clicks{};
     widget.onGenerateIdea = [&] { ++clicks[0]; };
-    widget.onBrowseIdeas = [&] { ++clicks[1]; };
-    widget.onContinueIdea = [&] { ++clicks[2]; };
-    widget.onClearIdea = [&] { ++clicks[3]; };
-    widget.onGenerateWav = [&] { ++clicks[4]; };
+    widget.onBrowseIdeas = [&] { ++clicks[4]; };
+    widget.onContinueIdea = [&] { ++clicks[1]; };
+    widget.onClearIdea = [&] { ++clicks[2]; };
+    widget.onGenerateWav = [&] { ++clicks[3]; };
     widget.onJamTaster = [&] { ++clicks[5]; };
     const QStringList actionIds{
         QStringLiteral("performance.home.idea.generate"),
-        QStringLiteral("performance.home.idea.browse"),
         QStringLiteral("performance.home.idea.continue"),
         QStringLiteral("performance.home.idea.clear"),
         QStringLiteral("performance.home.idea.generate-wav"),
+        QStringLiteral("performance.home.idea.browse"),
         QStringLiteral("performance.home.idea.jam-taster"),
     };
     const auto boundsFor = [](const QVector<jam2::gui::GuiVirtualControl>& controls, const QString& id,
@@ -1260,21 +1287,17 @@ void testResponsivePerformanceActions()
             expect(inserted || core->second == chord.size(),
                 "reducing window height never shrinks the current-chord display");
             const auto wav = std::find_if(controls.cbegin(), controls.cend(), [&](const auto& control) {
-                return control.id == actionIds[4];
+                return control.id == actionIds[3];
             });
             expect(wav != controls.cend(), "WAV action exposes its layout state");
             const bool wrapped = wav != controls.cend() &&
                 wav->state.value(QStringLiteral("actions_wrapped")).toBool();
-            const int upperY = boundsFor(controls, actionIds[1]).top();
-            const int lowerY = boundsFor(controls, actionIds[0]).top();
+            const int upperY = boundsFor(controls, actionIds[0]).top();
+            const int lowerY = boundsFor(controls, actionIds[3]).top();
             if (wrapped) {
                 ++wrappedCases;
-                expect(lowerY > upperY &&
-                        boundsFor(controls, actionIds[5]).left() < boundsFor(controls, actionIds[1]).left() &&
-                        boundsFor(controls, actionIds[1]).left() < boundsFor(controls, actionIds[4]).left() &&
-                        boundsFor(controls, actionIds[0]).left() < boundsFor(controls, actionIds[2]).left() &&
-                        boundsFor(controls, actionIds[2]).left() < boundsFor(controls, actionIds[3]).left(),
-                    "wrapped tiles put Generate New Idea, Continue Idea and Clear Idea on the bottom row in order");
+                expect(lowerY > upperY,
+                    "wrapped tiles keep the first three actions above the remaining three");
             } else {
                 ++unwrappedCases;
                 expect(lowerY == upperY, "unwrapped main-view actions occupy one row");
@@ -1289,7 +1312,7 @@ void testResponsivePerformanceActions()
             QVector<QRect> actionBounds;
             for (qsizetype i = 0; i < actionIds.size(); ++i) {
                 const QRect bounds = boundsFor(controls, actionIds[i]);
-                const bool lowerAction = i == 0 || i == 2 || i == 3;
+                const bool lowerAction = i >= 3;
                 const int expectedY = wrapped && lowerAction ? lowerY : upperY;
                 expect(!bounds.isEmpty() && widget.rect().contains(bounds) && bounds.y() == expectedY &&
                         !bounds.intersects(chord) && !bounds.intersects(runway) &&
@@ -1302,9 +1325,9 @@ void testResponsivePerformanceActions()
                 sendMouse(widget, QEvent::MouseButtonPress, bounds.center(), Qt::LeftButton, Qt::LeftButton);
                 expect(clicks[i] == before + 1, "resized painted tile dispatches through its actual click target");
             }
-            const QRect status = boundsFor(controls, actionIds[4], QStringLiteral("generation_status_bounds"));
+            const QRect status = boundsFor(controls, actionIds[3], QStringLiteral("generation_status_bounds"));
             if (generating) {
-                const int anchor = wrapped ? actionBounds[3].bottom() : actionBounds[4].bottom();
+                const int anchor = actionBounds[5].bottom();
                 expect(status.top() == anchor + 8 && status.right() == widget.width() - 25 &&
                         widget.rect().contains(status) && !status.intersects(chord) && !status.intersects(runway),
                     "WAV generation indicator stays below both wrapped rows or in its existing unwrapped position");
@@ -1313,12 +1336,20 @@ void testResponsivePerformanceActions()
             } else {
                 expect(status.isEmpty(), "inactive WAV generation has no status tile");
             }
-            QHelpEvent help(QEvent::ToolTip, actionBounds.front().center(),
-                widget.mapToGlobal(actionBounds.front().center()));
-            QApplication::sendEvent(&widget, &help);
-            expect(QToolTip::text() == QStringLiteral("GENERATE NEW IDEA"),
-                "painted compact tiles expose their complete label in a tooltip");
+            for (qsizetype i = 1; i < actionBounds.size(); ++i) {
+                expect(actionBounds[i].top() > actionBounds[i - 1].top() ||
+                        (actionBounds[i].top() == actionBounds[i - 1].top() && actionBounds[i].left() > actionBounds[i - 1].left()),
+                    "main Jam actions retain the requested reading order at every tested size");
+            }
+            expect(std::none_of(controls.cbegin(), controls.cend(), [](const auto& control) {
+                return control.id == QStringLiteral("performance.home.idea.details");
+            }), "main Jam view has Clear Idea and no Idea Details action");
             QToolTip::hideText();
+            for (const auto& bounds : actionBounds) {
+                QHelpEvent help(QEvent::ToolTip, bounds.center(), widget.mapToGlobal(bounds.center()));
+                QApplication::sendEvent(&widget, &help);
+                expect(QToolTip::text().isEmpty(), "main Jam idea actions show no tooltips");
+            }
             const QString previewRoot = qEnvironmentVariable("JAM2_TEST_LAYOUT_PREVIEW_ROOT");
             if (!previewRoot.isEmpty()) {
                 expect(QDir().mkpath(previewRoot) && widget.grab().save(QDir(previewRoot).filePath(
@@ -1560,6 +1591,7 @@ int main(int argc, char** argv)
 {
     QApplication app(argc, argv);
     testActionTileRow();
+    testIdeaHeaderRows();
     testResponsivePerformanceActions();
     if (argc == 2 && QString::fromLocal8Bit(argv[1]) == QStringLiteral("--responsive-actions")) {
         return failures == 0 ? 0 : 1;
@@ -1570,7 +1602,7 @@ int main(int argc, char** argv)
     testSessionDefaultsAndPriorityControls();
     testAudioDeviceUiSupport();
     testConnectionGuidance();
-    testWaveformAndMeterWidgets();
+    testMeterWidget();
     testLooperLaneWidget();
     testMetronomeWidgets();
     testBeatGridWidgets();

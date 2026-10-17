@@ -661,7 +661,8 @@ private:
                     snapshot.metronome_render_offset_frames,
                     snapshot.metronome_epoch_valid,
                     snapshot.metronome_epoch_frame,
-                    countIn)
+                    countIn,
+                    snapshot.playback_tempo)
                 : std::optional<jam2::QuantizedTransportSchedule>{
                     jam2::QuantizedTransportSchedule{
                         target,

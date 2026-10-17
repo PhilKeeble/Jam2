@@ -719,6 +719,77 @@ bool exerciseActiveCreatorWorkflows(
 
     (void)invokeAndReceive(creator, QStringLiteral("coverage-open-chords"),
         QStringLiteral("workspace.open.chords"), QStringLiteral("click"));
+    const Snapshot beforeAddedSection = snapshotAll(
+        creator, QStringLiteral("coverage-generate-before-section-add"));
+    const int activeIdeaSection = beforeAddedSection.content
+        .value(QStringLiteral("active_bank")).toInt(-1);
+    const int originalSectionCount = beforeAddedSection.content
+        .value(QStringLiteral("section_count")).toInt();
+    (void)invokeAndReceive(creator, QStringLiteral("coverage-generate-add-section"),
+        QStringLiteral("grid.chords.section.add"), QStringLiteral("click"));
+    const Snapshot addedSection = snapshotAll(
+        creator, QStringLiteral("coverage-generate-added-section"));
+    if (activeIdeaSection < 0 ||
+        addedSection.content.value(QStringLiteral("active_bank")).toInt(-1) != activeIdeaSection ||
+        addedSection.content.value(QStringLiteral("section_count")).toInt() != originalSectionCount + 1 ||
+        addedSection.content.value(QStringLiteral("chord_view_section")).toInt(-1) != originalSectionCount) {
+        fail(QStringLiteral("Adding a section did not retain the active bank while selecting the new section for editing"));
+    }
+    (void)invokeAndReceive(creator, QStringLiteral("coverage-generate-open-performance"),
+        QStringLiteral("workspace.close"), QStringLiteral("click"));
+    openModal(creator, QStringLiteral("coverage-generate-active-open"),
+        QStringLiteral("performance.home.idea.generate"));
+    const Snapshot activeGenerate = snapshotAll(
+        creator, QStringLiteral("coverage-generate-active-dialog"));
+    requireControls(activeGenerate, QStringLiteral("Generate New Idea"), {
+        "idea.generate-dialog.target-section", "idea.generate-dialog.cancel",
+    });
+    if (controlState(activeGenerate, QStringLiteral("idea.generate-dialog.target-section"))
+            .value(QStringLiteral("index")).toInt(-1) != activeIdeaSection) {
+        fail(QStringLiteral("Generate New Idea defaulted to the newly added section instead of the active section"));
+    }
+    closeModal(creator, QStringLiteral("coverage-generate-active-cancel"),
+        QStringLiteral("idea.generate-dialog.cancel"));
+    openModal(creator, QStringLiteral("coverage-catalog-active-open"),
+        QStringLiteral("performance.home.idea.browse"));
+    const Snapshot activeCatalog = snapshotAll(
+        creator, QStringLiteral("coverage-catalog-active-dialog"));
+    requireControls(activeCatalog, QStringLiteral("Groove Library"), {
+        "idea.catalog-dialog.target-section", "idea.catalog-dialog.cancel",
+    });
+    if (controlState(activeCatalog, QStringLiteral("idea.catalog-dialog.target-section"))
+            .value(QStringLiteral("index")).toInt(-1) != activeIdeaSection) {
+        fail(QStringLiteral("Groove Library defaulted to the newly added section instead of the active section"));
+    }
+    closeModal(creator, QStringLiteral("coverage-catalog-active-cancel"),
+        QStringLiteral("idea.catalog-dialog.cancel"));
+    openModal(creator, QStringLiteral("coverage-continue-active-open"),
+        QStringLiteral("performance.home.idea.continue"));
+    const Snapshot activeContinuation = snapshotAll(
+        creator, QStringLiteral("coverage-continue-active-dialog"));
+    requireControls(activeContinuation, QStringLiteral("Continue Idea"), {
+        "idea.continue-dialog.source", "idea.continue-dialog.target", "idea.continue-dialog.cancel",
+    });
+    if (controlState(activeContinuation, QStringLiteral("idea.continue-dialog.source"))
+            .value(QStringLiteral("index")).toInt(-1) != activeIdeaSection ||
+        controlState(activeContinuation, QStringLiteral("idea.continue-dialog.target"))
+            .value(QStringLiteral("index")).toInt(-1) == activeIdeaSection) {
+        fail(QStringLiteral("Continue Idea did not default to the active source and a different destination after adding a section"));
+    }
+    closeModal(creator, QStringLiteral("coverage-continue-active-cancel"),
+        QStringLiteral("idea.continue-dialog.cancel"));
+    const Snapshot cancelledGenerate = snapshotAll(
+        creator, QStringLiteral("coverage-generate-active-cancelled"));
+    if (cancelledGenerate.content.value(QStringLiteral("section_count")).toInt() != originalSectionCount + 1 ||
+        cancelledGenerate.content.value(QStringLiteral("active_bank")).toInt(-1) != activeIdeaSection ||
+        cancelledGenerate.content.value(QStringLiteral("song_model_sha256")) !=
+            addedSection.content.value(QStringLiteral("song_model_sha256"))) {
+        fail(QStringLiteral("Cancelling active-section idea dialogs changed the song or active section"));
+    }
+    (void)invokeAndReceive(creator, QStringLiteral("coverage-generate-return-chords"),
+        QStringLiteral("workspace.open.chords"), QStringLiteral("click"));
+    (void)invokeAndReceive(creator, QStringLiteral("coverage-generate-remove-added-section"),
+        QStringLiteral("grid.chords.section.remove"), QStringLiteral("click"));
     openModal(creator, QStringLiteral("coverage-generate-open"),
         QStringLiteral("chords.idea.generate"));
     Snapshot generate = snapshotAll(creator, QStringLiteral("coverage-generate-dialog"));
@@ -733,6 +804,10 @@ bool exerciseActiveCreatorWorkflows(
         "idea.generate-dialog.accept",
         "idea.generate-dialog.cancel",
     });
+    if (controlState(generate, QStringLiteral("idea.generate-dialog.target-section"))
+            .value(QStringLiteral("index")).toInt(-1) != activeIdeaSection) {
+        fail(QStringLiteral("Chord-page idea generation did not default to the active section"));
+    }
     (void)invokeAndReceive(creator, QStringLiteral("coverage-generate-exact-bpm"),
         QStringLiteral("idea.generate-dialog.exact-bpm"),
         QStringLiteral("set-checked"), true);
@@ -783,6 +858,14 @@ bool exerciseActiveCreatorWorkflows(
         "idea.continue-dialog.accept",
         "idea.continue-dialog.cancel",
     });
+    if (controlState(continuation, QStringLiteral("idea.continue-dialog.source"))
+            .value(QStringLiteral("index")).toInt(-1) != activeIdeaSection ||
+        controlState(continuation, QStringLiteral("idea.continue-dialog.target"))
+            .value(QStringLiteral("index")).toInt(-1) == activeIdeaSection ||
+        !controlState(continuation, QStringLiteral("idea.continue-dialog.accept"))
+            .value(QStringLiteral("enabled")).toBool()) {
+        fail(QStringLiteral("Chord-page Continue Idea did not default to the populated active source and a different destination"));
+    }
     (void)invokeAndReceive(creator, QStringLiteral("coverage-continue-source"),
         QStringLiteral("idea.continue-dialog.source"), QStringLiteral("set-index"), 0);
     (void)invokeAndReceive(creator, QStringLiteral("coverage-continue-target"),
@@ -804,6 +887,10 @@ bool exerciseActiveCreatorWorkflows(
         "idea.catalog-dialog.accept",
         "idea.catalog-dialog.cancel",
     });
+    if (controlState(catalog, QStringLiteral("idea.catalog-dialog.target-section"))
+            .value(QStringLiteral("index")).toInt(-1) != activeIdeaSection) {
+        fail(QStringLiteral("Chord-page Groove Library did not default to the active section"));
+    }
     const QJsonObject preview = controlState(
         catalog, QStringLiteral("idea.catalog-dialog.preview"));
     if (preview.value(QStringLiteral("enabled")).toBool()) {
@@ -865,6 +952,52 @@ bool exerciseActiveCreatorWorkflows(
         "idea.reference-dialog.accept",
         "idea.reference-dialog.cancel",
     });
+    const QString initialReferenceSummary = inspectWidget(
+        creator, QStringLiteral("reference-summary"), QStringLiteral("PracticeReferenceSummary"))
+        .value(QStringLiteral("text")).toString();
+    const QStringList referenceIds = initialReferenceSummary.section(
+        QStringLiteral(" -> "), 1).section(QLatin1Char(' '), 1).split(QLatin1Char(','));
+    if (!initialReferenceSummary.contains(QStringLiteral(" -> Section")) ||
+        initialReferenceSummary.section(QLatin1Char(' '), 0, 0).toInt() != referenceIds.size() ||
+        referenceIds.contains(QStringLiteral("-"))) {
+        fail(QStringLiteral("Reference dialog did not expose its populated section count and IDs: %1")
+            .arg(initialReferenceSummary));
+    }
+    const std::array<const char*, 5> referenceLayers{
+        "idea.reference-dialog.chords", "idea.reference-dialog.drums",
+        "idea.reference-dialog.melody", "idea.reference-dialog.bass",
+        "idea.reference-dialog.support"};
+    for (const char* layer : referenceLayers) {
+        const QString id = QString::fromLatin1(layer);
+        if (controlState(reference, id).value(QStringLiteral("enabled")).toBool()) {
+            (void)invokeAndReceive(creator, QStringLiteral("reference-clear-") + id,
+                id, QStringLiteral("set-checked"), false);
+        }
+    }
+    const Snapshot noReferences = snapshotAll(
+        creator, QStringLiteral("coverage-reference-none"));
+    if (inspectWidget(creator, QStringLiteral("reference-empty-summary"), QStringLiteral("PracticeReferenceSummary"))
+            .value(QStringLiteral("text")).toString() != QStringLiteral("0 sections -> Sections -") ||
+        controlState(noReferences, QStringLiteral("idea.reference-dialog.accept"))
+            .value(QStringLiteral("enabled")).toBool()) {
+        fail(QStringLiteral("Clearing reference layers did not update the summary and disable Render"));
+    }
+    for (const char* layer : referenceLayers) {
+        const QString id = QString::fromLatin1(layer);
+        if (controlState(reference, id).value(QStringLiteral("enabled")).toBool()) {
+            (void)invokeAndReceive(creator, QStringLiteral("reference-restore-") + id,
+                id, QStringLiteral("set-checked"),
+                controlState(reference, id).value(QStringLiteral("checked")));
+        }
+    }
+    const Snapshot restoredReferences = snapshotAll(
+        creator, QStringLiteral("coverage-reference-restored"));
+    if (inspectWidget(creator, QStringLiteral("reference-restored-summary"), QStringLiteral("PracticeReferenceSummary"))
+            .value(QStringLiteral("text")).toString() != initialReferenceSummary ||
+        !controlState(restoredReferences, QStringLiteral("idea.reference-dialog.accept"))
+            .value(QStringLiteral("enabled")).toBool()) {
+        fail(QStringLiteral("Restoring reference layers did not restore the section summary and Render"));
+    }
     closeModal(creator, QStringLiteral("coverage-reference-accept"),
         QStringLiteral("idea.reference-dialog.accept"));
 
@@ -914,7 +1047,48 @@ bool exerciseActiveCreatorWorkflows(
             });
     }
 
-    openModal(creator, QStringLiteral("coverage-idea-clear-open"),
+    (void)invokeAndReceive(creator, QStringLiteral("coverage-clear-open-chords"),
+        QStringLiteral("workspace.open.chords"), QStringLiteral("click"));
+    const Snapshot beforeClearSectionAdd = snapshotAll(
+        creator, QStringLiteral("coverage-clear-before-section-add"));
+    const int clearSectionCount = beforeClearSectionAdd.content
+        .value(QStringLiteral("section_count")).toInt();
+    (void)invokeAndReceive(creator, QStringLiteral("coverage-clear-add-section"),
+        QStringLiteral("grid.chords.section.add"), QStringLiteral("click"));
+    const QString newSectionChord = QStringLiteral("grid.chord.section.%1.beat.0.chord")
+        .arg(clearSectionCount);
+    (void)invokeAndReceive(creator, QStringLiteral("coverage-clear-new-section-chord"),
+        newSectionChord, QStringLiteral("set-text"), QStringLiteral("Dm7"));
+    const Snapshot beforeCurrentClear = snapshotAll(
+        creator, QStringLiteral("coverage-clear-before-current"));
+    if (beforeCurrentClear.content.value(QStringLiteral("active_bank")).toInt(-1) != 0 ||
+        beforeCurrentClear.content.value(QStringLiteral("chord_view_section")).toInt(-1) != clearSectionCount ||
+        beforeCurrentClear.content.value(QStringLiteral("first_section")).toObject()
+            .value(QStringLiteral("generated_kind")).toString().isEmpty() ||
+        controlState(beforeCurrentClear, newSectionChord).value(QStringLiteral("text")).toString() != QStringLiteral("Dm7")) {
+        fail(QStringLiteral("Clear Idea regression needs a populated active A and a different newly added section selected for editing"));
+    }
+    QSet<QString> activeReferenceIds;
+    QSet<QString> retainedLaneIds;
+    const QJsonArray beforeLaneIds = beforeCurrentClear.content.value(QStringLiteral("lane_ids")).toArray();
+    const QJsonArray beforeLaneNames = beforeCurrentClear.content.value(QStringLiteral("lane_names")).toArray();
+    const QJsonArray beforeLaneBanks = beforeCurrentClear.content.value(QStringLiteral("lane_banks")).toArray();
+    const QStringList activeReferenceNames{
+        QStringLiteral("Section A Chords"), QStringLiteral("Section A Drums"),
+        QStringLiteral("Section A Melody"), QStringLiteral("Section A Bass"), QStringLiteral("Section A Support")};
+    for (int index = 0; index < beforeLaneIds.size(); ++index) {
+        const QString id = beforeLaneIds.at(index).toString();
+        if (beforeLaneBanks.at(index).toString() == QStringLiteral("A") &&
+            activeReferenceNames.contains(beforeLaneNames.at(index).toString())) {
+            activeReferenceIds.insert(id);
+        } else {
+            retainedLaneIds.insert(id);
+        }
+    }
+    if (activeReferenceIds.isEmpty() || retainedLaneIds.isEmpty()) {
+        fail(QStringLiteral("Clear Idea regression needs active generated references and tracks to retain"));
+    }
+    openModal(creator, QStringLiteral("coverage-idea-clear-cancel-open"),
         QStringLiteral("performance.home.idea.clear"));
     const Snapshot clearIdea = snapshotAll(
         creator, QStringLiteral("coverage-idea-clear-dialog"));
@@ -923,8 +1097,68 @@ bool exerciseActiveCreatorWorkflows(
         "idea.clear-dialog.all-sections",
         "idea.clear-dialog.cancel",
     });
+    closeModal(creator, QStringLiteral("coverage-idea-clear-cancel"),
+        QStringLiteral("idea.clear-dialog.cancel"));
+    const Snapshot cancelledClear = snapshotAll(
+        creator, QStringLiteral("coverage-clear-cancelled"));
+    if (cancelledClear.content.value(QStringLiteral("song_model_sha256")) !=
+            beforeCurrentClear.content.value(QStringLiteral("song_model_sha256")) ||
+        cancelledClear.content.value(QStringLiteral("lane_ids")) !=
+            beforeCurrentClear.content.value(QStringLiteral("lane_ids"))) {
+        fail(QStringLiteral("Cancelling Clear Idea changed notes or track ownership"));
+    }
+    openModal(creator, QStringLiteral("coverage-idea-clear-current-open"),
+        QStringLiteral("performance.home.idea.clear"));
+    closeModal(creator, QStringLiteral("coverage-idea-clear-current-confirm"),
+        QStringLiteral("idea.clear-dialog.current-section"));
+    const Snapshot currentCleared = snapshotAll(
+        creator, QStringLiteral("coverage-clear-current-result"));
+    const QJsonObject firstCleared = currentCleared.content.value(QStringLiteral("first_section")).toObject();
+    if (!firstCleared.value(QStringLiteral("chord_0")).toString().isEmpty() ||
+        !firstCleared.value(QStringLiteral("generated_kind")).toString().isEmpty() ||
+        firstCleared.value(QStringLiteral("id")) != beforeCurrentClear.content
+            .value(QStringLiteral("first_section")).toObject().value(QStringLiteral("id")) ||
+        currentCleared.content.value(QStringLiteral("active_bank")).toInt(-1) != 0 ||
+        controlState(currentCleared, newSectionChord).value(QStringLiteral("text")).toString() != QStringLiteral("Dm7")) {
+        fail(QStringLiteral("Current Section did not clear active A while retaining the newly added section and section identity"));
+    }
+    QSet<QString> afterLaneIds;
+    for (const QJsonValue& id : currentCleared.content.value(QStringLiteral("lane_ids")).toArray()) {
+        afterLaneIds.insert(id.toString());
+    }
+    if (afterLaneIds.intersects(activeReferenceIds)) {
+        fail(QStringLiteral("Current Section retained active generated references"));
+    }
+    if (afterLaneIds != retainedLaneIds) {
+        fail(QStringLiteral("Current Section changed custom tracks or references from other sections"));
+    }
+    const QString clearedChords = firstCleared.value(QStringLiteral("chord_fingerprint")).toString();
+    const QString clearedBeats = firstCleared.value(QStringLiteral("beat_fingerprint")).toString();
+    if (!waitForAll(coordinator, QStringLiteral("active-section idea clear convergence"),
+            [&clearedChords, &clearedBeats](std::size_t, const QJsonObject& state) {
+                const auto section = state.value(QStringLiteral("content")).toObject()
+                    .value(QStringLiteral("first_section")).toObject();
+                return section.value(QStringLiteral("chord_fingerprint")).toString() == clearedChords &&
+                    section.value(QStringLiteral("beat_fingerprint")).toString() == clearedBeats &&
+                    section.value(QStringLiteral("generated_kind")).toString().isEmpty();
+            }, states)) {
+        for (const auto& state : states) {
+            const auto content = state.value(QStringLiteral("content")).toObject();
+            std::cerr << "clear state=" << QJsonDocument(content.value(QStringLiteral("first_section")).toObject()).toJson(QJsonDocument::Compact).constData()
+                << " policy=" << QJsonDocument(state.value(QStringLiteral("jam")).toObject().value(QStringLiteral("policy")).toObject()).toJson(QJsonDocument::Compact).constData() << '\n';
+        }
+        return false;
+    }
+    openModal(creator, QStringLiteral("coverage-idea-clear-all-open"),
+        QStringLiteral("performance.home.idea.clear"));
     closeModal(creator, QStringLiteral("coverage-idea-clear-confirm"),
         QStringLiteral("idea.clear-dialog.all-sections"));
+    const Snapshot allCleared = snapshotAll(creator, QStringLiteral("coverage-clear-all-result"));
+    if (!controlState(allCleared, newSectionChord).value(QStringLiteral("text")).toString().isEmpty()) {
+        fail(QStringLiteral("All Sections did not clear the newly added section"));
+    }
+    (void)invokeAndReceive(creator, QStringLiteral("coverage-clear-remove-added-section"),
+        QStringLiteral("grid.chords.section.remove"), QStringLiteral("click"));
 
     openModal(creator, QStringLiteral("coverage-new-jam-open"),
         QStringLiteral("session.new"));
@@ -1567,6 +1801,7 @@ int main(int argc, char* argv[])
             "application.settings-dialog.sync.track-lanes",
             "application.settings-dialog.sync.automatic-wavs",
             "application.settings-dialog.sync.global-playback",
+            "application.settings-dialog.sync.listening-tools",
             "application.settings-dialog.sync.metronome-state",
             "application.settings-dialog.sync.recordings",
             "application.settings-dialog.save",

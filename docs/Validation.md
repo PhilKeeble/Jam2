@@ -14,7 +14,11 @@ A normal distribution build remains test-free:
 cmd.exe /d /c "call compile.cmd --in-dev-shell"
 ```
 
-Run one selected suite while developing:
+Run only the CTests directly relevant to a change while developing. Every
+feature, behavior change and bug fix must add or update relevant native C++
+tests registered with CTest. All builds and tests use optimized Release.
+
+Select the relevant suite:
 
 ```powershell
 cmd.exe /d /c "call compile.cmd --in-dev-shell --tests unit"
@@ -28,34 +32,22 @@ Run one registered CTest exactly:
 cmd.exe /d /c "call compile.cmd --in-dev-shell --tests gui --test-name jam2_four_gui_agent_integration"
 ```
 
-Run the pre-distribution Release gate only after focused implementation work is
-done:
+Run the full suite only when the user explicitly requests it, including before
+distribution:
 
 ```powershell
 cmd.exe /d /c "call compile.cmd --in-dev-shell --tests-full"
 ```
 
-`--tests-full` builds the normal `/O2` Release targets, stages the one public
+`--tests-full` builds the optimized `/O2` Release targets, stages the one public
 `release/jam2.exe`, and runs the complete hardware-independent CTest catalogue
-once. It does not collect source coverage.
+once. No source-coverage collector or alternate build configuration is used.
 
-After implementing major features, audit which maintained source and functions
-the native catalogue exercises with the separate Windows coverage command:
-
-```powershell
-cmd.exe /d /c "call compile.cmd --in-dev-shell --coverage"
-```
-
-`--coverage` builds and runs the instrumented MSVC catalogue, exports the native
-coverage reports, and checks the reviewed maintained-function inventory. It
-does not rerun the optimized catalogue; use `--tests-full` for that behavioral
-gate. Because instrumentation replaces the staged executable while collecting,
-the command restores a normal `/O2` `release/jam2.exe` before returning, even
-when collection or the audit fails. `--test-name` can focus collection for
-diagnosis; it writes a report and requires that test to pass, but only an
-unfocused `--coverage` run enforces the complete maintained-source inventory.
-`--hardware-profile` makes the explicitly profiled hardware and plugin coverage
-mandatory during the full audit.
+A full-suite run is a report, not authorization to fix failures. For each
+failure, report the expected behavior, observed result, measurement method,
+and assertion or threshold. Distinguish confirmed causes from hypotheses and
+whether the evidence suggests a test issue, product issue, or environmental
+limitation. The user decides whether the test or product code needs changing.
 
 ## macOS commands
 
@@ -68,9 +60,9 @@ bash ./compile.sh --tests gui --test-name jam2_four_gui_agent_integration
 bash ./compile.sh --tests-full
 ```
 
-On macOS, `--tests-full` builds the normal Release targets and runs the complete
-CTest catalogue once. It does not collect source coverage and never invokes the
-Windows PowerShell coverage scripts.
+On macOS, builds and tests also use optimized Release. Run `--tests-full` only
+when the user explicitly requests the full CTest catalogue. The same reporting
+rule applies; no source coverage is collected.
 
 Windows completion does not imply CoreAudio/Cocoa completion. The exact later
 Apple parity work is listed in `TEST-MACOS.md`.
@@ -97,13 +89,9 @@ gate. Normal and selected test commands build only the requested target set.
 
 ## Results and temporary files
 
-All automated runtime state is rooted under `build/test-artifacts`. A selected,
-full, or coverage command removes that exact directory before starting and
-again after complete success; failures retain coverage artifacts under
-`build/coverage/test-artifacts` for diagnosis. Windows `--coverage` reports are
-written under `build/coverage`, including the instrumented CTest log, summary,
-source inventory, and function-level CSVs. Normal Windows and macOS test runs
-do not create code-coverage reports.
+All automated runtime state is rooted under `build/test-artifacts`. Selected
+and full test commands remove that exact directory before starting and again
+after complete success. Failures retain their test artifacts there for diagnosis.
 
 The maintained implementation/review history is in `TEST-PLAN.md`,
 `TEST-LOG.md`, and `TEST-REVIEW.md`. Cross-machine and long soak campaigns are

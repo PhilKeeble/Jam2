@@ -738,6 +738,7 @@ MainWindow::MainWindow(
     jamStorage_.startNew(initialJamName);
     projectPersistence_.initializeWorkspace(jamStorage_.rootFolder());
     MainWindowPages::build(*this);
+    initializeListeningTools();
     applyPreferencesToControls();
     applyNewJamDefaults();
     projectPersistence_.acceptNewProject(currentProjectSnapshot());
@@ -842,6 +843,12 @@ MainWindow::MainWindow(
     };
     sessionController_.onMessage = [this](const QString& sourcePeerToken, const QJsonObject& message) {
         const QString type = message.value(QStringLiteral("type")).toString();
+        if (type.startsWith(QStringLiteral("jam.listening."))) {
+            if (type != QStringLiteral("jam.listening.cancel") && type != QStringLiteral("jam.listening.reset") &&
+                deferIncomingControlForLaneRecording(message, sourcePeerToken)) return;
+            if (jamSyncAllowsControlMessage(message)) trackWorkspace_.listeningTools.receive(message, sourcePeerToken);
+            return;
+        }
         if (type == QStringLiteral("looper.recording.group.start")) {
             if (!syncedRecordingsEnabled()) return;
             handleRecordingGroupStart(message);
@@ -2652,6 +2659,7 @@ QJsonObject MainWindow::automationContentSnapshot() const
         {QStringLiteral("arrangement"), arrangementState},
         {QStringLiteral("first_section"), firstSection},
         {QStringLiteral("active_bank"), activeBankIndex},
+        {QStringLiteral("listening_tools"), trackWorkspace_.listeningTools.stats()},
         {QStringLiteral("pending_bank"), pendingBankIndex_},
         {QStringLiteral("pending_bank_absolute_beat"),
             QString::number(pendingBankAbsoluteBeat_)},
@@ -3691,6 +3699,7 @@ void MainWindow::handleEngineSnapshot(const jam2::EngineSnapshot& snapshot)
 
 void MainWindow::handleEngineEvent(const jam2::EngineEvent& event)
 {
+    if (trackWorkspace_.listeningTools.engineEvent(event)) return;
     if (tunerCommandCookie_ != 0 && event.cookie == tunerCommandCookie_) {
         tunerCommandCookie_ = 0;
         if (!event.ok) {
@@ -4168,6 +4177,7 @@ void MainWindow::stopJam(bool returnToLocal)
     deferredReferenceRenderRequests_.clear();
     publishStoppedTrackStateWhenApplied_ = false;
     trackRecordingWorkflow_.clearSessionSchedule();
+    trackWorkspace_.listeningTools.reset();
     if (recordingCountdownLabel_) recordingCountdownLabel_->hide();
     metronomeTransport_.setLocalState(false);
     if (startTrackMetronomeButton_) {
@@ -5221,6 +5231,8 @@ void MainWindow::applyPreferencesToControls()
     track.focusEnabled = preferences_.views.focusFrequencyEnabled;
     track.focusPreset = preferences_.views.focusPreset;
     track.focusFrequencyHz = preferences_.views.focusFrequencyHz;
+    if (!jam2_.isRunning()) trackWorkspace_.listeningTools.initialize(jam2::gui::ListeningToolsSettings::fromModel(track));
+    else editListeningTools();
     updateTrackControls();
 
     if (!preferencesInitialized_) {
@@ -5228,6 +5240,7 @@ void MainWindow::applyPreferencesToControls()
         policy.trackLanes = preferences_.sync.trackLanes;
         policy.autoShareWavs = preferences_.sync.autoShareWavs;
         policy.globalPlayback = preferences_.sync.globalPlayback;
+        policy.listeningTools = preferences_.sync.listeningTools;
         policy.generatedIdeas = static_cast<GeneratedIdeaSyncMode>(
             qBound(0, preferences_.sync.generatedIdeas, 3));
         policy.metronomeState = preferences_.sync.metronomeState;
@@ -5277,6 +5290,7 @@ void MainWindow::applyNewJamDefaults()
     track.focusPreset = preferences_.views.focusPreset;
     track.focusFrequencyHz = preferences_.views.focusFrequencyHz;
     if (metronomeBpmSpin_) {
+        trackWorkspace_.listeningTools.initialize(jam2::gui::ListeningToolsSettings::fromModel(track));
         applyMetronomePatternForBank(looperProject_.activeBankIndex(), false);
     }
     updateTrackControls();
@@ -5537,6 +5551,7 @@ void MainWindow::handleMeshPeerAuthenticated(const QString& token, const QJsonOb
                 ? SongSyncScope::IdeaBeats : SongSyncScope::IdeaFull;
         sendSongSnapshot(std::nullopt, scope);
     }
+    trackWorkspace_.listeningTools.sendCurrent(token);
     if (syncedRecordingsEnabled() && trackRecordingWorkflow_.laneArmed()) {
         publishLocalTrackRecordingState(
             localTrackRecordingPhase_,
@@ -5597,6 +5612,7 @@ bool MainWindow::deferIncomingControlForLaneRecording(
         type == QStringLiteral("jam.sync.set") ||
         type == QStringLiteral("jam.sync.request") ||
         type.startsWith(QStringLiteral("jam.metronome.state.")) ||
+        type.startsWith(QStringLiteral("jam.listening.")) ||
         type.startsWith(QStringLiteral("bank.")) ||
         type == QStringLiteral("song.set") ||
         type == QStringLiteral("practice.references.render") ||
@@ -5826,6 +5842,7 @@ void MainWindow::applyJamSyncPolicy(JamSyncPolicy policy, bool fromJam)
             ? QStringLiteral("armed") : QStringLiteral("idle");
     }
     applyingJamSyncPolicy_ = false;
+    trackWorkspace_.listeningTools.policyChanged(jam2JamSyncAllows(previous, JamSyncRoute::ListeningTools));
 
     updateJamSyncPresentation();
     updateTrackControls();
@@ -6725,7 +6742,8 @@ void MainWindow::schedulePreparedBankLaunch(
             position.secondsPerBeat,
             position.renderOffsetFrames,
             targetAbsoluteBeat,
-            currentMetronomePattern().beats_per_bar);
+            currentMetronomePattern().beats_per_bar,
+            position.tempo);
     if (!launchSchedule.has_value()) {
         appendLog(QStringLiteral("bank launch rejected invalid transport clock"));
         pendingBankIndex_ = -1;
@@ -7251,6 +7269,9 @@ void MainWindow::showArrangementDialog()
 
 void MainWindow::refreshLooperLanes()
 {
+    for (auto* row : ideaHeaderRows_) {
+        if (row) row->updateSection(chordModel_, beatModel_, viewedBankIndex_);
+    }
     const int activeBankIndex = looperProject_.activeBankIndex();
     if (trackRecordingWorkflow_.laneArmed() &&
         trackRecordingWorkflow_.armedBank() != activeBankIndex &&
@@ -9434,9 +9455,8 @@ void MainWindow::handleRecordingGroupStart(const QJsonObject& message)
         }
         return;
     }
-    const std::uint64_t countdownMusical = position.epochFrame +
-        countdownBeat * beatFrames;
-    const std::uint64_t targetMusical = position.epochFrame + targetBeat * beatFrames;
+    const std::uint64_t countdownMusical = position.frameAtBeat(countdownBeat);
+    const std::uint64_t targetMusical = position.frameAtBeat(targetBeat);
     const std::uint64_t countdownFrame = rawFrameFromMusicalFrame(
         countdownMusical, position.renderOffsetFrames);
     const std::uint64_t targetFrame = rawFrameFromMusicalFrame(
@@ -10479,7 +10499,8 @@ void MainWindow::regeneratePreparedMix(int bankIndex)
         QCoreApplication::applicationPid());
     const LooperProject project = looperProject_;
     const QString projectFolder = projectPersistence_.projectFolder();
-    const SharedTrackModel track = trackController_.model();
+    SharedTrackModel track = trackController_.model();
+    trackWorkspace_.listeningTools.appliedSettings().applyTo(track);
     const qint64 exactFrames = bankExactOutputFrames(targetBank, sampleRate);
     QPointer<MainWindow> self(this);
     fileWorkerPool_.start(QRunnable::create([
@@ -10637,7 +10658,8 @@ void MainWindow::applyPreparedMixResult(PreparedMixResult result)
         const TrackRecordingWorkflow::PreparedAttachPlan attachPlan =
             trackRecordingWorkflow_.preparedAttachPlan(
                 metronomeTransport_.grid().position(),
-                preparedMixLifecycle_.active().frames);
+                preparedMixLifecycle_.active().frames,
+                preparedMixLifecycle_.active().listeningSpeed);
         loadPreparedMixIntoEngine(
             attachPlan.targetFrame,
             attachPlan.sourceFrame,
@@ -10833,12 +10855,6 @@ void MainWindow::updateTrackControls()
     }
     if (focusFrequencySpin_) {
         focusFrequencySpin_->setEnabled(customFocus);
-    }
-    if (trackWaveform_) {
-        trackWaveform_->setBpm(model.acceptedBpm);
-        trackWaveform_->setLoop(
-            model.loopStartSeconds >= 0.0 ? static_cast<qint64>(std::llround(model.loopStartSeconds * 1000.0)) : -1,
-            model.loopEndSeconds >= 0.0 ? static_cast<qint64>(std::llround(model.loopEndSeconds * 1000.0)) : -1);
     }
     refreshLooperLanes();
     if (loopEnabledCheck_) {
@@ -11294,10 +11310,10 @@ bool MainWindow::scheduleLoopbackCountIn(
     }
     const std::uint64_t targetBeat = countdownBeat + countInBeats;
     loopbackCountdownStartFrame_ = rawFrameFromMusicalFrame(
-        position.epochFrame + countdownBeat * beatFrames,
+        position.frameAtBeat(countdownBeat),
         position.renderOffsetFrames);
     loopbackRecordingStartFrame_ = rawFrameFromMusicalFrame(
-        position.epochFrame + targetBeat * beatFrames,
+        position.frameAtBeat(targetBeat),
         position.renderOffsetFrames);
     stopMetronomeAtLoopbackStart_ = stopMetronomeAtStart;
     localTrackRecordingCountInBars_ = qBound(1, bars, 8);
@@ -11407,9 +11423,6 @@ void MainWindow::loadTrackWaveform()
     const std::uint64_t revision = ++trackWaveformRevision_;
     const QString path = trackController_.model().filePath;
     if (path.isEmpty() || !QFileInfo::exists(path)) {
-        if (trackWaveform_) {
-            trackWaveform_->clear();
-        }
         if (performanceHome_) {
             performanceHome_->setTrackWaveform({}, false);
         }
@@ -11434,11 +11447,6 @@ void MainWindow::loadTrackWaveform()
                 }
                 loadTrackWaveform();
                 return;
-            }
-            if (trackWaveform_) {
-                trackWaveform_->setPeaks(*peaks, *valid);
-                trackWaveform_->setDurationMs(trackController_.model().durationMs);
-                trackWaveform_->setBpm(trackController_.model().acceptedBpm);
             }
             if (performanceHome_) {
                 performanceHome_->setTrackWaveform(std::move(*peaks), *valid);
@@ -11618,21 +11626,11 @@ void MainWindow::updateTrackTimeline()
 {
     auto& model = trackController_.model();
     qint64 position = currentAudibleTrackPositionMs();
-    if (trackWaveform_) {
-
-        const qint64 duration = model.durationMs;
-        trackWaveform_->setDurationMs(duration);
-        trackWaveform_->setPlayheadMs(position);
-        trackWaveform_->setBpm(model.acceptedBpm);
-        trackWaveform_->setLoop(
-            model.loopStartSeconds >= 0.0 ? static_cast<qint64>(std::llround(model.loopStartSeconds * 1000.0)) : -1,
-            model.loopEndSeconds >= 0.0 ? static_cast<qint64>(std::llround(model.loopEndSeconds * 1000.0)) : -1);
-    }
     if (looperStack_) {
         looperStack_->setPlaybackMarkers(
-            position,
-            model.loopStartSeconds >= 0.0 ? static_cast<qint64>(std::llround(model.loopStartSeconds * 1000.0)) : -1,
-            model.loopEndSeconds >= 0.0 ? static_cast<qint64>(std::llround(model.loopEndSeconds * 1000.0)) : -1);
+            preparedMixLifecycle_.active().sourcePositionMs(position),
+            preparedMixLifecycle_.active().sourcePositionMs(model.loopStartSeconds >= 0.0 ? static_cast<qint64>(std::llround(model.loopStartSeconds * 1000.0)) : -1),
+            preparedMixLifecycle_.active().sourcePositionMs(model.loopEndSeconds >= 0.0 ? static_cast<qint64>(std::llround(model.loopEndSeconds * 1000.0)) : -1));
     }
     if (!jam2_.isRunning() && mixMetronomeMeter_) {
         mixMetronomeMeter_->setLevel(0.0);
@@ -14889,6 +14887,8 @@ void MainWindow::loadTrackJson(
 {
     validatedModel.syncControls = jamSyncPolicy_.globalPlayback;
     trackController_.replaceModel(std::move(validatedModel));
+    if (!jam2_.isRunning()) trackWorkspace_.listeningTools.initialize(jam2::gui::ListeningToolsSettings::fromModel(trackController_.model()));
+    else editListeningTools();
     const auto& model = trackController_.model();
     const int savedBpm = qBound(1,
         object.value(QStringLiteral("metronome_bpm")).toInt(static_cast<int>(std::lround(model.acceptedBpm))), 400);
@@ -15089,7 +15089,7 @@ void MainWindow::updatePlaybackGrid()
     } else if (trackRecordingWorkflow_.globalTransportPlaying()) {
         const double transportBpm = trackController_.model().durationMs > 0
             ? backingBpm
-            : qMax(1.0, metronomeTransport_.grid().bpm());
+            : qMax(1.0, static_cast<double>(livePattern.bpm));
         const double trackBeat =
             static_cast<double>(qMax<qint64>(0, transportPositionMs)) *
             transportBpm * tempoPulseUnits / 60000.0;
@@ -15113,7 +15113,7 @@ void MainWindow::updatePlaybackGrid()
     double metronomePulsePhase = visualRunning
         ? std::fmod(beatPhase * visualDivision, 1.0)
         : position.secondsPerStep > 0.0
-            ? std::fmod(position.secondsFromEpoch / position.secondsPerStep, 1.0)
+            ? std::fmod(position.secondsFromEpoch / (position.secondsPerStep * position.tempo.rate()), 1.0)
             : 0.0;
     if (metronomePulsePhase < 0.0) metronomePulsePhase += 1.0;
     const bool currentStepEnabled = jam2::metronome::mask_enabled(
@@ -15147,7 +15147,7 @@ void MainWindow::updatePlaybackGrid()
     const double metronomeStepsPerSecond =
         static_cast<double>(qMax(1, livePattern.bpm)) *
         static_cast<double>(qMax(1, tempoPulseUnits)) *
-        static_cast<double>(visualDivision) / 60.0;
+        static_cast<double>(visualDivision) * position.tempo.rate() / 60.0;
     if (metronomePatternWidget_) {
         metronomePatternWidget_->setCurrentStep(
             metronomeVisualStep,
@@ -15339,6 +15339,8 @@ void MainWindow::updatePlaybackGrid()
                     .arg(position.epochFrame)
                     .arg(position.renderOffsetFrames)
                     .arg(position.sampleRate);
+                text += QStringLiteral(" musical_rate_ppm=%1 effective_bpm=%2")
+                    .arg(position.tempo.rate_ppm).arg(metronomeTransport_.grid().bpm(), 0, 'f', 3);
             }
             gridPositionLabel_->setText(text);
         } else if (position.engineAnchored) {
@@ -15346,17 +15348,6 @@ void MainWindow::updatePlaybackGrid()
         } else {
             gridPositionLabel_->setText(QStringLiteral("Grid: stopped"));
         }
-    }
-    if (trackWaveform_) {
-        trackWaveform_->setBpm(metronomeTransport_.grid().bpm());
-        const bool trackPlaying =
-            trackRecordingWorkflow_.globalTransportPlaying();
-        const qint64 gridPositionMs = qMax<qint64>(0, transportPositionMs);
-        trackWaveform_->setGridPosition(
-            gridPositionMs,
-            trackPlaying,
-            currentMetronomePattern().beats_per_bar,
-            currentMetronomePattern().tempo_pulse_units);
     }
     if (looperStack_) {
         qint64 gridPositionMs = qMax<qint64>(0, transportPositionMs);
@@ -15449,8 +15440,7 @@ void MainWindow::runGridLockedEngineAction(
             currentMetronomePattern().beats_per_bar,
             quantizeToBar);
         const std::uint64_t targetStep = targetBeat * static_cast<std::uint64_t>(qMax(1, currentMetronomePattern().division));
-        const std::uint64_t targetMusicalFrame = position.epochFrame +
-            static_cast<std::uint64_t>(std::llround(static_cast<double>(targetBeat) * position.secondsPerBeat * static_cast<double>(position.sampleRate)));
+        const std::uint64_t targetMusicalFrame = position.frameAtBeat(targetBeat);
         targetFrame = rawFrameFromMusicalFrame(targetMusicalFrame, position.renderOffsetFrames);
         const double delayMs = targetFrame > position.rawCurrentFrame
             ? (static_cast<double>(targetFrame - position.rawCurrentFrame) * 1000.0 / static_cast<double>(position.sampleRate))
@@ -15530,9 +15520,6 @@ void MainWindow::newSong()
     applyNewJamDefaults();
     applyMetronomePatternForBank(0, false);
     trackRecordingWorkflow_.clearProjectCapture();
-    if (trackWaveform_) {
-        trackWaveform_->clear();
-    }
     updateTrackControls();
     refreshLooperLanes();
     refreshSongViews();
@@ -15910,7 +15897,6 @@ void MainWindow::discardPreparedMix(bool replacementExpected)
     track.fileBytes = 0;
     track.durationMs = 0;
     track.sha256.clear();
-    if (trackWaveform_) trackWaveform_->clear();
     updateTrackControls();
 }
 
@@ -16113,9 +16099,7 @@ void MainWindow::generatePracticeIdea()
     defaults.preferredBars = preferences_.ideas.bars;
     defaults.exactBpm = preferences_.ideas.exactBpm;
     defaults.complexity = preferences_.ideas.complexity;
-    defaults.targetSectionIndex = chordGrid_
-        ? chordGrid_->selectedSectionIndex()
-        : 0;
+    defaults.targetSectionIndex = looperProject_.activeBankIndex();
     if (defaults.targetSectionIndex < 0 ||
         defaults.targetSectionIndex >= chordModel_.sections().size()) {
         defaults.targetSectionIndex = 0;
@@ -16173,7 +16157,7 @@ void MainWindow::browseCuratedIdeas()
 
     jam2::practice::CuratedIdeaDialogDefaults defaults;
     defaults.targetSectionIndex = qBound(
-        0, viewedBankIndex_, looperProject_.banks().size() - 1);
+        0, looperProject_.activeBankIndex(), looperProject_.banks().size() - 1);
     defaults.timing = preferences_.ideas.grooveUseIdeaTiming
         ? jam2::practice::CuratedIdeaTimingPolicy::UseIdeaTiming
         : jam2::practice::CuratedIdeaTimingPolicy::KeepSectionTiming;
@@ -16372,7 +16356,7 @@ void MainWindow::continuePracticeIdea()
     }
     jam2::practice::ContinueIdeaDialogDefaults defaults;
     const int bankCount = looperProject_.banks().size();
-    defaults.sourceSectionIndex = qBound(0, viewedBankIndex_, bankCount - 1);
+    defaults.sourceSectionIndex = qBound(0, looperProject_.activeBankIndex(), bankCount - 1);
     for (int bank = 0; bank < bankCount; ++bank) {
         const SongSection& section = chordModel_.section(bank);
         defaults.bankHasContent.push_back(
@@ -16463,13 +16447,13 @@ void MainWindow::clearPracticeIdea()
             "idea clearing is unavailable while a track take is active"));
         return;
     }
-    const int viewedBank = qBound(
-        0, viewedBankIndex_, looperProject_.banks().size() - 1);
+    const int targetBank = qBound(
+        0, looperProject_.activeBankIndex(), looperProject_.banks().size() - 1);
     QMessageBox prompt(this);
     prompt.setIcon(QMessageBox::Question);
     prompt.setWindowTitle(QStringLiteral("Clear Idea"));
     prompt.setText(QStringLiteral("Clear Section %1 only, or clear ideas from every section?")
-        .arg(QChar(QLatin1Char('A').unicode() + viewedBank)));
+        .arg(QChar(QLatin1Char('A').unicode() + targetBank)));
     prompt.setInformativeText(QStringLiteral(
         "Generated reference WAVs will also be removed. Custom tracks are retained."));
     QPushButton* currentBankButton = prompt.addButton(
@@ -16502,7 +16486,7 @@ void MainWindow::clearPracticeIdea()
     ++practiceIdeaRevision_;
     const bool clearAllBanks = prompt.clickedButton() == allBanksButton;
     const int activeBank = looperProject_.activeBankIndex();
-    if (clearAllBanks || viewedBank == activeBank) {
+    if (clearAllBanks || targetBank == activeBank) {
         stopTrackForPracticeIdeaGeneration();
     }
     if (clearAllBanks) {
@@ -16510,12 +16494,12 @@ void MainWindow::clearPracticeIdea()
             chordModel_.clearSection(bank);
         }
     } else {
-        chordModel_.clearSection(viewedBank);
+        chordModel_.clearSection(targetBank);
     }
     const bool removedReferences = clearPracticeReferenceWavs(
-        true, clearAllBanks ? -1 : viewedBank);
-    const int firstResetBank = clearAllBanks ? 1 : viewedBank;
-    const int lastResetBank = clearAllBanks ? looperProject_.banks().size() - 1 : viewedBank;
+        true, clearAllBanks ? -1 : targetBank);
+    const int firstResetBank = clearAllBanks ? 1 : targetBank;
+    const int lastResetBank = clearAllBanks ? looperProject_.banks().size() - 1 : targetBank;
     for (int bank = firstResetBank; bank <= lastResetBank; ++bank) {
         if (bank > 0 && looperProject_.banks().at(bank).lanes.isEmpty()) {
             LooperBankTiming inherited = looperProject_.resolvedTiming(0);
@@ -16542,7 +16526,7 @@ void MainWindow::clearPracticeIdea()
     const QString scope = clearAllBanks
         ? QStringLiteral("all sections")
         : QStringLiteral("Section %1").arg(
-            QChar(QLatin1Char('A').unicode() + viewedBank));
+            QChar(QLatin1Char('A').unicode() + targetBank));
     appendLog(removedReferences
         ? QStringLiteral("cleared idea and generated reference tracks from %1; custom tracks retained").arg(scope)
         : QStringLiteral("cleared idea from %1; custom tracks retained").arg(scope));
@@ -16670,8 +16654,9 @@ void MainWindow::generatePracticeReferenceWavs()
     }
 
     const int bankCount = looperProject_.banks().size();
-    const int sectionCount = qMin(chordModel_.sections().size(), bankCount);
-    if (sectionCount <= 0) {
+    const auto sections = jam2::practice::PracticeIdeaController::referenceSections(
+        chordModel_, looperProject_);
+    if (sections.isEmpty()) {
         QMessageBox::information(this, QStringLiteral("Generate Reference WAVs"),
             QStringLiteral("Add a song section first."));
         return;
@@ -16679,32 +16664,26 @@ void MainWindow::generatePracticeReferenceWavs()
     if (chordModel_.sections().size() > bankCount) {
         QMessageBox::information(this, QStringLiteral("Generate Reference WAVs"),
             QStringLiteral(
-                "Only Sections A-D can be rendered. Later sections will not be rendered yet."));
+                "Only the first %1 sections have matching track sections and can be rendered.")
+                .arg(bankCount));
     }
 
-    QVector<jam2::practice::ReferenceLayerAvailability> availableLayers;
-    availableLayers.reserve(sectionCount);
     bool anyChords = false;
     bool anyDrums = false;
     bool anyMelody = false;
     bool anyBass = false;
     bool anySupport = false;
-    int maxBeats = 0;
-    for (int index = 0; index < sectionCount; ++index) {
-        const SongSection& section = chordModel_.section(index);
-        const auto available =
-            jam2::practice::PracticeIdeaController::referenceLayers(section);
-        availableLayers.push_back(available);
+    for (const auto& section : sections) {
+        const auto& available = section.layers;
         anyChords = anyChords || available.chords;
         anyDrums = anyDrums || available.drums;
         anyMelody = anyMelody || available.melody;
         anyBass = anyBass || available.bass;
         anySupport = anySupport || available.support;
-        maxBeats = qMax(maxBeats, section.beats);
     }
     if (!anyChords && !anyDrums && !anyMelody && !anyBass && !anySupport) {
         QMessageBox::information(this, QStringLiteral("Generate Reference WAVs"),
-            QStringLiteral("Add chords, beat hits, melody, bass, or supporting-line notes to the first four sections."));
+            QStringLiteral("Add chords, beat hits, melody, bass, or supporting-line notes to a song section."));
         return;
     }
 
@@ -16732,13 +16711,7 @@ void MainWindow::generatePracticeReferenceWavs()
             chordModel_.section(0).generatedRecipe.tempoPulseUnits;
     }
     const auto settings = jam2::practice::askForReferenceRender(
-        this, defaults,
-        anyChords ? maxBeats : 0,
-        anyDrums ? maxBeats : 0,
-        anyMelody ? maxBeats : 0,
-        anyBass ? maxBeats : 0,
-        anySupport ? maxBeats : 0,
-        sectionCount);
+        this, defaults, sections);
     if (!settings) {
         return;
     }
@@ -16864,17 +16837,8 @@ void MainWindow::startPracticeReferenceWavGeneration(
     const jam2::practice::ReferenceRenderSettings& requestedSettings,
     const QString& requestId)
 {
-    const int sectionCount = qMin(
-        chordModel_.sections().size(), looperProject_.banks().size());
-    QVector<jam2::practice::ReferenceLayerAvailability> availableLayers;
-    availableLayers.reserve(sectionCount);
-    for (int index = 0; index < sectionCount; ++index) {
-        availableLayers.push_back(
-            jam2::practice::PracticeIdeaController::referenceLayers(
-                chordModel_.section(index)));
-    }
-    const auto settings = std::optional<jam2::practice::ReferenceRenderSettings>{
-        requestedSettings};
+    const auto sections = jam2::practice::PracticeIdeaController::referenceSections(
+        chordModel_, looperProject_);
 
     struct SectionRender {
         int bankIndex = 0;
@@ -16890,32 +16854,35 @@ void MainWindow::startPracticeReferenceWavGeneration(
         int songRevision = 0;
     };
     auto state = std::make_shared<RenderState>();
-    state->sections.reserve(sectionCount);
-    for (int index = 0; index < sectionCount; ++index) {
+    state->sections.reserve(sections.size());
+    for (const auto& section : sections) {
+        if (!section.layers.selected(requestedSettings)) continue;
+        const int index = section.sectionIndex;
         SectionRender render;
         render.bankIndex = index;
-        render.bankId = looperProject_.banks().at(index).id;
-        if (render.bankId.trimmed().isEmpty()) {
-            render.bankId = QString(QChar(static_cast<ushort>('A' + index)));
-        }
+        render.bankId = section.bankId;
         render.section = chordModel_.section(index);
-        render.settings = *settings;
+        render.settings = requestedSettings;
         const auto bankPattern = bankMetronomePattern(index);
         render.settings.bpm = bankPattern.bpm;
         render.settings.meterNumerator = bankPattern.beats_per_bar;
         render.settings.meterDenominator = bankPattern.beat_unit;
         render.settings.tempoPulseUnits = bankPattern.tempo_pulse_units;
         render.settings.renderChords =
-            settings->renderChords && availableLayers[index].chords;
+            requestedSettings.renderChords && section.layers.chords;
         render.settings.renderDrums =
-            settings->renderDrums && availableLayers[index].drums;
+            requestedSettings.renderDrums && section.layers.drums;
         render.settings.renderMelody =
-            settings->renderMelody && availableLayers[index].melody;
+            requestedSettings.renderMelody && section.layers.melody;
         render.settings.renderBass =
-            settings->renderBass && availableLayers[index].bass;
+            requestedSettings.renderBass && section.layers.bass;
         render.settings.renderSupport =
-            settings->renderSupport && availableLayers[index].support;
+            requestedSettings.renderSupport && section.layers.support;
         state->sections.push_back(std::move(render));
+    }
+    if (state->sections.isEmpty()) {
+        appendLog(QStringLiteral("no song sections contain content in the selected reference layers"));
+        return;
     }
     state->ideaRevision = practiceIdeaRevision_;
     state->songRevision = chordModel_.revision();
@@ -16923,13 +16890,6 @@ void MainWindow::startPracticeReferenceWavGeneration(
     const bool started = startFileWorkerTask(
         [state, workspace] {
             for (SectionRender& render : state->sections) {
-                if (!render.settings.renderChords &&
-                    !render.settings.renderDrums &&
-                    !render.settings.renderMelody &&
-                    !render.settings.renderBass &&
-                    !render.settings.renderSupport) {
-                    continue;
-                }
                 render.result = jam2::practice::renderPracticeReferences(
                     render.settings.renderChords || render.settings.renderMelody ||
                         render.settings.renderBass || render.settings.renderSupport
@@ -16985,13 +16945,6 @@ void MainWindow::startPracticeReferenceWavGeneration(
             LooperProject stagedProject = looperProject_;
             jam2::practice::PracticeIdeaController::clearReferences(stagedProject);
             for (const SectionRender& render : state->sections) {
-                if (!render.settings.renderChords &&
-                    !render.settings.renderDrums &&
-                    !render.settings.renderMelody &&
-                    !render.settings.renderBass &&
-                    !render.settings.renderSupport) {
-                    continue;
-                }
                 QString applyError;
                 if (!jam2::practice::PracticeIdeaController::applyReferences(
                         stagedProject,
@@ -17037,10 +16990,14 @@ void MainWindow::startPracticeReferenceWavGeneration(
             discardPreparedMix(true);
             refreshLooperLanes();
             regeneratePreparedMix(looperProject_.activeBankIndex());
+            QStringList renderedIds;
+            for (const SectionRender& render : state->sections) {
+                renderedIds.push_back(render.bankId);
+            }
             appendLog(QStringLiteral(
-                "%1 song section(s) rendered into local Sections A-%2 for shared request %3")
+                "%1 song section(s) rendered into local Sections %2 for shared request %3")
                 .arg(state->sections.size())
-                .arg(state->sections.constLast().bankId)
+                .arg(renderedIds.join(QLatin1Char(',')))
                 .arg(requestId.left(8)));
         },
         [this](const QString& error) {
@@ -17067,11 +17024,11 @@ void MainWindow::startPracticeReferenceWavGeneration(
 
 void MainWindow::showPracticeIdeaDetails()
 {
-    const std::optional<SongSection> chord =
-        jam2::practice::PracticeIdeaController::generatedSection(chordModel_, QStringLiteral("chord"));
-    const std::optional<SongSection> beat =
-        jam2::practice::PracticeIdeaController::generatedSection(beatModel_, QStringLiteral("beat"));
-    const SongSection* source = chord ? &*chord : (beat ? &*beat : nullptr);
+    const SongSection* chord = viewedBankIndex_ >= 0 && viewedBankIndex_ < chordModel_.sections().size()
+        ? &chordModel_.section(viewedBankIndex_) : nullptr;
+    const SongSection* beat = viewedBankIndex_ >= 0 && viewedBankIndex_ < beatModel_.sections().size()
+        ? &beatModel_.section(viewedBankIndex_) : nullptr;
+    const SongSection* source = jam2::gui::ideaDetailsSection(chordModel_, beatModel_, viewedBankIndex_);
     if (!source || !source->generatedRecipe.isValid()) {
         QMessageBox::information(this, QStringLiteral("Idea Details"),
             QStringLiteral("Generate an idea first."));

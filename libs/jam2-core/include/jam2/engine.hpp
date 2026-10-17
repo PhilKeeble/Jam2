@@ -12,6 +12,7 @@
 #include "audio_device.hpp"
 #include "audio_ring.hpp"
 #include "metronome.hpp"
+#include "playback_tempo.hpp"
 
 namespace jam2 {
 
@@ -131,6 +132,9 @@ enum class EngineCommandType : std::uint8_t {
     ScheduleTransport,
     CancelTransport,
     LoadPreparedTrack,
+    StageListeningTrack,
+    CommitListeningTools,
+    CancelListeningTools,
     UnloadPreparedTrack,
     PreparedPlay,
     PreparedStop,
@@ -167,6 +171,11 @@ struct EngineCommand {
     std::uint64_t transport_musical_frame = 0;
     std::uint64_t transport_countdown_start_frame = 0;
     metronome::PatternSnapshot pattern{};
+    PlaybackTempo playback_tempo{};
+    bool update_playback_tempo = true;
+    bool prepared_loop_enabled = true;
+    std::uint64_t prepared_loop_start_frame = 0;
+    std::uint64_t prepared_loop_end_frame = 0;
     std::array<char, kEngineCommandTextBytes> text{};
     std::array<char, kEngineCommandIdBytes> id{};
 };
@@ -176,6 +185,7 @@ enum class EngineEventType : std::uint8_t {
     CommandApplied,
     CommandRejected,
     PreparedTrackLoaded,
+    ListeningTrackStaged,
     JamRecordingStarted,
     JamRecordingStopped,
     TrackTakeCompleted,
@@ -315,6 +325,9 @@ struct EngineSnapshot {
     bool metronome_epoch_valid = false;
     std::int64_t metronome_render_offset_frames = 0;
     std::uint64_t metronome_pattern_origin_frame = 0;
+    PlaybackTempo playback_tempo{};
+    std::uint64_t listening_commit_raw_frame = 0;
+    PlaybackTempo pending_playback_tempo{};
     bool metronome_pattern_origin_valid = false;
     std::uint64_t metronome_pattern_source_start_seen = 0;
     std::uint64_t transport_revision = 0;

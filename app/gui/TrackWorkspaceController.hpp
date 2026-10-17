@@ -9,6 +9,7 @@
 #include "ProjectPersistenceCoordinator.hpp"
 #include "SharedTrackController.hpp"
 #include "TrackRecordingWorkflow.hpp"
+#include "ListeningToolsController.hpp"
 
 #include <QJsonObject>
 #include <QMap>
@@ -104,6 +105,7 @@ public:
     void assetWorkStateChanged(bool pending) override;
 
     SharedTrackController trackController;
+    jam2::gui::ListeningToolsController listeningTools;
     LooperProject looperProject;
     TrackRecordingWorkflow recordingWorkflow;
     BeatGridModel songModel;

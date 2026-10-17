@@ -176,6 +176,7 @@ PreparedMixResult PreparedMixRenderer::render(
 {
     PreparedMixResult result;
     result.bankIndex = bankIndex >= 0 ? bankIndex : project.activeBankIndex();
+    result.listeningSpeed = qBound(0.10, track.speed, 2.0);
     const qint64 started = QDateTime::currentMSecsSinceEpoch();
     if (!jam2::limits::valid_sample_rate(sampleRate)) {
         result.error = QStringLiteral("prepared mix sample rate must be within %1..%2 Hz")

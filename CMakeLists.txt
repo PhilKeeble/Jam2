@@ -17,42 +17,6 @@ if(BUILD_TESTING)
     enable_testing()
 endif()
 
-option(JAM2_ENABLE_COVERAGE
-    "Build private Windows test binaries with MSVC coverage symbols" OFF)
-if(JAM2_ENABLE_COVERAGE)
-    if(NOT WIN32 OR NOT MSVC)
-        message(FATAL_ERROR
-            "JAM2_ENABLE_COVERAGE is the Windows/MSVC coverage pass. "
-            "Use the Apple Clang workflow documented in TEST-MACOS.md on macOS.")
-    endif()
-    if(NOT BUILD_TESTING)
-        message(FATAL_ERROR
-            "JAM2_ENABLE_COVERAGE requires BUILD_TESTING=ON.")
-    endif()
-
-    # The Microsoft dynamic native collector cannot reliably instrument many
-    # optimized functions (reported as has_external_branch). Replace CMake's
-    # Release optimization defaults instead of appending contradictory flags;
-    # otherwise MSVC emits D9025 once for nearly every translation unit.
-    foreach(language IN ITEMS C CXX)
-        set(release_flags_variable "CMAKE_${language}_FLAGS_RELEASE")
-        set(coverage_release_flags "${${release_flags_variable}}")
-        string(REGEX REPLACE "(^| )[/-]O[12dtx]( |$)" " "
-            coverage_release_flags "${coverage_release_flags}")
-        string(REGEX REPLACE "(^| )[/-]Ob[0123]( |$)" " "
-            coverage_release_flags "${coverage_release_flags}")
-        string(REGEX REPLACE "(^| )[/-]Z[iI7]( |$)" " "
-            coverage_release_flags "${coverage_release_flags}")
-        string(REGEX REPLACE "[ ]+" " "
-            coverage_release_flags "${coverage_release_flags}")
-        string(STRIP "${coverage_release_flags}" coverage_release_flags)
-        set(${release_flags_variable}
-            "${coverage_release_flags} /Od /Ob0 /Zi"
-            CACHE STRING "Release flags used by Jam2's MSVC coverage pass" FORCE)
-    endforeach()
-    add_link_options(/DEBUG:FULL /PROFILE)
-endif()
-
 if(CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_CONFIGURATION_TYPES Release CACHE STRING "Jam2 only supports Release builds" FORCE)
 else()

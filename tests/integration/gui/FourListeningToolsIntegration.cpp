@@ -1,0 +1,203 @@
+#include "FourPeerCoordinator.hpp"
+#include "LoopbackPortReservations.hpp"
+#include "TestTiming.hpp"
+
+#include <QCoreApplication>
+#include <QFile>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QTemporaryDir>
+#include <QThread>
+
+#include <array>
+#include <chrono>
+#include <cmath>
+#include <iostream>
+#include <stdexcept>
+
+namespace {
+using namespace std::chrono_literals;
+void require(bool ok, const QString& error) { if (!ok) throw std::runtime_error(error.toStdString()); }
+QJsonObject command(AutomationProcess& peer, QJsonObject message, const char* expected = "command_applied") {
+    QString error;
+    require(peer.send(std::move(message), error), error);
+    QJsonObject event;
+    require(peer.readEvent(event, 60s, error), error);
+    require(event.value(QStringLiteral("event")).toString() == QString::fromLatin1(expected),
+        QStringLiteral("unexpected response: ") + QString::fromUtf8(QJsonDocument(event).toJson(QJsonDocument::Compact)));
+    return event;
+}
+void invoke(AutomationProcess& peer, const QString& control, const QString& operation, QJsonValue value = {}) {
+    command(peer, {{QStringLiteral("type"), QStringLiteral("invoke")}, {QStringLiteral("id"), control},
+        {QStringLiteral("control"), control}, {QStringLiteral("operation"), operation}, {QStringLiteral("value"), value}});
+}
+QJsonObject snapshot(AutomationProcess& peer) {
+    return command(peer, {{QStringLiteral("type"), QStringLiteral("snapshot")},
+        {QStringLiteral("id"), QStringLiteral("state")}, {QStringLiteral("cursor"), 0}}, "snapshot");
+}
+QJsonObject markerSnapshot(AutomationProcess& peer) {
+    return command(peer, {{QStringLiteral("type"), QStringLiteral("snapshot")},
+        {QStringLiteral("id"), QStringLiteral("markers")},
+        {QStringLiteral("control"), QStringLiteral("looper.lane.0.select")}}, "snapshot");
+}
+QJsonObject listening(const QJsonObject& state) {
+    return state.value(QStringLiteral("content")).toObject().value(QStringLiteral("listening_tools")).toObject();
+}
+template<class Predicate>
+std::array<QJsonObject, 4> waitAll(FourPeerCoordinator& peers, Predicate predicate, const QString& description) {
+    std::array<QJsonObject, 4> states;
+    const auto deadline = std::chrono::steady_clock::now() + jam2::test::deadmanTimeout(60s);
+    do {
+        bool ready = true;
+        for (std::size_t i = 0; i < states.size(); ++i) {
+            states[i] = snapshot(peers.peer(i));
+            ready = predicate(i, states[i]) && ready;
+        }
+        if (ready) return states;
+        QThread::msleep(50);
+    } while (std::chrono::steady_clock::now() < deadline);
+    for (const auto& state : states)
+        std::cerr << QJsonDocument(state.value(QStringLiteral("content")).toObject()).toJson(QJsonDocument::Compact).constData() << '\n';
+    throw std::runtime_error((QStringLiteral("timeout: ") + description).toStdString());
+}
+bool applied(const QJsonObject& state, int speed, int rate, int pitch, int hz, bool focus) {
+    const auto tools = listening(state);
+    const auto settings = tools.value(QStringLiteral("settings")).toObject();
+    return tools.value(QStringLiteral("phase")).toInt(-1) == 0 &&
+        tools.value(QStringLiteral("applied_speed_ppm")).toInt() == speed &&
+        tools.value(QStringLiteral("musical_rate_ppm")).toInt() == rate &&
+        settings.value(QStringLiteral("pitch_cents")).toInt() == pitch &&
+        settings.value(QStringLiteral("focus_hz")).toInt() == hz &&
+        settings.value(QStringLiteral("focus_enabled")).toBool() == focus;
+}
+void syncPolicy(AutomationProcess& peer, bool enabled) {
+    invoke(peer, QStringLiteral("session.jam-sync"), QStringLiteral("click-async"));
+    invoke(peer, QStringLiteral("session.jam-sync-dialog.listening-tools"), QStringLiteral("set-checked"), enabled);
+    invoke(peer, QStringLiteral("session.jam-sync-dialog.apply"), QStringLiteral("click"));
+}
+QString fixture(const QString& directory) {
+    // One second of deterministic mono PCM; the real renderer expands it to
+    // the Section length before applying speed, pitch and focus processing.
+    QByteArray bytes;
+    const auto u16 = [&bytes](quint16 value) { bytes.append(char(value)); bytes.append(char(value >> 8)); };
+    const auto u32 = [&bytes](quint32 value) { for (int shift = 0; shift < 32; shift += 8) bytes.append(char(value >> shift)); };
+    bytes.append("RIFF", 4); u32(36 + 96000); bytes.append("WAVEfmt ", 8); u32(16);
+    u16(1); u16(1); u32(48000); u32(96000); u16(2); u16(16); bytes.append("data", 4); u32(96000);
+    for (int frame = 0; frame < 48000; ++frame) u16(quint16(qint16(9000 * std::sin(frame * 440.0 * 6.283185307179586 / 48000.0))));
+    const QString path = directory + QStringLiteral("/listening.wav");
+    QFile file(path);
+    require(file.open(QIODevice::WriteOnly) && file.write(bytes) == bytes.size(), QStringLiteral("fixture write failed"));
+    return path;
+}
+}
+
+int main(int argc, char** argv) {
+    QCoreApplication app(argc, argv);
+    try {
+        require(argc == 2, QStringLiteral("expected release/jam2 executable"));
+        QTemporaryDir directory;
+        require(directory.isValid(), QStringLiteral("fixture directory unavailable"));
+        const QString wav = fixture(directory.path());
+        LoopbackPortReservations reservations;
+        QString error;
+        require(reservations.reserve(4, error), error);
+        std::array<quint16, 4> ports;
+        std::array<QStringList, 4> arguments;
+        for (std::size_t i = 0; i < 4; ++i) {
+            ports[i] = reservations.port(i);
+            arguments[i] << QStringLiteral("debug") << QStringLiteral("gui-agent")
+                << QStringLiteral("--instance-id") << QStringLiteral("listening-peer-%1").arg(i + 1);
+        }
+        FourPeerCoordinator peers;
+        require(peers.launch(QString::fromLocal8Bit(argv[1]), arguments, error), error);
+        for (std::size_t i = 0; i < 4; ++i) {
+            QJsonObject hello;
+            require(peers.peer(i).readEvent(hello, 60s, error) && hello.value(QStringLiteral("event")) == QStringLiteral("hello"), error);
+        }
+        reservations.release();
+        const auto created = command(peers.peer(0), {{QStringLiteral("type"), QStringLiteral("jam.create")},
+            {QStringLiteral("id"), QStringLiteral("create")}, {QStringLiteral("port"), ports[0]},
+            {QStringLiteral("test_input"), QStringLiteral("tone-440")}});
+        for (std::size_t i = 1; i < 4; ++i)
+            command(peers.peer(i), {{QStringLiteral("type"), QStringLiteral("jam.join")},
+                {QStringLiteral("id"), QStringLiteral("join")}, {QStringLiteral("port"), ports[i]},
+                {QStringLiteral("invite_url"), created.value(QStringLiteral("invite_url"))},
+                {QStringLiteral("test_input"), QStringLiteral("tone-440")}});
+        waitAll(peers, [](std::size_t, const QJsonObject& state) {
+            const auto jam = state.value(QStringLiteral("jam")).toObject();
+            return jam.value(QStringLiteral("active_remote_peer_count")).toInt() == 3 &&
+                jam.value(QStringLiteral("transport_grid_ready")).toBool() &&
+                jam.value(QStringLiteral("policy")).toObject().value(QStringLiteral("listening_tools")).toBool();
+        }, QStringLiteral("four-peer grid and default listening sync"));
+        command(peers.peer(0), {{QStringLiteral("type"), QStringLiteral("looper.import")},
+            {QStringLiteral("id"), QStringLiteral("import")}, {QStringLiteral("lane"), -1}, {QStringLiteral("source_path"), wav}});
+        const auto original = waitAll(peers, [](std::size_t, const QJsonObject& state) {
+            const auto content = state.value(QStringLiteral("content")).toObject();
+            return content.value(QStringLiteral("pending_asset_count")).toInt() == 0 &&
+                content.value(QStringLiteral("track_duration_ms")).toInt() > 0 &&
+                content.value(QStringLiteral("prepared_mix_frames")).toInteger() > 0 &&
+                !content.value(QStringLiteral("prepared_mix_worker_running")).toBool();
+        }, QStringLiteral("real prepared WAV on four peers"));
+        invoke(peers.peer(0), QStringLiteral("performance.track-toggle"), QStringLiteral("click"));
+        waitAll(peers, [](std::size_t, const QJsonObject& state) {
+            return state.value(QStringLiteral("performance")).toObject().value(QStringLiteral("global_transport_playing")).toBool();
+        }, QStringLiteral("shared playback started"));
+        // Several numeric edits settle together; only their stable final state
+        // is prepared and committed through the real control/engine boundary.
+        invoke(peers.peer(2), QStringLiteral("looper.speed.value"), QStringLiteral("set-value"), 0.5);
+        invoke(peers.peer(2), QStringLiteral("looper.pitch.value"), QStringLiteral("set-value"), 3);
+        invoke(peers.peer(2), QStringLiteral("looper.focus.value"), QStringLiteral("set-value"), 640);
+        invoke(peers.peer(2), QStringLiteral("looper.focus.enabled"), QStringLiteral("set-checked"), true);
+        auto slow = waitAll(peers, [](std::size_t, const QJsonObject& state) { return applied(state, 500000, 500000, 300, 640, true); },
+            QStringLiteral("peer-originated speed, pitch and focus commit"));
+        const QString anchor = listening(slow[0]).value(QStringLiteral("tempo_anchor_frame")).toString();
+        for (std::size_t i = 0; i < 4; ++i) {
+            require(listening(slow[i]).value(QStringLiteral("tempo_anchor_frame")).toString() == anchor,
+                QStringLiteral("four peers must share the exact tempo boundary"));
+            const auto duration = slow[i].value(QStringLiteral("content")).toObject().value(QStringLiteral("track_duration_ms")).toInt();
+            const auto previous = original[i].value(QStringLiteral("content")).toObject().value(QStringLiteral("track_duration_ms")).toInt();
+            require(std::abs(duration - previous * 2) <= 3, QStringLiteral("half-speed prepared WAV duration is incorrect"));
+        }
+        for (std::size_t i = 0; i < 4; ++i) {
+            const auto state = markerSnapshot(peers.peer(i));
+            const auto marker = state.value(QStringLiteral("control")).toObject().value(QStringLiteral("state")).toObject();
+            const double expected = state.value(QStringLiteral("performance")).toObject().value(QStringLiteral("prepared_source_frame")).toDouble() / 96.0;
+            require(marker.contains(QStringLiteral("playhead_ms")) &&
+                std::abs(marker.value(QStringLiteral("playhead_ms")).toDouble() - expected) < 100.0,
+                QStringLiteral("audible lane marker must follow original source time on all four peers"));
+        }
+        const auto first = markerSnapshot(peers.peer(0));
+        QThread::msleep(300);
+        const auto second = markerSnapshot(peers.peer(0));
+        const double frames = second.value(QStringLiteral("performance")).toObject().value(QStringLiteral("engine_frame")).toDouble() -
+            first.value(QStringLiteral("performance")).toObject().value(QStringLiteral("engine_frame")).toDouble();
+        const double musical = listening(second).value(QStringLiteral("musical_position")).toDouble() - listening(first).value(QStringLiteral("musical_position")).toDouble();
+        require(frames > 0 && std::abs(musical / frames - 0.5) < 0.04, QStringLiteral("musical playhead must advance at half the raw audio clock rate"));
+        const double markerDelta = second.value(QStringLiteral("control")).toObject().value(QStringLiteral("state")).toObject().value(QStringLiteral("grid_position_ms")).toDouble() -
+            first.value(QStringLiteral("control")).toObject().value(QStringLiteral("state")).toObject().value(QStringLiteral("grid_position_ms")).toDouble();
+        require(std::abs(markerDelta - frames / 96.0) < 80.0,
+            QStringLiteral("real Track view global position marker must slow with the shared click"));
+        syncPolicy(peers.peer(1), false);
+        waitAll(peers, [](std::size_t, const QJsonObject& state) { return applied(state, 500000, 1000000, 300, 640, true); },
+            QStringLiteral("disabled sync restores metronome rate and retains listening tools"));
+        invoke(peers.peer(3), QStringLiteral("looper.speed.value"), QStringLiteral("set-value"), 0.73);
+        waitAll(peers, [](std::size_t i, const QJsonObject& state) { return applied(state, i == 3 ? 730000 : 500000, 1000000, 300, 640, true); },
+            QStringLiteral("local-only speed isolation"));
+        syncPolicy(peers.peer(0), true);
+        waitAll(peers, [](std::size_t, const QJsonObject& state) { return applied(state, 500000, 500000, 300, 640, true); },
+            QStringLiteral("reenable reconciles local edits"));
+        invoke(peers.peer(1), QStringLiteral("looper.speed.value"), QStringLiteral("set-value"), 0.73);
+        waitAll(peers, [](std::size_t, const QJsonObject& state) { return applied(state, 730000, 730000, 300, 640, true); },
+            QStringLiteral("fractional shared rate"));
+        for (std::size_t i = 0; i < 4; ++i) {
+            command(peers.peer(i), {{QStringLiteral("type"), QStringLiteral("shutdown")}, {QStringLiteral("id"), QStringLiteral("shutdown")}});
+            QJsonObject shutdown;
+            require(peers.peer(i).readEvent(shutdown, 60s, error), error);
+            int code = -1;
+            require(peers.peer(i).waitForExit(60s, code, error) && code == 0, error);
+        }
+        peers.markSuccessful();
+        std::cout << "four-peer listening tools integration passed\n";
+        return 0;
+    } catch (const std::exception& error) { std::cerr << "FAIL: " << error.what() << '\n'; return 1; }
+}

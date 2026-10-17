@@ -1,6 +1,7 @@
 #pragma once
 
 #include "PracticeIdeaGenerator.hpp"
+#include "PracticeReferenceSelection.hpp"
 
 #include <optional>
 
@@ -78,12 +79,7 @@ std::optional<ContinueIdeaRequest> askForIdeaContinuation(
 std::optional<ReferenceRenderSettings> askForReferenceRender(
     QWidget* parent,
     ReferenceRenderSettings defaults,
-    int chordBeats,
-    int beatBeats,
-    int melodyBeats,
-    int bassBeats,
-    int supportBeats,
-    int sectionCount = 1);
+    const QVector<ReferenceRenderSection>& sections);
 void showIdeaDetails(QWidget* parent, const GenerationRecipe& recipe, bool contentChanged);
 
 } // namespace jam2::practice

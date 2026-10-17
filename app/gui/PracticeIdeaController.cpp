@@ -315,6 +315,32 @@ std::optional<SongSection> PracticeIdeaController::generatedSection(
     return std::nullopt;
 }
 
+bool ReferenceLayerAvailability::selected(
+    const ReferenceRenderSettings& settings) const noexcept
+{
+    return (chords && settings.renderChords) ||
+        (drums && settings.renderDrums) ||
+        (melody && settings.renderMelody) ||
+        (bass && settings.renderBass) ||
+        (support && settings.renderSupport);
+}
+
+QVector<ReferenceRenderSection> PracticeIdeaController::referenceSections(
+    const BeatGridModel& model, const LooperProject& project)
+{
+    QVector<ReferenceRenderSection> sections;
+    const int count = qMin(model.sections().size(), project.banks().size());
+    sections.reserve(count);
+    for (int index = 0; index < count; ++index) {
+        QString bankId = project.banks().at(index).id;
+        if (bankId.trimmed().isEmpty()) {
+            bankId = QString(QChar(static_cast<ushort>('A' + index)));
+        }
+        sections.push_back({index, std::move(bankId), referenceLayers(model.section(index))});
+    }
+    return sections;
+}
+
 ReferenceLayerAvailability PracticeIdeaController::referenceLayers(
     const SongSection& section)
 {

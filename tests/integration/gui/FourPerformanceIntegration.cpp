@@ -1127,6 +1127,11 @@ int main(int argc, char* argv[])
                     const QJsonObject performance = state.value(QStringLiteral("performance")).toObject();
                     const qint64 expectedFrames = setting.speed == 0.5
                         ? normalFrames[peer] * 2 : normalFrames[peer];
+                    const auto tools = content.value(QStringLiteral("listening_tools")).toObject();
+                    if (tools.value(QStringLiteral("phase")).toInt(-1) != 0 ||
+                        tools.value(QStringLiteral("applied_speed_ppm")).toInt() != qRound(setting.speed * 1000000.0) ||
+                        tools.value(QStringLiteral("settings")).toObject().value(QStringLiteral("pitch_cents")).toInt() != setting.semitones * 100)
+                        return false;
                     return content.value(QStringLiteral("prepared_mix_frames")).toInteger() == expectedFrames &&
                         content.value(QStringLiteral("prepared_mix_revision")).toInteger() > previousRevision[peer] &&
                         !content.value(QStringLiteral("prepared_mix_worker_running")).toBool() &&

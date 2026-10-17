@@ -40,15 +40,15 @@ These rules apply to all implementation work in this repository.
 
 ## Feature Ownership and Native Test Rules
 
-- Every new Jam2 feature, behavior change, and bug fix must add or update the relevant native C++/CTest coverage in the same change. A successful build alone is not sufficient validation, and Python product-validation cases are not a substitute for the native tests.
-- Treat source coverage as evidence that major Jam2 features and behaviors are covered appropriately, not as a requirement to make every function observable to a particular collector. Add or strengthen native tests when meaningful product behavior is missing. When an already-covered behavior cannot be collected because of a documented platform, process-boundary, hardware, or coverage-tool limitation, add the narrowest justified exemption and keep the behavioral test mandatory. Do not change otherwise-working production or cross-platform test architecture, IPC, handle semantics, or behavior solely to satisfy line or function coverage tooling.
+- Every new Jam2 feature, behavior change, and bug fix must add or update the relevant native C++ tests registered with CTest in the same change. A successful build alone is not sufficient validation, and Python product-validation cases are not a substitute for the native tests.
 - Put production behavior in the file and component that owns the responsibility: model, controller, service, engine, transport, widget, page, or dialog. Keep `MainWindow` responsible for genuine window-level composition, routing, and lifecycle coordination; do not place a feature there merely because it is reachable from the main window. Do not split cohesive code solely because a file is large.
 - Model internal state, commands, results, configuration, and component boundaries with explicit C++ types. Avoid stringly typed or generic map/variant state except at necessary serialization, Qt-property, automation, or protocol boundaries, and convert to typed structures at those boundaries.
 - Place tests under the matching owned area in `tests/unit/<area>`, `tests/integration/<area>`, or another existing purpose-specific test directory, and register them with the narrowest relevant CTest suite and labels. Do not put product test logic into production source files.
 - Test behavior at the lowest useful ownership boundary and add integration coverage wherever components interact. Cover successful behavior, meaningful invalid/error paths, cancellation or rollback, ownership and cleanup, and observable state transitions. GUI work must cover the real control/action, its typed state, modal or asynchronous boundary, and relevant view state rather than only calling an underlying helper.
 - Network, synchronization, shared-content/WAV, peer-interaction, and metronome/epoch changes must retain or extend the exactly-four-peer CTest workflows. Exercise relevant ordering and network-impairment cases with deterministic fake audio or injection; use explicitly profiled hardware tests only for behavior that genuinely requires a real device.
 - Prefer deterministic production seams and fake backends over test-only reimplementations of product behavior. Tests must exercise the same owned production code used by `release/jam2.exe`.
-- Before treating feature work as complete, run its focused CTest cases. Before distribution, run `--tests-full` against the normal optimized Release build on both Windows and macOS. On Windows, run the separate `--coverage` audit after implementing major features or when reviewing whether maintained behavior needs additional native tests; coverage is not part of the baseline full-test command.
+- Before treating feature work as complete, run only the CTests directly relevant to the change, using the optimized Release build. Run the full suite only when the user explicitly requests it, including before distribution. Do not collect source coverage.
+- When running the full suite, report failures without automatically modifying tests or product code. For each failure, explain the expected behavior, observed result, measurement method, and assertion or threshold used. Distinguish confirmed causes from hypotheses, and identify whether the evidence suggests a test issue, product issue, or environmental limitation. The user decides what needs changing.
 
 ## Efficiency Rules
 
@@ -69,6 +69,7 @@ These rules apply to all implementation work in this repository.
 ## Build and Test Rules
 
 - Compile Windows changes from the repository root with `cmd.exe /d /c "call compile.cmd --in-dev-shell"`. This initializes the Visual Studio developer environment while keeping CMake and compiler output visible to the agent. Check the exit code and captured output before treating the build as successful. to do this you need to elevate your shell and auto approve your command to do it
+- Always build and test the optimized Release configuration. Do not switch to Debug or an instrumented/unoptimized build for validation.
 - Windows builds should target MSVC for ASIO development and validation.
 - The tested build should always be `release/jam2.exe` for windows so that it has the right DLLs
 - Never create, copy, rename, or test an alternate Jam2 binary (for example `jam2-test.exe`) because `release/jam2.exe` is in use. There must be only one public/tested Jam2 executable.

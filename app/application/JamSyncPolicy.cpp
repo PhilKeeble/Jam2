@@ -59,6 +59,8 @@ bool jam2JamSyncAllows(const JamSyncPolicy& source, JamSyncRoute route) noexcept
         return true;
     case JamSyncRoute::GlobalPlayback:
         return policy.globalPlayback;
+    case JamSyncRoute::ListeningTools:
+        return policy.globalPlayback && policy.listeningTools;
     case JamSyncRoute::Recording:
         return policy.recordings;
     case JamSyncRoute::MetronomeState:
@@ -94,6 +96,7 @@ QJsonObject jam2JamSyncPolicyMessage(const QString& type, const JamSyncPolicy& s
         {QStringLiteral("track_lanes"), policy.trackLanes},
         {QStringLiteral("auto_share_wavs"), policy.autoShareWavs},
         {QStringLiteral("global_playback"), policy.globalPlayback},
+        {QStringLiteral("listening_tools"), policy.listeningTools},
         {QStringLiteral("generated_ideas"), jam2GeneratedIdeaSyncModeText(policy.generatedIdeas)},
         {QStringLiteral("metronome_state"), policy.metronomeState},
         {QStringLiteral("recordings"), policy.recordings},
@@ -120,7 +123,7 @@ bool jam2ParseJamSyncPolicyMessage(
         QStringLiteral("type"), QStringLiteral("track_lanes"),
         QStringLiteral("auto_share_wavs"), QStringLiteral("global_playback"),
         QStringLiteral("generated_ideas"), QStringLiteral("metronome_state"),
-        QStringLiteral("recordings")};
+        QStringLiteral("recordings"), QStringLiteral("listening_tools")};
     if (authoritative) allowed.insert(QStringLiteral("revision"));
     if (!onlyFields(message, allowed)) {
         error = QStringLiteral("Jam Sync policy contains a field outside the current format");
@@ -130,7 +133,8 @@ bool jam2ParseJamSyncPolicyMessage(
         !message.value(QStringLiteral("auto_share_wavs")).isBool() ||
         !message.value(QStringLiteral("global_playback")).isBool() ||
         !message.value(QStringLiteral("metronome_state")).isBool() ||
-        !message.value(QStringLiteral("recordings")).isBool()) {
+        !message.value(QStringLiteral("recordings")).isBool() ||
+        (message.contains(QStringLiteral("listening_tools")) && !message.value(QStringLiteral("listening_tools")).isBool())) {
         error = QStringLiteral("Jam Sync policy boolean field is invalid");
         return false;
     }
@@ -138,6 +142,7 @@ bool jam2ParseJamSyncPolicyMessage(
     parsed.trackLanes = message.value(QStringLiteral("track_lanes")).toBool();
     parsed.autoShareWavs = message.value(QStringLiteral("auto_share_wavs")).toBool();
     parsed.globalPlayback = message.value(QStringLiteral("global_playback")).toBool();
+    parsed.listeningTools = message.value(QStringLiteral("listening_tools")).toBool(true);
     parsed.metronomeState = message.value(QStringLiteral("metronome_state")).toBool();
     parsed.recordings = message.value(QStringLiteral("recordings")).toBool();
     if (!parseGeneratedIdeas(message.value(QStringLiteral("generated_ideas")), parsed.generatedIdeas)) {
@@ -162,6 +167,10 @@ bool jam2JamSyncAllowsControlMessage(
     const QJsonObject& message) noexcept
 {
     const QString type = message.value(QStringLiteral("type")).toString();
+    if (type.startsWith(QStringLiteral("jam.listening."))) {
+        if (type == QStringLiteral("jam.listening.reset") || type == QStringLiteral("jam.listening.cancel")) return true;
+        return jam2JamSyncAllows(policy, JamSyncRoute::ListeningTools);
+    }
     if (type == QStringLiteral("song.set")) {
         const QString scope = message.value(QStringLiteral("sync_scope"))
             .toString(QStringLiteral("tracks"));

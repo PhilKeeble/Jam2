@@ -432,7 +432,8 @@ PreparedLoadResult load_prepared_track(
     std::size_t maximum_frames,
     std::uint64_t target_frame,
     std::uint64_t requested_source_frame,
-    bool attach_and_play)
+    bool attach_and_play,
+    int* staged_slot = nullptr)
 {
     const wav::InspectResult inspected = wav::inspect_pcm16_file(path);
     if (!inspected) {
@@ -488,6 +489,10 @@ PreparedLoadResult load_prepared_track(
     if (!source.publishReady(slot, inspected.info.frames, sample_rate)) {
         source.abandonLoadingSlot(slot);
         return {false, 0, "prepared track load failed: source slot publish failed"};
+    }
+    if (staged_slot != nullptr) {
+        *staged_slot = slot;
+        return {true, inspected.info.frames, {}};
     }
     const std::uint64_t replacement = attach_and_play
         ? (inspected.info.frames > 0
@@ -550,6 +555,10 @@ struct Engine::Impl {
     std::unique_ptr<audio::OutputRecorder> recorder;
     std::unique_ptr<audio::TrackTakeRecorder> track_take_recorder;
     std::unique_ptr<audio::PreparedTrackSource> prepared_source;
+    int staged_listening_slot = -1;
+    std::uint64_t staged_listening_cookie = 0;
+    std::uint64_t staged_listening_frames = 0;
+    std::uint64_t listening_tempo_cookie = 0;
     std::unique_ptr<audio::MonoRingBuffer> capture_ring;
     std::unique_ptr<audio::MonoRingBuffer> pitch_ring;
     std::unique_ptr<PitchAnalyzer> pitch_analyzer;
@@ -785,6 +794,73 @@ struct Engine::Impl {
             transport_cookie.store(0, std::memory_order_relaxed);
             transport_revision.fetch_add(1, std::memory_order_relaxed);
             return true;
+        case EngineCommandType::StageListeningTrack: {
+            if (staged_listening_slot >= 0) prepared_source->abandonReadySlot(staged_listening_slot);
+            staged_listening_slot = -1;
+            staged_listening_cookie = 0;
+            const auto result = load_prepared_track(*prepared_source,
+                std::filesystem::path(std::string(bounded_text(command.text))),
+                config.sample_rate, config.prepared_track_max_frames, 0, 0, false,
+                &staged_listening_slot);
+            if (!result.ok) { error = result.error; return false; }
+            staged_listening_cookie = command.cookie;
+            staged_listening_frames = result.frames;
+            push_event(EngineEventType::ListeningTrackStaged, true, command.cookie,
+                command.apply_frame, applied_frame, result.frames);
+            return true;
+        }
+        case EngineCommandType::CommitListeningTools: {
+            if (command.playback_tempo.rate_ppm < 100000 || command.playback_tempo.rate_ppm > 2000000 ||
+                !std::isfinite(command.playback_tempo.anchor_position) || command.playback_tempo.anchor_position < 0.0 ||
+                command.frame < applied_frame) {
+                error = "listening tempo or commit frame is invalid";
+                return false;
+            }
+            if (command.signed_value != 0) {
+                if (staged_listening_slot < 0 || staged_listening_cookie != static_cast<std::uint64_t>(command.signed_value)) {
+                    error = "listening track is not staged for this revision"; return false;
+                }
+                const std::array<audio::PreparedTrackSource::Command, 3> batch{{
+                    {audio::PreparedTrackSource::CommandType::Swap, static_cast<std::uint32_t>(staged_listening_slot), command.frame, command.frame_end, 0, 1000000, 0, 1},
+                    {audio::PreparedTrackSource::CommandType::SetLoop, 0, command.frame,
+                        command.prepared_loop_enabled ? command.prepared_loop_start_frame : 0,
+                        command.prepared_loop_enabled ? (command.prepared_loop_end_frame > 0 ? command.prepared_loop_end_frame : staged_listening_frames) : 0,
+                        1000000, 0, 1},
+                    {command.enabled ? audio::PreparedTrackSource::CommandType::Play : audio::PreparedTrackSource::CommandType::Stop, 0, command.frame, 0, 0, 1000000, 0, 1},
+                }};
+                if (!prepared_source->enqueueBatch(batch)) { error = "listening swap queue is full"; return false; }
+                staged_listening_slot = -1;
+                staged_listening_cookie = 0;
+            }
+            if (!command.update_playback_tempo) return true;
+            listening_tempo_cookie = command.cookie;
+            const auto previous = audio::playback_tempo_at(*control, applied_frame);
+            control->musical_rate_revision.fetch_add(1, std::memory_order_acq_rel);
+            control->musical_rate_ppm.store(previous.rate_ppm, std::memory_order_relaxed);
+            control->musical_rate_anchor_frame.store(previous.anchor_frame, std::memory_order_relaxed);
+            control->musical_rate_anchor_position.store(previous.anchor_position, std::memory_order_relaxed);
+            control->musical_rate_commit_raw_frame.store(0, std::memory_order_release);
+            control->pending_musical_rate_ppm.store(command.playback_tempo.rate_ppm, std::memory_order_relaxed);
+            control->pending_musical_rate_anchor_frame.store(command.playback_tempo.anchor_frame, std::memory_order_relaxed);
+            control->pending_musical_rate_anchor_position.store(command.playback_tempo.anchor_position, std::memory_order_relaxed);
+            control->musical_rate_commit_raw_frame.store(std::max<std::uint64_t>(1, command.frame), std::memory_order_release);
+            control->musical_rate_revision.fetch_add(1, std::memory_order_release);
+            return true;
+        }
+        case EngineCommandType::CancelListeningTools: {
+            if (staged_listening_slot >= 0) prepared_source->abandonReadySlot(staged_listening_slot);
+            staged_listening_slot = -1;
+            staged_listening_cookie = 0;
+            prepared_source->cancelListeningScheduled();
+            const auto target = control->musical_rate_commit_raw_frame.load(std::memory_order_acquire);
+            if (target != 0 && applied_frame < target && command.cookie != 0 &&
+                command.cookie == listening_tempo_cookie) {
+                control->musical_rate_revision.fetch_add(1, std::memory_order_acq_rel);
+                control->musical_rate_commit_raw_frame.store(0, std::memory_order_release);
+                control->musical_rate_revision.fetch_add(1, std::memory_order_release);
+            }
+            return true;
+        }
         case EngineCommandType::LoadPreparedTrack: {
             const auto result = load_prepared_track(
                 *prepared_source,
@@ -1385,6 +1461,9 @@ EngineSnapshot Engine::snapshot() const noexcept
     result.metronome_render_offset_frames = control.metronome_render_offset_frames.load(std::memory_order_relaxed);
     result.metronome_pattern_origin_frame =
         control.metronome_pattern_origin_frame.load(std::memory_order_relaxed);
+    result.playback_tempo = audio::playback_tempo_at(control, result.engine_frame);
+    result.listening_commit_raw_frame = control.musical_rate_commit_raw_frame.load(std::memory_order_acquire);
+    result.pending_playback_tempo = audio::pending_playback_tempo(control);
     result.metronome_pattern_origin_valid =
         control.metronome_pattern_origin_valid.load(std::memory_order_relaxed);
     result.metronome_pattern_source_start_seen =

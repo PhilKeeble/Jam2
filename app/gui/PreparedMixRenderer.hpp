@@ -8,6 +8,9 @@
 #include <QVector>
 
 #include <cstdint>
+#include <algorithm>
+#include <cmath>
+#include <limits>
 
 // Applied to every prepared backing-track mix before its final soft limiting.
 // Preview paths that audition a rendered lane directly use the same gain so
@@ -29,6 +32,19 @@ struct PreparedMixResult {
     QString sha256;
     QStringList warnings;
     QString error;
+    double listeningSpeed = 1.0;
+    // Lane WAVs use original musical time; the prepared waveform uses the
+    // transformed output time. Keep marker/loop conversion with its render.
+    qint64 sourcePositionMs(qint64 outputMs) const noexcept { return scaledPosition(outputMs, speed()); }
+private:
+    double speed() const noexcept { return std::isfinite(listeningSpeed) ? std::clamp(listeningSpeed, 0.1, 2.0) : 1.0; }
+    static qint64 scaledPosition(qint64 milliseconds, double scale) noexcept {
+        if (milliseconds < 0) return milliseconds;
+        const long double value = static_cast<long double>(milliseconds) * scale;
+        if (value >= static_cast<long double>((std::numeric_limits<qint64>::max)()) - 0.5L)
+            return (std::numeric_limits<qint64>::max)();
+        return static_cast<qint64>(std::floor(value + 0.5L));
+    }
 };
 
 struct PreparedMixSequenceSegment {

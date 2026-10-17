@@ -5,7 +5,6 @@
 #include "GuiTheme.hpp"
 
 #include <QFontMetricsF>
-#include <QHelpEvent>
 #include <QKeyEvent>
 #include <QLinearGradient>
 #include <QMenu>
@@ -18,7 +17,6 @@
 #include <QRegion>
 #include <QResizeEvent>
 #include <QThreadPool>
-#include <QToolTip>
 #include <QWheelEvent>
 
 #include <algorithm>
@@ -2544,12 +2542,12 @@ void PerformanceHomeWidget::paintGenerationActions(
 {
     constexpr int gap = 8;
     static const QVector<jam2::gui::ActionTileSpec> actions{
-        {QStringLiteral("JAMTASTER"), 126},
         {QStringLiteral("GENERATE NEW IDEA"), 154},
-        {QStringLiteral("GROOVE LIBRARY"), 132},
         {QStringLiteral("CONTINUE IDEA"), 124},
         {QStringLiteral("CLEAR IDEA"), 96},
         {QStringLiteral("GENERATE WAV"), 116},
+        {QStringLiteral("GROOVE LIBRARY"), 132},
+        {QStringLiteral("JAMTASTER"), 126},
     };
     const int left = qMin(right, bankStripRight_ + 12);
     const QRect available(left, top, qMax(0, right - left), 31);
@@ -2568,9 +2566,9 @@ void PerformanceHomeWidget::paintGenerationActions(
             const int sideLeft = qMin(right, qMax(left, protectedChord.right() + 1));
             const QRect rowAvailable(sideLeft, top, qMax(0, right - sideLeft), 31);
             const auto upper = jam2::gui::layoutActionTiles(rowAvailable,
-                {actions[0], actions[2], actions[5]}, jam2::gui::actionTileFont(), this);
+                {actions[0], actions[1], actions[2]}, jam2::gui::actionTileFont(), this);
             const auto lower = jam2::gui::layoutActionTiles(rowAvailable,
-                {actions[1], actions[3], actions[4]}, jam2::gui::actionTileFont(), this);
+                {actions[3], actions[4], actions[5]}, jam2::gui::actionTileFont(), this);
             auto& combined = generationActionLayout_;
             combined.font = upper.font.pointSizeF() < lower.font.pointSizeF() ? upper.font : lower.font;
             combined.padding = qMin(upper.padding, lower.padding);
@@ -2585,20 +2583,20 @@ void PerformanceHomeWidget::paintGenerationActions(
                     combined.bounds[indices[i]] = bounds;
                 }
             };
-            placeRow(upper, {0, 2, 5}, top);
-            placeRow(lower, {1, 3, 4}, top + combined.height + 6);
+            placeRow(upper, {0, 1, 2}, top);
+            placeRow(lower, {3, 4, 5}, top + combined.height + 6);
         }
         generationActionAvailable_ = available;
         generationChordExclusion_ = chordExclusion;
         generationActionDpi_ = logicalDpiY();
     }
     const auto& sizing = generationActionLayout_;
-    jamTasterHitRect_ = sizing.bounds[0];
-    generateIdeaHitRect_ = sizing.bounds[1];
-    browseIdeasHitRect_ = sizing.bounds[2];
-    continueIdeaHitRect_ = sizing.bounds[3];
-    clearIdeaHitRect_ = sizing.bounds[4];
-    generateWavHitRect_ = sizing.bounds[5];
+    generateIdeaHitRect_ = sizing.bounds[0];
+    continueIdeaHitRect_ = sizing.bounds[1];
+    clearIdeaHitRect_ = sizing.bounds[2];
+    generateWavHitRect_ = sizing.bounds[3];
+    browseIdeasHitRect_ = sizing.bounds[4];
+    jamTasterHitRect_ = sizing.bounds[5];
     wavGenerationStatusRect_ = {};
     painter.setFont(sizing.font);
     const QFontMetrics metrics(sizing.font, this);
@@ -2652,7 +2650,7 @@ void PerformanceHomeWidget::paintGenerationActions(
         constexpr int statusHeight = 56;
         wavGenerationStatusRect_ = QRect(
             right - statusWidth,
-            (generationActionsWrapped_ ? clearIdeaHitRect_ : generateWavHitRect_).bottom() + gap,
+            jamTasterHitRect_.bottom() + gap,
             statusWidth,
             statusHeight);
         const QRect& statusRect = wavGenerationStatusRect_;
@@ -3182,28 +3180,6 @@ void PerformanceHomeWidget::paintPeerRail(QPainter& painter, const QRect& bounds
                 .arg(peerScrollOffset_ + shown)
                 .arg(count));
     }
-}
-
-bool PerformanceHomeWidget::event(QEvent* event)
-{
-    if (event->type() == QEvent::ToolTip) {
-        const auto* help = static_cast<QHelpEvent*>(event);
-        const QPair<QRect, QString> actions[]{
-            {generateIdeaHitRect_, QStringLiteral("GENERATE NEW IDEA")},
-            {browseIdeasHitRect_, QStringLiteral("GROOVE LIBRARY")},
-            {continueIdeaHitRect_, QStringLiteral("CONTINUE IDEA")},
-            {clearIdeaHitRect_, QStringLiteral("CLEAR IDEA")},
-            {generateWavHitRect_, QStringLiteral("GENERATE WAV")},
-            {jamTasterHitRect_, QStringLiteral("JAMTASTER")},
-        };
-        for (const auto& action : actions) {
-            if (action.first.contains(help->pos())) {
-                QToolTip::showText(help->globalPos(), action.second, this, action.first);
-                return true;
-            }
-        }
-    }
-    return QWidget::event(event);
 }
 
 void PerformanceHomeWidget::resizeEvent(QResizeEvent* event)

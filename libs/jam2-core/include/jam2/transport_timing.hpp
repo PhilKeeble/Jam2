@@ -1,6 +1,7 @@
 #pragma once
 
 #include "metronome.hpp"
+#include "playback_tempo.hpp"
 
 #include <cstdint>
 #include <optional>
@@ -28,7 +29,8 @@ std::optional<QuantizedTransportSchedule> next_bar_transport_schedule(
     std::int64_t renderOffsetFrames,
     bool epochValid,
     std::uint64_t epochMusicalFrame,
-    int countInBars) noexcept;
+    int countInBars,
+    PlaybackTempo tempo = {}) noexcept;
 
 // Aligns a receiver-clock estimate of a peer's already quantized target to
 // the nearest local representation of the same shared musical bar. The
@@ -42,6 +44,7 @@ std::optional<QuantizedTransportSchedule> align_received_transport_to_grid(
     bool epochValid,
     std::uint64_t epochMusicalFrame,
     std::uint64_t estimatedTargetRawFrame,
-    std::uint64_t countInFrames) noexcept;
+    std::uint64_t countInFrames,
+    PlaybackTempo tempo = {}) noexcept;
 
 } // namespace jam2

@@ -1013,11 +1013,14 @@ std::optional<SettingsDialogResult> SettingsDialog::run(
     auto* syncTrackLanes = new QCheckBox(QStringLiteral("Sync Track Lanes"), syncContent);
     auto* syncWavs = new QCheckBox(QStringLiteral("Sync WAVs Automatically"), syncContent);
     auto* syncPlayback = new QCheckBox(QStringLiteral("Sync Global Playback"), syncContent);
+    auto* syncListening = new QCheckBox(QStringLiteral("Listening Tools / Metronome Sync"), syncContent);
+    syncListening->setToolTip(QStringLiteral("Share listening tools; speed adjusts the metronome and playhead. Disabled changes remain local. Requires Sync Global Playback."));
     auto* syncMetronome = new QCheckBox(QStringLiteral("Sync Metronome State"), syncContent);
     auto* syncRecordings = new QCheckBox(QStringLiteral("Sync Recordings"), syncContent);
     syncTrackLanes->setChecked(preferences_.sync.trackLanes);
     syncWavs->setChecked(preferences_.sync.autoShareWavs);
     syncPlayback->setChecked(preferences_.sync.globalPlayback);
+    syncListening->setChecked(preferences_.sync.listeningTools);
     syncMetronome->setChecked(preferences_.sync.metronomeState);
     syncRecordings->setChecked(preferences_.sync.recordings);
     auto* syncIdeas = new QComboBox(syncContent);
@@ -1027,6 +1030,7 @@ std::optional<SettingsDialogResult> SettingsDialog::run(
     syncIdeas->addItem(QStringLiteral("Beats Only"), 3);
     syncIdeas->setCurrentIndex(qMax(0, syncIdeas->findData(preferences_.sync.generatedIdeas)));
     const auto updateSyncDefaults = [=] {
+        syncListening->setEnabled(syncPlayback->isChecked());
         syncWavs->setEnabled(syncTrackLanes->isChecked());
         const bool recordingDependencies = syncTrackLanes->isChecked() &&
             syncPlayback->isChecked();
@@ -1042,6 +1046,7 @@ std::optional<SettingsDialogResult> SettingsDialog::run(
     syncForm->addRow(syncWavs);
     syncForm->addRow(QStringLiteral("Generated ideas"), syncIdeas);
     syncForm->addRow(syncPlayback);
+    syncForm->addRow(syncListening);
     syncForm->addRow(syncMetronome);
     syncForm->addRow(syncRecordings);
     auto* syncNote = new QLabel(QStringLiteral(
@@ -1375,6 +1380,7 @@ std::optional<SettingsDialogResult> SettingsDialog::run(
     registerPageControls(QStringLiteral("sync"), "application.settings-sync", {
         {syncTrackLanes, "track-lanes"}, {syncWavs, "automatic-wavs"},
         {syncPlayback, "global-playback"}, {syncMetronome, "metronome-state"},
+        {syncListening, "listening-tools"},
         {syncRecordings, "recordings"}, {syncIdeas, "generated-ideas"},
     });
     registerSettingsControl(settingsNavigation, QStringLiteral("navigation"),
@@ -1597,6 +1603,7 @@ std::optional<SettingsDialogResult> SettingsDialog::run(
     updated.sync.trackLanes = syncTrackLanes->isChecked();
     updated.sync.autoShareWavs = syncWavs->isChecked();
     updated.sync.globalPlayback = syncPlayback->isChecked();
+    updated.sync.listeningTools = syncListening->isChecked();
     updated.sync.generatedIdeas = syncIdeas->currentData().toInt();
     updated.sync.metronomeState = syncMetronome->isChecked();
     updated.sync.recordings = syncRecordings->isChecked();

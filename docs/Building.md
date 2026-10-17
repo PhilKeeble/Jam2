@@ -124,7 +124,8 @@ Real CoreAudio validation must happen on a macOS host with the target audio devi
 - CMake is the single source of truth for Windows and macOS builds.
 - The required DaisySP source subset is vendored under
   `libs/third_party/DaisySP`; normal builds do not download dependencies.
-- Jam2 currently expects Release builds. Configure fresh build directories with `-DCMAKE_BUILD_TYPE=Release`.
+- Jam2 builds and tests only optimized Release. Configure fresh build directories with `-DCMAKE_BUILD_TYPE=Release`.
+- Add or update relevant native CTests with each feature or fix and run only cases directly relevant to the change. Run the full suite only on explicit user instruction; report its failures without automatic repairs. See [Validation.md](Validation.md).
 - The unified GUI/CLI `jam2` target is enabled by default for new CMake build directories.
 - Built app binaries are staged to the repo-root `release` directory.
 - Intermediate build products stay in the selected CMake build directory.

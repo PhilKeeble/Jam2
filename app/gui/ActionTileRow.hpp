@@ -31,7 +31,7 @@ ActionTileLayout layoutActionTiles(
 
 // One row at every width. Owns existing semantic buttons without changing
 // their actions or control ids.
-class ActionTileRow final : public QWidget {
+class ActionTileRow : public QWidget {
 public:
     explicit ActionTileRow(QWidget* parent = nullptr);
     void addButton(QPushButton* button, int preferredWidth);

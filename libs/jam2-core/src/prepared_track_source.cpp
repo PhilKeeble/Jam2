@@ -47,6 +47,7 @@ bool PreparedTrackSource::enqueueBatch(std::span<const Command> commands)
     for (const Command& command : commands) {
         queue_[write] = command;
         queue_[write].generation = generation;
+        if (command.listeningGeneration != 0) queue_[write].listeningGeneration = listeningGeneration_.load(std::memory_order_acquire);
         write = (write + 1U) % capacity;
     }
     write_.store(write, std::memory_order_release);
@@ -56,6 +57,11 @@ bool PreparedTrackSource::enqueueBatch(std::span<const Command> commands)
 void PreparedTrackSource::cancelScheduled() noexcept
 {
     generation_.fetch_add(1, std::memory_order_acq_rel);
+}
+
+void PreparedTrackSource::cancelListeningScheduled() noexcept
+{
+    listeningGeneration_.fetch_add(1, std::memory_order_acq_rel);
 }
 
 int PreparedTrackSource::mix(
@@ -75,7 +81,8 @@ int PreparedTrackSource::mix(
                 break;
             }
             const Command command = queue_[read];
-            if (command.generation != generation_.load(std::memory_order_acquire)) {
+            if (command.generation != generation_.load(std::memory_order_acquire) ||
+                (command.listeningGeneration != 0 && command.listeningGeneration != listeningGeneration_.load(std::memory_order_acquire))) {
                 // A cancelled Swap owns a Ready slot that no later command can
                 // activate. Release it while consuming the stale command;
                 // otherwise repeated scheduled loads permanently exhaust the

@@ -594,6 +594,9 @@ void testPracticeIdeaDialog()
     interactWithNextDialog(cancelled, [](QDialog& dialog) {
         require(dialog.windowTitle() == QStringLiteral("Generate Practice Idea"),
             "practice dialog exposes its exact title");
+        auto* section = qobject_cast<QComboBox*>(formField(dialog, QStringLiteral("Section")));
+        require(section != nullptr && section->currentData().toInt() == 1,
+            "practice dialog retains the supplied active section instead of selecting the last section");
         clickStandard(dialog, QDialogButtonBox::Cancel);
     });
     require(!askForPracticeIdea(nullptr, defaults).has_value() &&
@@ -620,6 +623,8 @@ void testPracticeIdeaDialog()
                     length != nullptr && complexity != nullptr && exact != nullptr &&
                     bpm != nullptr,
                 "practice dialog exposes every requested form control");
+            require(section->currentData().toInt() == 1,
+                "practice dialog defaults to the supplied active section before an explicit override");
 
             selectData(*style, QStringLiteral("metal-experimental"),
                 "experimental style option must exist");
@@ -661,19 +666,26 @@ void testPracticeIdeaDialog()
 void testContinuationDialog()
 {
     ContinueIdeaDialogDefaults defaults;
-    defaults.sourceSectionIndex = 1;
+    defaults.sourceSectionIndex = 0;
     defaults.targetSectionIndex = 1;
     defaults.bankHasContent = {true, false, true};
     defaults.bankNames = {
         QStringLiteral("Verse"), QStringLiteral(""), QStringLiteral("Chorus")};
     DialogInteraction cancelled;
     interactWithNextDialog(cancelled, [](QDialog& dialog) {
+        auto* source = qobject_cast<QComboBox*>(formField(dialog, QStringLiteral("Source Section")));
+        auto* target = qobject_cast<QComboBox*>(formField(dialog, QStringLiteral("Target Section")));
+        require(source != nullptr && target != nullptr && source->currentData().toInt() == 0 &&
+                target->currentData().toInt() == 1 &&
+                dialog.findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->isEnabled(),
+            "continuation defaults retain the active source and a distinct empty destination");
         clickStandard(dialog, QDialogButtonBox::Cancel);
     });
     require(!askForIdeaContinuation(nullptr, defaults).has_value() &&
             cancelled.seen && cancelled.error.isEmpty(),
         "continuation dialog cancellation returns no request");
 
+    defaults.sourceSectionIndex = 1;
     DialogInteraction accepted;
     interactWithNextDialog(accepted, [](QDialog& dialog) {
         require(dialog.windowTitle() == QStringLiteral("Continue Idea"),
@@ -712,40 +724,62 @@ void testReferenceDialog()
     defaults.sampleRate = 48'000;
     defaults.tempoPulseUnits = 1;
 
+    BeatGridModel model;
+    LooperProject project;
+    while (model.sections().size() < 6) model.addSection(8);
+    while (project.banks().size() < 6) {
+        require(project.addBank(), "reference dialog needs six matching track sections");
+    }
+    for (int index = 0; index < model.sections().size(); ++index) model.clearSection(index);
+    model.setCell(2, QStringLiteral("chord"), 0, QStringLiteral("Cmaj7"));
+    model.setCell(1, QStringLiteral("chord"), 0, QStringLiteral("-"));
+    model.setCell(1, QStringLiteral("target"), 0, QStringLiteral("-"));
+    model.setCell(3, QStringLiteral("lyric"), 0, QStringLiteral("Verse lyrics"));
+    const auto summaryLabel = [](QDialog& dialog) {
+        for (QLabel* label : dialog.findChildren<QLabel*>()) {
+            if (label->text().contains(QStringLiteral(" -> "))) return label;
+        }
+        throw std::runtime_error("reference dialog omitted its section summary");
+    };
+
     DialogInteraction cancelled;
-    interactWithNextDialog(cancelled, [](QDialog& dialog) {
-        const QList<QLabel*> labels = dialog.findChildren<QLabel*>();
-        require(std::any_of(labels.cbegin(), labels.cend(), [](const QLabel* label) {
-                    return label->text().contains(QStringLiteral("beats")) &&
-                        label->text().contains(QStringLiteral("frames"));
-                }),
-            "single-section reference summary exposes beats, seconds, and frames");
+    interactWithNextDialog(cancelled, [summaryLabel](QDialog& dialog) {
+        require(summaryLabel(dialog)->text() == QStringLiteral("1 section -> Section C"),
+            "single populated section retains its actual letter among empty sections");
         clickStandard(dialog, QDialogButtonBox::Cancel);
     });
-    require(!askForReferenceRender(nullptr, defaults, 8, 8, 4, 4, 4).has_value() &&
+    require(!askForReferenceRender(nullptr, defaults,
+                PracticeIdeaController::referenceSections(model, project)).has_value() &&
             cancelled.seen && cancelled.error.isEmpty(),
         "reference dialog cancellation returns no settings");
 
     DialogInteraction emptyAccepted;
-    interactWithNextDialog(emptyAccepted, [](QDialog& dialog) {
+    for (int index = 0; index < model.sections().size(); ++index) model.clearSection(index);
+    interactWithNextDialog(emptyAccepted, [summaryLabel](QDialog& dialog) {
         for (QCheckBox* check : dialog.findChildren<QCheckBox*>()) {
             require(!check->isEnabled() && !check->isChecked(),
-                "zero-beat reference layer is disabled and clear");
+                "empty reference layer is disabled and clear");
         }
-        clickStandard(dialog, QDialogButtonBox::Ok);
+        require(summaryLabel(dialog)->text() == QStringLiteral("0 sections -> Sections -") &&
+                !dialog.findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->isEnabled(),
+            "empty sections expose zero count and disable Render");
+        dialog.accept();
     });
-    require(!askForReferenceRender(nullptr, defaults, 0, 0, 0, 0, 0).has_value() &&
+    require(!askForReferenceRender(nullptr, defaults,
+                PracticeIdeaController::referenceSections(model, project)).has_value() &&
             emptyAccepted.seen && emptyAccepted.error.isEmpty(),
-        "accepted reference dialog with no selected available layer returns no settings");
+        "programmatic acceptance of an empty reference dialog returns no settings");
+
+    model.setCell(0, QStringLiteral("chord"), 0, QStringLiteral("Cmaj7"));
+    model.setBeatHit(2, 0, 0, QStringLiteral("x"));
+    model.setCell(5, QStringLiteral("target"), 0, QStringLiteral("C4"));
+    model.setMusicalStep(5, 0, 0, QStringLiteral("support"), QStringLiteral("E4"));
 
     DialogInteraction accepted;
-    interactWithNextDialog(accepted, [](QDialog& dialog) {
-        const QList<QLabel*> labels = dialog.findChildren<QLabel*>();
-        require(std::any_of(labels.cbegin(), labels.cend(), [](const QLabel* label) {
-                    return label->text().contains(QStringLiteral("4 sections")) &&
-                        label->text().contains(QStringLiteral("Sections A-D"));
-                }),
-            "multi-section reference summary exposes its A-D scope");
+    interactWithNextDialog(accepted, [summaryLabel](QDialog& dialog) {
+        auto* summary = summaryLabel(dialog);
+        require(summary->text() == QStringLiteral("3 sections -> Sections A,C,F"),
+            "multi-section reference summary lists only populated sections including F");
         auto* drums = textWidget<QCheckBox>(dialog, QStringLiteral("Drum reference"));
         auto* chords = textWidget<QCheckBox>(dialog, QStringLiteral("Chord reference"));
         auto* melody = textWidget<QCheckBox>(dialog, QStringLiteral("Melody reference"));
@@ -754,8 +788,22 @@ void testReferenceDialog()
             dialog, QStringLiteral("Supporting line reference"));
         require(drums->isEnabled() && chords->isEnabled() && melody->isEnabled() &&
                 !bass->isEnabled() && support->isEnabled(),
-            "layer availability follows each source beat count independently");
-        drums->setChecked(false);
+            "layer availability follows actual content independently");
+        drums->click();
+        require(summary->text() == QStringLiteral("2 sections -> Sections A,F"),
+            "unchecking drums removes only its section from the render summary");
+        chords->click();
+        melody->click();
+        require(summary->text() == QStringLiteral("1 section -> Section F"),
+            "supporting line keeps its section selected without melody");
+        support->click();
+        require(summary->text() == QStringLiteral("0 sections -> Sections -") &&
+                !dialog.findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->isEnabled(),
+            "unchecking all layers disables Render");
+        melody->click();
+        require(summary->text() == QStringLiteral("1 section -> Section F") &&
+                dialog.findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->isEnabled(),
+            "selecting a populated layer restores its section and Render");
         chords->setChecked(true);
         melody->setChecked(true);
         support->setChecked(true);
@@ -773,7 +821,8 @@ void testReferenceDialog()
         box->button(QDialogButtonBox::Ok)->click();
     });
     const std::optional<ReferenceRenderSettings> result =
-        askForReferenceRender(nullptr, defaults, 8, 12, 4, 0, 16, 4);
+        askForReferenceRender(nullptr, defaults,
+            PracticeIdeaController::referenceSections(model, project));
     require(accepted.seen && accepted.error.isEmpty() && result.has_value() &&
             result->renderChords && !result->renderDrums && result->renderMelody &&
             !result->renderBass && result->renderSupport &&
@@ -781,6 +830,51 @@ void testReferenceDialog()
             result->drumKit == ReferenceDrumKit::Electronic &&
             result->sampleRate == defaults.sampleRate && result->bpm == defaults.bpm,
         "accepted reference dialog preserves exact layers, voicing, kit, and render shape");
+
+    for (int index = 0; index < model.sections().size(); ++index) model.clearSection(index);
+    for (int index = 0; index < 5; ++index) {
+        model.setCell(index, QStringLiteral("chord"), 0, QStringLiteral("Am"));
+    }
+    DialogInteraction fiveSections;
+    interactWithNextDialog(fiveSections, [summaryLabel](QDialog& dialog) {
+        require(summaryLabel(dialog)->text() == QStringLiteral("5 sections -> Sections A,B,C,D,E"),
+            "five populated sections do not clamp their displayed scope to D");
+        clickStandard(dialog, QDialogButtonBox::Ok);
+    });
+    require(askForReferenceRender(nullptr, defaults,
+                PracticeIdeaController::referenceSections(model, project)).has_value() &&
+            fiveSections.seen && fiveSections.error.isEmpty(),
+        "five-section reference dialog can render its selected content");
+
+    project.banks().resize(3);
+    project.banks()[2].id.clear();
+    const auto limited = PracticeIdeaController::referenceSections(model, project);
+    require(limited.size() == 3 && limited.at(2).sectionIndex == 2 &&
+            limited.at(2).bankId == QStringLiteral("C") && limited.at(2).layers.selected(defaults),
+        "reference selection bounds sections to matching banks and retains fallback IDs");
+    ReferenceRenderSettings noLayers = defaults;
+    noLayers.renderChords = false;
+    require(!limited.at(2).layers.selected(noLayers),
+        "renderer and dialog use the same selected-layer predicate");
+
+    for (int index = 0; index < model.sections().size(); ++index) model.clearSection(index);
+    model.section(2).musicalPatterns[0].bass[0] = {
+        MusicalStepState::Onset, QStringLiteral("C2")};
+    DialogInteraction bassOnly;
+    interactWithNextDialog(bassOnly, [summaryLabel](QDialog& dialog) {
+        require(summaryLabel(dialog)->text() == QStringLiteral("1 section -> Section C"),
+            "bass-only content contributes its section to the summary");
+        auto* bass = textWidget<QCheckBox>(dialog, QStringLiteral("Bass reference"));
+        require(bass->isEnabled() && bass->isChecked(), "bass-only content enables its layer");
+        bass->click();
+        require(summaryLabel(dialog)->text() == QStringLiteral("0 sections -> Sections -"),
+            "unchecking bass removes its section");
+        clickStandard(dialog, QDialogButtonBox::Cancel);
+    });
+    require(!askForReferenceRender(nullptr, defaults,
+                PracticeIdeaController::referenceSections(model, project)).has_value() &&
+            bassOnly.seen && bassOnly.error.isEmpty(),
+        "bass-only dialog cancellation returns no settings");
 }
 
 void testCuratedIdeaDialog()
@@ -789,10 +883,10 @@ void testCuratedIdeaDialog()
     defaults.targetSectionIndex = 1;
     defaults.timing = CuratedIdeaTimingPolicy::UseIdeaTiming;
     defaults.importBars = 12;
-    defaults.bankBpms = {90, 123};
-    defaults.bankMeterNumerators = {4, 7};
-    defaults.bankMeterDenominators = {4, 8};
-    defaults.bankBeats = {16, 28};
+    defaults.bankBpms = {90, 123, 112};
+    defaults.bankMeterNumerators = {4, 7, 4};
+    defaults.bankMeterDenominators = {4, 8, 4};
+    defaults.bankBeats = {16, 28, 32};
 
     CuratedIdeaPreviewCallbacks unavailable;
     unavailable.unavailableReason = QStringLiteral("preview unavailable in this fixture");
@@ -800,6 +894,9 @@ void testCuratedIdeaDialog()
     interactWithNextDialog(cancelled, [](QDialog& dialog) {
         require(dialog.windowTitle() == QStringLiteral("Groove Library"),
             "curated dialog exposes its exact title");
+        auto* target = qobject_cast<QComboBox*>(formField(dialog, QStringLiteral("Target")));
+        require(target != nullptr && target->currentData().toInt() == 1,
+            "groove library defaults to the supplied active section rather than the last section");
         auto* preview = textWidget<QPushButton>(dialog, QStringLiteral("PREVIEW 4 BARS"));
         require(!preview->isEnabled(),
             "unavailable curated preview remains explicitly disabled");
@@ -829,6 +926,8 @@ void testCuratedIdeaDialog()
         require(style != nullptr && profile != nullptr && target != nullptr &&
                 length != nullptr && list != nullptr && list->count() > 0,
             "curated dialog exposes filters, target, length, and catalog");
+        require(target->currentData().toInt() == 1,
+            "groove library retains its active-section default before an explicit override");
         if (style->count() > 1) style->setCurrentIndex(1);
         if (profile->count() > 1) profile->setCurrentIndex(1);
         require(list->count() > 0,

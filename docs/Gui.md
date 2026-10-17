@@ -218,18 +218,38 @@ The Track tab can:
 - Use **Share Tracks** to explicitly reconcile all asset-backed local lanes with the jam.
 
 The coloured idea-action buttons adapt their padding, spacing, and text size to
-the available width. Chord, Beat, and Track headers stay on one row. At very
-narrow widths, labels use ellipsis with the full action name in a tooltip.
-The main view preserves the core chord display's size as window height changes.
-When its action tiles would crowd the visualiser, they form two rows to its
-right, with **Generate New Idea**, **Continue Idea**, and **Clear Idea** on the
-bottom row. The WAV generation indicator sits below both rows when wrapped,
-and below **Generate WAV** in its usual position when unwrapped.
+the available width. Chord and Beat show **Generate New Idea**, **Continue Idea**,
+**Idea Details**, **Generate WAV**, **Groove Library**, and **JamTaster**, in that
+order. Idea Details is greyed out when the viewed section has no generated idea.
+Track uses the same order with Idea Details omitted. These view headers stay on
+one row and use descriptive tooltips; narrow labels may use ellipsis.
+
+The main Jam view uses **Clear Idea** in the third position instead of Idea
+Details and shows no action tooltips. It preserves the core chord display's
+size as window height changes. When tiles would crowd the visualiser, they wrap
+in reading order: Generate New Idea, Continue Idea and Clear Idea above Generate
+WAV, Groove Library and JamTaster. The WAV generation indicator sits below the
+last action row.
 
 The Track view's **Listening Tools** and **Sharing** sections start collapsed to
 leave more room for lanes on smaller screens. Click either header to expand or
 collapse it independently. Open **Sharing** for its sync status, **Share with Jam
 Now**, and **Export...** controls.
+
+**Jam Sync → Listening Tools / Metronome Sync** defaults on and requires Sync
+Global Playback. Speed, pitch and focus settings then apply across the jam;
+speed changes the metronome and musical playhead rate without changing the
+song's stored BPM. Slider edits commit on release; numeric edits settle for
+200 ms. Each peer prepares its own audio before the creator schedules a shared
+beat at least 750 ms ahead. Playback keeps its position and loop passage.
+Turning this option off restores the metronome's normal rate and leaves the
+listening tools local, so local speed can diverge from the global playhead.
+Recording or a transport transition prevents listening edits. Preparation
+failure or a 15-second readiness timeout retains the previous playback.
+Data exposes the musical rate and effective BPM; structured listening stats
+also include the revision, readiness counts, render time, commit frame and
+timing constants.
+
 The armed recording panel and expanded tools keep their content height. The
 track lanes scroll within the remaining space, so they cannot cover those panels.
 If the window is too short to fit everything, the Track page also scrolls;

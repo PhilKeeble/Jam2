@@ -93,7 +93,8 @@ MetronomeTransportController::SnapshotUpdate MetronomeTransportController::consu
         snapshot.metronome_epoch_frame,
         offset,
         sampleRate,
-        snapshot.metronome_epoch_valid && sampleRate > 0);
+        snapshot.metronome_epoch_valid && sampleRate > 0,
+        snapshot.playback_tempo);
 
     SnapshotUpdate update;
     const std::uint64_t revision = snapshot.transport_revision;

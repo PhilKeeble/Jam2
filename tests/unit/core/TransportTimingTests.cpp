@@ -201,6 +201,16 @@ void testInvalidAndExhaustedSchedules()
 
 int main()
 {
+    const jam2::PlaybackTempo half{500000, 48000, 48000.0};
+    expect(half.position(48000) == 48000.0 && half.position(96000) == 72000.0 && half.frame(72000.0) == 96000,
+        "playback tempo preserves its anchor and maps source frames in both directions");
+    jam2::metronome::PatternSnapshot slowedPattern;
+    const auto slowed = jam2::next_bar_transport_schedule(48000, slowedPattern, 60000, 0, true, 0, 1, half);
+    expect(slowed && slowed->countdown_start_raw_frame == 144000 && slowed->target_raw_frame == 336000,
+        "slowed playback keeps bar phase and doubles the physical count-in duration");
+    const auto aligned = jam2::align_received_transport_to_grid(48000, slowedPattern, 60000, 0, true, 0, 343000, 192000, half);
+    expect(aligned && aligned->target_raw_frame == 336000 && aligned->countdown_start_raw_frame == 144000,
+        "receiver alignment uses the same slowed musical mapping");
     testFrameConversions();
     testOrdinarySchedules();
     testReceivedGridAlignment();
