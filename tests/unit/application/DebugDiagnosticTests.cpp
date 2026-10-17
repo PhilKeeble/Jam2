@@ -157,10 +157,21 @@ void testHelpAndFuzzEntrypoints(
         const ProcessResult fuzzHelp = runProcess(
             executable, {QStringLiteral("debug"), QStringLiteral("fuzz"),
                          QStringLiteral("--help")}, std::chrono::seconds(10));
+        const ProcessResult loopbackHelp = runProcess(
+            executable, {QStringLiteral("debug"), QStringLiteral("loopback"),
+                         QStringLiteral("--help")}, std::chrono::seconds(10));
         expect(describe.code == 0 && describe.output.contains("debug describe --json") &&
                 run.code == 0 && run.output.contains("debug run <scenario.json>") &&
-                fuzzHelp.code == 0 && fuzzHelp.output.contains("udp-pcm24"),
+                fuzzHelp.code == 0 && fuzzHelp.output.contains("udp-pcm24") &&
+                loopbackHelp.code == 0 && loopbackHelp.output.contains("same loopback backend"),
             "all private debug subcommands publish their exact help contracts");
+        for (const QString& seconds : {QStringLiteral("0"), QStringLiteral("31"), QStringLiteral("invalid")}) {
+            const auto rejected = runProcess(executable,
+                {QStringLiteral("debug"), QStringLiteral("loopback"),
+                 QStringLiteral("unused.wav"), seconds}, std::chrono::seconds(10));
+            expect(rejected.code == 2 && rejected.output.contains("duration of 1..30 seconds"),
+                "loopback diagnostic rejects invalid duration before starting capture");
+        }
     }
     if (!runRejectedFuzz && !runAcceptedFuzz) return;
 

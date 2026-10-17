@@ -409,6 +409,9 @@ target_link_libraries(jam2_gui_loopback_recorder_tests PRIVATE
     jam2_core Qt6::Core)
 if(WIN32)
     target_link_libraries(jam2_gui_loopback_recorder_tests PRIVATE ole32 propsys)
+elseif(APPLE)
+    target_link_libraries(jam2_gui_loopback_recorder_tests PRIVATE jam2_mac_loopback)
+    target_sources(jam2_gui_loopback_recorder_tests PRIVATE unit/gui/MacLoopbackCaptureTests.cpp)
 endif()
 add_test(NAME jam2_gui_loopback_recorder_units
     COMMAND $<TARGET_FILE:jam2_gui_loopback_recorder_tests>)
@@ -433,6 +436,8 @@ target_link_libraries(jam2_track_workspace_support_tests PRIVATE
     jam2_core jam2_looper_model Qt6::Core)
 if(WIN32)
     target_link_libraries(jam2_track_workspace_support_tests PRIVATE ole32 propsys)
+elseif(APPLE)
+    target_link_libraries(jam2_track_workspace_support_tests PRIVATE jam2_mac_loopback)
 endif()
 add_test(NAME jam2_track_workspace_support_units
     COMMAND $<TARGET_FILE:jam2_track_workspace_support_tests>)
@@ -1112,6 +1117,19 @@ if(JAM2_HARDWARE_PROFILE)
         LABELS "hardware;audio-device;capabilities"
         RUN_SERIAL TRUE
         TIMEOUT 30)
+    if(APPLE)
+        add_executable(jam2_mac_loopback_hardware_integration EXCLUDE_FROM_ALL
+            integration/gui/MacLoopbackHardwareIntegration.cpp)
+        jam2_configure_test_target(jam2_mac_loopback_hardware_integration)
+        target_link_libraries(jam2_mac_loopback_hardware_integration PRIVATE jam2_core Qt6::Core)
+        add_dependencies(jam2_mac_loopback_hardware_integration jam2)
+        add_test(NAME jam2_mac_loopback_hardware_integration
+            COMMAND $<TARGET_FILE:jam2_mac_loopback_hardware_integration>
+                "${JAM2_TEST_PUBLIC_EXECUTABLE}")
+        set_tests_properties(jam2_mac_loopback_hardware_integration PROPERTIES
+            LABELS "integration;hardware;gui;audio;recording;loopback;interactive"
+            RUN_SERIAL TRUE TIMEOUT 45)
+    endif()
 endif()
 
 add_library(jam2_test_process_support STATIC EXCLUDE_FROM_ALL
@@ -1174,7 +1192,7 @@ add_executable(jam2_four_gui_modal_integration EXCLUDE_FROM_ALL
     integration/gui/FourGuiModalIntegration.cpp)
 jam2_configure_test_target(jam2_four_gui_modal_integration)
 target_link_libraries(jam2_four_gui_modal_integration PRIVATE
-    jam2_test_process_support Qt6::Core)
+    jam2_test_process_support jam2_core Qt6::Core)
 add_executable(jam2_four_jam_sync_integration EXCLUDE_FROM_ALL
     integration/gui/FourJamSyncIntegration.cpp)
 jam2_configure_test_target(jam2_four_jam_sync_integration)
@@ -1272,6 +1290,17 @@ endif()
 add_test(NAME jam2_four_gui_modal_integration
     COMMAND $<TARGET_FILE:jam2_four_gui_modal_integration>
         "${JAM2_TEST_PUBLIC_EXECUTABLE}")
+add_test(NAME jam2_four_loopback_recording_integration
+    COMMAND $<TARGET_FILE:jam2_four_gui_modal_integration>
+        "${JAM2_TEST_PUBLIC_EXECUTABLE}" loopback-only)
+set_tests_properties(jam2_four_loopback_recording_integration PROPERTIES
+    LABELS "integration;gui;four-peer;audio;recording;loopback;wav;fake-audio"
+    TIMEOUT 120)
+if(WIN32)
+    set_tests_properties(jam2_four_loopback_recording_integration PROPERTIES
+        ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
+endif()
 set_tests_properties(jam2_four_gui_modal_integration PROPERTIES
     LABELS "integration;gui;four-peer;automation;modal"
     TIMEOUT 180)
@@ -1543,6 +1572,9 @@ add_custom_target(jam2_tests_all
         jam2_tests_network)
 if(JAM2_HARDWARE_PROFILE)
     add_dependencies(jam2_tests_all jam2_tests_hardware)
+    if(APPLE)
+        add_dependencies(jam2_tests_hardware jam2_mac_loopback_hardware_integration)
+    endif()
 endif()
 
 # Keep every automated test's temporary state inside a private directory below

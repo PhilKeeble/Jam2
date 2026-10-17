@@ -17,6 +17,7 @@
 #include "MusicCorpusDiagnostic.hpp"
 #include "SessionController.hpp"
 #include "CliEntrypoint.hpp"
+#include "CliLoopbackDiagnostics.hpp"
 #include "CliOptions.hpp"
 #include "tuning_profile.hpp"
 #include "pcm16_wav.hpp"
@@ -137,11 +138,13 @@ constexpr std::string_view kDebugUsage = R"(Usage:
   jam2 debug describe --json
   jam2 debug run <scenario.json>
   jam2 debug fuzz <control|udp-pcm16|udp-pcm24|asset|wav> <input-file>
+  jam2 debug loopback <new-output.wav> <seconds:1..30> [source-id]
 
 Subcommands:
   describe    Emit the supported unversioned automation formats, operations, profiles, fields, and bounds
   run         Validate and execute a bounded declarative scenario
   fuzz        Execute one bounded local native parser input (test-only)
+  loopback    Record system output with the track loopback backend and report capture data
 
 Run `jam2 debug <subcommand> -h` for details.
 )";
@@ -1348,6 +1351,7 @@ int jam2RunDebugCommand(int argc, char* argv[])
         return 0;
     }
     const std::string_view subcommand{argv[2]};
+    if (subcommand == "loopback") return jam2RunLoopbackDiagnostic(argc, argv);
     if (subcommand == "describe" && hasHelpArgument(argc, argv, 3)) {
         printDescribeHelp();
         return 0;

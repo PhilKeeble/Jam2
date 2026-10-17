@@ -217,6 +217,22 @@ The Track tab can:
 - Sync collaborative arrangement snapshots and missing managed WAV assets by content hash when Track Sync is enabled.
 - Use **Share Tracks** to explicitly reconcile all asset-backed local lanes with the jam.
 
+For desktop sampling, select **System Loopback (desktop audio)** when arming a
+lane. Jam2 automatically uses WASAPI on Windows or native Core Audio taps on
+macOS 14.2 and later. The default source captures the system's current output;
+you can also select a particular output device. Playback continues normally,
+and stopping recording imports the mono PCM16 WAV into the armed lane. macOS
+asks for system-audio recording permission on first use. No virtual audio
+driver or manual device routing is needed. If the default output changes or
+the selected device disconnects during capture, start a new take.
+
+`jam2 debug loopback <new-output.wav> <seconds:1..30> [source-id]` records with
+the same backend and reports the device, sample rates, frame counts, callback
+count, queue capacity, dropped frames, and peak level. The macOS hardware
+CTest `jam2_mac_loopback_hardware_integration` requires an explicit hardware
+profile and system-audio permission; it plays a short 440 Hz tone and verifies
+that the public Release app captures that tone into a valid WAV.
+
 The coloured idea-action buttons adapt their padding, spacing, and text size to
 the available width. Chord and Beat show **Generate New Idea**, **Continue Idea**,
 **Idea Details**, **Generate WAV**, **Groove Library**, and **JamTaster**, in that
@@ -384,11 +400,13 @@ below the available desktop size, restored if the window manager tries to
 maximize them, and centred over the Jam2 window.
 
 System Loopback recording uses its own block active-channel fold-down and logs
-the endpoint format, channel mask, active-channel range, and recorded peak.
+the endpoint, channels, sample rates, and recorded peak. Windows also reports
+the channel mask and active-channel range. macOS reports callback count,
+capture queue capacity, dropped frames, and the capture/health polling intervals.
 
 Recordings always target the active jam contract rate, or the running local
 engine rate outside a jam. Perform Input writes at that engine rate. System
-Loopback may be supplied by Windows at a different shared-mode endpoint rate;
+Loopback may be supplied by the selected output at a different endpoint rate;
 Jam2 applies offline band-limited resampling before writing the WAV, so a
 48 kHz Windows endpoint still produces a 44.1 kHz WAV for a 44.1 kHz engine.
 The completion log reports both rates, frame counts, and the conversion ratio.

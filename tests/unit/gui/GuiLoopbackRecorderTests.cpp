@@ -22,6 +22,10 @@
 #include <thread>
 #include <vector>
 
+#if defined(__APPLE__)
+void runMacLoopbackCaptureTests();
+#endif
+
 namespace {
 
 using namespace std::chrono_literals;
@@ -480,6 +484,9 @@ int main(int argc, char** argv)
         testResamplingTrimmingAndAccumulator();
         testAtomicWavWriter();
         testRecorderLifecycleWithInjectedAudio();
+#if defined(__APPLE__)
+        runMacLoopbackCaptureTests();
+#endif
         std::cout << "GUI loopback recorder tests passed\n";
         return 0;
     } catch (const std::exception& error) {

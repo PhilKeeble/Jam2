@@ -4,6 +4,10 @@
 
 #include "audio_device.hpp"
 
+#if defined(__APPLE__)
+#include "MacLoopbackCapture.hpp"
+#endif
+
 #include <QDir>
 #include <QFileInfo>
 #include <QIODevice>
@@ -617,6 +621,8 @@ QStringList GuiLoopbackRecorder::listSources(QString* error)
         if (error) *error = QString::fromUtf8(ex.what());
         return {};
     }
+#elif defined(__APPLE__)
+    return jam2::gui::mac_loopback_sources(error);
 #else
     if (error) *error = QStringLiteral("internal loopback recording is currently implemented on Windows only");
     return {};
@@ -839,6 +845,11 @@ void GuiLoopbackRecorder::run(GuiLoopbackOptions options, FinishedCallback finis
                 outputSamples);
             ok = true;
         }
+#elif defined(__APPLE__)
+        auto result = jam2::gui::capture_mac_loopback(options, stopRequested_);
+        ok = result.ok;
+        error = std::move(result.error);
+        diagnostics = std::move(result.diagnostics);
 #else
         throw std::runtime_error("internal loopback recording is currently implemented on Windows only");
 #endif

@@ -1,10 +1,12 @@
 #include "FourPeerCoordinator.hpp"
 #include "TestTiming.hpp"
 #include "LoopbackPortReservations.hpp"
+#include "pcm16_wav.hpp"
 
 #include <QCoreApplication>
 #include <QDir>
 #include <QFileInfo>
+#include <QFile>
 #include <QHash>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -1186,6 +1188,82 @@ bool exerciseActiveCreatorWorkflows(
     return failures == 0;
 }
 
+bool exerciseLoopbackLaneWorkflow(AutomationProcess& peer, const QString& prefix)
+{
+    closeModal(peer, prefix + "initial-cancel", QStringLiteral("application.local-engine.cancel"));
+    const auto prepare = prefix + "prepare";
+    if (!send(peer, {
+            {QStringLiteral("type"), QStringLiteral("jam.dialog-runtime.prepare")},
+            {QStringLiteral("id"), prepare},
+            {QStringLiteral("test_input"), QStringLiteral("silence")},
+        }) || !receiveApplied(peer, prepare)) return false;
+    if (!invokeAndReceive(peer, prefix + "track", QStringLiteral("workspace.open.looper"), "click")) return false;
+    const auto before = runtimeSnapshot(peer, prefix + "before");
+    if (!before) return false;
+    const int initialLaneCount = before->value("content").toObject().value("lane_count").toInt();
+
+    // Exercise Cancel before the actual modal -> armed -> capture -> imported
+    // transition through the real controls, without choosing an OS/backend.
+    openModal(peer, prefix + "cancel-open", QStringLiteral("looper.lane.0.arm"));
+    (void)invokeAndReceive(peer, prefix + "cancel-mode",
+        QStringLiteral("looper.recording-dialog.mode"), "set-index", 2);
+    closeModal(peer, prefix + "cancel", QStringLiteral("looper.recording-dialog.cancel"));
+    auto state = runtimeSnapshot(peer, prefix + "cancel-state");
+    if (!state || state->value("content").toObject().value("loopback_recording_running").toBool() ||
+        state->value("content").toObject().value("lane_recording_local_phase").toString() != "idle") {
+        fail(prefix + "cancel started capture");
+        return false;
+    }
+    openModal(peer, prefix + "arm-open", QStringLiteral("looper.lane.0.arm"));
+    (void)invokeAndReceive(peer, prefix + "mode", QStringLiteral("looper.recording-dialog.mode"), "set-index", 2);
+    const auto dialog = snapshotAll(peer, prefix + "loopback-dialog");
+    if (!controlState(dialog, QStringLiteral("looper.recording-dialog.arm")).value("enabled").toBool()) {
+        fail(prefix + "loopback arm was disabled");
+        return false;
+    }
+    closeModal(peer, prefix + "arm", QStringLiteral("looper.recording-dialog.arm"));
+    (void)invokeAndReceive(peer, prefix + "manual", QStringLiteral("looper.recording.manual-stop"), "set-checked", true);
+    (void)invokeAndReceive(peer, prefix + "count-in", QStringLiteral("looper.recording.count-in"), "set-checked", false);
+    if (!invokeAndReceive(peer, prefix + "record", QStringLiteral("looper.recording.start-stop"), "click")) return false;
+
+    const auto deadline = std::chrono::steady_clock::now() + jam2::test::deadmanTimeout(30s);
+    QJsonObject content;
+    int attempt = 0;
+    while (std::chrono::steady_clock::now() < deadline) {
+        state = runtimeSnapshot(peer, prefix + QStringLiteral("import-%1").arg(attempt++));
+        if (!state) return false;
+        content = state->value("content").toObject();
+        if (content.value("lane_recording_import_failures").toInteger() > 0) break;
+        const auto hashes = content.value("asset_hashes").toArray();
+        const auto available = content.value("asset_available").toArray();
+        if (!content.value("loopback_recording_running").toBool() &&
+            !hashes.isEmpty() && !hashes.first().toString().isEmpty() &&
+            !available.isEmpty() && available.first().toBool()) break;
+    }
+    const auto paths = content.value("lane_paths").toArray();
+    const auto captured = content.value("loopback_capture_path").toString();
+    const auto wav = jam2::wav::inspect_pcm16_file(captured.toStdString());
+    if (paths.size() != initialLaneCount || paths.isEmpty() || paths.first().toString() != captured || !wav ||
+        wav.info.channels != 1 || wav.info.frames != 64 ||
+        content.value("lane_recording_import_last_hash").toString().isEmpty() ||
+        content.value("lane_recording_import_status").toString() != "attached") {
+        fail(prefix + QStringLiteral("recording did not import a valid WAV into the armed lane: %1")
+            .arg(QString::fromUtf8(QJsonDocument(QJsonObject{
+                {"import_status", content.value("lane_recording_import_status")},
+                {"hash", content.value("lane_recording_import_last_hash")},
+                {"paths", paths}, {"capture", captured},
+            }).toJson(QJsonDocument::Compact))));
+        return false;
+    }
+    QFile file(captured);
+    if (!file.open(QIODevice::ReadOnly) || !file.seek(static_cast<qint64>(wav.info.data_offset)) ||
+        file.read(2) != QByteArray::fromHex("0010")) {
+        fail(prefix + "imported loopback WAV omitted the captured samples");
+        return false;
+    }
+    return true;
+}
+
 bool exerciseLocalFakeAudioWorkflow(AutomationProcess& peer)
 {
     const QString prefix = QStringLiteral("local-fake-audio-");
@@ -1292,9 +1370,9 @@ bool exerciseLocalFakeAudioWorkflow(AutomationProcess& peer)
              QStringLiteral("jamtaster-source-disposition"),
              QStringLiteral("jamtaster-apply"),
              QStringLiteral("save-session-defaults"),
-             QStringLiteral("recording-loopback"),
              QStringLiteral("jamtaster-error-boundaries"),
              QStringLiteral("recording-schedule"),
+             QStringLiteral("recording-loopback"),
              QStringLiteral("failure-presentation"),
          }) {
         const QString id = prefix + action;
@@ -1330,6 +1408,7 @@ bool exerciseLocalFakeAudioWorkflow(AutomationProcess& peer)
     const auto loopbackDeadline = std::chrono::steady_clock::now() +
         jam2::test::deadmanTimeout(60s);
     bool loopbackCompleted = false;
+    QString loopbackPath;
     int loopbackAttempt = 0;
     while (std::chrono::steady_clock::now() < loopbackDeadline) {
         const auto state = runtimeSnapshot(
@@ -1339,12 +1418,25 @@ bool exerciseLocalFakeAudioWorkflow(AutomationProcess& peer)
         if (!content.value(QStringLiteral("loopback_recording_running")).toBool() &&
             content.value(QStringLiteral("loopback_capture_available")).toBool()) {
             loopbackCompleted = true;
+            loopbackPath = content.value(QStringLiteral("loopback_capture_path")).toString();
             break;
         }
     }
     if (!loopbackCompleted) {
         fail(QStringLiteral(
             "MainWindow fake loopback capture did not finish with a WAV artifact"));
+    } else {
+        const auto wav = jam2::wav::inspect_pcm16_file(loopbackPath.toStdString());
+        if (!wav || wav.info.channels != 1 || wav.info.frames != 64) {
+            fail(QStringLiteral("Loopback completion did not produce the expected PCM16 audio take"));
+        } else {
+            QFile file(loopbackPath);
+            if (!file.open(QIODevice::ReadOnly) ||
+                !file.seek(static_cast<qint64>(wav.info.data_offset)) ||
+                file.read(2) != QByteArray::fromHex("0010")) {
+                fail(QStringLiteral("Loopback completion WAV omitted the injected waveform"));
+            }
+        }
     }
 
     const auto deadline = std::chrono::steady_clock::now() +
@@ -1374,12 +1466,14 @@ int main(int argc, char* argv[])
 {
     QCoreApplication application(argc, argv);
     if (argc != 2 && argc != 3) {
-        std::cerr << "usage: jam2_four_gui_modal_integration <release-jam2> [startup-only]\n";
+        std::cerr << "usage: jam2_four_gui_modal_integration <release-jam2> [startup-only|loopback-only]\n";
         return 2;
     }
     const bool startupOnly = argc == 3 &&
         QString::fromLocal8Bit(argv[2]) == QStringLiteral("startup-only");
-    if (argc == 3 && !startupOnly) {
+    const bool loopbackOnly = argc == 3 &&
+        QString::fromLocal8Bit(argv[2]) == QStringLiteral("loopback-only");
+    if (argc == 3 && !startupOnly && !loopbackOnly) {
         std::cerr << "unknown modal test mode\n";
         return 2;
     }
@@ -1415,6 +1509,27 @@ int main(int argc, char* argv[])
         if (!receive(coordinator.peer(index), QStringLiteral("hello"), hello)) {
             return 1;
         }
+    }
+
+    if (loopbackOnly) {
+        for (std::size_t index = 0; index < FourPeerCoordinator::kPeerCount; ++index) {
+            if (!exerciseLoopbackLaneWorkflow(coordinator.peer(index),
+                    QStringLiteral("loopback-peer-%1-").arg(index + 1))) return 1;
+        }
+        for (std::size_t index = 0; index < FourPeerCoordinator::kPeerCount; ++index) {
+            auto& peer = coordinator.peer(index);
+            QJsonObject event;
+            if (!send(peer, {{QStringLiteral("type"), QStringLiteral("shutdown")},
+                    {QStringLiteral("id"), QStringLiteral("shutdown-%1").arg(index + 1)}}) ||
+                !receive(peer, QStringLiteral("command_applied"), event) ||
+                !receive(peer, QStringLiteral("shutdown"), event)) return 1;
+            int code = -1;
+            if (!peer.waitForExit(60s, code, error) || code != 0) return 1;
+        }
+        if (failures != 0) return 1;
+        coordinator.markSuccessful();
+        std::cout << "four-peer loopback recording and lane import passed\n";
+        return 0;
     }
 
     if (!startupOnly) {

@@ -17,6 +17,17 @@ if(NOT Qt6_FOUND)
     )
 endif()
 
+if(APPLE)
+    add_library(jam2_mac_loopback STATIC
+        gui/MacLoopbackCapture.hpp
+        gui/MacLoopbackCapture.mm)
+    target_compile_features(jam2_mac_loopback PUBLIC cxx_std_20)
+    set_target_properties(jam2_mac_loopback PROPERTIES OBJCXX_STANDARD 20)
+    target_compile_options(jam2_mac_loopback PRIVATE -fobjc-arc -Wall -Wextra -Wpedantic)
+    target_link_libraries(jam2_mac_loopback PUBLIC jam2_core Qt6::Core "-framework Foundation")
+    target_include_directories(jam2_mac_loopback PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/gui")
+endif()
+
 add_library(jam2_automation_contract STATIC
     application/AutomationActionRegistry.cpp
     application/AutomationActionRegistry.hpp
@@ -387,6 +398,8 @@ endif()
 # Windows starts without a console; CLI invocations attach to their parent
 # terminal while preserving inherited redirected streams.
 add_executable(jam2 MACOSX_BUNDLE
+    cli/CliLoopbackDiagnostics.cpp
+    cli/CliLoopbackDiagnostics.hpp
     Jam2Resources.qrc
     application/ApplicationEntrypoint.cpp
     application/ApplicationEntrypoint.hpp
@@ -605,6 +618,7 @@ target_link_libraries(jam2 PRIVATE
 
 if(APPLE)
     target_link_libraries(jam2 PRIVATE
+        jam2_mac_loopback
         "-framework AVFoundation"
         "-framework Foundation"
     )
