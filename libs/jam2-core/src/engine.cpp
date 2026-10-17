@@ -820,13 +820,12 @@ struct Engine::Impl {
                 if (staged_listening_slot < 0 || staged_listening_cookie != static_cast<std::uint64_t>(command.signed_value)) {
                     error = "listening track is not staged for this revision"; return false;
                 }
-                const std::array<audio::PreparedTrackSource::Command, 3> batch{{
-                    {audio::PreparedTrackSource::CommandType::Swap, static_cast<std::uint32_t>(staged_listening_slot), command.frame, command.frame_end, 0, 1000000, 0, 1},
+                const std::array<audio::PreparedTrackSource::Command, 2> batch{{
+                    {audio::PreparedTrackSource::CommandType::Swap, static_cast<std::uint32_t>(staged_listening_slot), command.frame, command.frame_end, 0, 1000000, 0, 1, command.cookie},
                     {audio::PreparedTrackSource::CommandType::SetLoop, 0, command.frame,
                         command.prepared_loop_enabled ? command.prepared_loop_start_frame : 0,
                         command.prepared_loop_enabled ? (command.prepared_loop_end_frame > 0 ? command.prepared_loop_end_frame : staged_listening_frames) : 0,
                         1000000, 0, 1},
-                    {command.enabled ? audio::PreparedTrackSource::CommandType::Play : audio::PreparedTrackSource::CommandType::Stop, 0, command.frame, 0, 0, 1000000, 0, 1},
                 }};
                 if (!prepared_source->enqueueBatch(batch)) { error = "listening swap queue is full"; return false; }
                 staged_listening_slot = -1;
@@ -885,6 +884,7 @@ struct Engine::Impl {
         }
         case EngineCommandType::UnloadPreparedTrack:
             prepared_source->cancelScheduled();
+            prepared_source->cancelListeningScheduled();
             return queue_prepared({
                 audio::PreparedTrackSource::CommandType::Clear,
                 0,
@@ -1531,6 +1531,11 @@ EngineSnapshot Engine::snapshot() const noexcept
     result.prepared_source_underruns = control.prepared_source_underruns.load(std::memory_order_relaxed);
     result.prepared_source_busy_events = control.prepared_source_busy_events.load(std::memory_order_relaxed);
     result.prepared_source_playing = impl_->prepared_source != nullptr && impl_->prepared_source->playing();
+    if (impl_->prepared_source) {
+        result.listening_source_cookie = impl_->prepared_source->appliedListeningCookie();
+        result.listening_source_queue_depth = impl_->prepared_source->listeningQueueDepth();
+        result.listening_source_queue_capacity = audio::PreparedTrackSource::kListeningCommandCapacity - 1;
+    }
     if (impl_->capture_ring != nullptr) {
         result.capture_ring_capacity_frames = impl_->capture_ring->capacity();
         result.capture_ring_depth_frames = impl_->capture_ring->available_read();

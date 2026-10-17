@@ -50,7 +50,8 @@ void MainWindow::initializeListeningTools()
             state.engine.metronome_epoch_frame, offset, sampleRate,
             state.engine.metronome_epoch_valid && sampleRate > 0, state.engine.playback_tempo);
         state.position = grid.position();
-        state.transportChanging = state.transportChanging || state.engine.transport_pending;
+        // Play/Stop does not invalidate listening preparation. Only a section
+        // transition needs to settle before choosing the content to render.
         const auto& track = trackController_.model();
         const double renderedSpeed = preparedMixLifecycle_.active().path.isEmpty()
             ? trackWorkspace_.listeningTools.appliedSettings().speedPpm / 1000000.0
@@ -62,9 +63,9 @@ void MainWindow::initializeListeningTools()
         state.loopStartSourceSeconds = track.loopStartSeconds >= 0.0 ? track.loopStartSeconds * renderedSpeed : -1.0;
         state.loopEndSourceSeconds = track.loopEndSeconds >= 0.0 ? track.loopEndSeconds * renderedSpeed : -1.0;
         const QByteArray lanes = QJsonDocument(looperProject_.toJson()).toJson(QJsonDocument::Compact);
-        state.sourceSignature = QStringLiteral("%1:%2:%3:%4:%5:%6:%7")
+        state.sourceSignature = QStringLiteral("%1:%2:%3:%4:%5:%6")
             .arg(chordModel_.revision()).arg(QString::fromLatin1(QCryptographicHash::hash(lanes, QCryptographicHash::Sha256).toHex()))
-            .arg(activeTrackSampleRate()).arg(state.playing).arg(track.loopEnabled)
+            .arg(activeTrackSampleRate()).arg(track.loopEnabled)
             .arg(track.loopStartSeconds, 0, 'g', 16).arg(track.loopEndSeconds, 0, 'g', 16);
         return state;
     };
@@ -78,8 +79,18 @@ void MainWindow::initializeListeningTools()
     callbacks.submit = [this](const jam2::EngineCommand& command) { return jam2_.submit(command); };
     callbacks.applied = [this](const ListeningToolsSettings& settings, const std::optional<PreparedMixResult>& result) {
         adoptListeningMix(settings, result);
+        if (trackWorkspace_.playAfterListening && trackWorkspace_.listeningTools.playbackReady()) {
+            QTimer::singleShot(0, this, [this] {
+                if (trackWorkspace_.playAfterListening && trackWorkspace_.listeningTools.playbackReady()) playTrack();
+            });
+        }
+    };
+    callbacks.selected = [this](const ListeningToolsSettings& settings) {
+        settings.applyTo(trackController_.model());
+        updateTrackControls();
     };
     callbacks.rejected = [this](const ListeningToolsSettings& settings, const QString& error) {
+        trackWorkspace_.playAfterListening = false;
         settings.applyTo(trackController_.model());
         updateTrackControls();
         appendLog(error);

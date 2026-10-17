@@ -260,11 +260,15 @@ song's stored BPM. Slider edits commit on release; numeric edits settle for
 beat at least 750 ms ahead. Playback keeps its position and loop passage.
 Turning this option off restores the metronome's normal rate and leaves the
 listening tools local, so local speed can diverge from the global playhead.
-Recording or a transport transition prevents listening edits. Preparation
-failure or a 15-second readiness timeout retains the previous playback.
+Play/Stop retains selected speed, pitch and focus settings. Preparation continues
+while playback is stopped; Play waits for the latest listening mix, and Stop
+can cancel that waiting Play without discarding the settings. Section-transition
+edits are queued until the section settles. Active recording prevents edits.
+Preparation failure or a 15-second readiness timeout retains the previous playback.
 Data exposes the musical rate and effective BPM; structured listening stats
-also include the revision, readiness counts, render time, commit frame and
-timing constants.
+also include the revision, readiness counts, render time, commit frame,
+playback readiness, audio-swap identity, listening queue depth/capacity and timing
+constants.
 
 The armed recording panel and expanded tools keep their content height. The
 track lanes scroll within the remaining space, so they cannot cover those panels.

@@ -152,25 +152,31 @@ void ListeningToolsController::initialize(const ListeningToolsSettings& settings
 }
 void ListeningToolsController::edit(ListeningToolsSettings settings, bool commitNow) {
     const Context state = context();
-    if (state.protectedRecording || state.transportChanging) {
-        error_ = QStringLiteral("listening tools are unavailable while recording or changing transport");
+    if (state.protectedRecording) {
+        error_ = QStringLiteral("listening tools are unavailable while recording");
         if (callbacks_.rejected) callbacks_.rejected(applied_, error_);
         return;
     }
     draft_ = std::move(settings);
+    if (callbacks_.selected) callbacks_.selected(draft_);
     if (commitNow) { debounce_.stop(); request(); } else debounce_.start();
+}
+void ListeningToolsController::flushEdits() {
+    if (debounce_.isActive()) { debounce_.stop(); request(); }
 }
 void ListeningToolsController::request() {
     const Context state = context();
-    if (state.protectedRecording || state.transportChanging) return;
+    if (state.protectedRecording || state.transportChanging) { queuedEdit_ = true; return; }
     if (phase_ == Phase::Scheduled || pendingReset_) { queuedEdit_ = true; return; }
     if (state.sync && state.network && !state.creator) {
         if (!send({{QStringLiteral("type"), type("request")}, {QStringLiteral("settings"), listeningSettingsJson(draft_)}})) {
             error_ = QStringLiteral("listening request could not be sent");
+            draft_ = applied_;
+            if (callbacks_.rejected) callbacks_.rejected(applied_, error_);
         }
         return;
     }
-    if (pending()) cancel(QStringLiteral("superseded by a newer listening edit"), state.creator && shared_);
+    if (pending()) cancel({}, state.creator && shared_, false);
     begin(nextRevision(revision_), draft_, state.bank, state.sync && state.network && !state.peers.isEmpty());
 }
 void ListeningToolsController::begin(int revision, ListeningToolsSettings settings, int bank, bool shared) {
@@ -180,6 +186,8 @@ void ListeningToolsController::begin(int revision, ListeningToolsSettings settin
     prepareGeneration_ = nextRevision(prepareGeneration_);
     bank_ = bank;
     preparing_ = std::move(settings);
+    if (!queuedEdit_) draft_ = preparing_;
+    if (callbacks_.selected) callbacks_.selected(draft_);
     shared_ = shared;
     coupled_ = state.sync;
     sourceSignature_ = state.sourceSignature;
@@ -244,6 +252,7 @@ void ListeningToolsController::ready() {
 void ListeningToolsController::maybeCommit() {
     if (phase_ != Phase::Ready || (!expected_.isEmpty() && ready_ != expected_)) return;
     const Context state = context();
+    if (state.transportChanging || state.protectedRecording || (shared_ && !state.creator)) return;
     const int sampleRate = state.position.sampleRate > 0 ? state.position.sampleRate : 48000;
     const auto lead = static_cast<std::uint64_t>(sampleRate) * kCommitLeadMs / 1000ULL;
     std::uint64_t target = state.position.currentFrame + lead;
@@ -292,7 +301,6 @@ bool ListeningToolsController::schedule(const QJsonObject& message) {
     command.frame = rawTarget;
     command.playback_tempo = tempo;
     command.update_playback_tempo = coupled_;
-    command.enabled = message.value(QStringLiteral("playing")).toBool() && state.playing;
     if (prepared_) {
         command.signed_value = static_cast<std::int64_t>(stageCookie_);
         double sourceSeconds = message.value(QStringLiteral("source_seconds")).toDouble();
@@ -340,6 +348,7 @@ void ListeningToolsController::cancel(const QString& error, bool broadcast, bool
     commitRawFrame_ = 0;
     stageCookie_ = 0;
     error_ = error;
+    if (!error.isEmpty()) draft_ = applied_;
     if (!error.isEmpty() && callbacks_.rejected) callbacks_.rejected(applied_, error);
     if (!error.isEmpty() && callbacks_.log) callbacks_.log(QStringLiteral("listening change cancelled: ") + error);
 }
@@ -461,11 +470,19 @@ void ListeningToolsController::tick() {
         return;
     }
     if (phase_ == Phase::Scheduled && state.engineRunning && state.engine.engine_frame < commitRawFrame_ &&
-        (state.bank != bank_ || state.protectedRecording || state.transportChanging || state.sourceSignature != sourceSignature_)) {
+        (state.bank != bank_ || state.protectedRecording || state.sourceSignature != sourceSignature_)) {
         cancel(QStringLiteral("track content or transport changed before listening commit"), shared_ && state.creator);
         return;
     }
     if (phase_ == Phase::Scheduled && (!state.engineRunning || state.engine.engine_frame >= commitRawFrame_)) {
+        if (state.engineRunning && prepared_ && state.engine.listening_source_cookie != stageCookie_) {
+            // The callback may not have published the source identity yet.
+            // Never declare an audio change applied from its tempo alone.
+            if (state.engine.engine_frame <= commitRawFrame_ + static_cast<std::uint64_t>(std::max(1, state.position.sampleRate)) * kAudioPublicationGraceMs / 1000) return;
+            phase_ = Phase::Ready;
+            cancel(QStringLiteral("listening audio swap was not applied by the engine"), shared_ && state.creator);
+            return;
+        }
         if (state.engineRunning && coupled_ && (state.engine.playback_tempo.rate_ppm != committedTempo_.rate_ppm ||
             state.engine.playback_tempo.anchor_frame != committedTempo_.anchor_frame ||
             state.engine.playback_tempo.anchor_position != committedTempo_.anchor_position)) {
@@ -479,6 +496,7 @@ void ListeningToolsController::tick() {
         if (!queuedEdit_) draft_ = applied_;
         phase_ = Phase::Idle;
         if (callbacks_.applied) callbacks_.applied(applied_, prepared_);
+        if (callbacks_.selected) callbacks_.selected(draft_);
         prepared_.reset();
         stageCookie_ = 0;
         if (callbacks_.log) callbacks_.log(QStringLiteral("listening revision=%1 speed_ppm=%2 musical_rate_ppm=%3 commit_raw_frame=%4 render_ms=%5")
@@ -487,7 +505,7 @@ void ListeningToolsController::tick() {
         return;
     }
     if (pending() && phase_ != Phase::Scheduled) {
-        if (state.bank != bank_ || state.protectedRecording || state.transportChanging || state.sourceSignature != sourceSignature_) {
+        if (state.bank != bank_ || state.protectedRecording || state.sourceSignature != sourceSignature_) {
             cancel(QStringLiteral("track content or transport changed during preparation"), shared_ && state.creator);
         } else if (preparationTime_.elapsed() > kPreparationTimeoutMs) {
             cancel(QStringLiteral("listening preparation timed out"), shared_ && state.creator);
@@ -495,7 +513,8 @@ void ListeningToolsController::tick() {
             cancel(QStringLiteral("jam membership changed during preparation"), true);
         }
     }
-    if (phase_ == Phase::Idle && queuedEdit_ && !pendingReset_) {
+    if (phase_ == Phase::Ready) maybeCommit();
+    if (phase_ == Phase::Idle && queuedEdit_ && !pendingReset_ && !state.transportChanging && !state.protectedRecording) {
         queuedEdit_ = false;
         request();
         return;
@@ -519,6 +538,11 @@ QJsonObject ListeningToolsController::stats() const {
     const Context state = context();
     return {{QStringLiteral("sync"), state.sync}, {QStringLiteral("phase"), static_cast<int>(phase_)},
         {QStringLiteral("reset_pending"), pendingReset_.has_value()},
+        {QStringLiteral("playback_ready"), playbackReady()},
+        {QStringLiteral("audio_commit_cookie"), QString::number(state.engine.listening_source_cookie)},
+        {QStringLiteral("audio_queue_depth"), static_cast<qint64>(state.engine.listening_source_queue_depth)},
+        {QStringLiteral("audio_queue_capacity"), static_cast<qint64>(state.engine.listening_source_queue_capacity)},
+        {QStringLiteral("audio_publication_grace_ms"), kAudioPublicationGraceMs},
         {QStringLiteral("requested_revision"), revision_}, {QStringLiteral("applied_revision"), appliedRevision_},
         {QStringLiteral("requested_speed_ppm"), draft_.speedPpm}, {QStringLiteral("applied_speed_ppm"), applied_.speedPpm},
         {QStringLiteral("effective_bpm"), state.engine.metronome_pattern.bpm * state.engine.playback_tempo.rate()},

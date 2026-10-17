@@ -464,7 +464,8 @@ private:
         SharedTrackModel validatedModel);
     QJsonObject songToJson(bool syncCompatibleOnly = false) const;
     void auditWavCompatibilityForSession(int expectedSampleRate, bool showModal);
-    bool loadSongJson(const QJsonObject& object);
+    enum class SongLoadOrigin { Project, SharedSnapshot };
+    bool loadSongJson(const QJsonObject& object, SongLoadOrigin origin = SongLoadOrigin::Project);
     void newSong();
     void openSong();
     bool saveSong();

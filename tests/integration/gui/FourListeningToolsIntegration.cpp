@@ -189,6 +189,44 @@ int main(int argc, char** argv) {
         invoke(peers.peer(1), QStringLiteral("looper.speed.value"), QStringLiteral("set-value"), 0.73);
         waitAll(peers, [](std::size_t, const QJsonObject& state) { return applied(state, 730000, 730000, 300, 640, true); },
             QStringLiteral("fractional shared rate"));
+        // Reproduce the real GUI race: settle another speed edit while Stop
+        // cancels the ordinary transport, keeping all four engines running.
+        invoke(peers.peer(1), QStringLiteral("looper.speed.value"), QStringLiteral("set-value"), 0.61);
+        invoke(peers.peer(0), QStringLiteral("performance.track-toggle"), QStringLiteral("click"));
+        invoke(peers.peer(1), QStringLiteral("looper.speed.value"), QStringLiteral("set-value"), 0.67);
+        waitAll(peers, [](std::size_t, const QJsonObject& state) {
+            return applied(state, 670000, 670000, 300, 640, true) &&
+                !state.value(QStringLiteral("performance")).toObject().value(QStringLiteral("global_transport_playing")).toBool();
+        }, QStringLiteral("speed selection applies across the mesh despite Stop"));
+
+        // Play immediately after stopped edits. Playback must wait for the
+        // shared prepared audio, rather than restart the old 0.67x mix.
+        invoke(peers.peer(2), QStringLiteral("looper.speed.value"), QStringLiteral("set-value"), 0.82);
+        invoke(peers.peer(2), QStringLiteral("looper.pitch.value"), QStringLiteral("set-value"), 5);
+        invoke(peers.peer(2), QStringLiteral("looper.focus.value"), QStringLiteral("set-value"), 900);
+        invoke(peers.peer(2), QStringLiteral("performance.track-toggle"), QStringLiteral("click"));
+        const auto resumed = waitAll(peers, [](std::size_t, const QJsonObject& state) {
+            const bool playing = state.value(QStringLiteral("performance")).toObject().value(QStringLiteral("global_transport_playing")).toBool();
+            if (playing) require(applied(state, 820000, 820000, 500, 900, true),
+                QStringLiteral("Play started before the latest listening settings applied"));
+            return playing && applied(state, 820000, 820000, 500, 900, true);
+        }, QStringLiteral("stopped speed/pitch/focus edits persist into the next shared Play"));
+        for (const auto& state : resumed) {
+            require(state.value(QStringLiteral("jam")).toObject().value(QStringLiteral("transport_grid_ready")).toBool() &&
+                state.value(QStringLiteral("performance")).toObject().value(QStringLiteral("metronome_epoch_valid")).toBool(),
+                QStringLiteral("listening edits and restart must retain a valid synchronized epoch/grid"));
+        }
+        invoke(peers.peer(0), QStringLiteral("performance.track-toggle"), QStringLiteral("click"));
+        waitAll(peers, [](std::size_t, const QJsonObject& state) {
+            return !state.value(QStringLiteral("performance")).toObject().value(QStringLiteral("global_transport_playing")).toBool();
+        }, QStringLiteral("all four peers stopped before pending-Play cancellation"));
+        invoke(peers.peer(3), QStringLiteral("looper.speed.value"), QStringLiteral("set-value"), 0.93);
+        invoke(peers.peer(3), QStringLiteral("performance.track-toggle"), QStringLiteral("click"));
+        invoke(peers.peer(3), QStringLiteral("performance.track-toggle"), QStringLiteral("click"));
+        waitAll(peers, [](std::size_t, const QJsonObject& state) {
+            return applied(state, 930000, 930000, 500, 900, true) &&
+                !state.value(QStringLiteral("performance")).toObject().value(QStringLiteral("global_transport_playing")).toBool();
+        }, QStringLiteral("Stop cancels waiting Play while retaining the newest shared speed"));
         for (std::size_t i = 0; i < 4; ++i) {
             command(peers.peer(i), {{QStringLiteral("type"), QStringLiteral("shutdown")}, {QStringLiteral("id"), QStringLiteral("shutdown")}});
             QJsonObject shutdown;

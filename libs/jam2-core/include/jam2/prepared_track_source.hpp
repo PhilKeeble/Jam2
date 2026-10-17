@@ -16,9 +16,10 @@ class PreparedTrackSource {
 public:
     static constexpr std::size_t kSlots = 4;
     static constexpr std::size_t kCommandCapacity = 64;
+    static constexpr std::size_t kListeningCommandCapacity = 8;
     enum class SlotState : std::uint8_t { Free, Loading, Ready, Active, Retired, Reclaiming };
     enum class CommandType : std::uint8_t { Swap, Clear, Play, Stop, Seek, NudgeSource, SetLoop, SetLevel };
-    struct Command { CommandType type{}; std::uint32_t slot = 0; std::uint64_t targetFrame = 0; std::uint64_t sourceFrame = 0; std::uint64_t loopEndFrame = 0; std::int32_t levelPpm = 1000000; std::uint64_t generation = 0; std::uint64_t listeningGeneration = 0; };
+    struct Command { CommandType type{}; std::uint32_t slot = 0; std::uint64_t targetFrame = 0; std::uint64_t sourceFrame = 0; std::uint64_t loopEndFrame = 0; std::int32_t levelPpm = 1000000; std::uint64_t generation = 0; std::uint64_t listeningGeneration = 0; std::uint64_t listeningCookie = 0; };
     explicit PreparedTrackSource(std::size_t maxFrames);
     int claimLoadingSlot();
     bool publishReady(int slot, std::uint64_t frames, int sampleRate);
@@ -39,16 +40,27 @@ public:
     std::uint64_t scheduledStartFrame() const noexcept { return scheduledStartFrame_.load(std::memory_order_relaxed); }
     std::uint64_t actualStartFrame() const noexcept { return actualStartFrame_.load(std::memory_order_relaxed); }
     bool playing() const noexcept { return playingAtomic_.load(std::memory_order_relaxed); }
+    std::uint64_t appliedListeningCookie() const noexcept { return appliedListeningCookie_.load(std::memory_order_acquire); }
+    std::size_t listeningQueueDepth() const noexcept {
+        const auto read = listeningRead_.load(std::memory_order_acquire), write = listeningWrite_.load(std::memory_order_acquire);
+        return (write + kListeningCommandCapacity - read) % kListeningCommandCapacity;
+    }
     bool needsProcessing() const noexcept
     {
         return playingAtomic_.load(std::memory_order_acquire) ||
             read_.load(std::memory_order_acquire) !=
-                write_.load(std::memory_order_acquire);
+                write_.load(std::memory_order_acquire) ||
+            listeningRead_.load(std::memory_order_acquire) != listeningWrite_.load(std::memory_order_acquire);
     }
 private:
     struct Slot { std::vector<std::int16_t> samples; std::atomic<SlotState> state{SlotState::Free}; std::uint64_t frames = 0; int sampleRate = 0; };
     std::array<Slot, kSlots> slots_;
     std::array<Command, kCommandCapacity> queue_{};
+    // Listening swaps retain the current playing state and cannot block Stop
+    // or be invalidated by cancellation of an ordinary transport schedule.
+    std::array<Command, kListeningCommandCapacity> listeningQueue_{};
+    std::atomic<std::uint32_t> listeningWrite_{0}, listeningRead_{0};
+    std::atomic<std::uint64_t> appliedListeningCookie_{0};
     std::mutex producerMutex_;
     std::atomic<std::uint32_t> write_{0}, read_{0};
     std::atomic<std::uint64_t> generation_{1};

@@ -357,6 +357,9 @@ struct EngineSnapshot {
     std::uint64_t prepared_source_underruns = 0;
     std::uint64_t prepared_source_busy_events = 0;
     bool prepared_source_playing = false;
+    std::uint64_t listening_source_cookie = 0;
+    std::size_t listening_source_queue_depth = 0;
+    std::size_t listening_source_queue_capacity = 0;
     EngineRecordingSnapshot jam_recording;
     EngineTrackTakeSnapshot track_take;
     std::size_t command_queue_capacity = 0;

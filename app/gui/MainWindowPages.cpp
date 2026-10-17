@@ -869,7 +869,7 @@ void MainWindowPages::build(MainWindow& w)
             .arg(w.jam2_.isRunning())
             .arg(w.performanceCountInCheck_ &&
                 w.performanceCountInCheck_->isChecked()));
-        if (w.trackRecordingWorkflow_.globalTransportRequestedPlaying()) {
+        if (w.trackRecordingWorkflow_.globalTransportRequestedPlaying() || w.trackWorkspace_.playAfterListening) {
             w.runGridLockedEngineAction(
                 QStringLiteral("track.stop"),
                 [&w](std::uint64_t targetFrame) { w.stopTrack(targetFrame); });

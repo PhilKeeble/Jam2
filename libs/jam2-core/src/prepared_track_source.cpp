@@ -35,23 +35,28 @@ bool PreparedTrackSource::enqueue(const Command& command)
 bool PreparedTrackSource::enqueueBatch(std::span<const Command> commands)
 {
     std::lock_guard<std::mutex> lock(producerMutex_);
-    const std::uint32_t capacity = static_cast<std::uint32_t>(kCommandCapacity);
-    std::uint32_t write = write_.load(std::memory_order_relaxed);
-    const std::uint32_t read = read_.load(std::memory_order_acquire);
-    const std::uint32_t used = write >= read ? write - read : capacity - (read - write);
-    const std::size_t available = static_cast<std::size_t>(capacity - 1U - used);
-    if (commands.size() > available) {
-        return false;
-    }
-    const std::uint64_t generation = generation_.load(std::memory_order_acquire);
-    for (const Command& command : commands) {
-        queue_[write] = command;
-        queue_[write].generation = generation;
-        if (command.listeningGeneration != 0) queue_[write].listeningGeneration = listeningGeneration_.load(std::memory_order_acquire);
-        write = (write + 1U) % capacity;
-    }
-    write_.store(write, std::memory_order_release);
-    return true;
+    if (commands.empty()) return true;
+    const bool listening = commands.front().listeningGeneration != 0;
+    if (std::any_of(commands.begin(), commands.end(), [listening](const Command& command) {
+        return (command.listeningGeneration != 0) != listening;
+    })) return false;
+    const auto enqueue = [&](auto& queue, auto& readIndex, auto& writeIndex, const auto& generation) {
+        const auto capacity = static_cast<std::uint32_t>(queue.size());
+        std::uint32_t write = writeIndex.load(std::memory_order_relaxed);
+        const std::uint32_t read = readIndex.load(std::memory_order_acquire);
+        const std::uint32_t used = (write + capacity - read) % capacity;
+        if (commands.size() > capacity - 1U - used) return false;
+        const auto transactionGeneration = generation.load(std::memory_order_acquire);
+        for (const Command& command : commands) {
+            queue[write] = command;
+            queue[write].generation = transactionGeneration;
+            write = (write + 1U) % capacity;
+        }
+        writeIndex.store(write, std::memory_order_release);
+        return true;
+    };
+    return listening ? enqueue(listeningQueue_, listeningRead_, listeningWrite_, listeningGeneration_)
+        : enqueue(queue_, read_, write_, generation_);
 }
 
 void PreparedTrackSource::cancelScheduled() noexcept
@@ -75,106 +80,115 @@ int PreparedTrackSource::mix(
     std::size_t cursor = 0;
     while (cursor < frames) {
         const std::uint64_t currentFrame = callbackFrame + static_cast<std::uint64_t>(cursor);
-        for (;;) {
-            const std::uint32_t read = read_.load(std::memory_order_relaxed);
-            if (read == write_.load(std::memory_order_acquire)) {
-                break;
-            }
-            const Command command = queue_[read];
-            if (command.generation != generation_.load(std::memory_order_acquire) ||
-                (command.listeningGeneration != 0 && command.listeningGeneration != listeningGeneration_.load(std::memory_order_acquire))) {
-                // A cancelled Swap owns a Ready slot that no later command can
-                // activate. Release it while consuming the stale command;
-                // otherwise repeated scheduled loads permanently exhaust the
-                // fixed source slots. This is an atomic state transition only
-                // and remains safe for the real-time callback.
-                if (command.type == CommandType::Swap && command.slot < kSlots) {
-                    abandonReadySlot(static_cast<int>(command.slot));
+        const auto consumeDue = [&](auto& queue, auto& readIndex, const auto& writeIndex, const auto& generation) {
+            const auto capacity = static_cast<std::uint32_t>(queue.size());
+            for (;;) {
+                const std::uint32_t read = readIndex.load(std::memory_order_relaxed);
+                if (read == writeIndex.load(std::memory_order_acquire)) {
+                    break;
                 }
-                read_.store(
-                    (read + 1U) % static_cast<std::uint32_t>(kCommandCapacity),
-                    std::memory_order_release);
-                continue;
-            }
-            if (command.targetFrame > currentFrame) {
-                break;
-            }
-            read_.store(
-                (read + 1U) % static_cast<std::uint32_t>(kCommandCapacity),
-                std::memory_order_release);
-            if (command.type == CommandType::Swap &&
-                command.slot < kSlots &&
-                slots_[command.slot].state.load(std::memory_order_acquire) == SlotState::Ready) {
-                scheduledStartFrame_.store(command.targetFrame, std::memory_order_relaxed);
-                if (active_ >= 0) {
-                    slots_[active_].state.store(SlotState::Retired, std::memory_order_release);
-                }
-                active_ = static_cast<int>(command.slot);
-                slots_[active_].state.store(SlotState::Active, std::memory_order_release);
-                sourcePos_ = command.sourceFrame;
-                if (playing_ && command.targetFrame > 0 && currentFrame > command.targetFrame &&
-                    slots_[active_].frames > 0) {
-                    sourcePos_ = (sourcePos_ + currentFrame - command.targetFrame) %
-                        slots_[active_].frames;
-                }
-            } else if (command.type == CommandType::Clear) {
-                if (active_ >= 0) {
-                    slots_[active_].state.store(
-                        SlotState::Retired, std::memory_order_release);
-                }
-                active_ = -1;
-                playing_ = false;
-                sourcePos_ = 0;
-                loopStart_ = 0;
-                loopEnd_ = 0;
-                scheduledStartFrame_.store(0, std::memory_order_relaxed);
-                actualStartFrame_.store(0, std::memory_order_relaxed);
-            } else if (command.type == CommandType::Play) {
-                scheduledStartFrame_.store(command.targetFrame, std::memory_order_relaxed);
-                playing_ = active_ >= 0;
-                actualStartFrame_.store(
-                    playing_ ? currentFrame : 0,
-                    std::memory_order_relaxed);
-            } else if (command.type == CommandType::Stop) {
-                playing_ = false;
-            } else if (command.type == CommandType::Seek) {
-                sourcePos_ = command.sourceFrame;
-            } else if (command.type == CommandType::NudgeSource && active_ >= 0) {
-                const std::int64_t delta = command.levelPpm;
-                const std::uint64_t slotFrames = slots_[active_].frames;
-                if (loopEnd_ > loopStart_) {
-                    const std::int64_t loopFrames = static_cast<std::int64_t>(loopEnd_ - loopStart_);
-                    std::int64_t relative = sourcePos_ >= loopStart_
-                        ? static_cast<std::int64_t>(sourcePos_ - loopStart_)
-                        : -static_cast<std::int64_t>(loopStart_ - sourcePos_);
-                    relative += delta;
-                    relative %= loopFrames;
-                    if (relative < 0) {
-                        relative += loopFrames;
+                const Command command = queue[read];
+                if (command.generation != generation.load(std::memory_order_acquire)) {
+                    // A cancelled Swap owns a Ready slot that no later command can
+                    // activate. Release it while consuming the stale command;
+                    // otherwise repeated scheduled loads permanently exhaust the
+                    // fixed source slots. This is an atomic state transition only
+                    // and remains safe for the real-time callback.
+                    if (command.type == CommandType::Swap && command.slot < kSlots) {
+                        abandonReadySlot(static_cast<int>(command.slot));
                     }
-                    sourcePos_ = loopStart_ + static_cast<std::uint64_t>(relative);
-                } else if (delta < 0) {
-                    const std::uint64_t magnitude = static_cast<std::uint64_t>(-delta);
-                    sourcePos_ = sourcePos_ > magnitude ? sourcePos_ - magnitude : 0ULL;
-                } else {
-                    sourcePos_ = std::min(slotFrames, sourcePos_ + static_cast<std::uint64_t>(delta));
+                    readIndex.store(
+                        (read + 1U) % capacity,
+                        std::memory_order_release);
+                    continue;
                 }
-            } else if (command.type == CommandType::SetLoop) {
-                loopStart_ = command.sourceFrame;
-                loopEnd_ = command.loopEndFrame;
-            } else if (command.type == CommandType::SetLevel) {
-                levelPpm_ = command.levelPpm;
+                if (command.targetFrame > currentFrame) {
+                    break;
+                }
+                readIndex.store(
+                    (read + 1U) % capacity,
+                    std::memory_order_release);
+                if (command.type == CommandType::Swap &&
+                    command.slot < kSlots &&
+                    slots_[command.slot].state.load(std::memory_order_acquire) == SlotState::Ready) {
+                    scheduledStartFrame_.store(command.targetFrame, std::memory_order_relaxed);
+                    if (active_ >= 0) {
+                        slots_[active_].state.store(SlotState::Retired, std::memory_order_release);
+                    }
+                    active_ = static_cast<int>(command.slot);
+                    slots_[active_].state.store(SlotState::Active, std::memory_order_release);
+                    appliedListeningCookie_.store(command.listeningCookie, std::memory_order_release);
+                    sourcePos_ = command.sourceFrame;
+                    if (playing_ && command.targetFrame > 0 && currentFrame > command.targetFrame &&
+                        slots_[active_].frames > 0) {
+                        sourcePos_ = (sourcePos_ + currentFrame - command.targetFrame) %
+                            slots_[active_].frames;
+                    }
+                } else if (command.type == CommandType::Clear) {
+                    if (active_ >= 0) {
+                        slots_[active_].state.store(
+                            SlotState::Retired, std::memory_order_release);
+                    }
+                    active_ = -1;
+                    appliedListeningCookie_.store(0, std::memory_order_release);
+                    playing_ = false;
+                    sourcePos_ = 0;
+                    loopStart_ = 0;
+                    loopEnd_ = 0;
+                    scheduledStartFrame_.store(0, std::memory_order_relaxed);
+                    actualStartFrame_.store(0, std::memory_order_relaxed);
+                } else if (command.type == CommandType::Play) {
+                    scheduledStartFrame_.store(command.targetFrame, std::memory_order_relaxed);
+                    playing_ = active_ >= 0;
+                    actualStartFrame_.store(
+                        playing_ ? currentFrame : 0,
+                        std::memory_order_relaxed);
+                } else if (command.type == CommandType::Stop) {
+                    playing_ = false;
+                } else if (command.type == CommandType::Seek) {
+                    sourcePos_ = command.sourceFrame;
+                } else if (command.type == CommandType::NudgeSource && active_ >= 0) {
+                    const std::int64_t delta = command.levelPpm;
+                    const std::uint64_t slotFrames = slots_[active_].frames;
+                    if (loopEnd_ > loopStart_) {
+                        const std::int64_t loopFrames = static_cast<std::int64_t>(loopEnd_ - loopStart_);
+                        std::int64_t relative = sourcePos_ >= loopStart_
+                            ? static_cast<std::int64_t>(sourcePos_ - loopStart_)
+                            : -static_cast<std::int64_t>(loopStart_ - sourcePos_);
+                        relative += delta;
+                        relative %= loopFrames;
+                        if (relative < 0) {
+                            relative += loopFrames;
+                        }
+                        sourcePos_ = loopStart_ + static_cast<std::uint64_t>(relative);
+                    } else if (delta < 0) {
+                        const std::uint64_t magnitude = static_cast<std::uint64_t>(-delta);
+                        sourcePos_ = sourcePos_ > magnitude ? sourcePos_ - magnitude : 0ULL;
+                    } else {
+                        sourcePos_ = std::min(slotFrames, sourcePos_ + static_cast<std::uint64_t>(delta));
+                    }
+                } else if (command.type == CommandType::SetLoop) {
+                    loopStart_ = command.sourceFrame;
+                    loopEnd_ = command.loopEndFrame;
+                } else if (command.type == CommandType::SetLevel) {
+                    levelPpm_ = command.levelPpm;
+                }
             }
-        }
+        };
+        consumeDue(queue_, read_, write_, generation_);
+        consumeDue(listeningQueue_, listeningRead_, listeningWrite_, listeningGeneration_);
 
         std::size_t segmentEnd = frames;
-        const std::uint32_t read = read_.load(std::memory_order_relaxed);
-        if (read != write_.load(std::memory_order_acquire)) {
-            const std::uint64_t target = queue_[read].targetFrame;
-            if (target > currentFrame && target < callbackFrame + static_cast<std::uint64_t>(frames)) {
-                segmentEnd = static_cast<std::size_t>(target - callbackFrame);
+        const auto endAtNext = [&](const auto& queue, const auto& readIndex, const auto& writeIndex) {
+            const auto read = readIndex.load(std::memory_order_relaxed);
+            if (read != writeIndex.load(std::memory_order_acquire)) {
+                const auto target = queue[read].targetFrame;
+                if (target > currentFrame && target < callbackFrame + static_cast<std::uint64_t>(segmentEnd))
+                    segmentEnd = static_cast<std::size_t>(target - callbackFrame);
             }
-        }
+        };
+        endAtNext(queue_, read_, write_);
+        endAtNext(listeningQueue_, listeningRead_, listeningWrite_);
 
         if (playing_ && active_ >= 0) {
             Slot& slot = slots_[active_];

@@ -65,17 +65,20 @@ public:
         std::function<bool(const ListeningToolsSettings&, int, int)> prepare;
         std::function<bool(const jam2::EngineCommand&)> submit;
         std::function<void(const ListeningToolsSettings&, const std::optional<PreparedMixResult>&)> applied;
+        std::function<void(const ListeningToolsSettings&)> selected;
         std::function<void(const ListeningToolsSettings&, const QString&)> rejected;
         std::function<void(const QString&)> log;
     };
     static constexpr int kDebounceMs = 200;
     static constexpr int kCommitLeadMs = 750;
+    static constexpr int kAudioPublicationGraceMs = 200;
     static constexpr int kPreparationTimeoutMs = 15000;
     explicit ListeningToolsController(QObject* parent = nullptr);
     ~ListeningToolsController() override;
     void setCallbacks(Callbacks callbacks);
     void initialize(const ListeningToolsSettings& settings);
     void edit(ListeningToolsSettings settings, bool commitNow = false);
+    void flushEdits();
     void policyChanged(bool previouslySynced);
     void receive(const QJsonObject& message, const QString& source);
     void prepared(int revision, PreparedMixResult result);
@@ -84,7 +87,12 @@ public:
     void reset();
     void tick();
     const ListeningToolsSettings& appliedSettings() const noexcept { return applied_; }
+    const ListeningToolsSettings& selectedSettings() const noexcept { return draft_; }
+    bool playbackReady() const noexcept {
+        return phase_ == Phase::Idle && !debounce_.isActive() && !queuedEdit_ && draft_ == applied_;
+    }
     bool pending() const noexcept { return phase_ != Phase::Idle; }
+    bool pendingForBank(int bank) const noexcept { return pending() && bank_ == bank; }
     QJsonObject stats() const;
 private:
     void request();

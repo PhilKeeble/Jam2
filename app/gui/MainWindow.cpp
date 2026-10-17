@@ -10465,6 +10465,10 @@ void MainWindow::regeneratePreparedMix(int bankIndex)
     const int requestedBank = bankIndex < 0 ? viewedBankIndex_ : bankIndex;
     const int targetBank = qBound(0, requestedBank, looperProject_.banks().size() - 1);
     (void)extendSectionToFitTracks(targetBank);
+    // The listening renderer owns this bank's replacement until it commits.
+    // A stopped-state snapshot must not render the previous applied settings
+    // and load them over the pending listening source.
+    if (trackWorkspace_.listeningTools.pendingForBank(targetBank)) return;
     const int sharedBank = sharedBankLaunch_.snapshot().bankIndex;
     const jam2::gui::PreparedMixRequestDecision request =
         preparedMixLifecycle_.request(
@@ -10749,6 +10753,7 @@ void MainWindow::loadPreparedMixIntoEngine(
     std::uint64_t sourceFrame,
     bool alignToRunningTransport)
 {
+    if (trackWorkspace_.listeningTools.pendingForBank(looperProject_.activeBankIndex())) return;
     if (!jam2_.isRunning() || preparedMixLifecycle_.active().path.isEmpty() ||
         !preparedMixLifecycle_.active().error.isEmpty()) {
         return;
@@ -10901,7 +10906,7 @@ void MainWindow::updateTrackPlaybackPresentation()
     }
     if (performanceTrackToggle_) {
         const bool playing =
-            trackRecordingWorkflow_.globalTransportRequestedPlaying();
+            trackRecordingWorkflow_.globalTransportRequestedPlaying() || trackWorkspace_.playAfterListening;
         performanceTrackToggle_->setText(
             playing ? QStringLiteral("■") : QStringLiteral("▶"));
         performanceTrackToggle_->setProperty("active", playing);
@@ -11480,6 +11485,15 @@ void MainWindow::playTrack()
         QMessageBox::warning(this, QStringLiteral("Jam2 Track"), QStringLiteral("Start the local engine before playing the prepared mix."));
         return;
     }
+    trackWorkspace_.listeningTools.flushEdits();
+    if (!trackWorkspace_.listeningTools.playbackReady()) {
+        trackWorkspace_.playAfterListening = true;
+        trackController_.requestPlayback(true);
+        updateTrackPlaybackPresentation();
+        if (gridScheduleLabel_) gridScheduleLabel_->setText(QStringLiteral("Play: preparing listening settings"));
+        return;
+    }
+    trackWorkspace_.playAfterListening = false;
     publishStoppedTrackStateWhenApplied_ = false;
     trackController_.requestPlayback(true);
     updateTrackPlaybackPresentation();
@@ -11564,6 +11578,7 @@ void MainWindow::playTrack()
 
 void MainWindow::stopTrack(std::uint64_t targetFrame)
 {
+    trackWorkspace_.playAfterListening = false;
     if (sharedRecordingProtected()) {
         appendLog(QStringLiteral("global playback stop ignored while a synced recording is active"));
         return;
@@ -13745,7 +13760,7 @@ void MainWindow::handleSongSet(
             pendingSongSourcePeerToken_.clear();
             pendingSongNeedsAuthoritativePublish_ = false;
             pendingLooperAssetHashes_.clear();
-            if (loadSongJson(resolvedSong)) {
+            if (loadSongJson(resolvedSong, SongLoadOrigin::SharedSnapshot)) {
                 if (hostAuthoritative) {
                     lastAppliedHostArrangementRevision_ = revision;
                     if (!pendingRecordingId.isEmpty() &&
@@ -13832,7 +13847,7 @@ void MainWindow::applyPendingSongIfAssetsReady()
         sendSongSnapshot();
         return;
     }
-    if (loadSongJson(song)) {
+    if (loadSongJson(song, SongLoadOrigin::SharedSnapshot)) {
         if (!publishAuthoritative) {
             lastAppliedHostArrangementRevision_ = qMax(
                 lastAppliedHostArrangementRevision_, revision);
@@ -14946,7 +14961,7 @@ QJsonObject MainWindow::songToJson(bool syncCompatibleOnly) const
     return root;
 }
 
-bool MainWindow::loadSongJson(const QJsonObject& object)
+bool MainWindow::loadSongJson(const QJsonObject& object, SongLoadOrigin origin)
 {
     BeatGridModel loadedSong;
     LooperProject loadedLooper = looperProject_;
@@ -14962,11 +14977,18 @@ bool MainWindow::loadSongJson(const QJsonObject& object)
         loadedSong.sections().size() != loadedLooper.banks().size()) {
         return false;
     }
+    const bool unchangedSources =
+        loadedSong.toJson().value(QStringLiteral("sections")) == chordModel_.toJson().value(QStringLiteral("sections")) &&
+        loadedLooper.toJson() == looperProject_.toJson();
+    const bool preserveListeningMix = origin == SongLoadOrigin::SharedSnapshot && unchangedSources &&
+        trackWorkspace_.listeningTools.pendingForBank(looperProject_.activeBankIndex());
+    // Stop also publishes an unchanged song snapshot. Keep that snapshot from
+    // unloading a pending listening swap for the very same content.
     // A prepared mix is a derived cache of the old arrangement. Invalidate
     // and unload it before adopting any replacement song so a later remote
     // TrackRestart cannot revive stale PCM that is no longer represented in
     // the GUI or looper model.
-    discardPreparedMix(false);
+    if (!preserveListeningMix) discardPreparedMix(false);
     chordModel_ = loadedSong;
     if (!jamStorage_.isSaved() &&
         chordModel_.title() != jamStorage_.displayName()) {
@@ -15000,7 +15022,7 @@ bool MainWindow::loadSongJson(const QJsonObject& object)
     pendingBankIndex_ = -1;
     pendingBankAbsoluteBeat_ = 0;
     pendingBankRequestedTargetBeat_.reset();
-    preparedMixLifecycle_.invalidateAll();
+    if (!preserveListeningMix) preparedMixLifecycle_.invalidateAll();
     discardObsoletePreparedMixPaths();
     viewedBankIndex_ = looperProject_.activeBankIndex();
     if (looperProject_.hasSerializedTiming()) {

@@ -879,6 +879,59 @@ void testListeningTempoAndSpecificCancellation()
     source.abandonLoadingSlot(reclaimed);
 }
 
+void testListeningSwapSurvivesTransportStop()
+{
+    using Source = jam2::audio::PreparedTrackSource;
+    Source source(8);
+    const auto stage = [&](std::int16_t sample) {
+        const int slot = source.claimLoadingSlot();
+        expect(slot >= 0, "listening transport fixture claims an owned slot");
+        if (slot < 0) return slot;
+        std::fill_n(source.loadingData(slot), 8, sample);
+        expect(source.publishReady(slot, 8, 48000), "listening transport fixture publishes a source");
+        return slot;
+    };
+    const int oldSlot = stage(1000), newSlot = stage(2000);
+    if (oldSlot < 0 || newSlot < 0) return;
+    const std::array start{
+        Source::Command{Source::CommandType::Swap, static_cast<std::uint32_t>(oldSlot)},
+        Source::Command{Source::CommandType::SetLoop, 0, 0, 0, 8},
+        Source::Command{Source::CommandType::Play}};
+    expect(source.enqueueBatch(start), "initial prepared source plays");
+    std::array<std::int32_t, 1> output{};
+    source.mix(output.data(), 1, 0);
+    Source::Command swap{Source::CommandType::Swap, static_cast<std::uint32_t>(newSlot), 100};
+    swap.listeningGeneration = 1; swap.listeningCookie = 71;
+    const std::array change{swap, Source::Command{Source::CommandType::SetLoop, 0, 100, 0, 8, 1000000, 0, 1}};
+    expect(source.enqueueBatch(change) && source.listeningQueueDepth() == 2,
+        "future listening audio is held in its bounded independent queue");
+    source.cancelScheduled();
+    expect(source.enqueue({Source::CommandType::Stop}), "Stop submits while a future listening swap is queued");
+    output.fill(0); source.mix(output.data(), 1, 1);
+    expect(!source.playing() && output[0] == 0 && source.appliedListeningCookie() == 0,
+        "Stop applies immediately rather than waiting behind the future listening boundary");
+    output.fill(0); source.mix(output.data(), 1, 100);
+    expect(!source.playing() && output[0] == 0 && source.appliedListeningCookie() == 71 && source.listeningQueueDepth() == 0,
+        "the listening swap still commits while stopped and does not restart playback");
+    const std::array restart{Source::Command{Source::CommandType::Seek}, Source::Command{Source::CommandType::Play}};
+    expect(source.enqueueBatch(restart), "Play resumes the newly prepared source");
+    output.fill(0); source.mix(output.data(), 1, 101);
+    expect(source.playing() && output[0] == 131072000,
+        "the next Play uses the newly committed samples rather than the old source");
+
+    Source bounded(1);
+    const std::array mixedBatch{Source::Command{Source::CommandType::Stop}, swap};
+    expect(!bounded.enqueueBatch(mixedBatch), "mixed transport/listening batches are rejected without partial enqueue");
+    Source::Command future{Source::CommandType::SetLevel, 0, 1000}; future.listeningGeneration = 1;
+    for (std::size_t i = 1; i < Source::kListeningCommandCapacity; ++i)
+        expect(bounded.enqueue(future), "the bounded listening queue accepts its advertised capacity");
+    expect(!bounded.enqueue(future), "a full listening queue rejects additional work");
+    bounded.cancelListeningScheduled();
+    output.fill(0); bounded.mix(output.data(), 1, 0);
+    expect(bounded.listeningQueueDepth() == 0 && bounded.enqueue(future),
+        "cancellation drains the listening queue and allows subsequent work");
+}
+
 void testInjectedInput()
 {
     const double nan = (std::numeric_limits<double>::quiet_NaN)();
@@ -1158,26 +1211,59 @@ void testEngineLocalCancellationPreservesClockReset()
             return false;
         }), "local staged source publishes readiness");
         const auto slowed = engine.snapshot();
-        const auto resetFrame = slowed.engine_frame + 24000;
+        // Exercise distinct future boundaries in a bounded number of callbacks.
+        // A headless 64-frame device can run below nominal wall-clock speed on
+        // hosts whose sleep granularity exceeds its 1.33 ms callback period.
+        const auto resetFrame = slowed.engine_frame + 4096;
         const jam2::PlaybackTempo unity{1000000, resetFrame, slowed.playback_tempo.position(resetFrame)};
         command = {}; command.type = jam2::EngineCommandType::CommitListeningTools;
         command.frame = resetFrame; command.playback_tempo = unity;
         expect(engine.submit(command), "authority unity reset submits");
         command = {}; command.type = jam2::EngineCommandType::CommitListeningTools;
-        command.cookie = 100; command.signed_value = 100; command.frame = resetFrame + 24000;
+        command.cookie = 100; command.signed_value = 100; command.frame = resetFrame + 4096;
         command.enabled = true; command.update_playback_tempo = false;
         command.prepared_loop_enabled = true; command.prepared_loop_end_frame = 2;
         expect(engine.submit(command), "local-only future source swap submits");
         const auto audioTarget = command.frame;
         command = {}; command.type = jam2::EngineCommandType::CancelListeningTools; command.cookie = 100;
         expect(engine.submit(command), "local source cancellation submits");
-        expect(wait([&] { return engine.snapshot().engine_frame > audioTarget + 64; }), "engine crosses both future boundaries");
+        const bool crossed = wait([&] { return engine.snapshot().engine_frame > audioTarget + 64; });
+        if (!crossed) {
+            const auto measured = engine.snapshot();
+            std::cerr << "MEASUREMENT: engine_frame=" << measured.engine_frame << " target=" << audioTarget
+                << " callbacks=" << measured.callbacks << " listening_depth=" << measured.listening_source_queue_depth
+                << " pending_commands=" << measured.command_queue_depth << '\n';
+        }
+        expect(crossed, "engine crosses both future boundaries");
         const auto final = engine.snapshot();
-        engine.requestStop(); engine.join();
         expect(final.playback_tempo.rate_ppm == 1000000 && final.playback_tempo.anchor_frame == unity.anchor_frame,
             "local cancellation preserves the authority's pending clock reset");
         expect(final.prepared_source_playing && final.prepared_source_actual_start_frame == originalStart,
             "local-only cancellation removes the scheduled swap/play while retaining current playback");
+        command = {}; command.type = jam2::EngineCommandType::StageListeningTrack; command.cookie = 150;
+        expect(jam2::engine_command_set_text(command, fixture.path.string()) && engine.submit(command), "stopped-playback update stages through the real engine");
+        expect(wait([&] {
+            jam2::EngineEvent event;
+            while (engine.pollEvent(event)) if (event.type == jam2::EngineEventType::ListeningTrackStaged && event.cookie == 150) return true;
+            return false;
+        }), "stopped-playback source reports staged readiness");
+        command = {}; command.type = jam2::EngineCommandType::CommitListeningTools;
+        command.cookie = 150; command.signed_value = 150; command.frame = engine.snapshot().engine_frame + 4096;
+        command.playback_tempo = {730000, command.frame, unity.position(command.frame)};
+        command.prepared_loop_enabled = true; command.prepared_loop_end_frame = 2;
+        expect(engine.submit(command), "audio and tempo update schedules before Stop");
+        command = {}; command.type = jam2::EngineCommandType::CancelTransport;
+        expect(engine.submit(command), "ordinary transport cancellation submits");
+        command = {}; command.type = jam2::EngineCommandType::PreparedStop;
+        expect(engine.submit(command), "Stop submits behind the scheduled listening update");
+        expect(wait([&] { return !engine.snapshot().prepared_source_playing; }), "Stop takes effect before the listening boundary");
+        expect(wait([&] { const auto state = engine.snapshot(); return state.listening_source_cookie == 150 && state.playback_tempo.rate_ppm == 730000; }),
+            "the real callback commits both the stopped audio source and its tempo despite transport cancellation");
+        expect(!engine.snapshot().prepared_source_playing, "applying listening settings leaves playback stopped");
+        command = {}; command.type = jam2::EngineCommandType::PreparedPlay;
+        expect(engine.submit(command) && wait([&] { return engine.snapshot().prepared_source_playing; }),
+            "subsequent Play starts the committed listening source");
+        engine.requestStop(); engine.join();
     } catch (const std::exception& error) {
         ++failures; std::cerr << "FAIL: engine listening cancellation: " << error.what() << '\n';
     }
@@ -1271,6 +1357,7 @@ int main()
     testPreparedSourceMixing();
     testCancelledPreparedSwapsReleaseEveryReadySlot();
     testListeningTempoAndSpecificCancellation();
+    testListeningSwapSurvivesTransportStop();
     testEngineLocalCancellationPreservesClockReset();
     testInjectedInput();
     testMetronomeOutput();

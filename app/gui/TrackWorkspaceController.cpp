@@ -36,6 +36,7 @@ void TrackWorkspaceController::setCallbacks(Callbacks callbacks)
 
 void TrackWorkspaceController::cancelPendingTrackPlayback() noexcept
 {
+    playAfterListening = false;
     preparedMixLifecycle.setPlayWhenReady(false);
     publishStoppedTrackStateWhenApplied = false;
     pendingSongTrackRestart = false;

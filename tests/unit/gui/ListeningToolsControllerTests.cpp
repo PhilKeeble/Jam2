@@ -25,6 +25,7 @@ struct Harness {
     std::vector<int> renders;
     int applications = 0;
     bool failSubmit = false;
+    ListeningToolsSettings visible;
     Harness() {
         state.engineRunning = true;
         state.position.engineAnchored = true;
@@ -42,6 +43,8 @@ struct Harness {
         callbacks.prepare = [this](const ListeningToolsSettings&, int generation, int) { renders.push_back(generation); return true; };
         callbacks.submit = [this](const jam2::EngineCommand& command) { commands.push_back(command); return !failSubmit; };
         callbacks.applied = [this](const ListeningToolsSettings&, const std::optional<PreparedMixResult>&) { ++applications; };
+        callbacks.selected = [this](const ListeningToolsSettings& settings) { visible = settings; };
+        callbacks.rejected = [this](const ListeningToolsSettings& settings, const QString&) { visible = settings; };
         controller.setCallbacks(std::move(callbacks));
         controller.initialize({});
     }
@@ -49,6 +52,7 @@ struct Harness {
         require(!commands.empty() && commands.back().type == jam2::EngineCommandType::CommitListeningTools, "change must commit through the engine");
         state.engine.engine_frame = commands.back().frame;
         if (commands.back().update_playback_tempo) state.engine.playback_tempo = commands.back().playback_tempo;
+        if (commands.back().signed_value != 0) state.engine.listening_source_cookie = commands.back().cookie;
         state.position.tempo = state.engine.playback_tempo;
         state.position.currentFrame = state.engine.engine_frame;
         controller.tick();
@@ -350,6 +354,65 @@ void testQueueFailureAndPassedBoundary() {
         committed.sent.back().value(QStringLiteral("settings")).toObject().value(QStringLiteral("speed_ppm")).toInt() == 500000,
         "joining after the boundary publishes committed state instead of cancelling active audio");
 }
+void testPlaybackChangesRetainListeningSelection() {
+    ListeningToolsSettings settings;
+    settings.speedPpm = 730000; settings.pitchCents = 200; settings.focusHz = 900;
+    Harness transitioning;
+    transitioning.state.transportChanging = true;
+    transitioning.controller.edit(settings);
+    transitioning.controller.flushEdits();
+    require(transitioning.commands.empty() && !transitioning.controller.playbackReady() && transitioning.visible == settings,
+        "a settled edit during a section transition is retained and makes Play wait");
+    transitioning.state.transportChanging = false;
+    transitioning.controller.tick(); transitioning.finish();
+    require(transitioning.controller.playbackReady() && transitioning.controller.appliedSettings() == settings,
+        "the retained edit is submitted when the section transition settles");
+
+    Harness h;
+    h.state.hasSources = h.state.playing = true;
+    h.controller.edit(settings, true);
+    h.state.playing = false;
+    h.controller.tick();
+    require(h.controller.pending() && h.visible == settings && h.renders.size() == 1,
+        "Stop during rendering retains the selection and its existing render");
+    settings.speedPpm = 610000;
+    h.controller.edit(settings, true);
+    require(h.visible == settings && h.renders.size() == 2,
+        "superseding an unfinished edit never flashes the old applied settings into the controls");
+    QTemporaryDir folder;
+    PreparedMixResult result;
+    result.path = folder.filePath(QStringLiteral("paused.wav"));
+    QFile file(result.path); require(file.open(QIODevice::WriteOnly), "paused render fixture opens"); file.write("fixture"); file.close();
+    result.frames = 96000; result.sampleRate = 48000;
+    h.controller.prepared(h.renders.back(), result);
+    jam2::EngineEvent staged;
+    staged.type = jam2::EngineEventType::ListeningTrackStaged;
+    staged.cookie = h.commands.back().cookie;
+    h.controller.engineEvent(staged);
+    h.state.transportChanging = true;
+    h.controller.tick();
+    require(h.controller.pending() && h.visible == settings && h.applications == 0,
+        "Stop after scheduling does not cancel the pending audio/tempo commit");
+    h.finish();
+    require(h.applications == 1 && h.controller.appliedSettings() == settings && h.visible == settings &&
+            h.controller.playbackReady() && !h.state.playing,
+        "settings apply with the engine running and playback stopped, ready for the next Play");
+
+    Harness missingAudio;
+    missingAudio.state.hasSources = true;
+    missingAudio.controller.edit(settings, true);
+    result.path = folder.filePath(QStringLiteral("missing-swap.wav"));
+    missingAudio.controller.prepared(missingAudio.renders.back(), result);
+    staged.cookie = missingAudio.commands.back().cookie;
+    missingAudio.controller.engineEvent(staged);
+    const auto commit = missingAudio.commands.back();
+    missingAudio.state.engine.playback_tempo = commit.playback_tempo;
+    missingAudio.state.engine.engine_frame = commit.frame + 48000;
+    missingAudio.controller.tick();
+    require(missingAudio.applications == 0 && !missingAudio.controller.pending(),
+        "tempo alone cannot report success when the corresponding audio swap did not apply");
+}
+
 void testStoppedEngineAndDeferredJoin() {
     Harness stopped;
     stopped.state.engineRunning = false;
@@ -390,6 +453,7 @@ int main(int argc, char** argv) {
         testLoopPassageAcrossSpeedChange();
         testFourPeersWithDelayedDuplicateMessages(); testQueueFailureAndPassedBoundary();
         testStoppedEngineAndDeferredJoin();
+        testPlaybackChangesRetainListeningSelection();
         std::cout << "listening-tool controller tests passed\n"; return 0;
     } catch (const std::exception& error) { std::cerr << "FAIL: " << error.what() << '\n'; return 1; }
 }

@@ -120,6 +120,7 @@ public:
     std::uint64_t fileWorkerTasksCompleted = 0;
     std::uint64_t fileWorkerTasksRejected = 0;
     bool trackWaveformWorkerRunning = false;
+    bool playAfterListening = false;
     std::uint64_t trackWaveformRevision = 0;
     QMap<QString, LooperWaveformPreview> looperWaveformCache;
     bool looperWaveformWorkerRunning = false;

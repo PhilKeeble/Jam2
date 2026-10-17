@@ -10,17 +10,11 @@ gui/mainwindow keeps getting bloated as default choice, refactor again later to 
 
 test benchmark, validate, stress and get logs for localhost and mac 
 
-make tooltips more conssitent across the app
-
 clear idea renamed to be more representative that its clearing the views across all sections but not track view? 
-
-maybe arrange the buttons a bit differently so they are grouped nicer
 
 add a copy and paste bar option in the beat and chord views for quicker work?
 
 allow export to midi option for chord and beat view?
-
-daw functionality on the track view for splitting tracks and doing multiple takes on a track and splicing them together in a useful workflow?? 
 
 python test cases and benchmarks are getting a bit lost, not being kept up to date, codex is preffering ctests instead. Maybe we have some other way to run validation of builds when a build happens so that a docker compose release file could eventually build all in docker containers and test validation and mesh and all other test cases and run the build through an automated rig pipeline to then deploy if they pass? maybe doing that in ctests rather than python so it could be done for other platforms as well like ipad / android in future as product support grows 
 
@@ -40,8 +34,6 @@ cant manually sync when auto is on - wanted it when open jamjar didnt sync
 
 Update.sh wasnt being clear that it was failing, make it easy for the user 
 
-loopback recording doesnt work on mac 
-
 # TEST
 
 - stretching time not affecting pitch 
@@ -57,12 +49,12 @@ loopback recording doesnt work on mac
 
 
 # DAW mode
+daw functionality on the track view for splitting tracks and doing multiple takes on a track and splicing them together in a useful workflow?? 
+
 make a new daw mode for complex editing local only, can take comps, fade, punch in, quick and not waiting on syncs etc 
 keep current mode as loop and listen
 look into track seeking workflows whilst syncing, same as loop workflows
 make the loop start and end markers lock to bar so its cleaner perhaps 
-
-
 
 
 ### Sound references
