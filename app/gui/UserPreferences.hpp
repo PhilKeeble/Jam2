@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QString>
+#include "RecordingCalibrationProfile.hpp"
 
 struct AudioDevicePreference {
     QString backend;
@@ -198,7 +199,7 @@ struct SyncPreference {
 };
 
 struct UserPreferences {
-    static constexpr int kSchemaVersion = 8;
+    static constexpr int kSchemaVersion = 9;
     AudioDevicePreference localAudio;
     AudioDevicePreference networkAudio;
     bool splitNetworkAudioByRole = false;
@@ -208,6 +209,7 @@ struct UserPreferences {
     JoinPreference join;
     LoggingPreference logging;
     RecordingPreference recording;
+    QVector<RecordingCalibrationProfile> recordingCalibrations;
     GeneralPreference general;
     IdeaPreference ideas;
     LevelPreference levels;
@@ -240,6 +242,7 @@ class UserPreferencesStore final {
 public:
     static UserPreferences load();
     static void save(const UserPreferences& preferences);
+    static bool saveChecked(const UserPreferences& preferences);
     static QString filePath();
     static bool setFilePathForTesting(const QString& path, QString& error);
 };

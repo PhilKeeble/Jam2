@@ -119,7 +119,9 @@ bool InputSourceRouter::process(
     const std::size_t recording_slot = recording_slot_.load(std::memory_order_acquire);
     std::size_t selected_recording_latency = 0;
     std::size_t combined_recording_latency = 0;
-    std::size_t rendered_sources = 0;
+    std::size_t rendered_sources = 0, audio_sources = 0, midi_sources = 0;
+    std::size_t single_channel = kNoInputChannel, selected_channel = kNoInputChannel;
+    RecordingInputKind selected_kind = RecordingInputKind::Unavailable;
     for (std::size_t slot_index = 0; slot_index < slots_.size(); ++slot_index) {
         Slot& source = slots_[slot_index];
         const std::uint64_t revision =
@@ -151,6 +153,15 @@ bool InputSourceRouter::process(
             }
         }
 
+        const auto path = kind == InputSourceKind::Audio
+            ? RecordingInputKind::PhysicalAudio : RecordingInputKind::MidiInstrument;
+        const auto physical_channel = kind == InputSourceKind::Audio && second == kNoInputChannel
+            ? first : kNoInputChannel;
+        if (slot_index == recording_slot) { selected_kind = path; selected_channel = physical_channel; }
+        if (included) {
+            if (kind == InputSourceKind::Audio) { ++audio_sources; single_channel = physical_channel; }
+            else ++midi_sources;
+        }
         bool rendered = false;
         const std::int32_t* sourceSamples = source_scratch_.data();
         const std::size_t source_latency = renderer != nullptr
@@ -209,6 +220,15 @@ bool InputSourceRouter::process(
         }
     }
 
+    const bool combined = recording_slot == kCombinedInputSources;
+    recording_kind_.store(combined
+        ? (audio_sources && midi_sources ? RecordingInputKind::Mixed
+           : audio_sources ? RecordingInputKind::PhysicalAudio
+           : midi_sources ? RecordingInputKind::MidiInstrument : RecordingInputKind::Unavailable)
+        : selected_kind, std::memory_order_relaxed);
+    recording_channel_.store(combined
+        ? (audio_sources == 1 && midi_sources == 0 ? single_channel : kNoInputChannel)
+        : selected_channel, std::memory_order_relaxed);
     recording_latency_frames_.store(
         recording_slot == kCombinedInputSources
             ? combined_recording_latency

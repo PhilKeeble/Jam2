@@ -742,6 +742,59 @@ QVector<LooperLaneStackWidget::LaneView> looperLanes()
     return lanes;
 }
 
+void testLooperWaveformGridAlignment()
+{
+    // Compare the actual painted waveform with a silent version of the same
+    // lane so grid lines, labels, borders and handle colours cancel out.
+    for (const int width : {1200, 2200}) {
+        for (const bool cropped : {false, true}) {
+            LooperLaneStackWidget widget;
+            widget.resize(width, 260);
+            auto lane = looperLanes().front();
+            lane.sourceFrames = lane.lane.sourceFrames = 48000;
+            lane.lane.startFrame = cropped ? 6000 : 0;
+            lane.lane.loopStartFrame = cropped ? 12000 : -1;
+            lane.lane.loopEndFrame = cropped ? 48000 : -1;
+            lane.peaks.assign(512, 0.0f);
+            widget.setLanes({lane}, -1, 0, -1, 48000, 96000, 120.0, 1, true);
+            widget.show();
+            QApplication::processEvents();
+            const QImage silent = widget.grab().toImage();
+            for (const int bucket : {0, 128, 384}) {
+                std::fill_n(lane.peaks.begin() + bucket, 6, 1.0f);
+            }
+            widget.setLanes({lane}, -1, 0, -1, 48000, 96000, 120.0, 1, true);
+            const QImage pulses = widget.grab().toImage();
+            const QString artifacts = qEnvironmentVariable("JAM2_TEST_ARTIFACT_ROOT");
+            if (!artifacts.isEmpty()) {
+                expect(pulses.save(QDir(artifacts).filePath(
+                    QStringLiteral("waveform-%1-%2.png").arg(width).arg(cropped ? "trimmed" : "full"))),
+                    "painted waveform evidence is saved in the test artifact directory");
+            }
+            const double scale = pulses.devicePixelRatio();
+            std::vector<int> starts;
+            bool previous = false;
+            for (int x = 294; x < widget.width() - 10; ++x) {
+                const QPoint point(qRound(x * scale), qRound(85 * scale));
+                const bool changed = silent.pixel(point) != pulses.pixel(point);
+                if (changed && !previous) starts.push_back(x);
+                previous = changed;
+            }
+            const std::vector<qint64> frames = cropped
+                ? std::vector<qint64>{6000, 30000}
+                : std::vector<qint64>{0, 12000, 36000};
+            expect(starts.size() == frames.size(),
+                "painted waveform retains the first attack and excludes cropped source attacks");
+            for (std::size_t i = 0; i < std::min(starts.size(), frames.size()); ++i) {
+                const int expected = 296 + qRound(
+                    static_cast<double>(frames[i]) / 96000 * (widget.width() - 306));
+                expect(std::abs(starts[i] - expected) <= 2,
+                    "first and later painted attacks share the grid scale across resize, placement and crop");
+            }
+        }
+    }
+}
+
 void testLooperLaneWidget()
 {
     LooperLaneStackWidget widget;
@@ -1590,6 +1643,10 @@ void testPerformanceWidget()
 int main(int argc, char** argv)
 {
     QApplication app(argc, argv);
+    if (argc == 2 && QString::fromLocal8Bit(argv[1]) == QStringLiteral("--looper-waveform")) {
+        testLooperWaveformGridAlignment();
+        return failures == 0 ? 0 : 1;
+    }
     testActionTileRow();
     testIdeaHeaderRows();
     testResponsivePerformanceActions();
@@ -1604,6 +1661,7 @@ int main(int argc, char** argv)
     testConnectionGuidance();
     testMeterWidget();
     testLooperLaneWidget();
+    testLooperWaveformGridAlignment();
     testMetronomeWidgets();
     testBeatGridWidgets();
     testPerformanceWidget();

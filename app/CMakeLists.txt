@@ -477,6 +477,11 @@ add_executable(jam2 MACOSX_BUNDLE
     gui/JamSyncDialog.hpp
     gui/JamTasterDialog.cpp
     gui/JamTasterDialog.hpp
+    gui/RecordingCalibrationController.cpp
+    gui/RecordingCalibrationDialog.cpp
+    gui/RecordingCalibrationController.hpp
+    gui/RecordingCalibrationDialog.hpp
+    gui/RecordingCalibrationProfile.hpp
     gui/LaneRecordingDialog.cpp
     gui/LaneRecordingDialog.hpp
     gui/ListenerCompensationDialog.cpp

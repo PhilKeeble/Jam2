@@ -10,6 +10,7 @@
 #include <functional>
 #include <optional>
 
+class RecordingCalibrationController;
 class QCheckBox;
 class QComboBox;
 class QDoubleSpinBox;
@@ -42,6 +43,7 @@ public:
         LoopbackRecordingPreference loopback;
         JamMixTrackRecordingPreference jamMix;
         QString latencySummary;
+        RecordingCalibrationController* calibration = nullptr;
     };
 
     struct Result {
@@ -69,6 +71,7 @@ private:
     void storeDraft();
     void loadDraft();
     void refreshMode();
+    void refreshCalibration();
     void populateLoopbackSources(const QVector<Choice>& choices);
     void selectLoopbackSource(const QString& id, const QString& name);
     void setFormRowVisible(QFormLayout* form, QWidget* field, bool visible);
@@ -97,6 +100,9 @@ private:
     QWidget* outputRow_ = nullptr;
     QWidget* sourceRow_ = nullptr;
     QWidget* latencyRow_ = nullptr;
+    QWidget* calibrationRow_ = nullptr;
+    QLabel* calibrationStatus_ = nullptr;
+    QPushButton* calibrate_ = nullptr;
     QPushButton* advancedToggle_ = nullptr;
     QWidget* advancedContent_ = nullptr;
     QSpinBox* latencyAdjustment_ = nullptr;

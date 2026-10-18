@@ -1387,7 +1387,9 @@ private:
 
     void drawLaneWaveform(QPainter& painter, int row, bool realLane)
     {
-        const QRect area = laneTimelineRect(row).adjusted(10, 11, -10, -11);
+        const QRect laneArea = laneTimelineRect(row).adjusted(0, 11, 0, -11);
+        const QRect timeline = effectiveTimelineRect();
+        const QRect area(timeline.left(), laneArea.top(), timeline.width(), laneArea.height());
         painter.setPen(theme::withAlpha(theme::gridBeat, 115));
         painter.drawLine(area.left(), area.center().y(), area.right(), area.center().y());
         if (!realLane || row >= lanes_.size() || lanes_[row].sourceFrames <= 0) {
@@ -1454,12 +1456,15 @@ private:
         painter.setPen(theme::withAlpha(waveformColor, audible ? 225 : 105));
         const auto& peaks = lanes_[row].peaks;
         const qint64 firstSourceFrame = sourceStart(row);
-        const qint64 croppedFrames = visibleFrames(row);
         const qint64 sourceFrames = lanes_[row].sourceFrames;
         for (int x = clip.left(); x <= clip.right(); ++x) {
-            const qint64 frameOffset = static_cast<qint64>(x - clip.left()) * croppedFrames /
-                qMax(1, clip.width());
-            const qint64 sourceFrame = qMin(sourceFrames - 1, firstSourceFrame + frameOffset);
+            // Painting may be clipped, but its time scale must remain the grid's
+            // scale. Insets, rounded edges and drag handles must not stretch the
+            // source into the remaining visible rectangle.
+            const qint64 timelineFrame = frameDeltaForX(x - timeline.left());
+            const qint64 sourceFrame = qBound<qint64>(0,
+                firstSourceFrame + timelineFrame - lanes_[row].lane.startFrame,
+                sourceFrames - 1);
             const int index = static_cast<int>(qBound<qint64>(
                 0,
                 sourceFrame * static_cast<qint64>(peaks.size()) / sourceFrames,
@@ -1469,9 +1474,9 @@ private:
         }
         painter.setPen(Qt::NoPen);
         painter.setBrush(theme::withAlpha(audible ? theme::accent : waveformColor, audible ? 185 : 90));
-        painter.drawRoundedRect(QRect(clip.left(), clip.top(), 5, clip.height()), 3, 3);
+        painter.drawRoundedRect(QRect(clip.left(), clip.bottom() - 7, 5, 8), 2, 2);
         painter.setBrush(theme::withAlpha(audible ? theme::nebulaCoral : waveformColor, audible ? 185 : 90));
-        painter.drawRoundedRect(QRect(clip.right() - 4, clip.top(), 5, clip.height()), 3, 3);
+        painter.drawRoundedRect(QRect(clip.right() - 4, clip.bottom() - 7, 5, 8), 2, 2);
         painter.restore();
     }
 

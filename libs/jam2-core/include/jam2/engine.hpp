@@ -10,6 +10,7 @@
 #include <string_view>
 
 #include "audio_device.hpp"
+#include "recording_calibration.hpp"
 #include "audio_ring.hpp"
 #include "metronome.hpp"
 #include "playback_tempo.hpp"
@@ -129,6 +130,7 @@ enum class EngineCommandType : std::uint8_t {
     SetMetronomeEpoch,
     SetMetronomeRenderOffset,
     SetRecordingLatencyAdjustment,
+    SetRecordingCalibration,
     ScheduleTransport,
     CancelTransport,
     LoadPreparedTrack,
@@ -288,6 +290,7 @@ struct EngineSnapshot {
     long driver_output_ready_error = 0;
     long driver_output_ready_latency_reduction_frames = 0;
     std::int64_t recording_latency_adjustment_frames = 0;
+    std::int64_t recording_calibration_adjustment_frames = 0;
     std::uint64_t recording_source_latency_frames = 0;
     std::uint64_t recording_latency_compensation_frames = 0;
     bool playback_prefilled = false;
@@ -436,6 +439,8 @@ public:
     // not need the full diagnostic snapshot or its scheduled-command lock.
     std::uint64_t currentFrame() const noexcept;
     EngineSnapshot snapshot() const noexcept;
+    std::shared_ptr<audio::RecordingCalibrationCapture> beginRecordingCalibration(
+        std::size_t input_channel, std::string& error);
     EngineGuiPeakSnapshot consumeGuiPeaks() noexcept;
     EngineColdSnapshot coldSnapshot() const;
     bool pollEvent(EngineEvent& event) noexcept;

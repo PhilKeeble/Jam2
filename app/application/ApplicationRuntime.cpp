@@ -238,6 +238,18 @@ jam2::EngineSnapshot ApplicationRuntime::engineSnapshot() const noexcept
     return engine_ != nullptr ? engine_->snapshot() : jam2::EngineSnapshot{};
 }
 
+jam2::EngineColdSnapshot ApplicationRuntime::engineColdSnapshot() const
+{
+    return engine_ ? engine_->coldSnapshot() : jam2::EngineColdSnapshot{};
+}
+std::shared_ptr<jam2::audio::RecordingCalibrationCapture> ApplicationRuntime::beginRecordingCalibration(
+    std::size_t channel, QString& error)
+{
+    if (!engine_ || isNetworkRunning()) { error = QStringLiteral("Start a local audio device and disconnect the jam first."); return {}; }
+    std::string message; auto result = engine_->beginRecordingCalibration(channel, message);
+    error = QString::fromStdString(message); return result;
+}
+
 jam2::EngineGuiPeakSnapshot ApplicationRuntime::consumeGuiPeaks() noexcept
 {
     return engine_ != nullptr ? engine_->consumeGuiPeaks() : jam2::EngineGuiPeakSnapshot{};

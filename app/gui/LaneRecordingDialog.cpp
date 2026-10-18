@@ -1,4 +1,5 @@
 #include "LaneRecordingDialog.hpp"
+#include "RecordingCalibrationController.hpp"
 
 #include "GuiControlContract.hpp"
 #include "GuiPresentation.hpp"
@@ -151,6 +152,22 @@ LaneRecordingDialog::LaneRecordingDialog(
     latencyRow_->setMinimumHeight(qMax(
         latencyLabel->minimumHeight(), latencyAdjustment_->sizeHint().height()));
 
+    calibrationRow_ = new QWidget(content);
+    auto* calibrationLayout = new QVBoxLayout(calibrationRow_);
+    calibrationLayout->setContentsMargins(0, 0, 0, 0);
+    calibrationStatus_ = new QLabel(calibrationRow_); calibrationStatus_->setWordWrap(true);
+    calibrate_ = new QPushButton(QStringLiteral("Calibrate Recording Alignment…"), calibrationRow_);
+    calibrationLayout->addWidget(calibrationStatus_); calibrationLayout->addWidget(calibrate_, 0, Qt::AlignLeft);
+    registerRecordingControl(*calibrate_, QStringLiteral("looper.recording.calibrate"), QStringLiteral("looper.recording-calibration"));
+    connect(calibrate_, &QPushButton::clicked, this, [this] {
+        if (!input_.calibration) return;
+        const qlonglong selected = inputSource_->currentData().toLongLong();
+        input_.calibration->showDialog(this, selected >= 0
+            ? std::optional<std::size_t>(static_cast<std::size_t>(selected)) : std::nullopt);
+        refreshCalibration();
+    });
+    connect(inputSource_, &QComboBox::currentIndexChanged, this, [this] { refreshCalibration(); });
+
     silenceThreshold_ = new QDoubleSpinBox(content);
     silenceThreshold_->setRange(-120.0, 0.0);
     silenceThreshold_->setDecimals(1);
@@ -189,7 +206,8 @@ LaneRecordingDialog::LaneRecordingDialog(
     advancedForm_->setRowWrapPolicy(QFormLayout::DontWrapRows);
     advancedForm_->setContentsMargins(14, 0, 0, 0);
     advancedForm_->setLabelAlignment(Qt::AlignLeft | Qt::AlignTop);
-    advancedForm_->addRow(QStringLiteral("Recording alignment"), latencyRow_);
+    advancedForm_->addRow(QStringLiteral("Recording calibration"), calibrationRow_);
+    advancedForm_->addRow(QStringLiteral("Additional manual offset"), latencyRow_);
     advancedForm_->addRow(QStringLiteral("Silence threshold"), silenceThreshold_);
     advancedForm_->addRow(QStringLiteral("Tail silence"), tailSilence_);
     advancedForm_->addRow(trimLeading_);
@@ -381,7 +399,9 @@ void LaneRecordingDialog::refreshMode()
     setFormRowVisible(form_, includeBacking_, currentJamMode);
     setFormRowVisible(form_, includeMetronome_, currentJamMode);
     setFormRowVisible(form_, leaderAudioWarning_, currentJamMode && input_.leaderAudio);
+    setFormRowVisible(advancedForm_, calibrationRow_, inputMode);
     setFormRowVisible(advancedForm_, latencyRow_, inputMode);
+    refreshCalibration();
     setFormRowVisible(advancedForm_, silenceThreshold_, loopbackMode);
     setFormRowVisible(advancedForm_, tailSilence_, loopbackMode);
     setFormRowVisible(advancedForm_, trimLeading_, loopbackMode);
@@ -421,4 +441,18 @@ void LaneRecordingDialog::setFormRowVisible(
     if (!form || !field) return;
     field->setVisible(visible);
     if (QWidget* label = form->labelForField(field)) label->setVisible(visible);
+}
+
+void LaneRecordingDialog::refreshCalibration()
+{
+    if (!input_.calibration) {
+        calibrate_->setEnabled(false); calibrationStatus_->setText(QStringLiteral("Start a physical audio device to calibrate recording alignment.")); return;
+    }
+    const qlonglong selected = inputSource_->currentData().toLongLong();
+    const auto slot = selected >= 0 ? std::optional<std::size_t>(static_cast<std::size_t>(selected)) : std::nullopt;
+    calibrationStatus_->setText(input_.calibration->status(slot));
+    const QString reason = input_.calibration->unavailableReason();
+    calibrate_->setEnabled(activeMode_ == QStringLiteral("input") && reason.isEmpty() &&
+        input_.calibration->channelForSource(slot).has_value());
+    calibrate_->setToolTip(reason);
 }

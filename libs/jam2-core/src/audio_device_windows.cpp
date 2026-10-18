@@ -1,4 +1,5 @@
 #include "audio_device.hpp"
+#include "recording_calibration.hpp"
 #include "audio_device_processing.hpp"
 #include "audio_ring.hpp"
 
@@ -395,6 +396,13 @@ void duplex_buffer_switch(long double_buffer_index, ASIOBool)
                     input_info->buffers[double_buffer_index] != nullptr ?
                     static_cast<const std::int32_t*>(input_info->buffers[double_buffer_index]) : nullptr;
             }
+            if (auto* calibration = context->control->recording_calibration) {
+                const auto channel = calibration->input_channel();
+                const auto* samples = channel < context->input_source_pointers.size()
+                    ? context->input_source_pointers[channel] : nullptr;
+                calibration->capture_input(samples ? std::span<const std::int32_t>(samples,
+                    static_cast<std::size_t>(context->buffer_size)) : std::span<const std::int32_t>{});
+            }
             const bool routed = source_router->process(
                 std::span<const std::int32_t* const>(context->input_source_pointers.data(),
                     context->input_source_pointers.size()),
@@ -601,14 +609,8 @@ void duplex_buffer_switch(long double_buffer_index, ASIOBool)
                     std::span<const std::int32_t>(
                         context->recorder_inputs_mix_scratch.data(), playback.size()));
             } else {
-                std::uint64_t compensation = context->control != nullptr
-                    ? context->control->recording_latency_compensation_frames.load(std::memory_order_relaxed)
-                    : 0ULL;
-                if (context->control != nullptr &&
-                    context->control->input_source_router != nullptr) {
-                    compensation += static_cast<std::uint64_t>(
-                        context->control->input_source_router->recording_latency_frames());
-                }
+                const std::uint64_t compensation = context->control != nullptr
+                    ? input_take_compensation_frames(*context->control) : 0;
                 const std::uint64_t capture_frame_start = audio_frame_start > compensation
                     ? audio_frame_start - compensation
                     : 0ULL;
@@ -636,6 +638,11 @@ void duplex_buffer_switch(long double_buffer_index, ASIOBool)
                 std::span<const std::int32_t>(context->recorder_inputs_mix_scratch.data(), playback.size()),
                 std::span<const std::int32_t>(context->recorder_metronome_scratch.data(), playback.size()),
             });
+        }
+        if (context->control && context->control->recording_calibration) {
+            context->control->recording_calibration->render(playback,
+                static_cast<std::uint64_t>(context->control->input_latency_frames.load(std::memory_order_relaxed)) +
+                context->control->output_latency_frames.load(std::memory_order_relaxed));
         }
         const std::size_t output_bytes =
             static_cast<std::size_t>(context->buffer_size) * sizeof(std::int32_t);

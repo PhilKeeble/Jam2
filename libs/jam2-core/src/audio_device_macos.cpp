@@ -1,6 +1,7 @@
 #include "audio_device.hpp"
 #include "audio_device_processing.hpp"
 #include "coreaudio_buffer_processing.hpp"
+#include "coreaudio_recording_timing.hpp"
 
 #include <CoreAudio/CoreAudio.h>
 #include <CoreFoundation/CoreFoundation.h>
@@ -575,6 +576,8 @@ struct CoreAudioDuplexContext {
     std::vector<std::int32_t> recorder_prepared_scratch;
     std::size_t playback_prefill_frames = 0;
     double sample_rate = 48000.0;
+    coreaudio::RecordingLatencyProperties input_latency;
+    coreaudio::RecordingLatencyProperties output_latency;
     std::uint64_t test_input_sample_counter = 0;
     std::uint64_t engine_frame_counter = 0;
     std::uint64_t metronome_beat_index = 0;
@@ -714,6 +717,13 @@ OSStatus duplex_io_proc(
     processing::publish_callback_begin(
         context->control,
         context->callback_generation);
+    if (context->control != nullptr) {
+        coreaudio::publish_recording_latency(*context->control,
+            coreaudio::recording_latency_frames(context->input_latency,
+                input_buffer_frames, input_time, now, context->sample_rate),
+            coreaudio::recording_latency_frames(context->output_latency,
+                output_buffer_frames, now, output_time, context->sample_rate));
+    }
     processing::publish_device_clock(context->control,
         {context->engine_frame_counter, callback_start_us});
     processing::observe_callback_interval(
@@ -815,6 +825,12 @@ OSStatus duplex_io_proc(
                 coreaudio::copy_input_channel(
                     context->input_channel_views[selected],
                     std::span<std::int32_t>(destination, input_frames));
+            }
+            if (auto* calibration = context->control->recording_calibration) {
+                const auto channel = calibration->input_channel();
+                calibration->capture_input(channel < context->input_source_pointers.size()
+                    ? std::span<const std::int32_t>(context->input_source_pointers[channel], input_frames)
+                    : std::span<const std::int32_t>{});
             }
             const bool routed = source_router->process(
                 std::span<const std::int32_t* const>(context->input_source_pointers.data(),
@@ -1011,19 +1027,8 @@ OSStatus duplex_io_proc(
                     std::span<const std::int32_t>(
                         context->recorder_inputs_mix_scratch.data(), playback.size()));
             } else {
-                std::uint64_t compensation = context->control != nullptr
-                    ? context->control->recording_latency_compensation_frames.load(std::memory_order_relaxed)
-                    : 0ULL;
-                if (context->control != nullptr &&
-                    context->control->input_source_router != nullptr) {
-                    compensation += static_cast<std::uint64_t>(
-                        context->control->input_source_router->recording_latency_frames());
-                }
-                const std::uint64_t capture_frame_start = audio_frame_start > compensation
-                    ? audio_frame_start - compensation
-                    : 0ULL;
-                context->track_take_recorder->record(
-                    capture_frame_start,
+                coreaudio::record_input_take(
+                    *context->track_take_recorder, context->control, audio_frame_start,
                     std::span<const std::int32_t>(
                         context->recorder_my_input_scratch.data(), playback.size()));
             }
@@ -1046,6 +1051,11 @@ OSStatus duplex_io_proc(
                 std::span<const std::int32_t>(context->recorder_inputs_mix_scratch.data(), playback.size()),
                 std::span<const std::int32_t>(context->recorder_metronome_scratch.data(), playback.size()),
             });
+        }
+        if (context->control && context->control->recording_calibration) {
+            context->control->recording_calibration->render(playback,
+                static_cast<std::uint64_t>(context->control->input_latency_frames.load(std::memory_order_relaxed)) +
+                context->control->output_latency_frames.load(std::memory_order_relaxed));
         }
         for (std::size_t selected = 0; selected < context->channels.output.size(); ++selected) {
             context->output_channel_views[selected] = coreaudio::output_channel(
@@ -1143,18 +1153,22 @@ public:
                 device_, kAudioDevicePropertySafetyOffset, kAudioDevicePropertyScopeOutput));
         output_stream_latency_frames_ = channels_.output.empty() ? 0L :
             maximum_stream_latency_frames(device_, kAudioDevicePropertyScopeOutput);
-        input_latency_frames_ = input_device_latency_frames_ + input_safety_offset_frames_;
-        output_latency_frames_ = output_device_latency_frames_ + output_safety_offset_frames_;
-        control.input_latency_frames.store(
-            static_cast<std::uint32_t>(std::max(0L, input_latency_frames_)),
-            std::memory_order_relaxed);
-        control.output_latency_frames.store(
-            static_cast<std::uint32_t>(std::max(0L, output_latency_frames_)),
-            std::memory_order_relaxed);
-        control.recording_latency_compensation_frames.store(
-            static_cast<std::uint64_t>(std::max(0L, input_latency_frames_)) +
-                static_cast<std::uint64_t>(std::max(0L, output_latency_frames_)),
-            std::memory_order_relaxed);
+        context_.input_latency = {
+            static_cast<std::uint32_t>(input_device_latency_frames_),
+            static_cast<std::uint32_t>(input_stream_latency_frames_),
+            static_cast<std::uint32_t>(input_safety_offset_frames_), true};
+        context_.output_latency = {
+            static_cast<std::uint32_t>(output_device_latency_frames_),
+            static_cast<std::uint32_t>(output_stream_latency_frames_),
+            static_cast<std::uint32_t>(output_safety_offset_frames_),
+            !channels_.output.empty()};
+        input_latency_frames_ = coreaudio::recording_latency_frames(
+            context_.input_latency, buffer_size_, nullptr, nullptr, sample_rate_);
+        output_latency_frames_ = coreaudio::recording_latency_frames(
+            context_.output_latency, buffer_size_, nullptr, nullptr, sample_rate_);
+        coreaudio::publish_recording_latency(control,
+            static_cast<std::uint32_t>(input_latency_frames_),
+            static_cast<std::uint32_t>(output_latency_frames_));
 
         require_ok(
             AudioDeviceCreateIOProcID(device_, duplex_io_proc, &context_, &proc_id_),

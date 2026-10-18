@@ -318,13 +318,7 @@ private:
                 }
                 track_take_recorder_->record(callback_frame, inputs_mix_scratch_);
             } else {
-                std::uint64_t compensation =
-                    control_.recording_latency_compensation_frames.load(
-                        std::memory_order_relaxed);
-                if (control_.input_source_router != nullptr) {
-                    compensation += static_cast<std::uint64_t>(
-                        control_.input_source_router->recording_latency_frames());
-                }
+                const auto compensation = audio::input_take_compensation_frames(control_);
                 track_take_recorder_->record(
                     callback_frame > compensation ? callback_frame - compensation : 0ULL,
                     capture_scratch_);
@@ -568,6 +562,7 @@ struct Engine::Impl {
     std::unique_ptr<audio::MonoRingBuffer> playback_ring;
     std::unique_ptr<audio::DeviceStream> stream;
     audio::StreamInfo stream_info;
+    std::shared_ptr<audio::RecordingCalibrationCapture> recording_calibration;
     FixedQueue<EngineCommand, Engine::kCommandCapacity> commands;
     FixedQueue<EngineEvent, Engine::kEventCapacity> events;
     std::array<ScheduledCommand, Engine::kScheduledCommandCapacity> scheduled{};
@@ -735,6 +730,11 @@ struct Engine::Impl {
             return true;
         case EngineCommandType::SetMetronomeRenderOffset:
             control->metronome_render_offset_frames.store(command.signed_value, std::memory_order_relaxed);
+            return true;
+        case EngineCommandType::SetRecordingCalibration:
+            audio::set_recording_calibration(*control,
+                command.enabled ? static_cast<std::size_t>(command.frame) : audio::kNoInputChannel,
+                command.enabled ? command.signed_value : 0);
             return true;
         case EngineCommandType::SetRecordingLatencyAdjustment: {
             const std::int64_t adjustment = std::clamp<std::int64_t>(command.signed_value, -1000000, 1000000);
@@ -1308,6 +1308,8 @@ void Engine::start(const EngineConfig& requested)
             impl_->config.sample_rate,
             control.engine_frame_counter);
 
+        impl_->recording_calibration = std::make_shared<audio::RecordingCalibrationCapture>(impl_->config.sample_rate);
+        control.recording_calibration = impl_->recording_calibration.get();
         const long buffer_frames = impl_->config.audio_buffer_frames > 0
             ? impl_->config.audio_buffer_frames
             : 128;
@@ -1366,6 +1368,25 @@ void Engine::start(const EngineConfig& requested)
     }
 }
 
+std::shared_ptr<audio::RecordingCalibrationCapture> Engine::beginRecordingCalibration(
+    std::size_t channel, std::string& error)
+{
+    std::lock_guard<std::mutex> lock(impl_->lifecycle_mutex);
+    if (!impl_->control || !impl_->stream || impl_->config.backend != EngineAudioBackend::Device ||
+        !impl_->config.input_source_router || channel >= impl_->config.channels.input.size() ||
+        impl_->config.channels.output.empty() || impl_->track_take_recorder->armed() ||
+        impl_->recorder->active() || impl_->transport_pending.load(std::memory_order_acquire) ||
+        impl_->control->transport_playback_active.load() ||
+        (impl_->prepared_source && impl_->prepared_source->playing())) {
+        error = "Stop playback and recording, and start a real audio device with an input and output.";
+        return {};
+    }
+    if (!impl_->recording_calibration->start(channel)) {
+        error = "A calibration is already in progress."; return {};
+    }
+    return impl_->recording_calibration;
+}
+
 void Engine::requestStop() noexcept
 {
     if (impl_ == nullptr) {
@@ -1390,6 +1411,7 @@ void Engine::join() noexcept
         impl_->control->pitch_analysis_enabled.store(false, std::memory_order_release);
     }
     impl_->stream.reset();
+    if (impl_->recording_calibration) impl_->recording_calibration->cancel();
     if (impl_->pitch_analyzer != nullptr) {
         impl_->pitch_analyzer->stop();
     }
@@ -1593,8 +1615,8 @@ EngineSnapshot Engine::snapshot() const noexcept
     if (impl_->stream != nullptr) {
         result.sample_rate = impl_->stream_info.sample_rate;
         result.audio_buffer_frames = impl_->stream_info.buffer_size;
-        result.input_latency_frames = impl_->stream_info.input_latency_frames;
-        result.output_latency_frames = impl_->stream_info.output_latency_frames;
+        result.input_latency_frames = control.input_latency_frames.load(std::memory_order_relaxed);
+        result.output_latency_frames = control.output_latency_frames.load(std::memory_order_relaxed);
         result.driver_output_ready_status =
             static_cast<audio::DriverOutputReadyStatus>(
                 control.driver_output_ready_status.load(std::memory_order_acquire));
@@ -1609,9 +1631,8 @@ EngineSnapshot Engine::snapshot() const noexcept
             ? static_cast<std::uint64_t>(
                 impl_->config.input_source_router->recording_latency_frames())
             : 0ULL;
-        result.recording_latency_compensation_frames =
-            control.recording_latency_compensation_frames.load(std::memory_order_relaxed) +
-            result.recording_source_latency_frames;
+        result.recording_latency_compensation_frames = audio::input_take_compensation_frames(control);
+        result.recording_calibration_adjustment_frames = audio::applied_recording_calibration_frames(control);
         result.callbacks = impl_->stream->callbacks();
         result.playback_prefilled = impl_->stream->playback_prefilled();
         result.callback_timing = impl_->stream->callback_timing_stats();
@@ -1675,6 +1696,10 @@ EngineColdSnapshot Engine::coldSnapshot() const
     }
     std::lock_guard<std::mutex> lock(impl_->lifecycle_mutex);
     result.stream = impl_->stream_info;
+    if (impl_->stream != nullptr) {
+        result.stream.input_latency_frames = impl_->control->input_latency_frames.load(std::memory_order_relaxed);
+        result.stream.output_latency_frames = impl_->control->output_latency_frames.load(std::memory_order_relaxed);
+    }
     if (impl_->recorder != nullptr) {
         const auto recording = impl_->recorder->stats();
         result.recording_folder = recording.folder;

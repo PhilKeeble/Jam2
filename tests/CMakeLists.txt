@@ -105,6 +105,17 @@ set_tests_properties(jam2_audio_device_processing_units PROPERTIES
     LABELS "unit;core;audio;performance;metronome"
     TIMEOUT 30)
 
+if(APPLE)
+    add_executable(jam2_coreaudio_recording_timing_tests EXCLUDE_FROM_ALL
+        unit/core/CoreAudioRecordingTimingTests.cpp)
+    jam2_configure_test_target(jam2_coreaudio_recording_timing_tests)
+    target_link_libraries(jam2_coreaudio_recording_timing_tests PRIVATE jam2_core)
+    add_test(NAME jam2_coreaudio_recording_timing_units
+        COMMAND $<TARGET_FILE:jam2_coreaudio_recording_timing_tests>)
+    set_tests_properties(jam2_coreaudio_recording_timing_units PROPERTIES
+        LABELS "unit;core;audio;recording;wav;fake-audio" TIMEOUT 30)
+endif()
+
 add_executable(jam2_transport_timing_tests EXCLUDE_FROM_ALL
     unit/core/TransportTimingTests.cpp)
 jam2_configure_test_target(jam2_transport_timing_tests)
@@ -578,12 +589,18 @@ target_link_libraries(jam2_gui_widget_boundary_tests PRIVATE
     jam2_core Qt6::Core Qt6::Widgets)
 add_test(NAME jam2_gui_widget_boundary_units
     COMMAND $<TARGET_FILE:jam2_gui_widget_boundary_tests>)
+add_test(NAME jam2_looper_waveform_alignment_units
+    COMMAND $<TARGET_FILE:jam2_gui_widget_boundary_tests> --looper-waveform)
+set_tests_properties(jam2_looper_waveform_alignment_units PROPERTIES
+    LABELS "unit;gui;widget;audio"
+    TIMEOUT 15
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 set_tests_properties(jam2_gui_widget_boundary_units PROPERTIES
     LABELS "unit;gui;widget;performance"
     TIMEOUT 45
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 if(WIN32)
-    set_tests_properties(jam2_gui_widget_boundary_units PROPERTIES
+    set_tests_properties(jam2_gui_widget_boundary_units jam2_looper_waveform_alignment_units PROPERTIES
         ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Widgets>")
 endif()
@@ -627,6 +644,26 @@ if(WIN32)
     set_tests_properties(jam2_practice_idea_boundary_units PROPERTIES
         ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Widgets>")
+endif()
+
+add_executable(jam2_recording_calibration_tests EXCLUDE_FROM_ALL
+    unit/gui/RecordingCalibrationTests.cpp
+    "${CMAKE_SOURCE_DIR}/app/gui/RecordingCalibrationController.cpp"
+    "${CMAKE_SOURCE_DIR}/app/gui/RecordingCalibrationDialog.cpp"
+    "${CMAKE_SOURCE_DIR}/app/gui/LaneRecordingDialog.cpp"
+    "${CMAKE_SOURCE_DIR}/app/gui/GuiControlContract.cpp"
+    "${CMAKE_SOURCE_DIR}/app/gui/GuiPresentation.cpp"
+    "${CMAKE_SOURCE_DIR}/app/gui/UserPreferences.cpp")
+jam2_configure_test_target(jam2_recording_calibration_tests)
+target_include_directories(jam2_recording_calibration_tests PRIVATE "${CMAKE_SOURCE_DIR}/app/gui")
+target_link_libraries(jam2_recording_calibration_tests PRIVATE jam2_core Qt6::Core Qt6::Widgets)
+add_test(NAME jam2_recording_calibration_units COMMAND $<TARGET_FILE:jam2_recording_calibration_tests>)
+set_tests_properties(jam2_recording_calibration_units PROPERTIES
+    LABELS "unit;gui;audio;recording;persistence;plugin;dialog;fake-audio"
+    TIMEOUT 30 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+if(WIN32)
+    set_tests_properties(jam2_recording_calibration_units PROPERTIES
+        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Widgets>")
 endif()
 
 add_executable(jam2_user_preferences_tests EXCLUDE_FROM_ALL
@@ -1462,6 +1499,7 @@ add_custom_target(jam2_tests_unit
         jam2_gui_widget_boundary_tests
         jam2_practice_idea_boundary_tests
         jam2_user_preferences_tests
+        jam2_recording_calibration_tests
         jam2_detail_section_edit_tests
         jam2_plugin_bridge_tests
         jamtaster_tests
@@ -1472,6 +1510,10 @@ add_custom_target(jam2_tests_unit
         jam2_jamtaster_service_tests
         jam2_jamtaster_dialog_tests
         jam2_jamtaster_project_support_tests)
+
+if(APPLE)
+    add_dependencies(jam2_tests_unit jam2_coreaudio_recording_timing_tests)
+endif()
 
 add_custom_target(jam2_tests_plugin
     DEPENDS
@@ -1508,6 +1550,7 @@ add_custom_target(jam2_tests_gui
         jam2_gui_widget_boundary_tests
         jam2_practice_idea_boundary_tests
         jam2_user_preferences_tests
+        jam2_recording_calibration_tests
         jam2_detail_section_edit_tests
         jam2_jamtaster_dialog_tests
         jam2_jamtaster_project_support_tests

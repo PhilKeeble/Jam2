@@ -20,6 +20,7 @@
 #include "TrackRecordingWorkflow.hpp"
 #include "TrackWorkspaceController.hpp"
 #include "UserPreferences.hpp"
+#include "RecordingCalibrationController.hpp"
 #include "InputPluginBackend.hpp"
 #include "IdeaHeaderRow.hpp"
 
@@ -584,6 +585,7 @@ private:
 
     ApplicationRuntime jam2_;
     UserPreferences preferences_;
+    std::unique_ptr<RecordingCalibrationController> recordingCalibration_;
     jam2::gui::SessionRuntimeDraft sessionRuntimeDraft_;
     bool preferencesInitialized_ = false;
     std::vector<jam2::audio::DeviceInfo> availableDevices_;

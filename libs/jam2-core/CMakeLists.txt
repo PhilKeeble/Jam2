@@ -44,6 +44,7 @@ add_library(jam2_core STATIC
     src/audio_ring.cpp
     src/common.cpp
     src/input_source.cpp
+    src/recording_calibration.cpp
     src/metronome.cpp
     src/midi.cpp
     src/engine.cpp

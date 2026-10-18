@@ -184,6 +184,26 @@ void testPureTimingBoundaries()
         "engine sample-rate matching must enforce finite positive one-Hz tolerance");
 }
 
+void testRecordingLatencyLogFields()
+{
+    FakeRuntime fake;
+    auto workflow = fake.workflow();
+    fake.snapshot.input_latency_frames = 2519;
+    fake.snapshot.output_latency_frames = 729;
+    fake.snapshot.recording_source_latency_frames = 32;
+    fake.snapshot.recording_latency_adjustment_frames = -10;
+    fake.snapshot.recording_latency_compensation_frames = 3270;
+    require(workflow.latencyLogFields() == QStringLiteral(
+        "input_latency_frames=2519 output_latency_frames=729 source_latency_frames=32 "
+        "calibration_adjustment_frames=0 manual_latency_adjustment_frames=-10 latency_compensation_frames=3270"),
+        "synced recording diagnostics expose the live engine correction and all contributing parts");
+    fake.snapshot.input_latency_frames = 100;
+    fake.snapshot.recording_latency_compensation_frames = 851;
+    require(workflow.latencyLogFields().contains(QStringLiteral("input_latency_frames=100 ")) &&
+            workflow.latencyLogFields().endsWith(QStringLiteral("latency_compensation_frames=851")),
+        "recording diagnostics query fresh engine values rather than a cached GUI snapshot");
+}
+
 void testListeningTempoTransportPosition()
 {
     FakeRuntime fake;
@@ -878,6 +898,7 @@ int main(int argc, char** argv)
     try {
         QCoreApplication application(argc, argv);
         testPureTimingBoundaries();
+        testRecordingLatencyLogFields();
         testListeningTempoTransportPosition();
         testPreparedAndTransportCommands();
         testSnapshotsAndCountdown();

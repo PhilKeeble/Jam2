@@ -629,6 +629,21 @@ MainWindow::MainWindow(
     , looperArrangementRevision_(trackWorkspace_.looperArrangementRevision)
     , lastAppliedHostArrangementRevision_(trackWorkspace_.lastAppliedHostArrangementRevision)
 {
+    RecordingCalibrationController::Backend calibrationBackend;
+    calibrationBackend.snapshot = [this] { return jam2_.engineSnapshot(); };
+    calibrationBackend.stream = [this] { return jam2_.engineColdSnapshot().stream; };
+    calibrationBackend.source = [this](std::size_t slot) { const auto* r = jam2_.inputSourceRouter(); return r ? r->slot_snapshot(slot) : jam2::audio::InputSourceSlotSnapshot{}; };
+    calibrationBackend.recordingChannel = [this]() -> std::optional<std::size_t> {
+        const auto* r = jam2_.inputSourceRouter();
+        if (!r || r->recording_input_kind() != jam2::audio::RecordingInputKind::PhysicalAudio ||
+            r->recording_input_channel() == jam2::audio::kNoInputChannel) return {};
+        return r->recording_input_channel();
+    };
+    calibrationBackend.networkRunning = [this] { return jam2_.isNetworkRunning(); };
+    calibrationBackend.submit = [this](const jam2::EngineCommand& c) { return jam2_.submit(c); };
+    calibrationBackend.begin = [this](std::size_t c, QString& error) { return jam2_.beginRecordingCalibration(c, error); };
+    recordingCalibration_ = std::make_unique<RecordingCalibrationController>(preferences_, std::move(calibrationBackend));
+
     trackWorkspace_.setCallbacks({
         [this] { return sessionController_.snapshot().contract.sampleRate; },
         [this](const QString& message) {
@@ -3051,6 +3066,10 @@ QJsonObject MainWindow::automationPerformanceSnapshot() const
         {QStringLiteral("track_take_finalized"), engine.track_take.finalized},
         {QStringLiteral("recording_latency_adjustment_frames"),
             static_cast<qint64>(engine.recording_latency_adjustment_frames)},
+        {QStringLiteral("recording_calibration_adjustment_frames"),
+            static_cast<qint64>(engine.recording_calibration_adjustment_frames)},
+        {QStringLiteral("recording_latency_compensation_frames"),
+            static_cast<qint64>(engine.recording_latency_compensation_frames)},
         {QStringLiteral("input_source_router"), inputSourceRouter},
         {QStringLiteral("midi_enumeration_gate"), automationCompletionGateText(
             midiInputBackend_->automationCompletionGateState())},
@@ -3623,6 +3642,7 @@ void MainWindow::restartPreparedTrackQuantized()
 
 void MainWindow::handleEngineSnapshot(const jam2::EngineSnapshot& snapshot)
 {
+    recordingCalibration_->update();
     const MetronomeTransportController::SnapshotUpdate transportUpdate =
         metronomeTransport_.consume(snapshot);
     updateMetronomePresentationFromEngine(snapshot);
@@ -8985,6 +9005,7 @@ bool MainWindow::showLaneRecordingDialog(
     input.loopback = preferences_.recording.loopback;
     input.jamMix = preferences_.recording.jamMixTrack;
     input.latencySummary = recordingLatencySummary();
+    input.calibration = recordingCalibration_.get();
 
     LaneRecordingDialog dialog(
         std::move(input),
@@ -11029,6 +11050,10 @@ void MainWindow::startInputCapture(std::uint64_t targetFrame, int countInBars)
     // Close the small scheduling window before the visible recording phase is
     // published so a remote transport edge cannot land between arming the
     // engine take and enabling local isolation.
+    if (!recordingCalibration_->prepareForSource(recordingInputSourceSlot_)) {
+        appendLog(QStringLiteral("Could not apply recording calibration: the audio engine is busy. Retry recording."));
+        return;
+    }
     jam2_.setLaneRecordingIsolationEnabled(true);
     if (!trackRecordingWorkflow_.startInputTake(
             output,
@@ -11159,11 +11184,12 @@ void MainWindow::startInputCaptureAtGroupSchedule(
     localTrackRecordingCountInBars_ = qBound(0, countInBars, 8);
     publishLocalTrackRecordingState(QStringLiteral("waiting"));
     appendLog(QStringLiteral(
-        "synced recording scheduled: group=%1 countdown_frame=%2 start_frame=%3 count_in_bars=%4")
+        "synced recording scheduled: group=%1 countdown_frame=%2 start_frame=%3 count_in_bars=%4 %5")
         .arg(activeRecordingGroupId_.left(8))
         .arg(countdownFrame)
         .arg(targetFrame)
-        .arg(countInBars));
+        .arg(countInBars)
+        .arg(trackRecordingWorkflow_.latencyLogFields()));
 }
 
 void MainWindow::startLoopbackCapture()

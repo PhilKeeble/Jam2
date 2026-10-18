@@ -251,6 +251,7 @@ public:
     std::uint32_t outputLatencyFrames() const noexcept { return output_latency_frames_; }
     std::uint64_t sourceLatencyFrames() const noexcept { return source_latency_frames_; }
     int latencySampleRate() const noexcept { return latency_sample_rate_; }
+    QString latencyLogFields() const;
     bool jamRecordingActive() const noexcept { return jam_recording_active_; }
     const QString& jamRecordingFolder() const noexcept { return jam_recording_folder_; }
 

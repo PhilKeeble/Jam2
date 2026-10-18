@@ -37,6 +37,9 @@ public:
     void setLaneRecordingIsolationEnabled(bool enabled) noexcept;
 
     jam2::EngineSnapshot engineSnapshot() const noexcept;
+    jam2::EngineColdSnapshot engineColdSnapshot() const;
+    std::shared_ptr<jam2::audio::RecordingCalibrationCapture> beginRecordingCalibration(
+        std::size_t channel, QString& error);
     jam2::EngineGuiPeakSnapshot consumeGuiPeaks() noexcept;
     std::optional<Jam2NetworkOperationalSnapshot> networkSnapshot() const;
     std::uint64_t engineStarts() const noexcept { return engine_starts_; }

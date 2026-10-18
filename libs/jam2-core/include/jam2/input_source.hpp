@@ -14,6 +14,8 @@ inline constexpr std::size_t kMaximumSourceInputChannels = 2;
 inline constexpr std::size_t kNoInputChannel = static_cast<std::size_t>(-1);
 inline constexpr std::size_t kCombinedInputSources = static_cast<std::size_t>(-1);
 
+enum class RecordingInputKind : std::uint8_t { PhysicalAudio, MidiInstrument, Mixed, Unavailable };
+
 enum class InputSourceKind : std::uint8_t {
     Audio,
     MidiInstrument,
@@ -86,6 +88,8 @@ public:
     {
         return recording_latency_frames_.load(std::memory_order_relaxed);
     }
+    RecordingInputKind recording_input_kind() const noexcept { return recording_kind_.load(std::memory_order_relaxed); }
+    std::size_t recording_input_channel() const noexcept { return recording_channel_.load(std::memory_order_relaxed); }
     int last_peak_ppm() const noexcept
     {
         return peak_ppm_.load(std::memory_order_relaxed);
@@ -132,6 +136,8 @@ private:
     std::atomic<std::size_t> recording_slot_{kCombinedInputSources};
     std::atomic<bool> recording_source_ready_{false};
     std::atomic<std::size_t> recording_latency_frames_{0};
+    std::atomic<RecordingInputKind> recording_kind_{RecordingInputKind::Unavailable};
+    std::atomic<std::size_t> recording_channel_{kNoInputChannel};
     std::atomic<std::uint64_t> rendered_blocks_{0};
     std::atomic<std::uint64_t> renderer_failures_{0};
     std::atomic<std::uint64_t> invalid_configurations_{0};

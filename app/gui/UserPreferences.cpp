@@ -13,6 +13,63 @@ QString& preferencesFilePathOverride()
     return path;
 }
 
+QVector<int> calibrationChannels(const QVariant& value)
+{
+    QVector<int> channels;
+    for (const auto& item : value.toList()) {
+        bool ok = false; const int channel = item.toInt(&ok);
+        if (!ok || channel < 0 || channel >= 1024 || channels.contains(channel)) return {};
+        channels.push_back(channel);
+    }
+    return channels;
+}
+QVariantList calibrationChannels(const QVector<int>& channels)
+{
+    QVariantList values; for (int channel : channels) values.push_back(channel); return values;
+}
+QVector<RecordingCalibrationProfile> loadCalibrations(QSettings& s)
+{
+    QVector<RecordingCalibrationProfile> profiles;
+    const int count = qMin(128, s.beginReadArray(QStringLiteral("recording_calibrations")));
+    for (int i = 0; i < count; ++i) {
+        s.setArrayIndex(i); RecordingCalibrationProfile p;
+        p.key.backend = s.value("backend").toString(); p.key.deviceId = s.value("device_id").toString();
+        p.key.sampleRate = s.value("sample_rate").toInt(); p.key.bufferFrames = s.value("buffer_frames").toInt();
+        p.key.inputChannels = calibrationChannels(s.value("inputs")); p.key.outputChannels = calibrationChannels(s.value("outputs"));
+        p.key.physicalInput = s.value("physical_input", -1).toInt();
+        const int method = s.value("method", -1).toInt();
+        if (method < 0 || method > 1) continue;
+        p.method = static_cast<RecordingCalibrationMethod>(method);
+        bool adjustmentOk=false, measuredOk=false, reportedOk=false, spreadOk=false, clicksOk=false;
+        p.adjustmentFrames = s.value("adjustment_frames").toLongLong(&adjustmentOk);
+        p.measuredFrames = s.value("measured_frames").toDouble(&measuredOk);
+        p.reportedFrames = s.value("reported_frames").toDouble(&reportedOk);
+        p.spreadFrames = s.value("spread_frames").toDouble(&spreadOk);
+        p.clicks = s.value("clicks").toInt(&clicksOk);
+        p.calibratedAt = s.value("calibrated_at").toString();
+        if (adjustmentOk && measuredOk && reportedOk && spreadOk && clicksOk && p.valid())
+            profiles.push_back(std::move(p));
+    }
+    s.endArray(); return profiles;
+}
+void saveCalibrations(QSettings& s, const QVector<RecordingCalibrationProfile>& profiles)
+{
+    s.remove(QStringLiteral("recording_calibrations"));
+    s.beginWriteArray(QStringLiteral("recording_calibrations")); int index = 0;
+    for (const auto& p : profiles) {
+        if (!p.valid() || index >= 128) continue;
+        s.setArrayIndex(index++);
+        s.setValue("backend", p.key.backend); s.setValue("device_id", p.key.deviceId);
+        s.setValue("sample_rate", p.key.sampleRate); s.setValue("buffer_frames", p.key.bufferFrames);
+        s.setValue("inputs", calibrationChannels(p.key.inputChannels)); s.setValue("outputs", calibrationChannels(p.key.outputChannels));
+        s.setValue("physical_input", p.key.physicalInput); s.setValue("method", static_cast<int>(p.method));
+        s.setValue("adjustment_frames", static_cast<qlonglong>(p.adjustmentFrames));
+        s.setValue("measured_frames", p.measuredFrames); s.setValue("reported_frames", p.reportedFrames);
+        s.setValue("spread_frames", p.spreadFrames); s.setValue("clicks", p.clicks); s.setValue("calibrated_at", p.calibratedAt);
+    }
+    s.endArray();
+}
+
 void loadAudio(QSettings& settings, AudioDevicePreference& value)
 {
     value.backend = settings.value(QStringLiteral("backend"), value.backend).toString();
@@ -265,6 +322,7 @@ UserPreferences UserPreferencesStore::load()
         QStringLiteral("compensation_slew_ms_per_second"),
         out.metronome.compensationSlewMsPerSecond).toDouble();
     settings.endGroup();
+    out.recordingCalibrations = loadCalibrations(settings);
     settings.beginGroup(QStringLiteral("local_audio")); loadAudio(settings, out.localAudio); settings.endGroup();
     settings.beginGroup(QStringLiteral("network_audio"));
     loadAudio(settings, out.networkAudio);
@@ -497,7 +555,7 @@ UserPreferences UserPreferencesStore::load()
     return out;
 }
 
-void UserPreferencesStore::save(const UserPreferences& p)
+bool UserPreferencesStore::saveChecked(const UserPreferences& p)
 {
     QDir().mkpath(QFileInfo(filePath()).absolutePath());
     QSettings settings(filePath(), QSettings::IniFormat);
@@ -512,6 +570,7 @@ void UserPreferencesStore::save(const UserPreferences& p)
     settings.setValue(QStringLiteral("compensation_slew_ms_per_second"),
         p.metronome.compensationSlewMsPerSecond);
     settings.endGroup();
+    saveCalibrations(settings, p.recordingCalibrations);
     settings.beginGroup(QStringLiteral("local_audio")); saveAudio(settings, p.localAudio); settings.endGroup();
     settings.beginGroup(QStringLiteral("network_audio"));
     saveAudio(settings, p.networkAudio);
@@ -639,4 +698,10 @@ void UserPreferencesStore::save(const UserPreferences& p)
     settings.setValue(QStringLiteral("recordings"), p.sync.recordings);
     settings.endGroup();
     settings.sync();
+    return settings.status() == QSettings::NoError;
+}
+
+void UserPreferencesStore::save(const UserPreferences& preferences)
+{
+    (void)saveChecked(preferences);
 }

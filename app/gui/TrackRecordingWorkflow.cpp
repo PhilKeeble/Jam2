@@ -1020,6 +1020,21 @@ bool TrackRecordingWorkflow::startInputTakeAtSchedule(
     return true;
 }
 
+QString TrackRecordingWorkflow::latencyLogFields() const
+{
+    const jam2::EngineSnapshot snapshot = snapshot_provider_
+        ? snapshot_provider_() : jam2::EngineSnapshot{};
+    return QStringLiteral(
+        "input_latency_frames=%1 output_latency_frames=%2 source_latency_frames=%3 "
+        "calibration_adjustment_frames=%4 manual_latency_adjustment_frames=%5 latency_compensation_frames=%6")
+        .arg(snapshot.input_latency_frames)
+        .arg(snapshot.output_latency_frames)
+        .arg(snapshot.recording_source_latency_frames)
+        .arg(snapshot.recording_calibration_adjustment_frames)
+        .arg(snapshot.recording_latency_adjustment_frames)
+        .arg(snapshot.recording_latency_compensation_frames);
+}
+
 bool TrackRecordingWorkflow::scheduleRecordingTransport(
     std::uint64_t countdownStartFrame,
     std::uint64_t targetFrame,
