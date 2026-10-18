@@ -104,7 +104,7 @@ bool validateListeningMessage(const QJsonObject& message, QString& error) {
     const bool timingMessage = commitMessage || stateMessage || resetMessage;
     if (settingsMessage) allowed << QStringLiteral("settings");
     if (prepareMessage || commitMessage || stateMessage) allowed << QStringLiteral("bank");
-    if (timingMessage) allowed << QStringLiteral("tempo") << QStringLiteral("target_frame");
+    if (timingMessage) allowed << QStringLiteral("tempo") << QStringLiteral("target_frame") << QStringLiteral("epoch_frame") << QStringLiteral("epoch_position");
     if (commitMessage || stateMessage) allowed << QStringLiteral("source_seconds") << QStringLiteral("playing");
     if (messageType == type("cancel") || messageType == type("failed")) allowed << QStringLiteral("reason");
     if ((!requestMessage && !prepareMessage && !commitMessage && !stateMessage && !resetMessage &&
@@ -124,6 +124,13 @@ bool validateListeningMessage(const QJsonObject& message, QString& error) {
         std::uint64_t target = 0;
         if (!parseTempo(message.value(QStringLiteral("tempo")), tempo) || !frame(message.value(QStringLiteral("target_frame")), target) ||
             (resetMessage && tempo.rate_ppm != 1000000)) { error = QStringLiteral("listening timing is invalid"); return false; }
+    }
+    if (timingMessage && (message.contains(QStringLiteral("epoch_frame")) || message.contains(QStringLiteral("epoch_position")))) {
+        std::uint64_t epoch = 0;
+        if (!frame(message.value(QStringLiteral("epoch_frame")), epoch) ||
+            !finite(message.value(QStringLiteral("epoch_position")), 0.0, 9007199254740991.0)) {
+            error = QStringLiteral("listening grid epoch is invalid"); return false;
+        }
     }
     if ((commitMessage || stateMessage) && (!finite(message.value(QStringLiteral("source_seconds")), 0.0, 3600.0) ||
         !message.value(QStringLiteral("playing")).isBool())) { error = QStringLiteral("listening source position is invalid"); return false; }
@@ -166,6 +173,8 @@ void ListeningToolsController::flushEdits() {
 }
 void ListeningToolsController::request() {
     const Context state = context();
+    if (!pending() && !queuedEdit_ && draft_ == applied_ &&
+        (!state.sync || applied_.speedPpm == state.engine.playback_tempo.rate_ppm)) return;
     if (state.protectedRecording || state.transportChanging) { queuedEdit_ = true; return; }
     if (phase_ == Phase::Scheduled || pendingReset_) { queuedEdit_ = true; return; }
     if (state.sync && state.network && !state.creator) {
@@ -260,8 +269,8 @@ void ListeningToolsController::maybeCommit() {
     if (state.position.engineAnchored && state.position.secondsPerBeat > 0.0) {
         const double source = previousTempo.position(target);
         const double beatFrames = state.position.secondsPerBeat * state.position.tempo.rate() * sampleRate;
-        const double nextBeat = std::ceil(std::max(0.0, source - state.position.epochFrame) / beatFrames);
-        target = previousTempo.frame(state.position.epochFrame + nextBeat * beatFrames);
+        const double nextBeat = std::ceil(std::max(0.0, source - state.position.epochSourcePosition) / beatFrames);
+        target = previousTempo.frame(state.position.epochSourcePosition + nextBeat * beatFrames);
     }
     const bool couple = state.sync;
     const jam2::PlaybackTempo tempo{couple ? preparing_.speedPpm : 1000000,
@@ -272,14 +281,17 @@ void ListeningToolsController::maybeCommit() {
     if (prepared_ && prepared_->frames > 0) {
         const double sourceLength = prepared_->frames * preparing_.speedPpm / 1000000.0 / prepared_->sampleRate;
         const double start = std::max(0.0, state.loopStartSourceSeconds);
-        const double end = state.loopEndSourceSeconds > start ? std::min(sourceLength, state.loopEndSourceSeconds) : sourceLength;
-        if (state.loopEnabled && end > start && sourceSeconds >= end)
-            sourceSeconds = start + std::fmod(sourceSeconds - start, end - start);
-        else sourceSeconds = std::fmod(sourceSeconds, sourceLength);
+        const double end = state.loopEndSourceSeconds > start ? state.loopEndSourceSeconds : sourceLength;
+        if (state.loopEnabled && end > start) {
+            if (sourceSeconds >= end)
+                sourceSeconds = start + std::fmod(sourceSeconds - start, end - start);
+        } else sourceSeconds = std::min(sourceSeconds, sourceLength);
     }
     QJsonObject message{{QStringLiteral("type"), type("commit")}, {QStringLiteral("revision"), revision_},
         {QStringLiteral("bank"), bank_}, {QStringLiteral("tempo"), tempoJson(tempo)},
-        {QStringLiteral("target_frame"), QString::number(target)}, {QStringLiteral("source_seconds"), sourceSeconds},
+        {QStringLiteral("target_frame"), QString::number(target)},
+        {QStringLiteral("epoch_frame"), QString::number(state.position.epochFrame)},
+        {QStringLiteral("epoch_position"), state.position.epochSourcePosition}, {QStringLiteral("source_seconds"), sourceSeconds},
         {QStringLiteral("playing"), state.playing}};
     if (shared_ && !send(message)) { cancel(QStringLiteral("listening commit could not be published"), true); return; }
     if (!schedule(message)) cancel(QStringLiteral("listening commit could not be scheduled"), shared_);
@@ -300,6 +312,10 @@ bool ListeningToolsController::schedule(const QJsonObject& message) {
     command.cookie = stageCookie_;
     command.frame = rawTarget;
     command.playback_tempo = tempo;
+    if (message.contains(QStringLiteral("epoch_position"))) {
+        frame(message.value(QStringLiteral("epoch_frame")), command.grid_epoch_frame);
+        command.grid_epoch_source_position = message.value(QStringLiteral("epoch_position")).toDouble();
+    }
     command.update_playback_tempo = coupled_;
     if (prepared_) {
         command.signed_value = static_cast<std::int64_t>(stageCookie_);
@@ -310,15 +326,18 @@ bool ListeningToolsController::schedule(const QJsonObject& message) {
             if (target >= sentFrame) sourceSeconds += static_cast<double>(target - sentFrame) /
                 std::max(1, state.position.sampleRate) * preparing_.speedPpm / 1000000.0;
         }
-        command.frame_end = static_cast<std::uint64_t>(std::max(0.0,
-            sourceSeconds * prepared_->sampleRate / (preparing_.speedPpm / 1000000.0))) % static_cast<std::uint64_t>(prepared_->frames);
         const double outputScale = prepared_->sampleRate / (preparing_.speedPpm / 1000000.0);
+        const double timelineFrames = state.loopEnabled && state.loopEndSourceSeconds > 0.0
+            ? state.loopEndSourceSeconds * outputScale : static_cast<double>(prepared_->frames);
+        command.frame_end = static_cast<std::uint64_t>(std::max(0.0, sourceSeconds * outputScale)) %
+            static_cast<std::uint64_t>(std::max(1.0, timelineFrames));
         command.prepared_loop_enabled = state.loopEnabled;
         command.prepared_loop_start_frame = static_cast<std::uint64_t>(std::clamp(state.loopStartSourceSeconds * outputScale,
-            0.0, static_cast<double>(prepared_->frames - 1)));
+            0.0, std::max(0.0, timelineFrames - 1.0)));
         command.prepared_loop_end_frame = state.loopEndSourceSeconds > state.loopStartSourceSeconds ?
             static_cast<std::uint64_t>(std::clamp(state.loopEndSourceSeconds * outputScale,
-                static_cast<double>(command.prepared_loop_start_frame + 1), static_cast<double>(prepared_->frames))) : static_cast<std::uint64_t>(prepared_->frames);
+                static_cast<double>(command.prepared_loop_start_frame + 1),
+                static_cast<double>(prepared_->sampleRate) * 3600.0)) : static_cast<std::uint64_t>(prepared_->frames);
     }
     if (state.engineRunning && (!callbacks_.submit || !callbacks_.submit(command))) return false;
     committedTempo_ = tempo;
@@ -357,6 +376,8 @@ QJsonObject ListeningToolsController::resetMessage(const Context& state) const {
     const auto target = state.position.currentFrame + static_cast<std::uint64_t>(sampleRate) * kCommitLeadMs / 1000ULL;
     return {{QStringLiteral("type"), type("reset")}, {QStringLiteral("revision"), nextRevision(revision_)},
         {QStringLiteral("target_frame"), QString::number(target)},
+        {QStringLiteral("epoch_frame"), QString::number(state.position.epochFrame)},
+        {QStringLiteral("epoch_position"), state.position.epochSourcePosition},
         {QStringLiteral("tempo"), tempoJson({1000000, target, tempoAtTarget(state, target).position(target)})}};
 }
 void ListeningToolsController::applyReset(const QJsonObject& message) {
@@ -369,6 +390,10 @@ void ListeningToolsController::applyReset(const QJsonObject& message) {
     jam2::EngineCommand command;
     command.type = jam2::EngineCommandType::CommitListeningTools;
     command.playback_tempo = tempo;
+    if (message.contains(QStringLiteral("epoch_position"))) {
+        frame(message.value(QStringLiteral("epoch_frame")), command.grid_epoch_frame);
+        command.grid_epoch_source_position = message.value(QStringLiteral("epoch_position")).toDouble();
+    }
     command.frame = jam2::transport_raw_frame_from_musical(target, state.position.renderOffsetFrames);
     if (command.frame <= state.engine.engine_frame) command.frame = state.engine.engine_frame + 1;
     pendingReset_.reset();
@@ -451,6 +476,8 @@ void ListeningToolsController::sendCurrent(const QString& peer) {
         {QStringLiteral("bank"), state.bank}, {QStringLiteral("settings"), listeningSettingsJson(applied_)},
         {QStringLiteral("tempo"), tempoJson(state.engine.playback_tempo)},
         {QStringLiteral("target_frame"), QString::number(state.position.currentFrame)},
+        {QStringLiteral("epoch_frame"), QString::number(state.position.epochFrame)},
+        {QStringLiteral("epoch_position"), state.position.epochSourcePosition},
         {QStringLiteral("source_seconds"), state.sourceSeconds}, {QStringLiteral("playing"), state.playing}}, peer);
 }
 void ListeningToolsController::tick() {

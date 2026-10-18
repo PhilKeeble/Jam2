@@ -300,7 +300,8 @@ struct EngineControlMirror {
 void sync_engine_control(
     const RuntimeState& runtime,
     jam2::Engine* engine,
-    EngineControlMirror& mirror)
+    EngineControlMirror& mirror,
+    std::int64_t clockOffset)
 {
     if (engine == nullptr) {
         return;
@@ -371,9 +372,10 @@ void sync_engine_control(
     }
     const std::uint64_t epoch = runtime.metronome_epoch_sample_time.load(std::memory_order_relaxed);
     const bool epoch_valid = runtime.metronome_epoch_valid.load(std::memory_order_relaxed);
-    if (mirror.snapshot.metronome_epoch_frame != epoch || mirror.snapshot.metronome_epoch_valid != epoch_valid) {
-        jam2::EngineCommand command; command.type = jam2::EngineCommandType::SetMetronomeEpoch; command.frame = epoch; command.enabled = epoch_valid;
-        if (submit(command)) { mirror.snapshot.metronome_epoch_frame = epoch; mirror.snapshot.metronome_epoch_valid = epoch_valid; }
+    if (mirror.snapshot.metronome_epoch_frame != epoch || mirror.snapshot.metronome_epoch_valid != epoch_valid ||
+        mirror.snapshot.metronome_clock_offset_frames != clockOffset) {
+        jam2::EngineCommand command; command.type = jam2::EngineCommandType::SetMetronomeEpoch; command.frame = epoch; command.enabled = epoch_valid; command.signed_value = clockOffset;
+        if (submit(command)) { mirror.snapshot.metronome_epoch_frame = epoch; mirror.snapshot.metronome_epoch_valid = epoch_valid; mirror.snapshot.metronome_clock_offset_frames = clockOffset; }
     }
     const std::int64_t offset = runtime.metronome_render_offset_frames.load(std::memory_order_relaxed);
     if (mirror.snapshot.metronome_render_offset_frames != offset) {
@@ -1148,7 +1150,8 @@ struct CommandThread {
 
 jam2::cli::RecordingSidecarContext make_recording_sidecar_context(
     const Options& options,
-    const RuntimeState& state)
+    const RuntimeState& state,
+    std::int64_t clockOffset = 0)
 {
     jam2::cli::RecordingSidecarContext context;
     context.metronome_enabled = state.metronome.load(std::memory_order_relaxed);
@@ -1163,6 +1166,8 @@ jam2::cli::RecordingSidecarContext make_recording_sidecar_context(
     context.test_input = std::string(test_input_mode_text(options.test_input));
     context.metronome_epoch_sample_time =
         state.metronome_epoch_sample_time.load(std::memory_order_relaxed);
+    context.metronome_clock_offset_frames = clockOffset;
+    context.metronome_render_offset_frames = state.metronome_render_offset_frames.load(std::memory_order_relaxed);
     context.metronome_epoch_valid =
         state.metronome_epoch_valid.load(std::memory_order_relaxed);
     context.pattern = metronome_pattern_from_runtime(state);
@@ -2087,24 +2092,10 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
         apply_grid_publisher_role();
         return true;
     };
-    auto hard_stop_grid_dependents = [&]() {
-        if (audio.engine != nullptr) {
-            jam2::EngineCommand stop;
-            stop.type = jam2::EngineCommandType::PreparedStop;
-            stop.frame = current_engine_frame(audio.engine.get());
-            (void)audio.engine->submit(stop);
-            jam2::EngineCommand cancelTake;
-            cancelTake.type = jam2::EngineCommandType::CancelTrackTake;
-            (void)audio.engine->submit(cancelTake);
-        }
-        std::lock_guard<std::mutex> lock(commands.state.transport_mutex);
-        commands.state.transport_pending.store(false, std::memory_order_release);
-        commands.state.transport_network_revision.store(0, std::memory_order_relaxed);
-        commands.state.transport_network_action.store(0, std::memory_order_relaxed);
-    };
     auto apply_ordered_grid = [&](bool reset_epoch) {
         if (reset_epoch) {
-            hard_stop_grid_dependents();
+            // Updating click timing does not cancel the independently playing WAV.
+            // Existing recording isolation guards timing edits at the control boundary.
             // An ordered epoch reset is a barrier.  A non-authority must not
             // keep rendering against its previous locally-mapped epoch while
             // it waits for the authority's first state packet.  The authority
@@ -3076,7 +3067,7 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
             mesh_grid_last_update_us = now;
         }
         commit_due_transport(commands.state, audio.engine.get());
-        sync_engine_control(commands.state, audio.engine.get(), engine_control_mirror);
+        sync_engine_control(commands.state, audio.engine.get(), engine_control_mirror, mesh_grid_base_offset_frames);
         if (!timed_stream_audio_detached && now >= send_deadline) {
             capture_ready_wake.cancelWakeRequest();
             detach_network_capture(audio);
@@ -3420,7 +3411,13 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                 const auto payload = make_grid_payload(
                     GridMessageKind::PeerPhase,
                     grid.revision,
-                    commands.state.metronome_epoch_sample_time.load(std::memory_order_relaxed),
+                    jam2::metronome::raw_epoch_phase(
+                        commands.state.metronome_epoch_sample_time.load(std::memory_order_relaxed),
+                        mesh_grid_base_offset_frames,
+                        jam2::metronome::step_interval_samples(options.sample_rate,
+                            metronome_pattern_from_runtime(commands.state).bpm,
+                            metronome_pattern_from_runtime(commands.state).division,
+                            metronome_pattern_from_runtime(commands.state).tempo_pulse_units)),
                     grid.mode,
                     grid.run_state);
                 network_session.sendToActive(
@@ -4025,6 +4022,7 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                         if (quantized_shared_grid_action &&
                             transport.target_sender_frame >=
                                 transport.countdown_start_sender_frame) {
+                            const auto grid_snapshot = audio.engine->snapshot();
                             translated_schedule =
                                 jam2::align_received_transport_to_grid(
                                     static_cast<double>(options.sample_rate),
@@ -4042,7 +4040,9 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                                     estimated_target_raw,
                                     transport.target_sender_frame -
                                         transport.countdown_start_sender_frame,
-                                    audio.engine ? audio.engine->snapshot().playback_tempo : jam2::PlaybackTempo{});
+                                    grid_snapshot.playback_tempo,
+                                    grid_snapshot.metronome_epoch_source_position,
+                                    jam2::TransportBoundary::Beat);
                         } else if (!quantized_shared_grid_action) {
                             const std::uint64_t countdown_start_raw = std::min(
                                 estimated_target_raw,
@@ -4264,7 +4264,7 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
     }
     commands.recording.finalize(
         audio.engine.get(),
-        make_recording_sidecar_context(options, commands.state));
+        make_recording_sidecar_context(options, commands.state, mesh_grid_base_offset_frames));
     std::cout.flush();
     return 0;
 }

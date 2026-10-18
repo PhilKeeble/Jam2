@@ -1,4 +1,5 @@
 #include "ArtifactReader.hpp"
+#include "transport_timing.hpp"
 
 #include <QFile>
 #include <QJsonDocument>
@@ -313,7 +314,7 @@ std::vector<std::int64_t> detectEvents(
 
 std::vector<std::int64_t> expectedMetronomeFrames(
     const QJsonObject& sidecar,
-    std::int64_t sampleCount)
+    std::int64_t sampleCount, MetronomeClock clock)
 {
     std::vector<std::int64_t> expected;
     const int sampleRate = sidecar.value(QStringLiteral("sample_rate")).toInt(48000);
@@ -326,22 +327,24 @@ std::vector<std::int64_t> expectedMetronomeFrames(
     const std::uint64_t playHigh = jsonUnsigned(
         sidecar, QStringLiteral("metronome_play_mask_high"), 0);
     const std::uint64_t start = jsonUnsigned(sidecar, QStringLiteral("start_audio_frame"));
-    const std::uint64_t epoch = jsonUnsigned(
-        sidecar, QStringLiteral("metronome_epoch_sample_time"));
+    const std::uint64_t mappedEpoch = jsonUnsigned(sidecar, QStringLiteral("metronome_epoch_sample_time"));
+    const auto offset = sidecar.value(clock == MetronomeClock::Input
+        ? QStringLiteral("metronome_clock_offset_frames") : QStringLiteral("metronome_render_offset_frames")).toInteger(0);
+    const std::uint64_t epoch = mappedEpoch;
     if (!sidecar.value(QStringLiteral("metronome_epoch_valid")).toBool(false) ||
         sampleRate <= 0 || bpm <= 0 || division <= 0 || sampleCount <= 0) {
         return expected;
     }
     const std::uint64_t interval = static_cast<std::uint64_t>(std::max<long long>(
         1, std::llround(60.0 * sampleRate / static_cast<double>(bpm * division))));
-    const std::uint64_t firstAbsolute = std::max(start, epoch);
-    std::uint64_t step = firstAbsolute > epoch
-        ? (firstAbsolute - epoch) / interval : 0;
-    if (step > 0) --step;
+    const auto mappedStart = jam2::transport_musical_frame_from_raw(start, offset);
+    std::uint64_t step = mappedStart > epoch ? (mappedStart - epoch) / interval : 0;
     const std::uint64_t stop = start + static_cast<std::uint64_t>(sampleCount);
     for (;; ++step) {
         if (step > (std::numeric_limits<std::uint64_t>::max() - epoch) / interval) break;
-        const std::uint64_t absolute = epoch + step * interval;
+        const std::uint64_t musical = epoch + step * interval;
+        if (musical < mappedStart) continue;
+        const std::uint64_t absolute = jam2::transport_raw_frame_from_musical(musical, offset);
         if (absolute >= stop) break;
         if (absolute < start) continue;
         const int patternStep = static_cast<int>(step % static_cast<std::uint64_t>(stepCount));
@@ -359,10 +362,10 @@ ExpectedClickAnalysis analyzeExpectedClicks(
     const std::vector<std::int16_t>& samples,
     int threshold,
     std::int64_t refractoryFrames,
-    std::int64_t toleranceFrames)
+    std::int64_t toleranceFrames, MetronomeClock clock)
 {
     const auto expected = expectedMetronomeFrames(
-        sidecar, static_cast<std::int64_t>(samples.size()));
+        sidecar, static_cast<std::int64_t>(samples.size()), clock);
     const auto detected = detectEvents(samples, threshold, refractoryFrames);
     const RawClickMatch raw = matchClicks(expected, detected, toleranceFrames);
     ExpectedClickAnalysis result;

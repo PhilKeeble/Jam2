@@ -53,8 +53,13 @@ struct Harness {
         state.engine.engine_frame = commands.back().frame;
         if (commands.back().update_playback_tempo) state.engine.playback_tempo = commands.back().playback_tempo;
         if (commands.back().signed_value != 0) state.engine.listening_source_cookie = commands.back().cookie;
+        if (commands.back().grid_epoch_source_position >= 0.0) {
+            state.engine.metronome_epoch_source_position = commands.back().grid_epoch_source_position;
+            state.position.epochSourcePosition = commands.back().grid_epoch_source_position;
+        }
         state.position.tempo = state.engine.playback_tempo;
-        state.position.currentFrame = state.engine.engine_frame;
+        state.position.rawCurrentFrame = state.engine.engine_frame;
+        state.position.currentFrame = jam2::transport_musical_frame_from_raw(state.engine.engine_frame, state.position.renderOffsetFrames);
         controller.tick();
     }
 };
@@ -289,6 +294,10 @@ void testFourPeersWithDelayedDuplicateMessages() {
         peers[i].state.network = true;
         peers[i].state.creator = i == 0;
         peers[i].state.localToken = QStringLiteral("p%1").arg(i);
+        const std::array<std::int64_t, 4> offsets{0, 48000, -96000, 12000};
+        peers[i].state.position.renderOffsetFrames = offsets[i];
+        peers[i].state.engine.engine_frame = peers[i].state.position.rawCurrentFrame =
+            jam2::transport_raw_frame_from_musical(96000, offsets[i]);
     }
     peers[0].state.peers = {QStringLiteral("p1"), QStringLiteral("p2"), QStringLiteral("p3")};
     ListeningToolsSettings settings;
@@ -309,7 +318,11 @@ void testFourPeersWithDelayedDuplicateMessages() {
         peers[i].controller.receive(commit, QStringLiteral("p0"));
         peers[i].controller.receive(commit, QStringLiteral("p0"));
     }
+    const auto sharedBoundary = peers[0].commands.back().playback_tempo.anchor_frame;
     for (auto& peer : peers) {
+        require(jam2::transport_musical_frame_from_raw(peer.commands.back().frame,
+            peer.state.position.renderOffsetFrames) == sharedBoundary,
+            "different local engine ages translate the same shared listening boundary exactly");
         require(peer.commands.size() == 1 && peer.commands.back().playback_tempo.rate_ppm == 730000,
             "duplicate commits schedule one exact fractional tempo on every peer");
         peer.finish();
@@ -413,6 +426,58 @@ void testPlaybackChangesRetainListeningSelection() {
         "tempo alone cannot report success when the corresponding audio swap did not apply");
 }
 
+void testListeningChangeDuringSilentSectionTail() {
+    Harness h;
+    h.state.hasSources = h.state.playing = true;
+    h.state.sourceSeconds = 5.0;
+    h.state.loopEndSourceSeconds = 12.0;
+    ListeningToolsSettings settings;
+    settings.speedPpm = 500000;
+    h.controller.edit(settings, true);
+    PreparedMixResult result;
+    QTemporaryDir folder;
+    result.path = folder.filePath(QStringLiteral("short-audio.wav"));
+    result.sampleRate = 48000;
+    result.frames = 96000; // One second of source audio rendered at half speed.
+    h.controller.prepared(h.renders.back(), result);
+    jam2::EngineEvent staged;
+    staged.type = jam2::EngineEventType::ListeningTrackStaged;
+    staged.cookie = h.commands.back().cookie;
+    h.controller.engineEvent(staged);
+    const auto commit = h.commands.back();
+    require(commit.frame_end > static_cast<std::uint64_t>(result.frames) &&
+        commit.prepared_loop_end_frame == 24 * 48000,
+        "speed change in the silent tail preserves section position and musical loop length");
+    h.finish();
+}
+
+void testJoinAfterTempoAndGridReset() {
+    Harness creator;
+    creator.state.network = true;
+    creator.state.engine.playback_tempo = creator.state.position.tempo = {1000000, 14020140, 12652167.5};
+    creator.state.position.currentFrame = creator.state.position.rawCurrentFrame = creator.state.engine.engine_frame = 19000000;
+    creator.state.position.epochFrame = creator.state.engine.metronome_epoch_frame = 18000000;
+    creator.state.position.epochSourcePosition = creator.state.engine.metronome_epoch_source_position = 16632027.5;
+    creator.controller.sendCurrent(QStringLiteral("joining"));
+    Harness joining;
+    joining.state.network = true;
+    joining.state.creator = false;
+    joining.state.position.currentFrame = joining.state.position.rawCurrentFrame = joining.state.engine.engine_frame = 19000000;
+    joining.state.position.epochFrame = joining.state.engine.metronome_epoch_frame = 18000000;
+    joining.state.position.epochSourcePosition = 18000000; // Fresh peer has not adopted the slowed musical history.
+    joining.controller.receive(creator.sent.back(), QStringLiteral("creator"));
+    require(joining.commands.back().grid_epoch_frame == 18000000 &&
+        joining.commands.back().grid_epoch_source_position == 16632027.5,
+        "late join carries the actual source anchor rather than reconstructing old musical history");
+    joining.finish();
+    require(joining.controller.playbackReady() && joining.state.position.epochSourcePosition == 16632027.5,
+        "joined musical clock and grid source anchor publish together");
+    auto invalid = creator.sent.back();
+    invalid.insert(QStringLiteral("epoch_position"), -5.0);
+    QString error;
+    require(!validateListeningMessage(invalid, error), "invalid joined grid anchor is rejected");
+}
+
 void testStoppedEngineAndDeferredJoin() {
     Harness stopped;
     stopped.state.engineRunning = false;
@@ -453,6 +518,8 @@ int main(int argc, char** argv) {
         testLoopPassageAcrossSpeedChange();
         testFourPeersWithDelayedDuplicateMessages(); testQueueFailureAndPassedBoundary();
         testStoppedEngineAndDeferredJoin();
+        testListeningChangeDuringSilentSectionTail();
+        testJoinAfterTempoAndGridReset();
         testPlaybackChangesRetainListeningSelection();
         std::cout << "listening-tool controller tests passed\n"; return 0;
     } catch (const std::exception& error) { std::cerr << "FAIL: " << error.what() << '\n'; return 1; }

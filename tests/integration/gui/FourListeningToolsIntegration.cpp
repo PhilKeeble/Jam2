@@ -216,6 +216,29 @@ int main(int argc, char** argv) {
                 state.value(QStringLiteral("performance")).toObject().value(QStringLiteral("metronome_epoch_valid")).toBool(),
                 QStringLiteral("listening edits and restart must retain a valid synchronized epoch/grid"));
         }
+        for (const int bpm : {80, 60, 120, 80}) {
+            const auto before = waitAll(peers, [](std::size_t, const QJsonObject& state) {
+                return state.value(QStringLiteral("performance")).toObject().value(QStringLiteral("global_transport_playing")).toBool();
+            }, QStringLiteral("playback before live BPM edit"));
+            command(peers.peer(0), {{QStringLiteral("type"), QStringLiteral("performance.metronome")},
+                {QStringLiteral("id"), QStringLiteral("live-bpm")}, {QStringLiteral("enabled"), true}, {QStringLiteral("bpm"), bpm}});
+            const auto after = waitAll(peers, [bpm](std::size_t, const QJsonObject& state) {
+                const auto performance = state.value(QStringLiteral("performance")).toObject();
+                require(performance.value(QStringLiteral("global_transport_playing")).toBool(), QStringLiteral("BPM edit stopped global playback"));
+                return performance.value(QStringLiteral("metronome_bpm")).toInt() == bpm &&
+                    state.value(QStringLiteral("jam")).toObject().value(QStringLiteral("transport_grid_ready")).toBool();
+            }, QStringLiteral("live BPM converges on four peers"));
+            for (std::size_t i = 0; i < 4; ++i) {
+                const auto oldContent = before[i].value(QStringLiteral("content")).toObject();
+                const auto newContent = after[i].value(QStringLiteral("content")).toObject();
+                require(oldContent.value(QStringLiteral("prepared_mix_requests")) == newContent.value(QStringLiteral("prepared_mix_requests")) &&
+                    oldContent.value(QStringLiteral("prepared_mix_frames")) == newContent.value(QStringLiteral("prepared_mix_frames")),
+                    QStringLiteral("BPM edit unnecessarily rebuilt the WAV"));
+                require(before[i].value(QStringLiteral("performance")).toObject().value(QStringLiteral("prepared_source_actual_start_frame")) ==
+                    after[i].value(QStringLiteral("performance")).toObject().value(QStringLiteral("prepared_source_actual_start_frame")),
+                    QStringLiteral("BPM edit restarted audio instead of retaining source position"));
+            }
+        }
         invoke(peers.peer(0), QStringLiteral("performance.track-toggle"), QStringLiteral("click"));
         waitAll(peers, [](std::size_t, const QJsonObject& state) {
             return !state.value(QStringLiteral("performance")).toObject().value(QStringLiteral("global_transport_playing")).toBool();
@@ -227,6 +250,32 @@ int main(int argc, char** argv) {
             return applied(state, 930000, 930000, 500, 900, true) &&
                 !state.value(QStringLiteral("performance")).toObject().value(QStringLiteral("global_transport_playing")).toBool();
         }, QStringLiteral("Stop cancels waiting Play while retaining the newest shared speed"));
+        invoke(peers.peer(0), QStringLiteral("looper.speed.value"), QStringLiteral("set-value"), 1.0);
+        waitAll(peers, [](std::size_t, const QJsonObject& state) { return applied(state, 1000000, 1000000, 500, 900, true); },
+            QStringLiteral("restored normal speed retains accumulated musical phase"));
+        for (const int bpm : {85, 90, 80}) {
+            command(peers.peer(0), {{QStringLiteral("type"), QStringLiteral("performance.metronome")},
+                {QStringLiteral("id"), QStringLiteral("stopped-bpm")}, {QStringLiteral("enabled"), true}, {QStringLiteral("bpm"), bpm}});
+            waitAll(peers, [bpm](std::size_t, const QJsonObject& state) {
+                const auto performance = state.value(QStringLiteral("performance")).toObject();
+                require(!performance.value(QStringLiteral("global_transport_playing")).toBool(), QStringLiteral("stopped BPM edit started playback"));
+                return performance.value(QStringLiteral("metronome_bpm")).toInt() == bpm &&
+                    state.value(QStringLiteral("jam")).toObject().value(QStringLiteral("transport_grid_ready")).toBool();
+            }, QStringLiteral("stopped BPM edit converges before Play"));
+        }
+        const auto stoppedBeforePlay = waitAll(peers, [](std::size_t, const QJsonObject&) { return true; }, QStringLiteral("pre-Play clocks"));
+        invoke(peers.peer(0), QStringLiteral("performance.track-toggle"), QStringLiteral("click"));
+        const auto finalPlayback = waitAll(peers, [](std::size_t, const QJsonObject& state) {
+            return state.value(QStringLiteral("performance")).toObject().value(QStringLiteral("global_transport_playing")).toBool();
+        }, QStringLiteral("Play after normal-speed restoration and repeated BPM resets"));
+        for (std::size_t i = 0; i < 4; ++i) {
+            const auto previous = stoppedBeforePlay[i].value(QStringLiteral("performance")).toObject();
+            const auto performance = finalPlayback[i].value(QStringLiteral("performance")).toObject();
+            const auto lead = performance.value(QStringLiteral("prepared_source_actual_start_frame")).toInteger() -
+                previous.value(QStringLiteral("engine_frame")).toInteger();
+            require(lead > 0 && lead < 2 * 48000,
+                QStringLiteral("Play after BPM reset retained stale tempo delay: %1 frames").arg(lead));
+        }
         for (std::size_t i = 0; i < 4; ++i) {
             command(peers.peer(i), {{QStringLiteral("type"), QStringLiteral("shutdown")}, {QStringLiteral("id"), QStringLiteral("shutdown")}});
             QJsonObject shutdown;

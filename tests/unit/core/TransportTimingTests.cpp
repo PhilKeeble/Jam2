@@ -168,6 +168,50 @@ void testReceivedGridAlignment()
         "received grid alignment rejects an invalid epoch");
 }
 
+void testCanonicalClockAndResetAfterSlowing()
+{
+    for (const std::uint64_t local : {2000ULL, 8000ULL, 900000ULL}) {
+        const auto mapped = jam2::metronome::map_authority_clock(1000, 5000, local);
+        expect(mapped.valid && mapped.epoch_sample_time == 1000 &&
+            jam2::transport_musical_frame_from_raw(local, mapped.render_offset_frames) == 5000,
+            "peers with different engine ages share the publisher's numeric clock and epoch");
+    }
+    expect(!jam2::metronome::map_authority_clock(1000, (std::numeric_limits<std::uint64_t>::max)(), 0).valid &&
+        !jam2::metronome::map_authority_clock(1000, 0, (std::numeric_limits<std::uint64_t>::max)()).valid,
+        "unrepresentable positive and negative shared-clock offsets are rejected");
+    expect(jam2::metronome::raw_epoch_phase(1000, 50000, 24000) == 23000 &&
+        jam2::metronome::raw_epoch_phase(1000, -12000, 24000) == 13000 &&
+        jam2::metronome::raw_epoch_phase(1000, 1, 0) == 0,
+        "listener phase reports translate nominal grid time into the peer's raw clock without losing negative epochs");
+    const jam2::PlaybackTempo restored{1000000, 14020140, 12652167.5};
+    constexpr std::uint64_t epoch = 18000000;
+    const double sourceEpoch = restored.position(epoch);
+    for (const auto& tempo : {restored, jam2::PlaybackTempo{500000, epoch, sourceEpoch}}) {
+        for (const auto offset : {-12345LL, 0LL, 12345LL}) {
+            const auto now = jam2::transport_raw_frame_from_musical(epoch + 1000, offset);
+            const auto schedule = jam2::next_bar_transport_schedule(48000, normalPattern(), now,
+                offset, true, epoch, 0, tempo, sourceEpoch);
+            expect(schedule && schedule->target_raw_frame > now &&
+                schedule->target_raw_frame - now <= static_cast<std::uint64_t>(96000 / tempo.rate() + 9600),
+                "reset after accumulated half-speed time schedules the next bar, not 28 seconds ahead");
+        }
+    }
+    for (const int rate : {500000, 730000, 1000000}) {
+        const jam2::PlaybackTempo tempo{rate, epoch, sourceEpoch};
+        const auto beat = static_cast<std::uint64_t>(std::llround(24000 / tempo.rate()));
+        for (const std::uint64_t index : {1ULL, 2ULL, 3ULL, 4ULL}) {
+            const auto target = epoch + index * beat;
+            const auto received = jam2::align_received_transport_to_grid(48000, normalPattern(), epoch,
+                0, true, epoch, target + 8, 0, tempo, sourceEpoch, jam2::TransportBoundary::Beat);
+            expect(received && std::abs(static_cast<double>(received->target_raw_frame) - target) <= 2,
+                "receiver preserves every sender-selected beat instead of moving to a bar");
+        }
+        expect(!jam2::align_received_transport_to_grid(48000, normalPattern(), epoch + beat + 100,
+            0, true, epoch, epoch + beat, 0, tempo, sourceEpoch, jam2::TransportBoundary::Beat),
+            "late beat restart is rejected instead of independently moving one peer forward");
+    }
+}
+
 void testInvalidAndExhaustedSchedules()
 {
     const auto pattern = normalPattern();
@@ -211,6 +255,7 @@ int main()
     const auto aligned = jam2::align_received_transport_to_grid(48000, slowedPattern, 60000, 0, true, 0, 343000, 192000, half);
     expect(aligned && aligned->target_raw_frame == 336000 && aligned->countdown_start_raw_frame == 144000,
         "receiver alignment uses the same slowed musical mapping");
+    testCanonicalClockAndResetAfterSlowing();
     testFrameConversions();
     testOrdinarySchedules();
     testReceivedGridAlignment();

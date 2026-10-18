@@ -383,7 +383,10 @@ struct StreamControl {
     std::atomic<bool> leader_audio_local_click{false};
     std::atomic<std::int32_t> track_take_options{0};
     std::atomic<std::uint64_t> metronome_epoch_sample_time{0};
+    std::atomic<double> metronome_epoch_source_position{-1.0};
     std::atomic<bool> metronome_epoch_valid{false};
+    // Nominal clock mapping is separate from the listener's output compensation.
+    std::atomic<std::int64_t> metronome_clock_offset_frames{0};
     std::atomic<std::int64_t> metronome_render_offset_frames{0};
     std::atomic<int> musical_rate_ppm{1000000};
     std::atomic<std::uint64_t> musical_rate_anchor_frame{0};
@@ -393,11 +396,16 @@ struct StreamControl {
     std::atomic<double> pending_musical_rate_anchor_position{0.0};
     std::atomic<std::uint64_t> musical_rate_commit_raw_frame{0};
     std::atomic<std::uint64_t> musical_rate_revision{0};
+    std::atomic<double> pending_grid_epoch_source_position{-1.0};
+    std::atomic<std::uint64_t> pending_grid_epoch_frame{0};
     // Click-render-thread cache. A concurrent publication is skipped for one
     // block instead of waiting or observing a partially written tempo pair.
     PlaybackTempo render_tempo_before{};
     PlaybackTempo render_tempo_after{};
     std::uint64_t render_tempo_commit_raw_frame = 0;
+    double render_grid_epoch_source_position = 0.0;
+    double render_pending_grid_epoch_source_position = -1.0;
+    std::uint64_t render_pending_grid_epoch_frame = 0;
     // The network epoch remains continuous. Prepared Play establishes a
     // separate song-relative 1.1 used only for local click-pattern phase.
     std::atomic<std::uint64_t> metronome_pattern_origin_frame{0};

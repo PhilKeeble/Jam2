@@ -822,6 +822,67 @@ void testCancelledPreparedSwapsReleaseEveryReadySlot()
     }
 }
 
+void testSectionTailAndEpochReset()
+{
+    jam2::audio::PreparedTrackSource source(8);
+    const int slot = source.claimLoadingSlot();
+    std::fill_n(source.loadingData(slot), 8, std::int16_t{1000});
+    expect(source.publishReady(slot, 8, 48000), "section-tail fixture publishes source");
+    using Command = jam2::audio::PreparedTrackSource::Command;
+    using Type = jam2::audio::PreparedTrackSource::CommandType;
+    const std::array commands{Command{Type::Swap, static_cast<std::uint32_t>(slot)},
+        Command{Type::SetLoop, 0, 0, 0, 16}, Command{Type::Play}};
+    expect(source.enqueueBatch(commands), "section-tail fixture queues audio and musical loop");
+    std::array<std::int32_t, 12> first{};
+    source.mix(first.data(), first.size(), 0);
+    expect(std::all_of(first.begin(), first.begin() + 8, [](auto x) { return x != 0; }) &&
+        std::all_of(first.begin() + 8, first.end(), [](auto x) { return x == 0; }) && source.sourceFrame() == 12,
+        "WAV ends at its sample count while section advances through silence");
+    std::array<std::int32_t, 6> tail{};
+    source.mix(tail.data(), tail.size(), 12);
+    expect(std::all_of(tail.begin(), tail.begin() + 4, [](auto x) { return x == 0; }) && tail[4] != 0 && source.sourceFrame() == 2,
+        "section loops exactly at the musical end and then plays the WAV from zero");
+    expect(source.enqueue({Type::SetLoop, 0, 18, 0, 24}), "live BPM edit changes only loop extent");
+    std::array<std::int32_t, 8> continued{};
+    source.mix(continued.data(), continued.size(), 18);
+    expect(source.playing() && source.sourceFrame() == 10 && source.actualStartFrame() == 0,
+        "changing section length preserves playback and source position without another Play");
+
+    jam2::audio::StreamControl control;
+    control.metronome_enabled.store(true);
+    control.metronome_epoch_valid.store(true);
+    control.metronome_epoch_sample_time.store(18000000);
+    control.metronome_epoch_source_position.store(16632027.5);
+    control.musical_rate_ppm.store(1000000);
+    control.musical_rate_anchor_frame.store(14020140);
+    control.musical_rate_anchor_position.store(12652167.5);
+    std::array<std::int32_t, 1024> output{}, stem{};
+    std::uint64_t beat = 0;
+    processing::mix_metronome_click(&control, 48000, 18000000, beat, output, stem);
+    expect(std::any_of(stem.begin(), stem.end(), [](auto x) { return x != 0; }),
+        "click begins at the new epoch after restored-speed lag instead of remaining silent for 28 seconds");
+    control.metronome_clock_offset_frames.store(2500);
+    control.metronome_epoch_sample_time.store(10000);
+    const auto mappedPulse = processing::render_metronome_test_input_sample(control, 7501, 48000, 1.0);
+    control.metronome_clock_offset_frames.store(0);
+    expect(mappedPulse == processing::render_metronome_test_input_sample(control, 10001, 48000, 1.0) && mappedPulse != 0,
+        "diagnostic input pulses follow the nominal common clock independently of output compensation");
+    control.metronome_epoch_sample_time.store(18000000);
+    control.metronome_epoch_source_position.store(18000000.0);
+    control.pending_musical_rate_ppm.store(1000000);
+    control.pending_musical_rate_anchor_frame.store(14020140);
+    control.pending_musical_rate_anchor_position.store(12652167.5);
+    control.musical_rate_commit_raw_frame.store(18000000);
+    control.pending_grid_epoch_frame.store(18000000);
+    control.pending_grid_epoch_source_position.store(16632027.5);
+    std::array<std::int32_t, 256> joinedOutput{}, joinedStem{};
+    processing::mix_metronome_click(&control, 48000, 17999872, beat, joinedOutput, joinedStem);
+    expect(std::all_of(joinedStem.begin(), joinedStem.begin() + 128, [](auto x) { return x == 0; }) &&
+        std::any_of(joinedStem.begin() + 128, joinedStem.end(), [](auto x) { return x != 0; }),
+        "late-join source epoch and tempo become audible at the same exact sample boundary");
+
+}
+
 void testListeningTempoAndSpecificCancellation()
 {
     jam2::audio::StreamControl control;
@@ -1187,6 +1248,22 @@ void testEngineLocalCancellationPreservesClockReset()
             }
             return false;
         };
+        jam2::EngineCommand tailLoad;
+        tailLoad.type = jam2::EngineCommandType::LoadPreparedTrack;
+        tailLoad.frame = engine.snapshot().engine_frame + 4800;
+        tailLoad.frame_end = 48000;
+        tailLoad.enabled = true;
+        tailLoad.prepared_loop_end_frame = 480000;
+        expect(jam2::engine_command_set_text(tailLoad, fixture.path.string()) && engine.submit(tailLoad),
+            "engine attaches a short WAV directly into the section's silent tail");
+        expect(wait([&] {
+            const auto state = engine.snapshot();
+            return state.prepared_source_playing && state.prepared_source_frame >= 48000 && state.prepared_source_frame < 480000;
+        }), "source, position and musical loop activate atomically without wrapping at physical WAV EOF");
+        jam2::EngineCommand tailStop;
+        tailStop.type = jam2::EngineCommandType::PreparedStop;
+        expect(engine.submit(tailStop) && wait([&] { return !engine.snapshot().prepared_source_playing; }),
+            "section-tail attachment stops and releases playback ownership normally");
         jam2::EngineCommand command;
         command.type = jam2::EngineCommandType::LoadPreparedTrack;
         if (!jam2::engine_command_set_text(command, fixture.path.string()) || !engine.submit(command)) {
@@ -1356,6 +1433,7 @@ int main()
     testResampledPlaybackDepthAccounting();
     testPreparedSourceMixing();
     testCancelledPreparedSwapsReleaseEveryReadySlot();
+    testSectionTailAndEpochReset();
     testListeningTempoAndSpecificCancellation();
     testListeningSwapSurvivesTransportStop();
     testEngineLocalCancellationPreservesClockReset();

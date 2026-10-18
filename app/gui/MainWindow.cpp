@@ -2633,7 +2633,8 @@ QJsonObject MainWindow::automationContentSnapshot() const
     const SharedTrackController::EffectiveLoop effectiveTrackLoop =
         trackController_.effectiveLoop(
             activePreparedMix.sampleRate,
-            activePreparedMix.frames);
+            static_cast<qint64>(std::llround(bankExactOutputFrames(looperProject_.activeBankIndex(),
+                activeTrackSampleRate()) / std::clamp(activePreparedMix.listeningSpeed, 0.1, 2.0))));
     return {
         {QStringLiteral("arrangement_revision"), static_cast<double>(
             sessionController_.snapshot().arrangementRevision)},
@@ -2975,6 +2976,7 @@ QJsonObject MainWindow::automationPerformanceSnapshot() const
         {QStringLiteral("metronome_enabled"), engine.metronome_enabled},
         {QStringLiteral("metronome_transport_gated"), engine.metronome_transport_gated},
         {QStringLiteral("metronome_bpm"), pattern.bpm},
+        {QStringLiteral("metronome_epoch_source_position"), engine.metronome_epoch_source_position},
         {QStringLiteral("metronome_beats_per_bar"), pattern.beats_per_bar},
         {QStringLiteral("metronome_division"), pattern.division},
         {QStringLiteral("metronome_mode"), metronomeModeText()},
@@ -6743,7 +6745,7 @@ void MainWindow::schedulePreparedBankLaunch(
             position.renderOffsetFrames,
             targetAbsoluteBeat,
             currentMetronomePattern().beats_per_bar,
-            position.tempo);
+            position.tempo, position.epochSourcePosition);
     if (!launchSchedule.has_value()) {
         appendLog(QStringLiteral("bank launch rejected invalid transport clock"));
         pendingBankIndex_ = -1;
@@ -6766,7 +6768,8 @@ void MainWindow::schedulePreparedBankLaunch(
         track.filePath = cached.path;
         track.fileBytes = cached.fileBytes;
         track.sampleRate = cached.sampleRate;
-        track.durationMs = cached.durationMs;
+        track.durationMs = static_cast<int>(std::llround(bankExactOutputFrames(bankIndex, activeTrackSampleRate()) *
+        1000.0 / activeTrackSampleRate() / cached.listeningSpeed));
         track.sha256 = cached.sha256;
         loadPreparedMixIntoEngine(targetFrame, 0, true);
     }
@@ -6933,14 +6936,9 @@ void MainWindow::startArrangement()
 qint64 MainWindow::bankExactOutputFrames(int bankIndex, int sampleRate) const
 {
     const int boundedBank = qBound(0, bankIndex, looperProject_.banks().size() - 1);
-    const auto pattern = bankMetronomePattern(boundedBank);
-    const int sectionBeats = boundedBank < chordModel_.sections().size()
-        ? qMax(1, chordModel_.section(boundedBank).beats)
-        : qMax(1, pattern.beats_per_bar);
-    return qMax<qint64>(1, static_cast<qint64>(std::llround(
-        static_cast<double>(sectionBeats) * 60.0 * qMax(1, sampleRate) /
-        (std::max(1.0, static_cast<double>(pattern.bpm)) *
-         qMax(1, pattern.tempo_pulse_units)))));
+    const int beats = boundedBank < chordModel_.sections().size()
+        ? chordModel_.section(boundedBank).beats : bankMetronomePattern(boundedBank).beats_per_bar;
+    return looperProject_.sectionPlaybackFrames(boundedBank, beats, sampleRate);
 }
 
 void MainWindow::exportLooperAudio()
@@ -10505,7 +10503,7 @@ void MainWindow::regeneratePreparedMix(int bankIndex)
     const QString projectFolder = projectPersistence_.projectFolder();
     SharedTrackModel track = trackController_.model();
     trackWorkspace_.listeningTools.appliedSettings().applyTo(track);
-    const qint64 exactFrames = bankExactOutputFrames(targetBank, sampleRate);
+    const qint64 exactFrames = 0; // Section timing is applied by the playback loop, without regenerating audio.
     QPointer<MainWindow> self(this);
     fileWorkerPool_.start(QRunnable::create([
         self,
@@ -10648,7 +10646,8 @@ void MainWindow::applyPreparedMixResult(PreparedMixResult result)
         track.sampleRate = preparedMixLifecycle_.active().sampleRate;
         track.sampleRateCompatible = true;
         track.userProvidedSource = false;
-        track.durationMs = preparedMixLifecycle_.active().durationMs;
+        track.durationMs = static_cast<int>(std::llround(bankExactOutputFrames(resultBank, activeTrackSampleRate()) *
+            1000.0 / activeTrackSampleRate() / preparedMixLifecycle_.active().listeningSpeed));
         track.sha256 = preparedMixLifecycle_.active().sha256;
         // The performance playhead derives its relative song beat from this
         // value while a prepared WAV is active.  Refreshing the live bank must
@@ -10662,7 +10661,8 @@ void MainWindow::applyPreparedMixResult(PreparedMixResult result)
         const TrackRecordingWorkflow::PreparedAttachPlan attachPlan =
             trackRecordingWorkflow_.preparedAttachPlan(
                 metronomeTransport_.grid().position(),
-                preparedMixLifecycle_.active().frames,
+                static_cast<qint64>(std::llround(bankExactOutputFrames(resultBank, activeTrackSampleRate()) /
+                    preparedMixLifecycle_.active().listeningSpeed)),
                 preparedMixLifecycle_.active().listeningSpeed);
         loadPreparedMixIntoEngine(
             attachPlan.targetFrame,
@@ -10741,7 +10741,8 @@ void MainWindow::adoptPreparedBankCache(int bankIndex)
     track.sampleRate = cached.sampleRate;
     track.sampleRateCompatible = true;
     track.userProvidedSource = false;
-    track.durationMs = cached.durationMs;
+    track.durationMs = static_cast<int>(std::llround(bankExactOutputFrames(bankIndex, activeTrackSampleRate()) *
+        1000.0 / activeTrackSampleRate() / cached.listeningSpeed));
     track.sha256 = cached.sha256;
     track.acceptedBpm = bankMetronomePattern(bankIndex).bpm;
     updateTrackControls();
@@ -10758,11 +10759,19 @@ void MainWindow::loadPreparedMixIntoEngine(
         !preparedMixLifecycle_.active().error.isEmpty()) {
         return;
     }
+    const SharedTrackController::EffectiveLoop loop =
+        trackController_.effectiveLoop(
+            preparedMixLifecycle_.active().sampleRate,
+            static_cast<qint64>(std::llround(bankExactOutputFrames(looperProject_.activeBankIndex(),
+                activeTrackSampleRate()) / preparedMixLifecycle_.active().listeningSpeed)));
     jam2::EngineCommand load;
     load.type = jam2::EngineCommandType::LoadPreparedTrack;
     load.frame = alignToRunningTransport ? targetFrame : 0ULL;
     load.frame_end = alignToRunningTransport ? sourceFrame : 0ULL;
     load.enabled = alignToRunningTransport;
+    load.prepared_loop_enabled = loop.enabled;
+    load.prepared_loop_start_frame = static_cast<std::uint64_t>(loop.startFrame);
+    load.prepared_loop_end_frame = static_cast<std::uint64_t>(loop.endFrame);
     if (!jam2::engine_command_set_text(
             load,
             QDir::toNativeSeparators(
@@ -10788,18 +10797,6 @@ void MainWindow::loadPreparedMixIntoEngine(
             .arg(sourceFrame));
     } else if (alignToRunningTransport) {
         trackRecordingWorkflow_.cancelPreparedAttach();
-    }
-    const SharedTrackController::EffectiveLoop loop =
-        trackController_.effectiveLoop(
-            trackRecordingWorkflow_.preparedSampleRate(),
-            preparedMixLifecycle_.active().frames);
-    if (loop.enabled) {
-        setPreparedTrackLoop(
-            true,
-            static_cast<std::uint64_t>(loop.startFrame),
-            static_cast<std::uint64_t>(loop.endFrame));
-    } else {
-        setPreparedTrackLoop(false);
     }
     sendPreparedTrackLevel();
 }
@@ -12075,14 +12072,16 @@ void MainWindow::sendMetronomePatternToJam()
         previous.beats_per_bar != pattern.beats_per_bar ||
         previous.beat_unit != pattern.beat_unit ||
         previous.tempo_pulse_units != pattern.tempo_pulse_units;
+    storeCurrentMetronomePatternForBank(activeBank);
     if (gridTimingChanged) {
-        stopTrackForPracticeIdeaGeneration();
-        preparedMixLifecycle_.invalidateAll();
-        discardPreparedMix(false);
-        appendLog(QStringLiteral(
-            "grid timing changed: stopped playback and invalidated prepared bank WAVs"));
+        for (int bank = 0; bank < looperProject_.banks().size(); ++bank) {
+            if (bank == activeBank || (activeBank == 0 && looperProject_.banks().at(bank).timing.inheritsBankA))
+                (void)trackWorkspace_.updateSectionPlaybackTiming(bank, activeTrackSampleRate());
+        }
+        refreshLooperLanes();
+        updateTrackControls();
+        appendLog(QStringLiteral("grid timing changed: retained WAV playback and updated section loop"));
     }
-    storeCurrentMetronomePatternForBank(looperProject_.activeBankIndex());
     if (!jam2_.isRunning() ||
         !metronomeTransport_.localGridMutationAllowed()) {
         return;

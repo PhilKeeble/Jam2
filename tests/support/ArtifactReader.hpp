@@ -42,9 +42,11 @@ std::vector<std::int64_t> detectEvents(
     int threshold,
     std::int64_t refractoryFrames);
 
+enum class MetronomeClock { Output, Input };
+
 std::vector<std::int64_t> expectedMetronomeFrames(
     const QJsonObject& sidecar,
-    std::int64_t sampleCount);
+    std::int64_t sampleCount, MetronomeClock clock = MetronomeClock::Output);
 
 struct ExpectedClickAnalysis {
     bool ok = false;
@@ -61,7 +63,7 @@ ExpectedClickAnalysis analyzeExpectedClicks(
     const std::vector<std::int16_t>& samples,
     int threshold = 1800,
     std::int64_t refractoryFrames = 900,
-    std::int64_t toleranceFrames = 96);
+    std::int64_t toleranceFrames = 96, MetronomeClock clock = MetronomeClock::Output);
 
 struct IntervalGridAnalysis {
     std::size_t clicks = 0;

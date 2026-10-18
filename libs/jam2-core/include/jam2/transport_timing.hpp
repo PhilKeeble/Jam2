@@ -8,6 +8,8 @@
 
 namespace jam2 {
 
+enum class TransportBoundary { Bar, Beat };
+
 struct QuantizedTransportSchedule {
     std::uint64_t countdown_start_raw_frame = 0;
     std::uint64_t target_raw_frame = 0;
@@ -30,7 +32,8 @@ std::optional<QuantizedTransportSchedule> next_bar_transport_schedule(
     bool epochValid,
     std::uint64_t epochMusicalFrame,
     int countInBars,
-    PlaybackTempo tempo = {}) noexcept;
+    PlaybackTempo tempo = {},
+    double epochSourcePosition = -1.0) noexcept;
 
 // Aligns a receiver-clock estimate of a peer's already quantized target to
 // the nearest local representation of the same shared musical bar. The
@@ -45,6 +48,8 @@ std::optional<QuantizedTransportSchedule> align_received_transport_to_grid(
     std::uint64_t epochMusicalFrame,
     std::uint64_t estimatedTargetRawFrame,
     std::uint64_t countInFrames,
-    PlaybackTempo tempo = {}) noexcept;
+    PlaybackTempo tempo = {},
+    double epochSourcePosition = -1.0,
+    TransportBoundary boundaryKind = TransportBoundary::Bar) noexcept;
 
 } // namespace jam2

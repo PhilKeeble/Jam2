@@ -29,13 +29,14 @@ public:
         double secondsPerStep = 0.0;
         double secondsPerBeat = 0.0;
         std::uint64_t epochFrame = 0;
+        double epochSourcePosition = 0.0;
         std::uint64_t rawCurrentFrame = 0;
         std::uint64_t currentFrame = 0;
         std::int64_t renderOffsetFrames = 0;
         int sampleRate = 0;
         jam2::PlaybackTempo tempo{};
         std::uint64_t frameAtBeat(std::uint64_t absoluteBeatValue) const noexcept {
-            return tempo.frame(static_cast<double>(epochFrame) +
+            return tempo.frame(epochSourcePosition +
                 static_cast<double>(absoluteBeatValue) * secondsPerBeat * tempo.rate() * sampleRate);
         }
     };
@@ -48,7 +49,8 @@ public:
         std::int64_t renderOffsetFrames,
         int sampleRate,
         bool running,
-        jam2::PlaybackTempo tempo = {});
+        jam2::PlaybackTempo tempo = {},
+        double epochSourcePosition = -1.0);
     void clearEngine();
     Position position() const;
     double bpm() const;
@@ -63,6 +65,7 @@ private:
     std::uint64_t engineFrame_ = 0;
     std::uint64_t engineMusicalFrame_ = 0;
     std::uint64_t engineEpochFrame_ = 0;
+    double engineEpochSourcePosition_ = 0.0;
     std::int64_t engineRenderOffsetFrames_ = 0;
     int engineSampleRate_ = 0;
     QElapsedTimer engineReportTime_;

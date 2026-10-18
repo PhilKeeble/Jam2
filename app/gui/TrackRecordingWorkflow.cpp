@@ -171,7 +171,7 @@ std::uint64_t jam2::gui::synced_recording_countdown_beat(
     const std::uint64_t countdownMusicalFrame = musicalFrameFromRawFrame(
         countdownRawFrame, position.renderOffsetFrames);
     if (position.tempo.rate_ppm != 1000000 || position.tempo.anchor_frame != 0 || position.tempo.anchor_position != 0.0) {
-        const double elapsed = position.tempo.position(countdownMusicalFrame) - position.epochFrame;
+        const double elapsed = position.tempo.position(countdownMusicalFrame) - position.epochSourcePosition;
         const double sourceBeatFrames = position.secondsPerBeat * position.tempo.rate() * position.sampleRate;
         return elapsed >= 0.0 && sourceBeatFrames > 0.0
             ? static_cast<std::uint64_t>(std::floor(elapsed / sourceBeatFrames + 0.5)) : 0;

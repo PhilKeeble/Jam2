@@ -125,6 +125,8 @@ void CliRecordingSupervisor::write_sidecar(
         << "  \"metronome_mode\": \"" << json_escape(context.metronome_mode) << "\",\n"
         << "  \"test_input\": \"" << json_escape(context.test_input) << "\",\n"
         << "  \"metronome_epoch_sample_time\": " << context.metronome_epoch_sample_time << ",\n"
+        << "  \"metronome_render_offset_frames\": " << context.metronome_render_offset_frames << ",\n"
+        << "  \"metronome_clock_offset_frames\": " << context.metronome_clock_offset_frames << ",\n"
         << "  \"metronome_epoch_valid\": " << (context.metronome_epoch_valid ? "true" : "false") << ",\n"
         << "  \"metronome_beats_per_bar\": " << pattern.beats_per_bar << ",\n"
         << "  \"metronome_division\": " << pattern.division << ",\n"

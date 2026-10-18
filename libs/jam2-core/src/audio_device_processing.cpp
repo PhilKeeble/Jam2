@@ -760,7 +760,9 @@ std::int32_t render_metronome_test_input_sample(
     }
     const std::uint64_t epoch = control.metronome_epoch_sample_time.load(
         std::memory_order_relaxed);
-    if (sampleTime < epoch) {
+    const auto clockFrame = metronome_musical_frame_from_raw(sampleTime,
+        control.metronome_clock_offset_frames.load(std::memory_order_relaxed));
+    if (clockFrame < epoch) {
         return 0;
     }
     const metronome::PatternSnapshot pattern = metronome::sanitize({
@@ -782,7 +784,7 @@ std::int32_t render_metronome_test_input_sample(
         pattern.tempo_pulse_units);
     const double rendered = metronome::render_sample(
         pattern,
-        sampleTime - epoch,
+        clockFrame - epoch,
         interval,
         sampleRate,
         level,
@@ -890,15 +892,23 @@ void mix_metronome_click(
     std::uint64_t patternOrigin = patternOriginValid
         ? control->metronome_pattern_origin_frame.load(std::memory_order_relaxed)
         : epoch;
+    const double epochSource = control->metronome_epoch_source_position.load(std::memory_order_relaxed);
     double patternOriginPosition = patternOriginValid && control->metronome_pattern_origin_position_valid.load(std::memory_order_relaxed)
         ? control->metronome_pattern_origin_position.load(std::memory_order_relaxed)
-        : static_cast<double>(patternOrigin);
+        : (patternOriginValid ? static_cast<double>(patternOrigin)
+            : (epochSource >= 0.0 ? epochSource : static_cast<double>(epoch)));
     const auto tempoRevision = control->musical_rate_revision.load(std::memory_order_acquire);
     if ((tempoRevision & 1ULL) == 0) {
         const auto target = control->musical_rate_commit_raw_frame.load(std::memory_order_acquire);
         const auto before = current_playback_tempo(*control);
         const auto after = pending_playback_tempo(*control);
+        const double sourceEpochBefore = control->metronome_epoch_source_position.load(std::memory_order_relaxed);
+        const double sourceEpochAfter = control->pending_grid_epoch_source_position.load(std::memory_order_relaxed);
+        const auto epochAfter = control->pending_grid_epoch_frame.load(std::memory_order_relaxed);
         if (tempoRevision == control->musical_rate_revision.load(std::memory_order_acquire)) {
+            control->render_grid_epoch_source_position = sourceEpochBefore >= 0.0 ? sourceEpochBefore : static_cast<double>(epoch);
+            control->render_pending_grid_epoch_source_position = sourceEpochAfter;
+            control->render_pending_grid_epoch_frame = epochAfter;
             control->render_tempo_before = before;
             control->render_tempo_after = after;
             control->render_tempo_commit_raw_frame = target;
@@ -960,6 +970,11 @@ void mix_metronome_click(
             if ((patternOriginValid || epochValid) &&
                 musicalFrame < patternOrigin) {
                 continue;
+            }
+            if (!patternOriginValid) {
+                patternOriginPosition = tempoTargetFrame != 0 && rawFrame >= tempoTargetFrame &&
+                    control->render_pending_grid_epoch_frame == epoch && control->render_pending_grid_epoch_source_position >= 0.0
+                    ? control->render_pending_grid_epoch_source_position : control->render_grid_epoch_source_position;
             }
             if (tempo.rate_ppm == 1000000 && tempo.anchor_frame == 0 && tempo.anchor_position == 0.0)
                 position = musicalFrame - (patternOriginValid || epochValid ? patternOrigin : 0ULL);

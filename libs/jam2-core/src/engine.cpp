@@ -433,7 +433,10 @@ PreparedLoadResult load_prepared_track(
     std::uint64_t target_frame,
     std::uint64_t requested_source_frame,
     bool attach_and_play,
-    int* staged_slot = nullptr)
+    int* staged_slot = nullptr,
+    bool loop_enabled = true,
+    std::uint64_t loop_start = 0,
+    std::uint64_t loop_end = 0)
 {
     const wav::InspectResult inspected = wav::inspect_pcm16_file(path);
     if (!inspected) {
@@ -496,10 +499,10 @@ PreparedLoadResult load_prepared_track(
     }
     const std::uint64_t replacement = attach_and_play
         ? (inspected.info.frames > 0
-            ? requested_source_frame % inspected.info.frames
+            ? requested_source_frame
             : 0ULL)
         : (source.playing()
-            ? std::min(source.sourceFrame(), inspected.info.frames)
+            ? source.sourceFrame()
             : 0ULL);
     const std::array<audio::PreparedTrackSource::Command, 3> commands{{
         {
@@ -514,8 +517,8 @@ PreparedLoadResult load_prepared_track(
             audio::PreparedTrackSource::CommandType::SetLoop,
             0,
             target_frame,
-            0,
-            inspected.info.frames,
+            loop_enabled ? loop_start : 0,
+            loop_enabled ? (loop_end > 0 ? loop_end : inspected.info.frames) : 0,
             1000000,
         },
         {
@@ -717,9 +720,18 @@ struct Engine::Impl {
             control->leader_audio_local_click.store(command.enabled, std::memory_order_relaxed);
             return true;
         case EngineCommandType::SetMetronomeEpoch:
+            control->musical_rate_revision.fetch_add(1, std::memory_order_acq_rel);
+            if (control->pending_grid_epoch_frame.load(std::memory_order_relaxed) != command.frame)
+                control->pending_grid_epoch_source_position.store(-1.0, std::memory_order_relaxed);
+            control->metronome_epoch_source_position.store(
+                audio::playback_tempo_at(*control, transport_raw_frame_from_musical(command.frame,
+                    command.signed_value)).position(command.frame),
+                std::memory_order_relaxed);
+            control->metronome_clock_offset_frames.store(command.signed_value, std::memory_order_relaxed);
             control->metronome_epoch_sample_time.store(command.frame, std::memory_order_relaxed);
             control->metronome_epoch_valid.store(command.enabled, std::memory_order_relaxed);
             audio::reset_metronome_pattern_origin(*control);
+            control->musical_rate_revision.fetch_add(1, std::memory_order_release);
             return true;
         case EngineCommandType::SetMetronomeRenderOffset:
             control->metronome_render_offset_frames.store(command.signed_value, std::memory_order_relaxed);
@@ -812,6 +824,7 @@ struct Engine::Impl {
         case EngineCommandType::CommitListeningTools: {
             if (command.playback_tempo.rate_ppm < 100000 || command.playback_tempo.rate_ppm > 2000000 ||
                 !std::isfinite(command.playback_tempo.anchor_position) || command.playback_tempo.anchor_position < 0.0 ||
+                !std::isfinite(command.grid_epoch_source_position) || command.grid_epoch_source_position < -1.0 ||
                 command.frame < applied_frame) {
                 error = "listening tempo or commit frame is invalid";
                 return false;
@@ -834,7 +847,18 @@ struct Engine::Impl {
             if (!command.update_playback_tempo) return true;
             listening_tempo_cookie = command.cookie;
             const auto previous = audio::playback_tempo_at(*control, applied_frame);
+            const auto oldTarget = control->musical_rate_commit_raw_frame.load(std::memory_order_relaxed);
+            const double pendingEpoch = control->pending_grid_epoch_source_position.load(std::memory_order_relaxed);
+            const auto epoch = control->metronome_epoch_sample_time.load(std::memory_order_relaxed);
+            const double previousEpoch = oldTarget != 0 && applied_frame >= oldTarget && pendingEpoch >= 0.0 &&
+                control->pending_grid_epoch_frame.load(std::memory_order_relaxed) == epoch
+                ? pendingEpoch : control->metronome_epoch_source_position.load(std::memory_order_relaxed);
             control->musical_rate_revision.fetch_add(1, std::memory_order_acq_rel);
+            control->metronome_epoch_source_position.store(previousEpoch, std::memory_order_relaxed);
+            control->pending_grid_epoch_source_position.store(command.grid_epoch_source_position >= 0.0
+                ? command.grid_epoch_source_position : previousEpoch, std::memory_order_relaxed);
+            control->pending_grid_epoch_frame.store(command.grid_epoch_source_position >= 0.0
+                ? command.grid_epoch_frame : epoch, std::memory_order_relaxed);
             control->musical_rate_ppm.store(previous.rate_ppm, std::memory_order_relaxed);
             control->musical_rate_anchor_frame.store(previous.anchor_frame, std::memory_order_relaxed);
             control->musical_rate_anchor_position.store(previous.anchor_position, std::memory_order_relaxed);
@@ -861,6 +885,11 @@ struct Engine::Impl {
             return true;
         }
         case EngineCommandType::LoadPreparedTrack: {
+            if (command.prepared_loop_enabled && command.prepared_loop_end_frame != 0 &&
+                command.prepared_loop_end_frame <= command.prepared_loop_start_frame) {
+                error = "prepared track loop bounds are invalid";
+                return false;
+            }
             const auto result = load_prepared_track(
                 *prepared_source,
                 std::filesystem::path(std::string(bounded_text(command.text))),
@@ -868,7 +897,11 @@ struct Engine::Impl {
                 config.prepared_track_max_frames,
                 command.frame,
                 command.frame_end,
-                command.enabled);
+                command.enabled,
+                nullptr,
+                command.prepared_loop_enabled,
+                command.prepared_loop_start_frame,
+                command.prepared_loop_end_frame);
             if (!result.ok) {
                 error = result.error;
                 return false;
@@ -1249,7 +1282,11 @@ void Engine::start(const EngineConfig& requested)
         control.metronome_mode.store(static_cast<int>(impl_->config.metronome_mode), std::memory_order_relaxed);
         control.leader_audio_local_click.store(impl_->config.leader_audio_local_click, std::memory_order_relaxed);
         control.metronome_epoch_sample_time.store(0, std::memory_order_relaxed);
+        control.metronome_epoch_source_position.store(0.0, std::memory_order_relaxed);
+        control.pending_grid_epoch_source_position.store(-1.0, std::memory_order_relaxed);
+        control.pending_grid_epoch_frame.store(0, std::memory_order_relaxed);
         control.metronome_epoch_valid.store(true, std::memory_order_relaxed);
+        control.metronome_clock_offset_frames.store(0, std::memory_order_relaxed);
         control.metronome_render_offset_frames.store(0, std::memory_order_relaxed);
         control.engine_frame_counter.store(0, std::memory_order_relaxed);
         control.test_input_mode.store(static_cast<int>(impl_->config.test_input), std::memory_order_relaxed);
@@ -1457,13 +1494,20 @@ EngineSnapshot Engine::snapshot() const noexcept
         control.playback_ratio_ramping.load(std::memory_order_relaxed);
     result.playback_ratio_ramp_ms = impl_->config.playback_ratio_ramp_ms;
     result.metronome_epoch_frame = control.metronome_epoch_sample_time.load(std::memory_order_relaxed);
+    result.metronome_epoch_source_position = control.metronome_epoch_source_position.load(std::memory_order_relaxed);
     result.metronome_epoch_valid = control.metronome_epoch_valid.load(std::memory_order_relaxed);
+    result.metronome_clock_offset_frames = control.metronome_clock_offset_frames.load(std::memory_order_relaxed);
     result.metronome_render_offset_frames = control.metronome_render_offset_frames.load(std::memory_order_relaxed);
     result.metronome_pattern_origin_frame =
         control.metronome_pattern_origin_frame.load(std::memory_order_relaxed);
     result.playback_tempo = audio::playback_tempo_at(control, result.engine_frame);
     result.listening_commit_raw_frame = control.musical_rate_commit_raw_frame.load(std::memory_order_acquire);
     result.pending_playback_tempo = audio::pending_playback_tempo(control);
+    if (result.listening_commit_raw_frame != 0 && result.engine_frame >= result.listening_commit_raw_frame &&
+        control.pending_grid_epoch_frame.load(std::memory_order_relaxed) == result.metronome_epoch_frame) {
+        const double pendingEpoch = control.pending_grid_epoch_source_position.load(std::memory_order_relaxed);
+        if (pendingEpoch >= 0.0) result.metronome_epoch_source_position = pendingEpoch;
+    }
     result.metronome_pattern_origin_valid =
         control.metronome_pattern_origin_valid.load(std::memory_order_relaxed);
     result.metronome_pattern_source_start_seen =

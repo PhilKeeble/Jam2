@@ -86,6 +86,20 @@ void testPlaybackGrid()
         "clearing the engine must remove all public grid anchoring");
 }
 
+void testGridResetAfterAccumulatedSlowTime()
+{
+    PlaybackGrid grid;
+    grid.setPattern(80, 4, 1, 1);
+    const jam2::PlaybackTempo tempo{1000000, 14020140, 12652167.5};
+    constexpr std::uint64_t epoch = 18000000;
+    grid.updateEngine(epoch + 1000, epoch + 1000, epoch, 0, 48000, true, tempo, tempo.position(epoch));
+    const auto position = grid.position();
+    require(position.absoluteBeat == 0 && position.frameAtBeat(1) == epoch + 36000,
+        "new epoch retains its source coordinate after a minute of slowing and return to unity");
+    require(position.frameAtBeat(1) - position.rawCurrentFrame < 48000,
+        "next beat remains less than one second away rather than the accumulated tempo lag");
+}
+
 void testTransportController()
 {
     std::vector<jam2::EngineCommand> submitted;
@@ -202,6 +216,7 @@ int main(int argc, char** argv)
         QCoreApplication application(argc, argv);
         testTapTempo();
         testPlaybackGrid();
+        testGridResetAfterAccumulatedSlowTime();
         testTransportController();
         MetronomeTransportController slowed([](const jam2::EngineCommand&) { return true; });
         jam2::EngineSnapshot snapshot;

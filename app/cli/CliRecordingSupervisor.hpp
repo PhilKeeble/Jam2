@@ -23,6 +23,8 @@ struct RecordingSidecarContext {
     std::string metronome_mode;
     std::string test_input;
     std::uint64_t metronome_epoch_sample_time = 0;
+    std::int64_t metronome_clock_offset_frames = 0;
+    std::int64_t metronome_render_offset_frames = 0;
     bool metronome_epoch_valid = false;
     jam2::metronome::PatternSnapshot pattern;
     bool sample_time_playout = false;

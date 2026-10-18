@@ -111,6 +111,8 @@ public:
     LooperBankTiming resolvedTiming(int bankIndex) const;
     bool setTiming(int bankIndex, LooperBankTiming timing);
     bool hasSerializedTiming() const;
+    int sectionPlaybackBeats(int bankIndex, int minimumBeats, int sampleRate) const noexcept;
+    qint64 sectionPlaybackFrames(int bankIndex, int minimumBeats, int sampleRate) const noexcept;
     const ArrangementDefinition& arrangement() const;
     bool setArrangement(ArrangementDefinition arrangement);
     void setArrangementEnabled(bool enabled);

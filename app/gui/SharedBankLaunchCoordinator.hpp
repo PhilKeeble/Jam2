@@ -89,6 +89,7 @@ std::optional<BankLaunchFrameSchedule> bankLaunchFrameSchedule(
     std::int64_t renderOffsetFrames,
     std::optional<std::uint64_t> requestedTargetBeat,
     int beatsPerBar,
-    jam2::PlaybackTempo tempo = {}) noexcept;
+    jam2::PlaybackTempo tempo = {},
+    double epochSourcePosition = -1.0) noexcept;
 
 } // namespace jam2::gui

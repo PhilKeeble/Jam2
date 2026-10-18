@@ -504,6 +504,33 @@ int main(int argc, char* argv[])
                 QStringLiteral("different-import"),
         "different concurrent imports survive in stable accepted-then-rebased order");
 
+    {
+        LooperProject tempoProject;
+        LooperLane tempoLane;
+        tempoLane.sourceFrames = 24 * 48000;
+        tempoLane.sampleRate = 48000;
+        tempoProject.banks()[0].lanes.append(tempoLane);
+        auto timing = tempoProject.resolvedTiming(0);
+        timing.bpm = 80; tempoProject.setTiming(0, timing);
+        expect(tempoProject.sectionPlaybackFrames(0, 32, 48000) == 24 * 48000,
+            "eight bars at 80 BPM contain the recorded 24-second WAV");
+        timing.bpm = 60; tempoProject.setTiming(0, timing);
+        expect(tempoProject.sectionPlaybackBeats(0, 32, 48000) == 32 &&
+            tempoProject.sectionPlaybackFrames(0, 32, 48000) == 32 * 48000,
+            "slower BPM keeps eight bars and adds eight seconds of section silence");
+        timing.bpm = 120; tempoProject.setTiming(0, timing);
+        expect(tempoProject.sectionPlaybackBeats(0, 32, 48000) == 48 &&
+            tempoProject.sectionPlaybackFrames(0, 32, 48000) == 24 * 48000,
+            "faster BPM extends to twelve whole bars without truncating the WAV");
+        tempoProject.banks()[0].lanes[0].startFrame = 1;
+        expect(tempoProject.sectionPlaybackBeats(0, 32, 48000) == 48,
+            "one frame of endpoint rounding does not manufacture another empty bar");
+        tempoProject.banks()[0].lanes[0].startFrame = 2;
+        expect(tempoProject.sectionPlaybackBeats(0, 32, 48000) == 52,
+            "a placed WAV extending into another bar expands the section");
+        expect(tempoProject.sectionPlaybackFrames(-1, 32, 48000) == 0 &&
+            tempoProject.sectionPlaybackFrames(0, 32, 0) == 0, "invalid section clock inputs fail closed");
+    }
     if (failures != 0) {
         std::cerr << failures << " LooperProject checks failed\n";
         return 1;

@@ -74,6 +74,7 @@ public:
 
     void setCallbacks(Callbacks callbacks);
     void cancelPendingTrackPlayback() noexcept;
+    bool updateSectionPlaybackTiming(int bankIndex, int sampleRate);
     bool startFileTask(
         std::function<void()> work,
         std::function<void()> complete,

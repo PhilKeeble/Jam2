@@ -252,6 +252,28 @@ bool LooperProject::setTiming(int bankIndex, LooperBankTiming timing)
     hasSerializedTiming_ = true;
     return true;
 }
+int LooperProject::sectionPlaybackBeats(int bankIndex, int minimumBeats, int sampleRate) const noexcept
+{
+    if (bankIndex < 0 || bankIndex >= banks_.size() || sampleRate <= 0) return 0;
+    const auto timing = resolvedTiming(bankIndex);
+    qint64 end = 0;
+    for (const auto& lane : banks_.at(bankIndex).lanes)
+        end = qMax(end, jam2::gui::looperLaneTimelineEnd(lane, lane.sourceFrames, sampleRate));
+    return qMax(qMax(1, minimumBeats), jam2::gui::sectionBeatCountForTimelineEnd(
+        end, sampleRate, timing.bpm, timing.tempoPulseUnits, timing.beatsPerBar));
+}
+
+qint64 LooperProject::sectionPlaybackFrames(int bankIndex, int minimumBeats, int sampleRate) const noexcept
+{
+    const int beats = sectionPlaybackBeats(bankIndex, minimumBeats, sampleRate);
+    if (beats <= 0) return 0;
+    const auto timing = resolvedTiming(bankIndex);
+    const long double frames = static_cast<long double>(beats) * 60.0L * sampleRate /
+        (timing.bpm * timing.tempoPulseUnits);
+    return frames >= static_cast<long double>((std::numeric_limits<qint64>::max)())
+        ? (std::numeric_limits<qint64>::max)() : qMax<qint64>(1, static_cast<qint64>(std::llround(frames)));
+}
+
 bool LooperProject::hasSerializedTiming() const { return hasSerializedTiming_; }
 const ArrangementDefinition& LooperProject::arrangement() const { return arrangement_; }
 bool LooperProject::setArrangement(ArrangementDefinition arrangement)

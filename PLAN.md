@@ -20,7 +20,7 @@ Make a jamjar collection repo to store full songs and jams
 
 ## macOS Follow-ups
 
-- Fix loopback recording on macOS. Validate the CoreAudio capture and permission paths, keep the UI action disabled when capture is unavailable, and add native CTest coverage plus a profiled hardware check on macOS.
+
 
 ## refinement pass
 

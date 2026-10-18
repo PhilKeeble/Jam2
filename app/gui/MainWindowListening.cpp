@@ -48,7 +48,7 @@ void MainWindow::initializeListeningTools()
         grid.updateEngine(state.engine.engine_frame,
             jam2::transport_musical_frame_from_raw(state.engine.engine_frame, offset),
             state.engine.metronome_epoch_frame, offset, sampleRate,
-            state.engine.metronome_epoch_valid && sampleRate > 0, state.engine.playback_tempo);
+            state.engine.metronome_epoch_valid && sampleRate > 0, state.engine.playback_tempo, state.engine.metronome_epoch_source_position);
         state.position = grid.position();
         // Play/Stop does not invalidate listening preparation. Only a section
         // transition needs to settle before choosing the content to render.
@@ -61,7 +61,8 @@ void MainWindow::initializeListeningTools()
             : trackRecordingWorkflow_.currentTransportPositionMs(state.position, track.durationMs) / 1000.0;
         state.loopEnabled = track.loopEnabled;
         state.loopStartSourceSeconds = track.loopStartSeconds >= 0.0 ? track.loopStartSeconds * renderedSpeed : -1.0;
-        state.loopEndSourceSeconds = track.loopEndSeconds >= 0.0 ? track.loopEndSeconds * renderedSpeed : -1.0;
+        state.loopEndSourceSeconds = track.loopEndSeconds >= 0.0 ? track.loopEndSeconds * renderedSpeed
+            : static_cast<double>(bankExactOutputFrames(state.bank, sampleRate)) / std::max(1, sampleRate);
         const QByteArray lanes = QJsonDocument(looperProject_.toJson()).toJson(QJsonDocument::Compact);
         state.sourceSignature = QStringLiteral("%1:%2:%3:%4:%5:%6")
             .arg(chordModel_.revision()).arg(QString::fromLatin1(QCryptographicHash::hash(lanes, QCryptographicHash::Sha256).toHex()))
@@ -113,7 +114,7 @@ bool MainWindow::prepareListeningMix(const jam2::gui::ListeningToolsSettings& se
     SharedTrackModel track = trackController_.model();
     settings.applyTo(track);
     const int sampleRate = activeTrackSampleRate();
-    const qint64 exactFrames = bankExactOutputFrames(bank, sampleRate);
+    const qint64 exactFrames = 0;
     const QFileInfo ordinary(PreparedMixRenderer::outputPath(projectPersistence_.workspaceFolder(), bank, generation, QCoreApplication::applicationPid()));
     const QString path = QDir(ordinary.absolutePath()).absoluteFilePath(QStringLiteral("listening-") + ordinary.fileName());
     auto job = std::make_shared<ListeningRenderJob>();
@@ -147,7 +148,8 @@ void MainWindow::adoptListeningMix(const jam2::gui::ListeningToolsSettings& sett
             track.fileBytes = result->fileBytes;
             track.sampleRate = result->sampleRate;
             track.sampleRateCompatible = true;
-            track.durationMs = result->durationMs;
+            track.durationMs = static_cast<int>(std::llround(bankExactOutputFrames(result->bankIndex,
+                result->sampleRate) * 1000.0 / result->sampleRate / speed));
             track.sha256 = result->sha256;
             track.acceptedBpm = bankMetronomePattern(result->bankIndex).bpm;
             loadTrackWaveform();

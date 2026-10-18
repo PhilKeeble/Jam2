@@ -358,31 +358,31 @@ double render_pattern_step_sample(
         1.0);
 }
 
+std::uint64_t raw_epoch_phase(std::uint64_t epoch, std::int64_t clockOffset, std::uint64_t interval) noexcept
+{
+    if (interval == 0) return 0;
+    const auto phase = epoch % interval;
+    if (clockOffset >= 0) {
+        const auto offset = static_cast<std::uint64_t>(clockOffset) % interval;
+        return phase >= offset ? phase - offset : interval - (offset - phase);
+    }
+    const auto offset = (static_cast<std::uint64_t>(-(clockOffset + 1)) + 1ULL) % interval;
+    return phase >= interval - offset ? phase - (interval - offset) : phase + offset;
+}
+
 AuthorityClockMapping map_authority_clock(
     std::uint64_t authority_epoch_sample_time,
     std::uint64_t projected_authority_sample_time,
     std::uint64_t local_sample_time)
 {
-    if (projected_authority_sample_time < authority_epoch_sample_time) {
-        const std::uint64_t lead =
-            authority_epoch_sample_time - projected_authority_sample_time;
-        if (local_sample_time > (std::numeric_limits<std::uint64_t>::max)() - lead) {
-            return {};
-        }
-        return {local_sample_time + lead, 0, true};
-    }
-
-    const std::uint64_t elapsed =
-        projected_authority_sample_time - authority_epoch_sample_time;
-    if (local_sample_time >= elapsed) {
-        return {local_sample_time - elapsed, 0, true};
-    }
-
-    const std::uint64_t offset = elapsed - local_sample_time;
-    if (offset > static_cast<std::uint64_t>((std::numeric_limits<std::int64_t>::max)())) {
+    const bool positive = projected_authority_sample_time >= local_sample_time;
+    const std::uint64_t magnitude = positive
+        ? projected_authority_sample_time - local_sample_time
+        : local_sample_time - projected_authority_sample_time;
+    if (magnitude > static_cast<std::uint64_t>((std::numeric_limits<std::int64_t>::max)()))
         return {};
-    }
-    return {0, static_cast<std::int64_t>(offset), true};
+    const auto offset = static_cast<std::int64_t>(magnitude);
+    return {authority_epoch_sample_time, positive ? offset : -offset, true};
 }
 
 double render_sample(

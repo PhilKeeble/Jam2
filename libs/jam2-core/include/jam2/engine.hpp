@@ -172,6 +172,8 @@ struct EngineCommand {
     std::uint64_t transport_countdown_start_frame = 0;
     metronome::PatternSnapshot pattern{};
     PlaybackTempo playback_tempo{};
+    std::uint64_t grid_epoch_frame = 0;
+    double grid_epoch_source_position = -1.0;
     bool update_playback_tempo = true;
     bool prepared_loop_enabled = true;
     std::uint64_t prepared_loop_start_frame = 0;
@@ -322,7 +324,9 @@ struct EngineSnapshot {
     bool playback_ratio_ramping = false;
     int playback_ratio_ramp_ms = 250;
     std::uint64_t metronome_epoch_frame = 0;
+    double metronome_epoch_source_position = 0.0;
     bool metronome_epoch_valid = false;
+    std::int64_t metronome_clock_offset_frames = 0;
     std::int64_t metronome_render_offset_frames = 0;
     std::uint64_t metronome_pattern_origin_frame = 0;
     PlaybackTempo playback_tempo{};

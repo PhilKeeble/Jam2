@@ -908,7 +908,7 @@ bool listenerAudioValid(const PeerEvidence& evidence, int peerIndex, QString& re
         evidence.stems[kMyInputStem].samples,
         2500,
         900,
-        96);
+        96, jam2::test::MetronomeClock::Input);
     if (!inputEpoch.ok || inputEpoch.detectedClicks < 20) {
         reason = QStringLiteral("peer %1 metro-pulse input does not prove the replacement epoch")
             .arg(peerIndex + 1);
@@ -1952,6 +1952,21 @@ int main(int argc, char* argv[])
     if (argc != 4) {
         std::cerr << "usage: jam2_four_metronome_impairment <jam2> <mode> <condition>\n";
         return 2;
+    }
+    const QJsonObject metricFixture{
+        {QStringLiteral("sample_rate"), 48000}, {QStringLiteral("bpm"), 120},
+        {QStringLiteral("metronome_epoch_sample_time"), 1000}, {QStringLiteral("metronome_epoch_valid"), true},
+        {QStringLiteral("metronome_render_offset_frames"), 50000}};
+    auto negativeOffsetFixture = metricFixture;
+    negativeOffsetFixture.insert(QStringLiteral("metronome_render_offset_frames"), -12000);
+    auto inputMetricFixture = metricFixture;
+    inputMetricFixture.insert(QStringLiteral("metronome_clock_offset_frames"), -12000);
+    if (jam2::test::expectedMetronomeFrames(inputMetricFixture, 50000, jam2::test::MetronomeClock::Input) !=
+            std::vector<std::int64_t>{13000, 37000} ||
+        jam2::test::expectedMetronomeFrames(metricFixture, 50000) != std::vector<std::int64_t>{23000, 47000} ||
+        jam2::test::expectedMetronomeFrames(negativeOffsetFixture, 50000) != std::vector<std::int64_t>{13000, 37000}) {
+        std::cerr << "recording metric lost the phase of a mapped raw-clock epoch\n";
+        return 1;
     }
     const QString executable = QFileInfo(QString::fromLocal8Bit(argv[1])).absoluteFilePath();
     const auto mode = parseMode(QString::fromLocal8Bit(argv[2]));

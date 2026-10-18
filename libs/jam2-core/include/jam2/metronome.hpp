@@ -73,6 +73,7 @@ double render_pattern_step_sample(
     double level,
     ClickVoice voice,
     ClickSound sound);
+std::uint64_t raw_epoch_phase(std::uint64_t epoch, std::int64_t clockOffset, std::uint64_t interval) noexcept;
 AuthorityClockMapping map_authority_clock(
     std::uint64_t authority_epoch_sample_time,
     std::uint64_t projected_authority_sample_time,

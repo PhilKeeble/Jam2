@@ -70,12 +70,14 @@ void PlaybackGrid::updateEngine(
     std::int64_t renderOffsetFrames,
     int sampleRate,
     bool running,
-    jam2::PlaybackTempo tempo)
+    jam2::PlaybackTempo tempo,
+    double epochSourcePosition)
 {
     tempo_ = tempo;
     engineFrame_ = rawFrame;
     engineMusicalFrame_ = musicalFrame;
     engineEpochFrame_ = epochFrame;
+    engineEpochSourcePosition_ = epochSourcePosition >= 0.0 ? epochSourcePosition : static_cast<double>(epochFrame);
     engineRenderOffsetFrames_ = renderOffsetFrames;
     engineSampleRate_ = jam2::limits::valid_sample_rate(sampleRate)
         ? sampleRate
@@ -109,12 +111,13 @@ PlaybackGrid::Position PlaybackGrid::position() const
         const std::uint64_t epochFrame = engineEpochFrame_;
         result.engineAnchored = true;
         result.epochFrame = epochFrame;
+        result.epochSourcePosition = engineEpochSourcePosition_;
         result.rawCurrentFrame = rawFrame;
         result.currentFrame = musicalFrame;
         result.renderOffsetFrames = engineRenderOffsetFrames_;
         result.sampleRate = engineSampleRate_;
         if (engineRunning_ && musicalFrame >= epochFrame) {
-            seconds = std::max(0.0, tempo_.position(musicalFrame) - static_cast<double>(epochFrame)) / engineSampleRate_;
+            seconds = std::max(0.0, tempo_.position(musicalFrame) - engineEpochSourcePosition_) / engineSampleRate_;
         }
         result.running = engineRunning_;
     } else {

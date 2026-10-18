@@ -98,7 +98,8 @@ std::optional<QuantizedTransportSchedule> next_bar_transport_schedule(
     bool epochValid,
     std::uint64_t epochMusicalFrame,
     int countInBars,
-    PlaybackTempo tempo) noexcept
+    PlaybackTempo tempo,
+    double epochSourcePosition) noexcept
 {
     if (!std::isfinite(sampleRate) ||
         sampleRate < static_cast<double>(limits::kMinimumSampleRate) ||
@@ -135,16 +136,17 @@ std::optional<QuantizedTransportSchedule> next_bar_transport_schedule(
         return std::nullopt;
     }
     const std::uint64_t epoch = epochValid ? epochMusicalFrame : 0ULL;
+    const double sourceEpoch = epochValid && epochSourcePosition >= 0.0 ? epochSourcePosition : static_cast<double>(epoch);
     if (tempo.rate_ppm != 1000000 || tempo.anchor_frame != 0 || tempo.anchor_position != 0.0) {
-        const double elapsedSource = std::max(0.0, tempo.position(musicalNow) - static_cast<double>(epoch));
-        double next = static_cast<double>(epoch) + (std::floor(elapsedSource / barFrames) + 1.0) * barFrames;
+        const double elapsedSource = std::max(0.0, tempo.position(musicalNow) - sourceEpoch);
+        double next = sourceEpoch + (std::floor(elapsedSource / barFrames) + 1.0) * barFrames;
         std::uint64_t minimum = 0;
         if (!checked_add(rawCurrentFrame, static_cast<std::uint64_t>(integerSampleRate) / 5ULL, minimum)) return std::nullopt;
         auto countdown = transport_raw_frame_from_musical(tempo.frame(next), renderOffsetFrames);
         if (countdown <= minimum) {
             const auto minimumMusical = transport_musical_frame_from_raw(minimum, renderOffsetFrames);
-            next = static_cast<double>(epoch) + (std::floor(std::max(0.0,
-                tempo.position(minimumMusical) - epoch) / barFrames) + 1.0) * barFrames;
+            next = sourceEpoch + (std::floor(std::max(0.0,
+                tempo.position(minimumMusical) - sourceEpoch) / barFrames) + 1.0) * barFrames;
             countdown = transport_raw_frame_from_musical(tempo.frame(next), renderOffsetFrames);
         }
         const auto targetMusical = tempo.frame(next + static_cast<double>(countInBars) * barFrames);
@@ -214,7 +216,9 @@ std::optional<QuantizedTransportSchedule> align_received_transport_to_grid(
     std::uint64_t epochMusicalFrame,
     std::uint64_t estimatedTargetRawFrame,
     std::uint64_t countInFrames,
-    PlaybackTempo tempo) noexcept
+    PlaybackTempo tempo,
+    double epochSourcePosition,
+    TransportBoundary boundaryKind) noexcept
 {
     if (!epochValid || !std::isfinite(sampleRate) ||
         sampleRate < static_cast<double>(limits::kMinimumSampleRate) ||
@@ -244,6 +248,20 @@ std::optional<QuantizedTransportSchedule> align_received_transport_to_grid(
         return std::nullopt;
     }
 
+    if (boundaryKind == TransportBoundary::Beat) {
+        const auto beatFrames = stepFrames * static_cast<std::uint64_t>(pattern.division);
+        const double sourceEpoch = epochSourcePosition >= 0.0 ? epochSourcePosition : static_cast<double>(epochMusicalFrame);
+        const auto estimate = transport_musical_frame_from_raw(estimatedTargetRawFrame, renderOffsetFrames);
+        const double elapsed = tempo.position(estimate) - sourceEpoch;
+        if (elapsed < -static_cast<double>(beatFrames) / 2.0) return std::nullopt;
+        const double beat = std::floor(std::max(0.0, elapsed) / beatFrames + 0.5);
+        const auto musical = tempo.frame(sourceEpoch + beat * beatFrames);
+        const auto raw = transport_raw_frame_from_musical(musical, renderOffsetFrames);
+        if (musical == kMaximumFrame || raw < countInFrames || raw - countInFrames <= rawCurrentFrame)
+            return std::nullopt;
+        return QuantizedTransportSchedule{raw - countInFrames, raw, musical};
+    }
+    const double sourceEpoch = epochSourcePosition >= 0.0 ? epochSourcePosition : static_cast<double>(epochMusicalFrame);
     std::uint64_t estimatedMusical = 0;
     if (!checked_musical_from_raw(
             estimatedTargetRawFrame,
@@ -253,15 +271,15 @@ std::optional<QuantizedTransportSchedule> align_received_transport_to_grid(
         return std::nullopt;
     }
     if (tempo.rate_ppm != 1000000 || tempo.anchor_frame != 0 || tempo.anchor_position != 0.0) {
-        const double estimatedSource = std::max(0.0, tempo.position(estimatedMusical) - epochMusicalFrame);
-        double boundary = static_cast<double>(epochMusicalFrame) + std::floor(estimatedSource / barFrames + 0.5) * barFrames;
+        const double estimatedSource = std::max(0.0, tempo.position(estimatedMusical) - sourceEpoch);
+        double boundary = sourceEpoch + std::floor(estimatedSource / barFrames + 0.5) * barFrames;
         auto musical = tempo.frame(boundary);
         auto raw = transport_raw_frame_from_musical(musical, renderOffsetFrames);
         if (raw < countInFrames || raw - countInFrames <= rawCurrentFrame) {
             if (rawCurrentFrame > kMaximumFrame - countInFrames) return std::nullopt;
             const auto safeMusical = transport_musical_frame_from_raw(rawCurrentFrame + countInFrames, renderOffsetFrames);
-            boundary = static_cast<double>(epochMusicalFrame) + (std::floor(std::max(0.0,
-                tempo.position(safeMusical) - epochMusicalFrame) / barFrames) + 1.0) * barFrames;
+            boundary = sourceEpoch + (std::floor(std::max(0.0,
+                tempo.position(safeMusical) - sourceEpoch) / barFrames) + 1.0) * barFrames;
             musical = tempo.frame(boundary);
             raw = transport_raw_frame_from_musical(musical, renderOffsetFrames);
         }

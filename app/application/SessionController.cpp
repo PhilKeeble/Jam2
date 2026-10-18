@@ -662,7 +662,7 @@ private:
                     snapshot.metronome_epoch_valid,
                     snapshot.metronome_epoch_frame,
                     countIn,
-                    snapshot.playback_tempo)
+                    snapshot.playback_tempo, snapshot.metronome_epoch_source_position)
                 : std::optional<jam2::QuantizedTransportSchedule>{
                     jam2::QuantizedTransportSchedule{
                         target,
@@ -940,6 +940,8 @@ private:
             {QStringLiteral("metronome_mode"), metronomeModeText(snapshot.metronome_mode)},
             {QStringLiteral("test_input"), testInputText(runtimeOptions_.test_input)},
             {QStringLiteral("metronome_epoch_sample_time"), static_cast<qint64>(snapshot.metronome_epoch_frame)},
+            {QStringLiteral("metronome_clock_offset_frames"), static_cast<qint64>(snapshot.metronome_clock_offset_frames)},
+            {QStringLiteral("metronome_render_offset_frames"), static_cast<qint64>(snapshot.metronome_render_offset_frames)},
             {QStringLiteral("metronome_epoch_valid"), snapshot.metronome_epoch_valid},
             {QStringLiteral("metronome_pattern_origin_frame"),
                 static_cast<qint64>(snapshot.metronome_pattern_origin_frame)},

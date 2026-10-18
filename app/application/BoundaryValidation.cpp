@@ -7598,12 +7598,12 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
         const auto futureStart = jam2::metronome::map_authority_clock(
             5000, 4000, 2000);
         record(QStringLiteral("transport-clock.late-join-preserves-absolute-position"),
-            establishedEngine.valid && establishedEngine.epoch_sample_time == 4000 &&
-            establishedEngine.render_offset_frames == 0 &&
-            youngerEngine.valid && youngerEngine.epoch_sample_time == 0 &&
-            youngerEngine.render_offset_frames == 2000 &&
-            futureStart.valid && futureStart.epoch_sample_time == 3000 &&
-            futureStart.render_offset_frames == 0);
+            establishedEngine.valid && establishedEngine.epoch_sample_time == 1000 &&
+            establishedEngine.render_offset_frames == -3000 &&
+            youngerEngine.valid && youngerEngine.epoch_sample_time == 1000 &&
+            youngerEngine.render_offset_frames == 3000 &&
+            futureStart.valid && futureStart.epoch_sample_time == 5000 &&
+            futureStart.render_offset_frames == 2000);
     }
     record(QStringLiteral("record-count-in.wait-then-4-3-2-1"),
         recordingCountInBeat(1000, 5000, 1000) == 4 &&

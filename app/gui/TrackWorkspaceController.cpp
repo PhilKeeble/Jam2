@@ -10,6 +10,8 @@
 
 #include <exception>
 #include <memory>
+#include <cmath>
+#include <limits>
 
 TrackWorkspaceController::TrackWorkspaceController(
     ApplicationRuntime& runtime,
@@ -32,6 +34,23 @@ TrackWorkspaceController::~TrackWorkspaceController()
 void TrackWorkspaceController::setCallbacks(Callbacks callbacks)
 {
     callbacks_ = std::move(callbacks);
+}
+
+bool TrackWorkspaceController::updateSectionPlaybackTiming(int bankIndex, int sampleRate)
+{
+    if (bankIndex < 0 || bankIndex >= songModel.sections().size() || sampleRate <= 0) return false;
+    const int beats = looperProject.sectionPlaybackBeats(bankIndex, songModel.section(bankIndex).beats, sampleRate);
+    if (beats > songModel.section(bankIndex).beats) songModel.resizeSection(bankIndex, beats);
+    if (bankIndex != looperProject.activeBankIndex()) return true;
+    auto& track = trackController.model();
+    const double speed = listeningTools.appliedSettings().speedPpm / 1000000.0;
+    const auto frames = static_cast<qint64>(std::llround(
+        looperProject.sectionPlaybackFrames(bankIndex, songModel.section(bankIndex).beats, sampleRate) / speed));
+    track.durationMs = static_cast<int>(qMin<qint64>((std::numeric_limits<int>::max)(), frames * 1000 / sampleRate));
+    track.acceptedBpm = looperProject.resolvedTiming(bankIndex).bpm;
+    if (preparedMixLifecycle.active().path.isEmpty()) return true;
+    const auto loop = trackController.effectiveLoop(sampleRate, frames);
+    return recordingWorkflow.setPreparedLoop(loop.enabled, loop.startFrame, loop.endFrame);
 }
 
 void TrackWorkspaceController::cancelPendingTrackPlayback() noexcept

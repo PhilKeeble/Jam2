@@ -121,8 +121,8 @@ int PreparedTrackSource::mix(
                     sourcePos_ = command.sourceFrame;
                     if (playing_ && command.targetFrame > 0 && currentFrame > command.targetFrame &&
                         slots_[active_].frames > 0) {
-                        sourcePos_ = (sourcePos_ + currentFrame - command.targetFrame) %
-                            slots_[active_].frames;
+                        sourcePos_ += std::min(currentFrame - command.targetFrame,
+                            (std::numeric_limits<std::uint64_t>::max)() - sourcePos_);
                     }
                 } else if (command.type == CommandType::Clear) {
                     if (active_ >= 0) {
@@ -198,7 +198,8 @@ int PreparedTrackSource::mix(
                 }
                 if (sourcePos_ >= slot.frames) {
                     if (loopEnd_ > loopStart_) {
-                        sourcePos_ = loopStart_;
+                        ++sourcePos_; // Silent section tail; wrap only at the musical loop end.
+                        continue;
                     } else {
                         playing_ = false;
                         break;
