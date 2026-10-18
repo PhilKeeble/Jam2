@@ -30,11 +30,6 @@ maybe look at bringing track seeking back in
 
 cant manually sync when auto is on - wanted it when open jamjar didnt sync
 
-when changing speed metronome could come out of sync
-after changing speed was like global playback had a delay
-after chnging metronome the track just didnt play 
-delayed for ages then played??
-
 ## Bugs - MacOS
 
 Update.sh wasnt being clear that it was failing, make it easy for the user 

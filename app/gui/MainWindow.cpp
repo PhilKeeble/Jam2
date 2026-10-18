@@ -9138,7 +9138,9 @@ void MainWindow::startArmedLooperLaneRecording()
     }
     const bool engineCapture =
         trackRecordingWorkflow_.captureMode() != TrackRecordingWorkflow::CaptureMode::Loopback;
-    localLaneTakeForcedLocal_ = !engineCapture;
+    // Capture coordination does not determine whether the completed WAV is shared.
+    // Only explicit recovery of a stalled group keeps the resulting take private.
+    localLaneTakeForcedLocal_ = false;
     if (syncedRecordingsEnabled() && jam2_.isNetworkRunning() && engineCapture) {
         if (localTrackRecordingPhase_ == QStringLiteral("ready")) {
             localTrackRecordingCountInBars_ = 0;
@@ -9246,7 +9248,8 @@ void MainWindow::publishLocalTrackRecordingState(
     }
     updateSharedRecordingPresentation();
     updateLaneRecordingIsolation();
-    if (localLaneTakeForcedLocal_ || !syncedRecordingsEnabled() ||
+    if (trackRecordingWorkflow_.captureMode() == TrackRecordingWorkflow::CaptureMode::Loopback ||
+        localLaneTakeForcedLocal_ || !syncedRecordingsEnabled() ||
         !jam2_.isNetworkRunning()) {
         return;
     }
@@ -9687,6 +9690,7 @@ bool MainWindow::sharedRecordingProtected() const
 void MainWindow::updateSharedRecordingPresentation()
 {
     const bool sharedWorkflow = syncedRecordingsEnabled() &&
+        trackRecordingWorkflow_.captureMode() != TrackRecordingWorkflow::CaptureMode::Loopback &&
         !localLaneTakeForcedLocal_;
     const bool localVisible = localTrackRecordingPhase_ != QStringLiteral("idle") &&
         trackRecordingWorkflow_.laneArmed();

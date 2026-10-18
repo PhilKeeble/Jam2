@@ -1293,11 +1293,21 @@ add_test(NAME jam2_four_gui_modal_integration
 add_test(NAME jam2_four_loopback_recording_integration
     COMMAND $<TARGET_FILE:jam2_four_gui_modal_integration>
         "${JAM2_TEST_PUBLIC_EXECUTABLE}" loopback-only)
-set_tests_properties(jam2_four_loopback_recording_integration PROPERTIES
+add_test(NAME jam2_four_loopback_sync_auto_integration
+    COMMAND $<TARGET_FILE:jam2_four_gui_modal_integration>
+        "${JAM2_TEST_PUBLIC_EXECUTABLE}" loopback-sync-auto)
+add_test(NAME jam2_four_loopback_sync_manual_integration
+    COMMAND $<TARGET_FILE:jam2_four_gui_modal_integration>
+        "${JAM2_TEST_PUBLIC_EXECUTABLE}" loopback-sync-manual)
+set_tests_properties(jam2_four_loopback_recording_integration
+    jam2_four_loopback_sync_auto_integration jam2_four_loopback_sync_manual_integration PROPERTIES
     LABELS "integration;gui;four-peer;audio;recording;loopback;wav;fake-audio"
     TIMEOUT 120)
+set_property(TEST jam2_four_loopback_sync_auto_integration
+    jam2_four_loopback_sync_manual_integration APPEND PROPERTY LABELS "shared-content")
 if(WIN32)
-    set_tests_properties(jam2_four_loopback_recording_integration PROPERTIES
+    set_tests_properties(jam2_four_loopback_recording_integration
+        jam2_four_loopback_sync_auto_integration jam2_four_loopback_sync_manual_integration PROPERTIES
         ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
 endif()
@@ -1548,6 +1558,7 @@ add_custom_target(jam2_tests_shared_content
         jam2_workspace_state_tests
         jam2_track_workspace_support_tests
         jam2_asset_transfer_tests
+        jam2_four_gui_modal_integration
         jam2_four_shared_content_integration
         jam2_four_wav_interruption_integration)
 

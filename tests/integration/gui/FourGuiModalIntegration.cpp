@@ -4,6 +4,7 @@
 #include "pcm16_wav.hpp"
 
 #include <QCoreApplication>
+#include <QCryptographicHash>
 #include <QDir>
 #include <QFileInfo>
 #include <QFile>
@@ -1188,15 +1189,18 @@ bool exerciseActiveCreatorWorkflows(
     return failures == 0;
 }
 
-bool exerciseLoopbackLaneWorkflow(AutomationProcess& peer, const QString& prefix)
+bool exerciseLoopbackLaneWorkflow(
+    AutomationProcess& peer, const QString& prefix, bool runtimePrepared = false)
 {
-    closeModal(peer, prefix + "initial-cancel", QStringLiteral("application.local-engine.cancel"));
-    const auto prepare = prefix + "prepare";
-    if (!send(peer, {
-            {QStringLiteral("type"), QStringLiteral("jam.dialog-runtime.prepare")},
-            {QStringLiteral("id"), prepare},
-            {QStringLiteral("test_input"), QStringLiteral("silence")},
-        }) || !receiveApplied(peer, prepare)) return false;
+    if (!runtimePrepared) {
+        closeModal(peer, prefix + "initial-cancel", QStringLiteral("application.local-engine.cancel"));
+        const auto prepare = prefix + "prepare";
+        if (!send(peer, {
+                {QStringLiteral("type"), QStringLiteral("jam.dialog-runtime.prepare")},
+                {QStringLiteral("id"), prepare},
+                {QStringLiteral("test_input"), QStringLiteral("silence")},
+            }) || !receiveApplied(peer, prepare)) return false;
+    }
     if (!invokeAndReceive(peer, prefix + "track", QStringLiteral("workspace.open.looper"), "click")) return false;
     const auto before = runtimeSnapshot(peer, prefix + "before");
     if (!before) return false;
@@ -1260,6 +1264,138 @@ bool exerciseLoopbackLaneWorkflow(AutomationProcess& peer, const QString& prefix
         file.read(2) != QByteArray::fromHex("0010")) {
         fail(prefix + "imported loopback WAV omitted the captured samples");
         return false;
+    }
+    return true;
+}
+
+bool exerciseLoopbackSharing(
+    FourPeerCoordinator& coordinator,
+    LoopbackPortReservations& reservations,
+    const std::array<quint16, FourPeerCoordinator::kPeerCount>& ports,
+    bool automatic)
+{
+    for (std::size_t peer = 0; peer < FourPeerCoordinator::kPeerCount; ++peer) {
+        const QString prefix = QStringLiteral("loopback-sync-%1-").arg(peer + 1);
+        closeModal(coordinator.peer(peer), prefix + "cancel-local",
+            QStringLiteral("application.local-engine.cancel"));
+        const QString id = prefix + "prepare";
+        if (!send(coordinator.peer(peer), {
+                {"type", "jam.dialog-runtime.prepare"}, {"id", id},
+                {"test_input", "silence"},
+            }) || !receiveApplied(coordinator.peer(peer), id)) return false;
+    }
+    reservations.release();
+    QJsonObject created;
+    if (!send(coordinator.peer(0), {
+            {"type", "jam.create"}, {"id", "loopback-create"},
+            {"port", ports[0]}, {"test_input", "silence"},
+        }) || !receiveApplied(coordinator.peer(0), "loopback-create", &created)) return false;
+    const QString invite = created.value("invite_url").toString();
+    if (invite.isEmpty()) {
+        fail("loopback creator omitted invite URL");
+        return false;
+    }
+    for (std::size_t peer = 1; peer < FourPeerCoordinator::kPeerCount; ++peer) {
+        const QString id = QStringLiteral("loopback-join-%1").arg(peer + 1);
+        if (!send(coordinator.peer(peer), {
+                {"type", "jam.join"}, {"id", id}, {"port", ports[peer]},
+                {"invite_url", invite}, {"test_input", "silence"},
+            }) || !receiveApplied(coordinator.peer(peer), id)) return false;
+    }
+    std::array<QJsonObject, FourPeerCoordinator::kPeerCount> states;
+    if (!waitForAll(coordinator, "four connected loopback peers",
+            [](std::size_t, const QJsonObject& state) {
+                const auto jam = state.value("jam").toObject();
+                return jam.value("remote_peer_count").toInt() == 3 &&
+                    jam.value("active_remote_peer_count").toInt() == 3 &&
+                    jam.value("network_attachment_ready").toBool() &&
+                    state.value("content").toObject().value("arrangement_revision").toInteger() > 0;
+            }, states, 30s)) return false;
+    if (!send(coordinator.peer(0), {
+            {"type", "jam.policy"}, {"id", "loopback-policy"},
+            {"track_lanes", true}, {"auto_share_wavs", automatic},
+            {"global_playback", true}, {"recordings", true},
+            {"generated_ideas", "full"}, {"metronome_state", false},
+        }) || !receiveApplied(coordinator.peer(0), "loopback-policy") ||
+        !waitForAll(coordinator, "loopback WAV sharing policy",
+            [automatic](std::size_t, const QJsonObject& state) {
+                return state.value("jam").toObject().value("policy").toObject()
+                    .value("auto_share_wavs").toBool() == automatic;
+            }, states, 30s)) return false;
+
+    // Use a joiner for automatic sharing and the creator for manual sharing.
+    const std::size_t source = automatic ? 1 : 0;
+    auto& recorder = coordinator.peer(source);
+    if (!send(recorder, {{"type", "looper.transfer.pause"},
+            {"id", "loopback-pause"}, {"point", "outgoing-validation"}}) ||
+        !receiveApplied(recorder, "loopback-pause") ||
+        !exerciseLoopbackLaneWorkflow(recorder, "loopback-network-", true)) return false;
+    const auto imported = runtimeSnapshot(recorder, "loopback-imported");
+    if (!imported) return false;
+    const QString hash = imported->value("content").toObject()
+        .value("lane_recording_import_last_hash").toString();
+    const auto assetState = [&hash](const QJsonObject& state, bool available) {
+        const auto content = state.value("content").toObject();
+        const auto hashes = content.value("asset_hashes").toArray();
+        const auto ready = content.value("asset_available").toArray();
+        int matches = 0;
+        for (qsizetype index = 0; index < hashes.size(); ++index) {
+            if (hashes.at(index).toString() == hash) {
+                if (index >= ready.size() || ready.at(index).toBool() != available) return false;
+                ++matches;
+            }
+        }
+        return matches == 1 && !content.value("lane_recording_protected").toBool() &&
+            content.value("lane_recording_active_group_id").toString().isEmpty();
+    };
+    if (!automatic) {
+        if (!waitForAll(coordinator, "loopback metadata without automatic WAV transfer",
+                [&assetState, source](std::size_t peer, const QJsonObject& state) {
+                    const auto jam = state.value("jam").toObject();
+                    return assetState(state, peer == source) &&
+                        !jam.value("asset_channel_required").toBool() &&
+                        jam.value("asset_client_connection_attempts").toInt() == 0;
+                }, states, 30s) ||
+            !invokeAndReceive(recorder, "loopback-manual-share", "looper.share-now", "click")) return false;
+    }
+    if (!waitForAll(coordinator, "delayed loopback transfer before atomic publication",
+            [&assetState, &hash, source](std::size_t peer, const QJsonObject& state) {
+                const auto content = state.value("content").toObject();
+                if (peer == source) {
+                    return assetState(state, true) && content.value("transfer").toObject()
+                        .value("pause_active").toString() == "outgoing-validation";
+                }
+                const auto hashes = content.value("asset_hashes").toArray();
+                const auto ready = content.value("asset_available").toArray();
+                for (qsizetype index = 0; index < hashes.size(); ++index) {
+                    if (hashes.at(index).toString() == hash && ready.at(index).toBool()) return false;
+                }
+                return !content.value("lane_recording_protected").toBool() &&
+                    content.value("lane_recording_active_group_id").toString().isEmpty();
+            }, states, 30s) ||
+        !send(recorder, {{"type", "looper.transfer.release"}, {"id", "loopback-release"}}) ||
+        !receiveApplied(recorder, "loopback-release") ||
+        !waitForAll(coordinator, "completed loopback WAV on all four peers",
+            [&assetState](std::size_t, const QJsonObject& state) {
+                const auto content = state.value("content").toObject();
+                return assetState(state, true) &&
+                    content.value("pending_track_contributions").toArray().isEmpty() &&
+                    content.value("outgoing_track_batches").toArray().isEmpty() &&
+                    content.value("file_tasks_active").toInt() == 0;
+            }, states, 30s)) return false;
+    for (std::size_t peer = 0; peer < states.size(); ++peer) {
+        const auto content = states[peer].value("content").toObject();
+        const auto hashes = content.value("asset_hashes").toArray();
+        const qsizetype index = std::find(hashes.begin(), hashes.end(), QJsonValue(hash)) - hashes.begin();
+        const QString path = content.value("lane_paths").toArray().at(index).toString();
+        QFile file(path);
+        const auto wav = jam2::wav::inspect_pcm16_file(path.toStdString());
+        if (!file.open(QIODevice::ReadOnly) || !wav || wav.info.frames != 64 ||
+            wav.info.sample_rate != 48000 ||
+            QString::fromLatin1(QCryptographicHash::hash(file.readAll(), QCryptographicHash::Sha256).toHex()) != hash) {
+            fail(QStringLiteral("peer %1 did not retain the exact captured loopback WAV").arg(peer + 1));
+            return false;
+        }
     }
     return true;
 }
@@ -1466,20 +1602,25 @@ int main(int argc, char* argv[])
 {
     QCoreApplication application(argc, argv);
     if (argc != 2 && argc != 3) {
-        std::cerr << "usage: jam2_four_gui_modal_integration <release-jam2> [startup-only|loopback-only]\n";
+        std::cerr << "usage: jam2_four_gui_modal_integration <release-jam2> [startup-only|loopback-only|loopback-sync-auto|loopback-sync-manual]\n";
         return 2;
     }
     const bool startupOnly = argc == 3 &&
         QString::fromLocal8Bit(argv[2]) == QStringLiteral("startup-only");
     const bool loopbackOnly = argc == 3 &&
         QString::fromLocal8Bit(argv[2]) == QStringLiteral("loopback-only");
-    if (argc == 3 && !startupOnly && !loopbackOnly) {
+    const bool loopbackSyncAuto = argc == 3 &&
+        QString::fromLocal8Bit(argv[2]) == QStringLiteral("loopback-sync-auto");
+    const bool loopbackSyncManual = argc == 3 &&
+        QString::fromLocal8Bit(argv[2]) == QStringLiteral("loopback-sync-manual");
+    const bool loopbackSync = loopbackSyncAuto || loopbackSyncManual;
+    if (argc == 3 && !startupOnly && !loopbackOnly && !loopbackSync) {
         std::cerr << "unknown modal test mode\n";
         return 2;
     }
     LoopbackPortReservations portReservations;
     std::array<quint16, FourPeerCoordinator::kPeerCount> ports{};
-    if (startupOnly) {
+    if (startupOnly || loopbackSync) {
         QString portError;
         if (!portReservations.reserve(FourPeerCoordinator::kPeerCount, portError)) {
             fail(QStringLiteral("reserving four dialog-startup ports: ") + portError);
@@ -1511,10 +1652,14 @@ int main(int argc, char* argv[])
         }
     }
 
-    if (loopbackOnly) {
-        for (std::size_t index = 0; index < FourPeerCoordinator::kPeerCount; ++index) {
-            if (!exerciseLoopbackLaneWorkflow(coordinator.peer(index),
-                    QStringLiteral("loopback-peer-%1-").arg(index + 1))) return 1;
+    if (loopbackOnly || loopbackSync) {
+        if (loopbackSync) {
+            if (!exerciseLoopbackSharing(coordinator, portReservations, ports, loopbackSyncAuto)) return 1;
+        } else {
+            for (std::size_t index = 0; index < FourPeerCoordinator::kPeerCount; ++index) {
+                if (!exerciseLoopbackLaneWorkflow(coordinator.peer(index),
+                        QStringLiteral("loopback-peer-%1-").arg(index + 1))) return 1;
+            }
         }
         for (std::size_t index = 0; index < FourPeerCoordinator::kPeerCount; ++index) {
             auto& peer = coordinator.peer(index);
@@ -1528,7 +1673,7 @@ int main(int argc, char* argv[])
         }
         if (failures != 0) return 1;
         coordinator.markSuccessful();
-        std::cout << "four-peer loopback recording and lane import passed\n";
+        std::cout << "four-peer loopback recording, lane import, and sharing checks passed\n";
         return 0;
     }
 
