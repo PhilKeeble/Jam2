@@ -7,6 +7,7 @@
 #include <fstream>
 #include <iostream>
 #include <string>
+#include <system_error>
 
 namespace {
 
@@ -24,7 +25,9 @@ std::filesystem::path filesystemIoPath(const std::filesystem::path& path)
 #ifdef _WIN32
     const std::filesystem::path absolute = std::filesystem::absolute(path);
     const std::wstring value = absolute.wstring();
-    if (value.rfind(L"\\\\?\\", 0) == 0 || value.size() < 240U) return absolute;
+    // A short cleanup root can contain descendants beyond Win32's path limit.
+    // Preserve the long-path prefix throughout recursive deletion as well.
+    if (value.rfind(L"\\\\?\\", 0) == 0) return absolute;
     if (value.rfind(L"\\\\", 0) == 0) {
         return std::filesystem::path(L"\\\\?\\UNC\\" + value.substr(2));
     }
@@ -32,6 +35,23 @@ std::filesystem::path filesystemIoPath(const std::filesystem::path& path)
 #else
     return path;
 #endif
+}
+
+bool cleanupFixture(const std::filesystem::path& root)
+{
+    std::error_code error;
+    const std::filesystem::path ioRoot = filesystemIoPath(root);
+    std::filesystem::remove_all(ioRoot, error);
+    if (error) {
+        ++failures;
+        std::cerr << "FAIL: fixture cleanup failed (" << error.value()
+                  << "): " << error.message() << '\n';
+        return false;
+    }
+    const bool remains = std::filesystem::exists(ioRoot, error);
+    expect(!error, "fixture cleanup verification must not report an error");
+    expect(!remains, "fixture cleanup must remove the entire directory tree");
+    return !error && !remains;
 }
 
 void putLe16(std::array<std::uint8_t, 48>& bytes, std::size_t offset, std::uint16_t value)
@@ -75,19 +95,19 @@ bool writeFixture(const std::filesystem::path& path)
 
 int main()
 {
-    std::filesystem::path directory =
+    const std::filesystem::path root =
         std::filesystem::temp_directory_path() / "pcm16-wav";
+    std::filesystem::path directory = root;
     for (int segment = 0; segment < 6; ++segment) {
         directory /= std::string(40, static_cast<char>('a' + segment));
     }
     const std::filesystem::path fixture = directory / "fixture.wav";
 
-    std::error_code ignored;
-    std::filesystem::remove_all(filesystemIoPath(
-        std::filesystem::temp_directory_path() / "pcm16-wav"), ignored);
+    if (!cleanupFixture(root)) return 1;
+    std::error_code error;
     expect(std::filesystem::create_directories(
-        filesystemIoPath(directory), ignored), "long fixture directory must be created");
-    expect(!ignored, "long fixture directory creation must not report an error");
+        filesystemIoPath(directory), error), "long fixture directory must be created");
+    expect(!error, "long fixture directory creation must not report an error");
     expect(writeFixture(fixture), "long PCM16 fixture must be written");
 
     const jam2::wav::InspectResult inspected = jam2::wav::inspect_pcm16_file(fixture);
@@ -97,8 +117,7 @@ int main()
     expect(inspected.info.sample_rate == 48000, "PCM16 fixture sample rate must be inspected");
     expect(inspected.info.frames == 2, "PCM16 fixture frame count must be inspected");
 
-    std::filesystem::remove_all(filesystemIoPath(
-        std::filesystem::temp_directory_path() / "pcm16-wav"), ignored);
+    cleanupFixture(root);
     if (failures == 0) std::cout << "pcm16 WAV tests passed\n";
     return failures == 0 ? 0 : 1;
 }

@@ -12,6 +12,13 @@
 #include <chrono>
 #include <iostream>
 
+#ifdef Q_OS_WIN
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+
 namespace {
 
 bool writeScenario(
@@ -112,6 +119,25 @@ int main(int argc, char* argv[])
 
     const QString executable = QString::fromLocal8Bit(argv[1]);
     const QString operation = QString::fromLocal8Bit(argv[2]);
+#ifdef Q_OS_WIN
+    QFile binary(executable);
+    IMAGE_DOS_HEADER dos{};
+    IMAGE_NT_HEADERS64 headers{};
+    const bool validHeaders = binary.open(QIODevice::ReadOnly) &&
+        binary.read(reinterpret_cast<char*>(&dos), sizeof(dos)) == sizeof(dos) &&
+        dos.e_magic == IMAGE_DOS_SIGNATURE && dos.e_lfanew >= sizeof(dos) &&
+        binary.seek(dos.e_lfanew) &&
+        binary.read(reinterpret_cast<char*>(&headers), sizeof(headers)) == sizeof(headers) &&
+        headers.Signature == IMAGE_NT_SIGNATURE &&
+        headers.OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC;
+    if (!validHeaders || headers.OptionalHeader.SizeOfStackReserve < 4ULL * 1024 * 1024) {
+        std::cerr << "native validation requires a valid Windows executable with at least 4 MiB stack reserve\n";
+        return 1;
+    }
+    std::cout << "METRIC executable_stack_reserve_bytes=" << headers.OptionalHeader.SizeOfStackReserve
+              << " executable_stack_commit_bytes=" << headers.OptionalHeader.SizeOfStackCommit << '\n';
+    binary.close();
+#endif
     QTemporaryDir root;
     if (!root.isValid()) {
         std::cerr << "could not create native validation temporary root\n";

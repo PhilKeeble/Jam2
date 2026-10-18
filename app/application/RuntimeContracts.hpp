@@ -69,7 +69,7 @@ struct Jam2RuntimeOptions {
     jam2::NetworkAudioFormat network_audio_format = jam2::NetworkAudioFormat::Pcm24Mono;
     bool drift_correction = true;
     double drift_smoothing = 0.02;
-    int drift_deadband_ppm = 25;
+    int drift_deadband_ppm = 0;
     int drift_max_correction_ppm = 500;
     bool metronome = false;
     bool metronome_transport_gated = false;

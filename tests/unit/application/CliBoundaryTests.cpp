@@ -190,6 +190,26 @@ void testOptionAndStatsContracts()
             options.os_priority == Jam2OsPriorityMode::High,
         "channel-list parsing preserves unique one-based CLI selections as zero-based indices");
 
+    for (const std::string_view profile : {"fast", "moderate", "safe"}) {
+        Arguments preset{"jam2", "network", "create", "--profile", profile};
+        const auto create = jam2::cli::parse_options(preset.count(), preset.data(), 3);
+        const auto join = jam2::cli::parse_options(
+            preset.count(), preset.data(), 3, Jam2ProfileApplication::Join);
+        expect(create.drift_deadband_ppm == 0 && join.drift_deadband_ppm == 0,
+            "CLI create and join apply zero drift deadband for every maintained profile");
+        if (profile == "fast") {
+            expect(create.frame_size == 64 && create.audio_buffer_size == 32 &&
+                    create.playback_prefill_frames == 64 && join.playback_prefill_frames == 64,
+                "CLI Fast defaults to 64-frame packets, 32-frame callbacks and 64-frame prefill");
+        }
+    }
+    Arguments numericOverride{"jam2", "network", "create", "--profile", "fast",
+        "--frame-size", "128", "--playback-prefill-frames", "192", "--drift-deadband-ppm", "7"};
+    const auto overridden = jam2::cli::parse_options(numericOverride.count(), numericOverride.data(), 3);
+    expect(overridden.frame_size == 128 && overridden.playback_prefill_frames == 192 &&
+            overridden.drift_deadband_ppm == 7,
+        "explicit packet, prefill and deadband overrides remain available for controlled comparisons");
+
     const auto offScheduling =
         jam2::cli::windows_scheduling_request(Jam2OsPriorityMode::Off);
     const auto highScheduling =
@@ -274,6 +294,16 @@ void testOptionAndStatsContracts()
     mixerSource.normal_path_limit_frames = 320;
     mixerSource.live_tail_rounding_tolerance_frames = 64;
     mixerSource.adaptive_release_alignment_margin_frames = 64;
+    mixerSource.partial_release_events = 23;
+    mixerSource.partial_release_frames = 63;
+    mixerSource.lookahead_hold_events = 31;
+    mixerSource.lookahead_hold_frames = 32;
+    mixerSource.lookahead_hold_max_fraction_ppm = 33;
+    mixerSource.isolated_recovery_events = 34;
+    mixerSource.worker_service_gap_us = 35;
+    mixerSource.worker_runway_frames = 36;
+    mixerSource.playback_stopping_frames = 37;
+    mixerSource.release_worker_guard_active = true;
     jam2::cli::stats::copy_peer_mixer_stats(copied, mixerSource);
     expect(copied.mix_receive_recovery_active &&
             copied.mix_receive_recovery_events == 11 &&
@@ -292,7 +322,16 @@ void testOptionAndStatsContracts()
             copied.mix_live_tail_batch_tolerance_frames == 128 &&
             copied.mix_normal_output_limit_frames == 256 && copied.mix_normal_path_limit_frames == 320 &&
             copied.mix_live_tail_rounding_tolerance_frames == 64 &&
-            copied.mix_adaptive_release_alignment_margin_frames == 64,
+            copied.mix_adaptive_release_alignment_margin_frames == 64 &&
+            copied.mix_partial_release_events == 23 && copied.mix_partial_release_frames == 63 &&
+            copied.mix_lookahead_hold_events == 31 &&
+            copied.mix_lookahead_hold_frames == 32 &&
+            copied.mix_lookahead_hold_max_fraction_ppm == 33 &&
+            copied.mix_isolated_recovery_events == 34 &&
+            copied.mix_worker_service_gap_us == 35 &&
+            copied.mix_worker_runway_frames == 36 &&
+            copied.mix_playback_stopping_frames == 37 &&
+            copied.mix_release_worker_guard_active,
         "CLI diagnostics copy debt-driven recovery and delivery-gap learning state");
 
     jam2::PeerStreamStats firstGap;
@@ -425,9 +464,9 @@ void testOptionAndStatsContracts()
         const bool schemaMatches = opened && lines.size() == 3 &&
                 csvFieldCount(header) == csvFieldCount(finalRow) &&
                 csvFieldCount(header) == csvFieldCount(periodicRow) &&
-                header.endsWith("mix_live_tail_rounding_tolerance_frames,mix_adaptive_release_alignment_margin_frames") &&
-                periodicRow.endsWith(",17,256,yes,18,19,20,21,22,128,256,320,64,64") &&
-                finalRow.endsWith(",17,256,yes,18,19,20,21,22,128,256,320,64,64");
+                header.endsWith("mix_live_tail_rounding_tolerance_frames,mix_adaptive_release_alignment_margin_frames,mix_partial_release_events,mix_partial_release_frames,mix_lookahead_hold_events,mix_lookahead_hold_frames,mix_lookahead_hold_max_fraction_ppm,mix_isolated_recovery_events,mix_worker_service_gap_us,mix_worker_runway_frames,mix_playback_stopping_frames,mix_release_worker_guard_active") &&
+                periodicRow.endsWith(",17,256,yes,18,19,20,21,22,128,256,320,64,64,23,63,31,32,33,34,35,36,37,yes") &&
+                finalRow.endsWith(",17,256,yes,18,19,20,21,22,128,256,320,64,64,23,63,31,32,33,34,35,36,37,yes");
         expect(schemaMatches,
             "final CSV preserves the capture-clock pacing field and schema width");
     }
@@ -481,6 +520,7 @@ void testOptionAndStatsContracts()
     jam2::cli::CliPeerStreamPlayback playback(&engine);
     const std::array<std::int32_t, 2> frames{1, 2};
     expect(playback.acceptsFrames() && playback.depthFrames() == 0 && playback.callbackFrames() == 0 &&
+            playback.playbackRecoveryState().unity && playback.playbackRecoveryState().stopping_frames == 0 &&
             playback.pushFrames(frames) == 0,
         "CLI playback adapter delegates safely to an unstarted engine");
     playback.requestDropFrames(1);

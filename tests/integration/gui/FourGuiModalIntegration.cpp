@@ -1058,6 +1058,12 @@ bool exerciseActiveCreatorWorkflows(
         .value(QStringLiteral("section_count")).toInt();
     (void)invokeAndReceive(creator, QStringLiteral("coverage-clear-add-section"),
         QStringLiteral("grid.chords.section.add"), QStringLiteral("click"));
+    if (!waitForAll(coordinator, QStringLiteral("added section and bank convergence"),
+            [clearSectionCount](std::size_t, const QJsonObject& state) {
+                const auto content = state.value("content").toObject();
+                return content.value("section_count").toInt() == clearSectionCount + 1 &&
+                    content.value("bank_count").toInt() == clearSectionCount + 1;
+            }, states)) return false;
     const QString newSectionChord = QStringLiteral("grid.chord.section.%1.beat.0.chord")
         .arg(clearSectionCount);
     (void)invokeAndReceive(creator, QStringLiteral("coverage-clear-new-section-chord"),
@@ -1162,6 +1168,14 @@ bool exerciseActiveCreatorWorkflows(
     }
     (void)invokeAndReceive(creator, QStringLiteral("coverage-clear-remove-added-section"),
         QStringLiteral("grid.chords.section.remove"), QStringLiteral("click"));
+
+    if (!waitForAll(coordinator, QStringLiteral("removed section and cleared idea convergence"),
+            [clearSectionCount](std::size_t, const QJsonObject& state) {
+                const auto content = state.value("content").toObject();
+                return content.value("section_count").toInt() == clearSectionCount &&
+                    content.value("bank_count").toInt() == clearSectionCount &&
+                    content.value("first_section").toObject().value("generated_kind").toString().isEmpty();
+            }, states)) return false;
 
     openModal(creator, QStringLiteral("coverage-new-jam-open"),
         QStringLiteral("session.new"));

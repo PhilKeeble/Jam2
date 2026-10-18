@@ -1,4 +1,5 @@
 #include "UserPreferences.hpp"
+#include "tuning_profile.hpp"
 
 #include <QDir>
 #include <QDateTime>
@@ -179,6 +180,54 @@ void migrateFastPlaybackMaximum(LocalTuningPreference& value)
     }
 }
 
+void migrateProfileTimingDefaults(LocalTuningPreference& value, bool ownsPacketSize)
+{
+    const auto* create = jam2::find_create_profile(value.profile.toStdString());
+    if (create == nullptr) return;
+    const auto& profile = *create->local;
+    LocalTuningPreference legacy;
+    legacy.profile = value.profile;
+    // Preserve the physical device callback selection. Migrate only the
+    // complete maintained numerical preset, leaving custom tuning intact.
+    legacy.bufferSize = value.bufferSize;
+    legacy.frameSize = ownsPacketSize ? create->frame_size : value.frameSize;
+    legacy.prefillFrames = static_cast<int>(profile.playback_prefill_frames);
+    legacy.playbackMaxFrames = static_cast<int>(profile.playback_max_frames);
+    legacy.captureRingFrames = static_cast<int>(profile.capture_ring_frames);
+    legacy.playbackRingFrames = static_cast<int>(profile.playback_ring_frames);
+    legacy.driftCorrection = profile.drift_correction;
+    legacy.driftSmoothing = profile.drift_smoothing;
+    legacy.driftDeadbandPpm = 25;
+    legacy.driftMaxCorrectionPpm = profile.drift_max_correction_ppm;
+    legacy.sampleTimePlayout = profile.sample_time_playout;
+    legacy.playoutDelayFrames = static_cast<int>(profile.playout_delay_frames);
+    legacy.jitterBufferFrames = static_cast<int>(profile.jitter_buffer_frames);
+    legacy.jitterBufferMaxFrames = static_cast<int>(profile.jitter_buffer_max_frames);
+    legacy.adaptiveCushion = profile.adaptive_playback_cushion;
+    legacy.adaptiveTargetFrames = static_cast<int>(profile.adaptive_playback_target_frames);
+    legacy.adaptiveMinFrames = static_cast<int>(profile.adaptive_playback_min_frames);
+    legacy.adaptiveMaxFrames = static_cast<int>(profile.adaptive_playback_max_frames);
+    legacy.adaptiveReleasePpm = profile.adaptive_playback_release_ppm;
+    legacy.adaptiveRatioRampMs = profile.adaptive_playback_ratio_ramp_ms;
+    if (value.profile == QStringLiteral("fast")) {
+        if (ownsPacketSize) legacy.frameSize = 64;
+        legacy.prefillFrames = 64;
+    }
+    if (value == legacy) {
+        value.frameSize = create->frame_size;
+        value.prefillFrames = static_cast<int>(profile.playback_prefill_frames);
+        value.driftDeadbandPpm = profile.drift_deadband_ppm;
+    }
+}
+
+void migrateFastPacketSizeDefault(LocalTuningPreference& value)
+{
+    LocalTuningPreference previous;
+    previous.frameSize = 128;
+    previous.bufferSize = value.bufferSize;
+    if (value == previous) value.frameSize = 64;
+}
+
 void saveTuning(QSettings& s, const LocalTuningPreference& v)
 {
     s.setValue(QStringLiteral("profile"), v.profile);
@@ -320,6 +369,11 @@ UserPreferences UserPreferencesStore::load()
     if (schemaVersion < 1 || schemaVersion > UserPreferences::kSchemaVersion) {
         return out;
     }
+    if (schemaVersion < 10) {
+        out.create.tuning.frameSize = out.join.tuning.frameSize = 64;
+        out.create.tuning.prefillFrames = out.join.tuning.prefillFrames = 64;
+        out.create.tuning.driftDeadbandPpm = out.join.tuning.driftDeadbandPpm = 25;
+    }
     settings.beginGroup(QStringLiteral("metronome"));
     out.metronome.sound = qBound(
         0, settings.value(QStringLiteral("sound"), out.metronome.sound).toInt(), 3);
@@ -387,6 +441,14 @@ UserPreferences UserPreferencesStore::load()
     if (schemaVersion < 8) {
         migrateFastPlaybackMaximum(out.create.tuning);
         migrateFastPlaybackMaximum(out.join.tuning);
+    }
+    if (schemaVersion < 10) {
+        migrateProfileTimingDefaults(out.create.tuning, true);
+        migrateProfileTimingDefaults(out.join.tuning, false);
+    }
+    if (schemaVersion < 11) {
+        migrateFastPacketSizeDefault(out.create.tuning);
+        migrateFastPacketSizeDefault(out.join.tuning);
     }
     if (schemaVersion >= 2) {
         settings.beginGroup(QStringLiteral("logging"));

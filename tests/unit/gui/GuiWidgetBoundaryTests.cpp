@@ -537,7 +537,7 @@ void testLocalEngineDialogState()
 void testSessionDefaultsAndPriorityControls()
 {
     const auto hasFastPlaybackDefaults = [](const LocalTuningPreference& tuning) {
-        return tuning.prefillFrames == 64 &&
+        return tuning.prefillFrames == 64 && tuning.frameSize == 64 && tuning.driftDeadbandPpm == 0 &&
             tuning.playoutDelayFrames == 64 &&
             tuning.jitterBufferFrames == 64 &&
             tuning.jitterBufferMaxFrames == 512 &&
@@ -555,7 +555,11 @@ void testSessionDefaultsAndPriorityControls()
             hasFastPlaybackDefaults(startDialog.state().create.tuning),
         "create dialog opens with the fully coupled Fast playback defaults");
     if (startProfile != nullptr) {
-        startProfile->setCurrentIndex(startProfile->findData(QStringLiteral("moderate")));
+        for (const auto& name : {QStringLiteral("moderate"), QStringLiteral("safe")}) {
+            startProfile->setCurrentIndex(startProfile->findData(name));
+            expect(startDialog.state().create.tuning.driftDeadbandPpm == 0,
+                "create profile selector disables drift deadband for every maintained preset");
+        }
         startProfile->setCurrentIndex(startProfile->findData(QStringLiteral("fast")));
         expect(hasFastPlaybackDefaults(startDialog.state().create.tuning),
             "selecting Fast reapplies every create-side playback default");
@@ -580,7 +584,11 @@ void testSessionDefaultsAndPriorityControls()
             hasFastPlaybackDefaults(joinDialog.state().join.tuning),
         "join dialog opens with the fully coupled Fast playback defaults");
     if (joinProfile != nullptr) {
-        joinProfile->setCurrentIndex(joinProfile->findData(QStringLiteral("moderate")));
+        for (const auto& name : {QStringLiteral("moderate"), QStringLiteral("safe")}) {
+            joinProfile->setCurrentIndex(joinProfile->findData(name));
+            expect(joinDialog.state().join.tuning.driftDeadbandPpm == 0,
+                "join profile selector disables drift deadband for every maintained preset");
+        }
         joinProfile->setCurrentIndex(joinProfile->findData(QStringLiteral("fast")));
         expect(hasFastPlaybackDefaults(joinDialog.state().join.tuning),
             "selecting Fast reapplies every join-side playback default");
@@ -785,7 +793,7 @@ void testLooperWaveformGridAlignment()
                 : std::vector<qint64>{0, 12000, 36000};
             expect(starts.size() == frames.size(),
                 "painted waveform retains the first attack and excludes cropped source attacks");
-            for (std::size_t i = 0; i < std::min(starts.size(), frames.size()); ++i) {
+            for (std::size_t i = 0; i < (std::min)(starts.size(), frames.size()); ++i) {
                 const int expected = 296 + qRound(
                     static_cast<double>(frames[i]) / 96000 * (widget.width() - 306));
                 expect(std::abs(starts[i] - expected) <= 2,

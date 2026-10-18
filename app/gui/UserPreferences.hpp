@@ -23,7 +23,7 @@ struct LocalTuningPreference {
     int playbackRingFrames = 4096;
     bool driftCorrection = true;
     double driftSmoothing = 0.02;
-    int driftDeadbandPpm = 25;
+    int driftDeadbandPpm = 0;
     int driftMaxCorrectionPpm = 500;
     bool sampleTimePlayout = true;
     int playoutDelayFrames = 64;
@@ -35,6 +35,7 @@ struct LocalTuningPreference {
     int adaptiveMaxFrames = 512;
     int adaptiveReleasePpm = 5000;
     int adaptiveRatioRampMs = 250;
+    bool operator==(const LocalTuningPreference&) const = default;
 };
 
 struct RuntimePreference {
@@ -199,7 +200,7 @@ struct SyncPreference {
 };
 
 struct UserPreferences {
-    static constexpr int kSchemaVersion = 9;
+    static constexpr int kSchemaVersion = 11;
     AudioDevicePreference localAudio;
     AudioDevicePreference networkAudio;
     bool splitNetworkAudioByRole = false;

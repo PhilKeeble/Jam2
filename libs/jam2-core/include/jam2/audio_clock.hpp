@@ -9,6 +9,12 @@ struct DeviceClockSample {
     std::uint64_t time_us = 0;
 };
 
+// Published playback-clock state used by the receive worker's recovery gate.
+struct PlaybackRecoveryState {
+    bool unity = true;
+    std::uint64_t stopping_frames = 0;
+};
+
 struct DeviceClockStats {
     bool valid = false;
     double raw_ppm = 0;

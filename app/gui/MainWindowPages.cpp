@@ -1576,13 +1576,10 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
     listeningLayout->setContentsMargins(0, 0, 0, 0);
     listeningLayout->setSpacing(0);
     auto* listeningToggle = new QPushButton(listeningGroup);
+    w.listeningToolsToggle_ = listeningToggle;
+    listeningToggle->setCheckable(true);
     registerTrack(*listeningToggle, "listening-tools", "looper.listening-tools");
-    const auto setListeningToggleText = [listeningToggle](bool open) {
-        listeningToggle->setText(QStringLiteral(
-            "%1  LISTENING TOOLS     Speed 1.00× · Pitch 0 st · Focus off")
-            .arg(open ? QStringLiteral("▾") : QStringLiteral("▸")));
-    };
-    setListeningToggleText(false);
+    w.updateListeningToolsSummary();
     listeningToggle->setStyleSheet(QStringLiteral(
         "QPushButton { border:0;border-top:1px solid #2f3a3d;background:transparent;color:#ddd7e8;"
         "font:12px Bahnschrift;padding:9px 2px 4px;text-align:left; }"
@@ -1590,10 +1587,9 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
     listeningLayout->addWidget(listeningToggle);
     listeningLayout->addWidget(listeningContent);
     QObject::connect(listeningToggle, &QPushButton::clicked, listeningGroup,
-        [toolsGroup, listeningContent, setListeningToggleText, revealPanel] {
-            const bool open = !listeningContent->isVisible();
+        [&w, toolsGroup, listeningContent, revealPanel](bool open) {
             listeningContent->setVisible(open);
-            setListeningToggleText(open);
+            w.updateListeningToolsSummary();
             if (open) revealPanel(toolsGroup);
         });
 
@@ -1680,6 +1676,7 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
             const QSignalBlocker blocker(w.trackSpeedSpin_);
             w.trackSpeedSpin_->setValue(speed);
         }
+        w.updateListeningToolsSummary();
         if (!w.trackSpeedSlider_->isSliderDown()) w.editListeningTools();
     });
     QObject::connect(w.trackSpeedSlider_, &QSlider::sliderReleased, &w, [&w] {
@@ -1699,6 +1696,7 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
             const QSignalBlocker blocker(w.trackPitchSpin_);
             w.trackPitchSpin_->setValue(value);
         }
+        w.updateListeningToolsSummary();
         if (!w.trackPitchSlider_->isSliderDown()) w.editListeningTools();
     });
     QObject::connect(w.trackPitchSlider_, &QSlider::sliderReleased, &w, [&w] {
@@ -1763,6 +1761,7 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
             const QSignalBlocker blocker(w.focusFrequencySpin_);
             w.focusFrequencySpin_->setValue(value);
         }
+        w.updateListeningToolsSummary();
         if (!w.focusFrequencySlider_->isSliderDown()) w.editListeningTools();
     });
     QObject::connect(w.focusFrequencySlider_, &QSlider::sliderReleased, &w, [&w] {

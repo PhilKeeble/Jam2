@@ -52,6 +52,12 @@ public:
         return engine_ != nullptr ? engine_->pushNetworkPlayback(frames) : 0;
     }
 
+    jam2::audio::PlaybackRecoveryState playbackRecoveryState() const noexcept override
+    {
+        return engine_ != nullptr ? engine_->networkPlaybackRecoveryState()
+            : jam2::audio::PlaybackRecoveryState{};
+    }
+
     void requestDropFrames(std::size_t frames) noexcept override
     {
         if (engine_ != nullptr) engine_->requestNetworkPlaybackDrop(frames);

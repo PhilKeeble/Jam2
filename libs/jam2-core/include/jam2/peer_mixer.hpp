@@ -56,6 +56,17 @@ struct PeerMixerStats {
     std::uint64_t active_slots = 0;
     std::uint64_t max_slots = 0;
     std::uint64_t active_slots_high_water = 0;
+    // Logical slots stay fixed-size even when delivered in several real prefixes.
+    std::uint64_t partial_release_events = 0;
+    std::uint64_t partial_release_frames = 0;
+    std::uint64_t lookahead_hold_events = 0;
+    std::uint64_t lookahead_hold_frames = 0;
+    std::uint64_t lookahead_hold_max_fraction_ppm = 0;
+    std::uint64_t isolated_recovery_events = 0;
+    std::uint64_t worker_service_gap_us = 0;
+    std::uint64_t worker_runway_frames = 0;
+    std::uint64_t playback_stopping_frames = 0;
+    bool release_worker_guard_active = false;
     std::uint64_t released_slots = 0;
     std::uint64_t complete_slots = 0;
     std::uint64_t deadline_slots = 0;

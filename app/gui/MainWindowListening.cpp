@@ -7,6 +7,7 @@
 #include <QFile>
 #include <QJsonDocument>
 #include <QPointer>
+#include <QPushButton>
 
 #include <memory>
 #include <algorithm>
@@ -104,6 +105,14 @@ void MainWindow::initializeListeningTools()
 void MainWindow::editListeningTools(bool commitNow)
 {
     trackWorkspace_.listeningTools.edit(jam2::gui::ListeningToolsSettings::fromModel(trackController_.model()), commitNow);
+}
+
+void MainWindow::updateListeningToolsSummary()
+{
+    if (listeningToolsToggle_) {
+        listeningToolsToggle_->setText(
+            trackController_.listeningToolsSummary(listeningToolsToggle_->isChecked()));
+    }
 }
 
 bool MainWindow::prepareListeningMix(const jam2::gui::ListeningToolsSettings& settings, int generation, int bank)

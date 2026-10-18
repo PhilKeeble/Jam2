@@ -1417,6 +1417,27 @@ void testHeadlessUsesSharedPipeline()
 
 } // namespace
 
+void testPlaybackRecoveryState()
+{
+    jam2::audio::StreamControl control;
+    control.playback_ratio_ramp_frames.store(12000);
+    control.playback_release_return_ramp_frames.store(2400);
+    auto state = processing::read_playback_recovery_state(control);
+    expect(state.unity && state.stopping_frames == 0, "unity playback needs no added stopping runway");
+    control.playback_ratio_ppm.store(1005000);
+    control.playback_ratio_applied_ppm.store(1005000);
+    state = processing::read_playback_recovery_state(control);
+    expect(!state.unity && state.stopping_frames == 6, "stopping runway integrates the actual linear return ramp");
+    control.playback_ratio_ppm.store(1000000);
+    expect(!processing::read_playback_recovery_state(control).unity, "a unity request cannot hide still-accelerated playback");
+    control.playback_ratio_ramp_frames.store(480);
+    expect(processing::read_playback_recovery_state(control).stopping_frames == 2, "faster custom return keeps its smaller rounded runway");
+    control.playback_ratio_ramp_frames.store(0);
+    expect(processing::read_playback_recovery_state(control).stopping_frames == 0, "immediate stopping needs no ramp runway");
+    control.playback_ratio_applied_ppm.store(1000000);
+    expect(processing::read_playback_recovery_state(control).unity, "settled unity adds no permanent interpolation-history floor");
+}
+
 int main()
 {
     testDeviceClock();
@@ -1430,6 +1451,7 @@ int main()
     testPeakGainAndMixing();
     testPlaybackResampler();
     testPlaybackReleaseReturnRamp();
+    testPlaybackRecoveryState();
     testResampledPlaybackDepthAccounting();
     testPreparedSourceMixing();
     testCancelledPreparedSwapsReleaseEveryReadySlot();

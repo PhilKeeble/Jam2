@@ -1072,6 +1072,7 @@ void testSmallDiagnosticBoundaries()
     expect(fast != nullptr && fast_create != nullptr && fast_create->local == fast &&
             fast_create->sample_rate == 48000 && fast_create->frame_size == 64 &&
             fast->audio_buffer_size == 32 && fast->playback_prefill_frames == 64 &&
+            fast->drift_deadband_ppm == 0 &&
             fast->playback_max_frames == 1024 &&
             fast->playout_delay_frames == 64 && fast->jitter_buffer_frames == 64 &&
             fast->jitter_buffer_max_frames == 512 &&
@@ -1079,12 +1080,16 @@ void testSmallDiagnosticBoundaries()
             fast->adaptive_playback_min_frames == 64 &&
             fast->adaptive_playback_max_frames == 512,
         "fast create and join profiles preserve the 64-frame floor, 512-frame adaptive bound, and 1024-frame safety ceiling");
+    for (const auto& profile : jam2::join_profiles()) {
+        expect(profile.drift_correction && profile.drift_deadband_ppm == 0,
+            "every maintained profile corrects small clock differences without deadband");
+    }
     const jam2::JoinProfile* moderate = jam2::find_join_profile("moderate");
     const jam2::CreateProfile* moderate_create = jam2::find_create_profile("moderate");
     expect(moderate != nullptr && moderate_create != nullptr &&
             moderate_create->local == moderate &&
             moderate_create->sample_rate == 48000 && moderate_create->frame_size == 128 &&
-            moderate->audio_buffer_size == 64 &&
+            moderate->audio_buffer_size == 64 && moderate->drift_deadband_ppm == 0 &&
             moderate->playback_prefill_frames == 256 &&
             moderate->playout_delay_frames == 512 &&
             moderate->jitter_buffer_frames == 1536 &&

@@ -355,6 +355,16 @@ struct AudioPacketStats {
     std::uint64_t mix_normal_path_limit_frames = 0;
     std::uint64_t mix_live_tail_rounding_tolerance_frames = 0;
     std::uint64_t mix_adaptive_release_alignment_margin_frames = 0;
+    std::uint64_t mix_partial_release_events = 0;
+    std::uint64_t mix_partial_release_frames = 0;
+    std::uint64_t mix_lookahead_hold_events = 0;
+    std::uint64_t mix_lookahead_hold_frames = 0;
+    std::uint64_t mix_lookahead_hold_max_fraction_ppm = 0;
+    std::uint64_t mix_isolated_recovery_events = 0;
+    std::uint64_t mix_worker_service_gap_us = 0;
+    std::uint64_t mix_worker_runway_frames = 0;
+    std::uint64_t mix_playback_stopping_frames = 0;
+    bool mix_release_worker_guard_active = false;
     std::uint64_t metronome_epoch_sample_time = 0;
     std::uint64_t local_metronome_beat = 0;
     std::uint64_t remote_metronome_beat = 0;
@@ -721,7 +731,7 @@ public:
                 "adaptive_delivery_gap_required_frames,"
                 "adaptive_delivery_gap_required_max_frames,mix_live_tail_batch_tolerance_frames,"
                 "mix_normal_output_limit_frames,mix_normal_path_limit_frames,"
-                "mix_live_tail_rounding_tolerance_frames,mix_adaptive_release_alignment_margin_frames\n";
+                "mix_live_tail_rounding_tolerance_frames,mix_adaptive_release_alignment_margin_frames,mix_partial_release_events,mix_partial_release_frames,mix_lookahead_hold_events,mix_lookahead_hold_frames,mix_lookahead_hold_max_fraction_ppm,mix_isolated_recovery_events,mix_worker_service_gap_us,mix_worker_runway_frames,mix_playback_stopping_frames,mix_release_worker_guard_active\n";
     }
 
     explicit operator bool() const { return out_.is_open(); }
@@ -1281,7 +1291,16 @@ public:
              << stats.mix_normal_output_limit_frames << ','
              << stats.mix_normal_path_limit_frames << ','
              << stats.mix_live_tail_rounding_tolerance_frames << ','
-             << stats.mix_adaptive_release_alignment_margin_frames;
+             << stats.mix_adaptive_release_alignment_margin_frames << ','
+             << stats.mix_partial_release_events << ',' << stats.mix_partial_release_frames
+             << ',' << stats.mix_lookahead_hold_events
+             << ',' << stats.mix_lookahead_hold_frames
+             << ',' << stats.mix_lookahead_hold_max_fraction_ppm
+             << ',' << stats.mix_isolated_recovery_events
+             << ',' << stats.mix_worker_service_gap_us
+             << ',' << stats.mix_worker_runway_frames
+             << ',' << stats.mix_playback_stopping_frames
+             << ',' << (stats.mix_release_worker_guard_active ? "yes" : "no");
         out_ << '\n';
         if (row_type == "final") {
             out_.flush();
@@ -1297,7 +1316,7 @@ public:
         if (!out_) {
             return;
         }
-        std::vector<std::string> fields(507);
+        std::vector<std::string> fields(517);
         auto set = [&](std::size_t index, auto value) {
             std::ostringstream text;
             text << value;
@@ -1785,6 +1804,16 @@ public:
         set(504, stats.mix_normal_path_limit_frames);
         set(505, stats.mix_live_tail_rounding_tolerance_frames);
         set(506, stats.mix_adaptive_release_alignment_margin_frames);
+        set(507, stats.mix_partial_release_events);
+        set(508, stats.mix_partial_release_frames);
+        set(509, stats.mix_lookahead_hold_events);
+        set(510, stats.mix_lookahead_hold_frames);
+        set(511, stats.mix_lookahead_hold_max_fraction_ppm);
+        set(512, stats.mix_isolated_recovery_events);
+        set(513, stats.mix_worker_service_gap_us);
+        set(514, stats.mix_worker_runway_frames);
+        set(515, stats.mix_playback_stopping_frames);
+        set(516, (stats.mix_release_worker_guard_active ? "yes" : "no"));
 
         for (std::size_t i = 0; i < fields.size(); ++i) {
             if (i != 0) {

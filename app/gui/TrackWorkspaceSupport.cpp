@@ -512,3 +512,67 @@ int mergeLocalOnlyLooperLanes(
     if (preserved > 0) song.insert(QStringLiteral("looper"), received.toJson());
     return preserved;
 }
+
+bool reconcileSynchronizedSongStructure(
+    QJsonObject& localSong,
+    const QJsonObject& incomingSong)
+{
+    const QJsonArray incomingSections = incomingSong.value("sections").toArray();
+    const QJsonArray incomingBanks = incomingSong.value("looper").toObject()
+        .value("banks").toArray();
+    if (incomingSections.isEmpty() || incomingSections.size() != incomingBanks.size()) {
+        return false;
+    }
+    const QJsonArray localSections = localSong.value("sections").toArray();
+    QJsonObject looper = localSong.value("looper").toObject();
+    const QJsonArray localBanks = looper.value("banks").toArray();
+    QJsonArray sections;
+    QJsonArray banks;
+    QStringList sectionIds;
+    QStringList bankIds;
+    for (int index = 0; index < incomingSections.size(); ++index) {
+        const QJsonObject incomingSection = incomingSections.at(index).toObject();
+        const QJsonObject incomingBank = incomingBanks.at(index).toObject();
+        const QString sectionId = incomingSection.value("id").toString();
+        const QString bankId = incomingBank.value("id").toString();
+        if (sectionId.isEmpty() || bankId.isEmpty() ||
+            sectionIds.contains(sectionId) || bankIds.contains(bankId)) return false;
+        sectionIds.append(sectionId);
+        bankIds.append(bankId);
+        QJsonObject section;
+        for (const QJsonValue& value : localSections) {
+            if (value.toObject().value("id").toString() == sectionId) {
+                section = value.toObject();
+                break;
+            }
+        }
+        for (const QString& field : {QStringLiteral("id"), QStringLiteral("label"),
+                 QStringLiteral("name"), QStringLiteral("beats")}) {
+            section.insert(field, incomingSection.value(field));
+        }
+        sections.append(section);
+        QJsonObject bank = incomingBank;
+        bank.insert("lanes", QJsonArray{});
+        for (const QJsonValue& value : localBanks) {
+            if (value.toObject().value("id").toString() == bankId) {
+                bank.insert("lanes", value.toObject().value("lanes"));
+                break;
+            }
+        }
+        banks.append(bank);
+    }
+    looper.insert("banks", banks);
+    looper.insert("active_bank", qBound(0, looper.value("active_bank").toInt(),
+        static_cast<int>(banks.size()) - 1));
+    QJsonObject arrangement = looper.value("arrangement").toObject();
+    QJsonArray steps;
+    for (const QJsonValue& value : arrangement.value("steps").toArray()) {
+        const int bank = value.toObject().value("bank").toInt(-1);
+        if (bank >= 0 && bank < banks.size()) steps.append(value);
+    }
+    arrangement.insert("steps", steps);
+    looper.insert("arrangement", arrangement);
+    localSong.insert("sections", sections);
+    localSong.insert("looper", looper);
+    return true;
+}

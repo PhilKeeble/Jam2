@@ -605,6 +605,18 @@ void publish_callback_end(
         std::memory_order_release);
 }
 
+PlaybackRecoveryState read_playback_recovery_state(const StreamControl& control) noexcept
+{
+    const auto requested = control.playback_ratio_ppm.load(std::memory_order_relaxed);
+    const auto applied = control.playback_ratio_applied_ppm.load(std::memory_order_relaxed);
+    auto ramp = control.playback_ratio_ramp_frames.load(std::memory_order_relaxed);
+    const auto return_ramp = control.playback_release_return_ramp_frames.load(std::memory_order_relaxed);
+    if (return_ramp != 0) ramp = std::min(ramp, return_ramp);
+    const auto excess = std::max(applied - 1000000, 0);
+    return {requested == 1000000 && applied == 1000000,
+        static_cast<std::uint64_t>(std::ceil(static_cast<double>(excess) * ramp / 2000000.0))};
+}
+
 void pop_resampled_playback(
     MonoRingBuffer* playback,
     StreamControl* control,

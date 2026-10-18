@@ -278,6 +278,29 @@ void testSharedTrackState()
         "incompatible audio must override the ordinary playback phase status");
 }
 
+void testListeningToolsSummary()
+{
+    SharedTrackController controller;
+    require(controller.listeningToolsSummary(false).contains(QStringLiteral("Speed 1.00\u00d7")) &&
+            controller.listeningToolsSummary(false).contains(QStringLiteral("Pitch 0 st")) &&
+            controller.listeningToolsSummary(false).endsWith(QStringLiteral("Focus off")),
+        "collapsed listening summary must describe the current default settings");
+    controller.model().speed = 0.73;
+    controller.model().pitchCents = -250;
+    controller.model().focusEnabled = true;
+    controller.model().focusFrequencyHz = 640;
+    const QString summary = controller.listeningToolsSummary(true);
+    require(summary.startsWith(QChar(0x25be)) && summary.contains(QStringLiteral("Speed 0.73\u00d7")) &&
+            summary.contains(QStringLiteral("Pitch -2.5 st")) && summary.endsWith(QStringLiteral("Focus 640 Hz")),
+        "expanded listening summary must preserve fractional pitch and current speed and focus");
+    require(controller.listeningToolsSummary(false).mid(1) == summary.mid(1),
+        "collapsing listening tools must retain the displayed settings");
+    controller.replaceModel(SharedTrackModel{});
+    require(controller.listeningToolsSummary(false).endsWith(QStringLiteral("Focus off")) &&
+            controller.listeningToolsSummary(false).contains(QStringLiteral("Speed 1.00\u00d7")),
+        "replacing the track must restore the summary from the replacement model");
+}
+
 void testSharedTrackLoopAndProjectState(const QString& fixtureRoot)
 {
     SharedTrackController controller;
@@ -464,6 +487,7 @@ int main(int argc, char** argv)
         testExternalOpenSafety(releaseRoot, root.path());
         testTakeNamesDiscardAndPruning(releaseRoot);
         testSharedTrackState();
+        testListeningToolsSummary();
         testSharedTrackLoopAndProjectState(root.path());
         testLooperRename();
         std::cout << "Workspace state tests passed\n";

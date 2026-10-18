@@ -151,6 +151,10 @@ void observe_output_peak(
     StreamControl* control,
     std::span<const std::int32_t> output) noexcept;
 
+// Non-callback readers use published atomics, never the callback's private
+// interpolation history. Cached history is not additional queued runway.
+PlaybackRecoveryState read_playback_recovery_state(const StreamControl& control) noexcept;
+
 void pop_resampled_playback(
     MonoRingBuffer* playback,
     StreamControl* control,

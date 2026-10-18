@@ -10831,6 +10831,7 @@ void MainWindow::sendPreparedTrackLevel()
 void MainWindow::updateTrackControls()
 {
     const auto& model = trackController_.model();
+    updateListeningToolsSummary();
     updateTrackPlaybackPresentation();
     if (trackSpeedSpin_) {
         const QSignalBlocker blocker(trackSpeedSpin_);
@@ -13506,6 +13507,10 @@ void MainWindow::handleSongSet(
         }
     }
     QJsonObject normalizedSong = songToJson(true);
+    if (!reconcileSynchronizedSongStructure(normalizedSong, normalizedIncomingSong)) {
+        appendLog(QStringLiteral("rejected shared song with inconsistent section/bank identities"));
+        return;
+    }
     if (songScope == SongSyncScope::Tracks) {
         normalizedSong.insert(
             QStringLiteral("looper"),

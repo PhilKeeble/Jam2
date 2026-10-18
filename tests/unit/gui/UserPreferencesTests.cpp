@@ -87,7 +87,7 @@ int main(int argc, char** argv)
 
         const auto hasFastPlaybackDefaults = [](const LocalTuningPreference& tuning) {
             return tuning.profile == QStringLiteral("fast") &&
-                tuning.prefillFrames == 64 &&
+                tuning.prefillFrames == 64 && tuning.frameSize == 64 && tuning.driftDeadbandPpm == 0 &&
                 tuning.playbackMaxFrames == 1024 &&
                 tuning.playoutDelayFrames == 64 &&
                 tuning.jitterBufferFrames == 64 &&
@@ -212,6 +212,122 @@ int main(int argc, char** argv)
         require(migratedMaximum.create.tuning.playbackMaxFrames == 1024 &&
                 migratedMaximum.join.tuning.playbackMaxFrames == 1408,
             "Fast maximum migration did not update the old default while preserving an explicit custom value");
+
+        struct PreviousPreset {
+            const char* name;
+            int frame, prefill, playbackMax, captureRing, playbackRing;
+            int playout, jitter, jitterMax, target, minimum, maximum;
+        };
+        const PreviousPreset previousPresets[]{
+            {"fast", 64, 64, 1024, 4096, 4096, 64, 64, 512, 64, 64, 512},
+            {"moderate", 128, 256, 4096, 4096, 8192, 512, 1536, 3072, 512, 512, 4096},
+            {"safe", 256, 1024, 7168, 4096, 8192, 1024, 2048, 6144, 1024, 1024, 7168},
+        };
+        for (const auto& preset : previousPresets) {
+            LocalTuningPreference old;
+            old.profile = QString::fromLatin1(preset.name);
+            old.bufferSize = 64;
+            old.frameSize = preset.frame;
+            old.prefillFrames = preset.prefill;
+            old.playbackMaxFrames = preset.playbackMax;
+            old.captureRingFrames = preset.captureRing;
+            old.playbackRingFrames = preset.playbackRing;
+            old.playoutDelayFrames = preset.playout;
+            old.jitterBufferFrames = preset.jitter;
+            old.jitterBufferMaxFrames = preset.jitterMax;
+            old.adaptiveTargetFrames = preset.target;
+            old.adaptiveMinFrames = preset.minimum;
+            old.adaptiveMaxFrames = preset.maximum;
+            old.driftDeadbandPpm = 25;
+            const QString path = directory.filePath(old.profile + QStringLiteral("-clock-defaults.ini"));
+            require(UserPreferencesStore::setFilePathForTesting(path, error), "profile migration test path accepted");
+            UserPreferences previous;
+            previous.create.tuning = previous.join.tuning = old;
+            // A joiner's stored packet-size field did not follow the selected
+            // profile: packet size is owned by the remote creator.
+            previous.join.tuning.frameSize = 64;
+            UserPreferencesStore::save(previous);
+            {
+                QSettings settings(path, QSettings::IniFormat);
+                settings.setValue(QStringLiteral("schema_version"), 9);
+            }
+            const auto updated = UserPreferencesStore::load();
+            LocalTuningPreference wanted = old;
+            wanted.driftDeadbandPpm = 0;
+            if (old.profile == QStringLiteral("fast")) {
+                wanted.frameSize = 64;
+                wanted.prefillFrames = 64;
+            }
+            if (!(updated.create.tuning == wanted && updated.join.tuning == wanted)) {
+                std::cerr << "Migration profile=" << preset.name
+                    << " create_match=" << (updated.create.tuning == wanted)
+                    << " join_match=" << (updated.join.tuning == wanted)
+                    << " create_frame=" << updated.create.tuning.frameSize
+                    << " join_frame=" << updated.join.tuning.frameSize
+                    << " create_prefill=" << updated.create.tuning.prefillFrames
+                    << " join_prefill=" << updated.join.tuning.prefillFrames
+                    << " create_deadband=" << updated.create.tuning.driftDeadbandPpm
+                    << " join_deadband=" << updated.join.tuning.driftDeadbandPpm << '\n';
+            }
+            require(updated.create.tuning == wanted && updated.join.tuning == wanted,
+                "previous default create/join presets migrate timing while preserving the device callback choice");
+            UserPreferencesStore::save(updated);
+            const auto repeated = UserPreferencesStore::load();
+            require(repeated.create.tuning == wanted && repeated.join.tuning == wanted,
+                "updated profile defaults survive a save/reload without a second migration");
+            for (int custom = 0; custom < 4; ++custom) {
+                UserPreferences customized;
+                customized.create.tuning = customized.join.tuning = old;
+                if (custom == 0) ++customized.create.tuning.prefillFrames;
+                if (custom == 1) customized.create.tuning.frameSize += 32;
+                if (custom == 2) customized.create.tuning.driftDeadbandPpm = 7;
+                if (custom == 3) customized.create.tuning.playbackMaxFrames -= 128;
+                customized.join.tuning = customized.create.tuning;
+                // The join-side packet size is ignored; use a meaningful
+                // local customization as well when testing that case.
+                if (custom == 1) ++customized.join.tuning.prefillFrames;
+                UserPreferencesStore::save(customized);
+                {
+                    QSettings settings(path, QSettings::IniFormat);
+                    settings.setValue(QStringLiteral("schema_version"), 9);
+                }
+                const auto preserved = UserPreferencesStore::load();
+                require(preserved.create.tuning == customized.create.tuning &&
+                        preserved.join.tuning == customized.join.tuning,
+                    "profile timing migration preserves customized numeric presets");
+            }
+        }
+
+        const QString packetDefaultPath = directory.filePath(QStringLiteral("temporary-fast-128-default.ini"));
+        require(UserPreferencesStore::setFilePathForTesting(packetDefaultPath, error),
+            "previous Fast packet default test path accepted");
+        UserPreferences previousPacketDefault;
+        previousPacketDefault.create.tuning.frameSize = previousPacketDefault.join.tuning.frameSize = 128;
+        previousPacketDefault.join.tuning.bufferSize = 64;
+        UserPreferencesStore::save(previousPacketDefault);
+        {
+            QSettings settings(packetDefaultPath, QSettings::IniFormat);
+            settings.setValue(QStringLiteral("schema_version"), 10);
+        }
+        const auto restoredPacketDefault = UserPreferencesStore::load();
+        require(hasFastPlaybackDefaults(restoredPacketDefault.create.tuning) &&
+                hasFastPlaybackDefaults(restoredPacketDefault.join.tuning) &&
+                restoredPacketDefault.join.tuning.bufferSize == 64,
+            "temporary 128-frame Fast defaults return to 64-frame packets without changing prefill or device choice");
+        UserPreferencesStore::save(restoredPacketDefault);
+        require(UserPreferencesStore::load().create.tuning == restoredPacketDefault.create.tuning,
+            "restored Fast packet defaults survive save/reload");
+        previousPacketDefault.create.tuning.prefillFrames = 192;
+        previousPacketDefault.join.tuning.driftDeadbandPpm = 7;
+        UserPreferencesStore::save(previousPacketDefault);
+        {
+            QSettings settings(packetDefaultPath, QSettings::IniFormat);
+            settings.setValue(QStringLiteral("schema_version"), 10);
+        }
+        const auto customPacketDefault = UserPreferencesStore::load();
+        require(customPacketDefault.create.tuning == previousPacketDefault.create.tuning &&
+                customPacketDefault.join.tuning == previousPacketDefault.join.tuning,
+            "restoring the Fast packet default preserves customized presets");
 
         std::cout << "Jam2 user preference tests passed\n";
         return 0;

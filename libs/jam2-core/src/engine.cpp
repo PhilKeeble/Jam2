@@ -1821,6 +1821,13 @@ std::size_t Engine::networkPlaybackCallbackFrames() const noexcept
             impl_->stream_info.maximum_callback_frames})) : 0;
 }
 
+audio::PlaybackRecoveryState Engine::networkPlaybackRecoveryState() const noexcept
+{
+    return impl_ != nullptr && impl_->control != nullptr
+        ? audio::device_processing::read_playback_recovery_state(*impl_->control)
+        : audio::PlaybackRecoveryState{};
+}
+
 NetworkPlaybackTimelineSnapshot Engine::networkPlaybackTimelineSnapshot() const noexcept
 {
     NetworkPlaybackTimelineSnapshot result;

@@ -33,28 +33,35 @@ Recommended values:
 | Sample rate | `48000` |
 | Audio buffer size | `32` |
 | Frame size | `64` |
-| Playback prefill frames | `256` |
-| Playback max frames | `1536` |
+| Playback prefill frames | `128` |
+| Playback max frames | `1024` |
 | Capture ring frames | `4096` |
 | Playback ring frames | `4096` |
 | Stats warmup ms | `3000` |
 | Drift correction | `on` |
 | Drift smoothing | `0.02` |
-| Drift deadband ppm | `25` |
+| Drift deadband ppm | `0` |
 | Drift max correction ppm | `500` |
 | Sample-time playout | `on` |
-| Playout delay frames | `256` |
-| Jitter buffer frames | `512` |
-| Jitter buffer max frames | `1024` |
+| Playout delay frames | `64` |
+| Jitter buffer frames | `64` |
+| Jitter buffer max frames | `512` |
 | Adaptive cushion | `on` |
-| Adaptive target frames | `256` |
-| Adaptive min frames | `256` |
-| Adaptive max frames | `1536` |
-| Adaptive release ppm | `1000` |
+| Adaptive target frames | `64` |
+| Adaptive min frames | `64` |
+| Adaptive max frames | `512` |
+| Adaptive release ppm | `5000` |
 
-This spends about `768` receive-side frames on jitter/playback cushion, around `16.0 ms` at `48000` Hz before device, driver, and network latency.
+Fast uses `64`-frame packets (`1.33 ms` at `48000` Hz), `32`-frame device callbacks, and a `128`-frame startup prefill threshold. Actual buffering depends on packet arrival and callback timing and is exposed in the runtime statistics.
 
-If this underruns or drops jitter-buffer packets on Wi-Fi, increase `Jitter buffer frames` first to `1024` and set `Jitter buffer max frames` to `3072`.
+Fast prioritizes low latency over dropout resistance. Its native timing tests
+report shortages without failing when a
+contributing source and its jitter queue are empty and output is running at
+normal speed. They still fail for withheld usable audio, release-induced
+starvation, unexplained recovery padding, sample cuts, excess latency and
+buffer growth. Underrun counts and sample discontinuities remain in the test
+metrics, including the shortages accepted by this policy. Moderate and Safe
+retain their stricter continuity requirements.
 
 ## Moderate Profile
 
@@ -71,23 +78,23 @@ Recommended values:
 | Sample rate | `48000` |
 | Audio buffer size | `64` |
 | Frame size | `128` |
-| Playback prefill frames | `512` |
+| Playback prefill frames | `256` |
 | Playback max frames | `4096` |
 | Capture ring frames | `4096` |
 | Playback ring frames | `8192` |
 | Drift correction | `on` |
 | Drift smoothing | `0.02` |
-| Drift deadband ppm | `25` |
+| Drift deadband ppm | `0` |
 | Drift max correction ppm | `500` |
 | Sample-time playout | `on` |
 | Playout delay frames | `512` |
-| Jitter buffer frames | `2048` |
+| Jitter buffer frames | `1536` |
 | Jitter buffer max frames | `3072` |
 | Adaptive cushion | `on` |
 | Adaptive target frames | `512` |
 | Adaptive min frames | `512` |
 | Adaptive max frames | `4096` |
-| Adaptive release ppm | `1000` |
+| Adaptive release ppm | `5000` |
 
 Use this when `fast` is close but shows occasional underruns or missing frames.
 
@@ -111,7 +118,7 @@ Recommended values:
 | Playback max frames | `7168` |
 | Drift correction | `on` |
 | Drift smoothing | `0.02` |
-| Drift deadband ppm | `25` |
+| Drift deadband ppm | `0` |
 | Drift max correction ppm | `500` |
 | Sample-time playout | `on` |
 | Playout delay frames | `1024` |
@@ -121,7 +128,7 @@ Recommended values:
 | Adaptive target frames | `1024` |
 | Adaptive min frames | `1024` |
 | Adaptive max frames | `7168` |
-| Adaptive release ppm | `1000` |
+| Adaptive release ppm | `5000` |
 
 At `48000` Hz this uses `256` frame packets, about `5.3 ms` per packet. The configured playout delay is `1024` frames, about `21.3 ms`, and the jitter buffer target is `2048` frames, about `42.7 ms`.
 

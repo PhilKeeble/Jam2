@@ -59,6 +59,7 @@ public:
     void preparedForTransport(quint64 arrangementRevision) noexcept;
     bool observeEnginePlaying(bool playing) noexcept;
     QString playbackStatusText(bool syncEnabled) const;
+    QString listeningToolsSummary(bool expanded) const;
 private:
     SharedTrackModel model_;
     PlaybackState playback_;

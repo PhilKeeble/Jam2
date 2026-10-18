@@ -395,6 +395,16 @@ void copy_peer_mixer_stats(
     target.mix_normal_path_limit_frames = source.normal_path_limit_frames;
     target.mix_live_tail_rounding_tolerance_frames = source.live_tail_rounding_tolerance_frames;
     target.mix_adaptive_release_alignment_margin_frames = source.adaptive_release_alignment_margin_frames;
+    target.mix_partial_release_events = source.partial_release_events;
+    target.mix_partial_release_frames = source.partial_release_frames;
+    target.mix_lookahead_hold_events = source.lookahead_hold_events;
+    target.mix_lookahead_hold_frames = source.lookahead_hold_frames;
+    target.mix_lookahead_hold_max_fraction_ppm = source.lookahead_hold_max_fraction_ppm;
+    target.mix_isolated_recovery_events = source.isolated_recovery_events;
+    target.mix_worker_service_gap_us = source.worker_service_gap_us;
+    target.mix_worker_runway_frames = source.worker_runway_frames;
+    target.mix_playback_stopping_frames = source.playback_stopping_frames;
+    target.mix_release_worker_guard_active = source.release_worker_guard_active;
     target.mix_capacity_drops = source.capacity_drops;
     target.mix_capacity_dropped_frames = source.capacity_dropped_frames;
     target.mix_clipped_samples = source.clipped_samples;
@@ -829,6 +839,16 @@ void print_periodic_stream_stats(
               << " mix_normal_path_limit_frames=" << stats.mix_normal_path_limit_frames
               << " mix_live_tail_rounding_tolerance_frames=" << stats.mix_live_tail_rounding_tolerance_frames
               << " mix_adaptive_release_alignment_margin_frames=" << stats.mix_adaptive_release_alignment_margin_frames
+              << " mix_partial_release_events=" << stats.mix_partial_release_events
+              << " mix_partial_release_frames=" << stats.mix_partial_release_frames
+              << " mix_lookahead_hold_events=" << stats.mix_lookahead_hold_events
+              << " mix_lookahead_hold_frames=" << stats.mix_lookahead_hold_frames
+              << " mix_lookahead_hold_max_fraction_ppm=" << stats.mix_lookahead_hold_max_fraction_ppm
+              << " mix_isolated_recovery_events=" << stats.mix_isolated_recovery_events
+              << " mix_worker_service_gap_us=" << stats.mix_worker_service_gap_us
+              << " mix_worker_runway_frames=" << stats.mix_worker_runway_frames
+              << " mix_playback_stopping_frames=" << stats.mix_playback_stopping_frames
+              << " mix_release_worker_guard_active=" << (stats.mix_release_worker_guard_active ? "yes" : "no")
               << " mix_receive_recovery_active="
               << (stats.mix_receive_recovery_active ? "yes" : "no")
               << " mix_receive_recovery_debt_frames="
@@ -1163,6 +1183,16 @@ void print_audio_packet_stats(const AudioPacketStats& stats, const Options& opti
     std::cout << "Mixer normal output limit frames: " << stats.mix_normal_output_limit_frames << "\n";
     std::cout << "Mixer normal path limit frames: " << stats.mix_normal_path_limit_frames << "\n";
     std::cout << "Mixer source rounding tolerance frames: " << stats.mix_live_tail_rounding_tolerance_frames << "\n";
+    std::cout << "Mixer partial release events: " << stats.mix_partial_release_events << "\n";
+    std::cout << "Mixer partial release frames: " << stats.mix_partial_release_frames << "\n";
+    std::cout << "Mixer lookahead hold events: " << stats.mix_lookahead_hold_events << "\n";
+    std::cout << "Mixer lookahead hold frames: " << stats.mix_lookahead_hold_frames << "\n";
+    std::cout << "Mixer lookahead hold max fraction ppm: " << stats.mix_lookahead_hold_max_fraction_ppm << "\n";
+    std::cout << "Mixer isolated recovery events: " << stats.mix_isolated_recovery_events << "\n";
+    std::cout << "Mixer worker service gap us: " << stats.mix_worker_service_gap_us << "\n";
+    std::cout << "Mixer worker runway frames: " << stats.mix_worker_runway_frames << "\n";
+    std::cout << "Mixer playback stopping frames: " << stats.mix_playback_stopping_frames << "\n";
+    std::cout << "Mixer release worker guard active: " << (stats.mix_release_worker_guard_active ? "yes" : "no") << "\n";
     std::cout << "Mixer release alignment margin frames: " << stats.mix_adaptive_release_alignment_margin_frames << "\n";
     std::cout << "Mixer receive recovery active: "
               << (stats.mix_receive_recovery_active ? "yes" : "no") << "\n";

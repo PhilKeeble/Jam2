@@ -43,6 +43,19 @@ QJsonObject markerSnapshot(AutomationProcess& peer) {
 QJsonObject listening(const QJsonObject& state) {
     return state.value(QStringLiteral("content")).toObject().value(QStringLiteral("listening_tools")).toObject();
 }
+void requireSummary(AutomationProcess& peer, const QString& speed, int pitch, int focusHz, bool expanded) {
+    const auto state = command(peer, {{QStringLiteral("type"), QStringLiteral("snapshot")},
+        {QStringLiteral("id"), QStringLiteral("listening-summary")},
+        {QStringLiteral("control"), QStringLiteral("looper.listening-tools")}}, "snapshot");
+    const auto control = state.value(QStringLiteral("control")).toObject().value(QStringLiteral("state")).toObject();
+    const QString text = control.value(QStringLiteral("text")).toString();
+    require(state.value(QStringLiteral("control_found")).toBool() &&
+        control.value(QStringLiteral("checkable")).toBool() && control.value(QStringLiteral("checked")).toBool() == expanded &&
+        text.contains(QStringLiteral("Speed %1\u00d7").arg(speed)) &&
+        text.contains(QStringLiteral("Pitch %1 st").arg(pitch)) &&
+        text.endsWith(focusHz > 0 ? QStringLiteral("Focus %1 Hz").arg(focusHz) : QStringLiteral("Focus off")),
+        QStringLiteral("real listening-tools summary disagrees with current settings: ") + text);
+}
 template<class Predicate>
 std::array<QJsonObject, 4> waitAll(FourPeerCoordinator& peers, Predicate predicate, const QString& description) {
     std::array<QJsonObject, 4> states;
@@ -138,6 +151,9 @@ int main(int argc, char** argv) {
                 content.value(QStringLiteral("prepared_mix_frames")).toInteger() > 0 &&
                 !content.value(QStringLiteral("prepared_mix_worker_running")).toBool();
         }, QStringLiteral("real prepared WAV on four peers"));
+        for (std::size_t i = 0; i < 4; ++i) requireSummary(peers.peer(i), QStringLiteral("1.00"), 0, 0, false);
+        invoke(peers.peer(2), QStringLiteral("looper.listening-tools"), QStringLiteral("click"));
+        requireSummary(peers.peer(2), QStringLiteral("1.00"), 0, 0, true);
         invoke(peers.peer(0), QStringLiteral("performance.track-toggle"), QStringLiteral("click"));
         waitAll(peers, [](std::size_t, const QJsonObject& state) {
             return state.value(QStringLiteral("performance")).toObject().value(QStringLiteral("global_transport_playing")).toBool();
@@ -145,11 +161,17 @@ int main(int argc, char** argv) {
         // Several numeric edits settle together; only their stable final state
         // is prepared and committed through the real control/engine boundary.
         invoke(peers.peer(2), QStringLiteral("looper.speed.value"), QStringLiteral("set-value"), 0.5);
+        requireSummary(peers.peer(2), QStringLiteral("0.50"), 0, 0, true);
         invoke(peers.peer(2), QStringLiteral("looper.pitch.value"), QStringLiteral("set-value"), 3);
         invoke(peers.peer(2), QStringLiteral("looper.focus.value"), QStringLiteral("set-value"), 640);
         invoke(peers.peer(2), QStringLiteral("looper.focus.enabled"), QStringLiteral("set-checked"), true);
         auto slow = waitAll(peers, [](std::size_t, const QJsonObject& state) { return applied(state, 500000, 500000, 300, 640, true); },
             QStringLiteral("peer-originated speed, pitch and focus commit"));
+        for (std::size_t i = 0; i < 4; ++i) requireSummary(peers.peer(i), QStringLiteral("0.50"), 3, 640, i == 2);
+        invoke(peers.peer(2), QStringLiteral("looper.listening-tools"), QStringLiteral("click"));
+        requireSummary(peers.peer(2), QStringLiteral("0.50"), 3, 640, false);
+        invoke(peers.peer(2), QStringLiteral("looper.listening-tools"), QStringLiteral("click"));
+        requireSummary(peers.peer(2), QStringLiteral("0.50"), 3, 640, true);
         const QString anchor = listening(slow[0]).value(QStringLiteral("tempo_anchor_frame")).toString();
         for (std::size_t i = 0; i < 4; ++i) {
             require(listening(slow[i]).value(QStringLiteral("tempo_anchor_frame")).toString() == anchor,
@@ -180,9 +202,15 @@ int main(int argc, char** argv) {
         syncPolicy(peers.peer(1), false);
         waitAll(peers, [](std::size_t, const QJsonObject& state) { return applied(state, 500000, 1000000, 300, 640, true); },
             QStringLiteral("disabled sync restores metronome rate and retains listening tools"));
-        invoke(peers.peer(3), QStringLiteral("looper.speed.value"), QStringLiteral("set-value"), 0.73);
+        invoke(peers.peer(3), QStringLiteral("looper.speed.slider"), QStringLiteral("set-value"), 73);
         waitAll(peers, [](std::size_t i, const QJsonObject& state) { return applied(state, i == 3 ? 730000 : 500000, 1000000, 300, 640, true); },
             QStringLiteral("local-only speed isolation"));
+        for (std::size_t i = 0; i < 4; ++i) requireSummary(peers.peer(i), i == 3 ? QStringLiteral("0.73") : QStringLiteral("0.50"), 3, 640, i == 2);
+        invoke(peers.peer(3), QStringLiteral("looper.focus.enabled"), QStringLiteral("set-checked"), false);
+        waitAll(peers, [](std::size_t i, const QJsonObject& state) {
+            return applied(state, i == 3 ? 730000 : 500000, 1000000, 300, 640, i != 3);
+        }, QStringLiteral("local focus toggle remains isolated"));
+        requireSummary(peers.peer(3), QStringLiteral("0.73"), 3, 0, false);
         syncPolicy(peers.peer(0), true);
         waitAll(peers, [](std::size_t, const QJsonObject& state) { return applied(state, 500000, 500000, 300, 640, true); },
             QStringLiteral("reenable reconciles local edits"));
@@ -211,6 +239,7 @@ int main(int argc, char** argv) {
                 QStringLiteral("Play started before the latest listening settings applied"));
             return playing && applied(state, 820000, 820000, 500, 900, true);
         }, QStringLiteral("stopped speed/pitch/focus edits persist into the next shared Play"));
+        for (std::size_t i = 0; i < 4; ++i) requireSummary(peers.peer(i), QStringLiteral("0.82"), 5, 900, i == 2);
         for (const auto& state : resumed) {
             require(state.value(QStringLiteral("jam")).toObject().value(QStringLiteral("transport_grid_ready")).toBool() &&
                 state.value(QStringLiteral("performance")).toObject().value(QStringLiteral("metronome_epoch_valid")).toBool(),

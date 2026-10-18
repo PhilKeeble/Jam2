@@ -69,11 +69,29 @@ add_test(NAME jam2_core_low_skew_units
 set_tests_properties(jam2_core_low_skew_units PROPERTIES
     LABELS "unit;core;audio;network;performance;four-peer"
     TIMEOUT 120)
+add_test(NAME jam2_core_callback_runway_units
+    COMMAND $<TARGET_FILE:jam2_core_input_tests> --callback-runway)
+add_test(NAME jam2_core_playback_recovery_units
+    COMMAND $<TARGET_FILE:jam2_core_input_tests> --playback-recovery)
+set_tests_properties(jam2_core_playback_recovery_units PROPERTIES
+    LABELS "unit;core;audio;network;performance;four-peer"
+    TIMEOUT 120)
+set_tests_properties(jam2_core_callback_runway_units PROPERTIES
+    LABELS "unit;core;audio;network;performance;four-peer"
+    TIMEOUT 120)
 add_test(NAME jam2_core_release_return_units
     COMMAND $<TARGET_FILE:jam2_core_input_tests> --release-return)
 set_tests_properties(jam2_core_release_return_units PROPERTIES
     LABELS "unit;core;audio;network;performance;four-peer"
     TIMEOUT 60)
+
+foreach(profile fast64 moderate safe)
+    add_test(NAME jam2_profile_${profile}_timing
+        COMMAND $<TARGET_FILE:jam2_core_input_tests> --profile-${profile})
+    set_tests_properties(jam2_profile_${profile}_timing PROPERTIES
+        LABELS "unit;core;audio;network;performance;four-peer"
+        TIMEOUT 120)
+endforeach()
 
 add_executable(jam2_core_boundary_tests EXCLUDE_FROM_ALL
     unit/core/CoreBoundaryTests.cpp)
@@ -672,7 +690,7 @@ add_executable(jam2_user_preferences_tests EXCLUDE_FROM_ALL
 jam2_configure_test_target(jam2_user_preferences_tests)
 target_include_directories(jam2_user_preferences_tests PRIVATE
     "${CMAKE_SOURCE_DIR}/app/gui")
-target_link_libraries(jam2_user_preferences_tests PRIVATE Qt6::Core)
+target_link_libraries(jam2_user_preferences_tests PRIVATE jam2_core Qt6::Core)
 add_test(NAME jam2_user_preferences_units
     COMMAND $<TARGET_FILE:jam2_user_preferences_tests>)
 set_tests_properties(jam2_user_preferences_units PROPERTIES

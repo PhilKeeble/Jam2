@@ -362,6 +362,7 @@ private:
     void regeneratePreparedMix(int bankIndex = -1);
     void initializeListeningTools();
     void editListeningTools(bool commitNow = false);
+    void updateListeningToolsSummary();
     bool prepareListeningMix(const jam2::gui::ListeningToolsSettings& settings, int revision, int bank);
     void adoptListeningMix(const jam2::gui::ListeningToolsSettings& settings, const std::optional<PreparedMixResult>& result);
     void applyPreparedMixResult(PreparedMixResult result);
@@ -646,6 +647,7 @@ private:
     QCheckBox* captureManualStopCheck_ = nullptr;
     QSpinBox* captureDurationSpin_ = nullptr;
     QDoubleSpinBox* trackSpeedSpin_ = nullptr;
+    QPushButton* listeningToolsToggle_ = nullptr;
     QSpinBox* trackPitchSpin_ = nullptr;
     QSlider* trackSpeedSlider_ = nullptr;
     QSlider* trackPitchSlider_ = nullptr;

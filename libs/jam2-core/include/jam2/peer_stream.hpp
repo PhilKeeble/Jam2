@@ -29,7 +29,7 @@ struct PeerStreamConfig {
     int adaptive_playback_release_ppm = 5000;
     bool drift_correction = true;
     double drift_smoothing = 0.02;
-    int drift_deadband_ppm = 25;
+    int drift_deadband_ppm = 0;
     int drift_max_correction_ppm = 500;
     // Routine local receive-thread batching is not unstable-network evidence.
     std::uint64_t adaptive_delivery_gap_minimum_us = 50000;
@@ -58,6 +58,7 @@ public:
     // Callback-facing sinks expose their consumption quantum. Source queues
     // and non-device fixtures may return zero (use the network block size).
     virtual std::size_t callbackFrames() const noexcept { return 0; }
+    virtual audio::PlaybackRecoveryState playbackRecoveryState() const noexcept { return {}; }
     virtual audio::DeviceClockSample deviceClockSample() const noexcept { return {}; }
     virtual std::size_t pushFrames(std::span<const std::int32_t> frames) noexcept = 0;
     virtual void requestDropFrames(std::size_t frames) noexcept = 0;

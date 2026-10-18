@@ -49,6 +49,8 @@ public:
     std::size_t depthFrames() const noexcept override { return ring.available_read(); }
     std::size_t callbackFrames() const noexcept override { return ::callbackFrames; }
     std::uint64_t underrunFrames() const noexcept override { return ring.underrun_frames(); }
+    jam2::audio::PlaybackRecoveryState playbackRecoveryState() const noexcept override
+    { return jam2::audio::device_processing::read_playback_recovery_state(control); }
     std::size_t pushFrames(std::span<const std::int32_t> frames) noexcept override { return ring.push(frames); }
     void requestDropFrames(std::size_t frames) noexcept override { ring.request_drop_oldest(frames); }
     void setResamplerRatio(double ratio) noexcept override

@@ -46,3 +46,9 @@ int mergeSynchronizedLooperLanes(
 int mergeLocalOnlyLooperLanes(
     QJsonObject& song,
     const LooperProject& localProject);
+
+// Apply shared section/bank membership together, retaining local content only
+// for matching identities. Scope-specific content is merged by the caller.
+bool reconcileSynchronizedSongStructure(
+    QJsonObject& localSong,
+    const QJsonObject& incomingSong);

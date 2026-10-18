@@ -415,6 +415,17 @@ bool SharedTrackController::observeEnginePlaying(bool playing) noexcept
     return playback_ != before;
 }
 
+QString SharedTrackController::listeningToolsSummary(bool expanded) const
+{
+    return QStringLiteral("%1  LISTENING TOOLS     Speed %2\u00d7 \u00b7 Pitch %3 st \u00b7 Focus %4")
+        .arg(expanded ? QChar(0x25be) : QChar(0x25b8))
+        .arg(model_.speed, 0, 'f', 2)
+        .arg(QString::number(model_.pitchCents / 100.0, 'g', 4))
+        .arg(model_.focusEnabled
+            ? QStringLiteral("%1 Hz").arg(qRound(model_.focusFrequencyHz))
+            : QStringLiteral("off"));
+}
+
 QString SharedTrackController::playbackStatusText(bool syncEnabled) const
 {
     if (!model_.sampleRateCompatible) {

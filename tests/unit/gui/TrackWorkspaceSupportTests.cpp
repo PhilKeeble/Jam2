@@ -659,6 +659,59 @@ void testLocalOnlyLaneMerge(const QString& root)
         "repeated path-only preservation must retain the first generated lane identity");
 }
 
+void testSynchronizedSongStructure()
+{
+    const auto section = [](const QString& id, const QString& chord) {
+        return QJsonObject{{"id", id}, {"label", id}, {"name", id}, {"beats", 32},
+            {"chords", QJsonArray{chord}}, {"generated_kind", "practice"}};
+    };
+    const auto bank = [](const QString& id, const QString& laneId) {
+        return QJsonObject{{"id", id}, {"lanes", QJsonArray{QJsonObject{{"id", laneId}}}},
+            {"timing", QJsonObject{{"bpm", 120}}}};
+    };
+    const QJsonArray steps{QJsonObject{{"bank", 0}, {"repeats", 1}},
+        QJsonObject{{"bank", 1}, {"repeats", 1}}};
+    const QJsonObject localLooper{{"banks", QJsonArray{bank("A", "custom-A"), bank("B", "custom-B")}},
+        {"active_bank", 1}, {"arrangement", QJsonObject{{"steps", steps}}}};
+    QJsonObject local{{"sections", QJsonArray{section("old-A", "C"), section("old-B", "Dm")}},
+        {"looper", localLooper}};
+    const QJsonObject incomingLooper{{"banks", QJsonArray{
+        bank("A", "remote-A"), bank("B", "remote-B"), bank("C", "remote-C")}}};
+    QJsonObject incoming{{"sections", QJsonArray{section("old-A", "F"), section("old-B", "G"),
+        section("new-C", "Am")}}, {"looper", incomingLooper}};
+    require(reconcileSynchronizedSongStructure(local, incoming), "valid added section must merge");
+    auto sections = local.value("sections").toArray();
+    auto banks = local.value("looper").toObject().value("banks").toArray();
+    require(sections.size() == 3 && banks.size() == 3 &&
+            sections[0].toObject().value("chords").toArray()[0] == QJsonValue("C") &&
+            sections[2].toObject().value("id") == QJsonValue("new-C") &&
+            !sections[2].toObject().contains("chords") &&
+            !sections[2].toObject().contains("generated_kind") &&
+            banks[0].toObject().value("lanes").toArray()[0].toObject().value("id") == QJsonValue("custom-A") &&
+            banks[2].toObject().value("lanes").toArray().isEmpty(),
+        "structure must grow atomically without importing unshared ideas or WAV lanes");
+    const QJsonObject once = local;
+    require(reconcileSynchronizedSongStructure(local, incoming) && local == once,
+        "repeated structure snapshots must be idempotent");
+    // A replacement identity at the same position must not inherit old notes.
+    incoming.insert("sections", QJsonArray{section("replacement-A", "F")});
+    incoming.insert("looper", QJsonObject{{"banks", QJsonArray{bank("A", "remote-A")}}});
+    require(reconcileSynchronizedSongStructure(local, incoming), "removed sections must merge");
+    sections = local.value("sections").toArray();
+    const auto looper = local.value("looper").toObject();
+    require(sections.size() == 1 && !sections[0].toObject().contains("chords") &&
+            looper.value("banks").toArray().size() == 1 && looper.value("active_bank").toInt() == 0 &&
+            looper.value("arrangement").toObject().value("steps").toArray().size() == 1,
+        "removal must drop corresponding banks, stale notes and invalid arrangement references");
+    const QJsonObject valid = local;
+    incoming.insert("sections", QJsonArray{section("x", "F"), section("x", "G")});
+    require(!reconcileSynchronizedSongStructure(local, incoming) && local == valid,
+        "mismatched section and bank counts must reject without partial mutation");
+    incoming.insert("looper", QJsonObject{{"banks", QJsonArray{bank("A", "a"), bank("B", "b")}}});
+    require(!reconcileSynchronizedSongStructure(local, incoming) && local == valid,
+        "duplicate section identities must reject without partial mutation");
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -672,6 +725,7 @@ int main(int argc, char** argv)
         testResampledStagingAndRepair(root.path());
         testStagingBoundaryValidation(root.path());
         testTransactionalAssetMaterialization(root.path());
+        testSynchronizedSongStructure();
         testSynchronizedLaneMerge();
         testLocalOnlyLaneMerge(root.path());
         std::cout << "Track workspace support tests passed\n";

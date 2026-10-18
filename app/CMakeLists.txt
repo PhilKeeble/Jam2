@@ -566,6 +566,10 @@ endif()
 
 if(WIN32)
     set_target_properties(jam2 PROPERTIES WIN32_EXECUTABLE TRUE)
+    if(MSVC)
+        # Boundary validation needs headroom beyond the default 1 MiB stack.
+        target_link_options(jam2 PRIVATE /STACK:4194304)
+    endif()
     target_sources(jam2 PRIVATE
         "${CMAKE_CURRENT_BINARY_DIR}/Jam2.rc"
         "${JAM2_GUI_WINDOWS_ICON}"
