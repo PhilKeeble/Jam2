@@ -733,7 +733,6 @@ struct Engine::Impl {
             return true;
         case EngineCommandType::SetRecordingCalibration:
             audio::set_recording_calibration(*control,
-                command.enabled ? static_cast<std::size_t>(command.frame) : audio::kNoInputChannel,
                 command.enabled ? command.signed_value : 0);
             return true;
         case EngineCommandType::SetRecordingLatencyAdjustment: {
@@ -1633,6 +1632,7 @@ EngineSnapshot Engine::snapshot() const noexcept
             : 0ULL;
         result.recording_latency_compensation_frames = audio::input_take_compensation_frames(control);
         result.recording_calibration_adjustment_frames = audio::applied_recording_calibration_frames(control);
+        result.device_recording_calibration_frames = control.device_recording_calibration_frames.load(std::memory_order_acquire);
         result.callbacks = impl_->stream->callbacks();
         result.playback_prefilled = impl_->stream->playback_prefilled();
         result.callback_timing = impl_->stream->callback_timing_stats();

@@ -28,6 +28,7 @@ private:
     QTimer poll_;
     QElapsedTimer elapsed_;
     QComboBox* method_ = nullptr;
+    QComboBox* input_ = nullptr;
     QLabel* instructions_ = nullptr;
     QLabel* status_ = nullptr;
     QPushButton* start_ = nullptr;

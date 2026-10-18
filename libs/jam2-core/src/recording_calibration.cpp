@@ -6,21 +6,18 @@
 #include <stdexcept>
 
 namespace jam2::audio {
-void set_recording_calibration(StreamControl& c, std::size_t channel, std::int64_t adjustment) noexcept
+void set_recording_calibration(StreamControl& c, std::int64_t adjustment) noexcept
 {
-    const auto tag = channel < 0xffffffffULL ? static_cast<std::uint32_t>(channel) : 0xffffffffU;
-    const auto frames = static_cast<std::int32_t>(std::clamp<std::int64_t>(adjustment, -1000000, 1000000));
-    c.recording_calibration_binding.store((static_cast<std::uint64_t>(tag) << 32) |
-        static_cast<std::uint32_t>(frames), std::memory_order_release);
+    c.device_recording_calibration_frames.store(
+        std::clamp<std::int64_t>(adjustment, -1000000, 1000000), std::memory_order_release);
 }
 std::int64_t applied_recording_calibration_frames(const StreamControl& c) noexcept
 {
     const auto* router = c.input_source_router;
-    if (!router || router->recording_input_kind() != RecordingInputKind::PhysicalAudio) return 0;
-    const auto binding = c.recording_calibration_binding.load(std::memory_order_acquire);
-    const auto channel = static_cast<std::uint32_t>(binding >> 32);
-    return channel != 0xffffffffU && channel == router->recording_input_channel()
-        ? static_cast<std::int32_t>(binding & 0xffffffffU) : 0;
+    if (!router) return 0;
+    const auto kind = router->recording_input_kind();
+    if (kind != RecordingInputKind::PhysicalAudio && kind != RecordingInputKind::Mixed) return 0;
+    return c.device_recording_calibration_frames.load(std::memory_order_acquire);
 }
 std::uint64_t input_take_compensation_frames(const StreamControl& c) noexcept
 {

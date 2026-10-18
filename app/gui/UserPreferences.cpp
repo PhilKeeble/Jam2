@@ -1,9 +1,11 @@
 #include "UserPreferences.hpp"
 
 #include <QDir>
+#include <QDateTime>
 #include <QFileInfo>
 #include <QSettings>
 #include <QStandardPaths>
+#include <algorithm>
 
 namespace {
 
@@ -47,8 +49,19 @@ QVector<RecordingCalibrationProfile> loadCalibrations(QSettings& s)
         p.spreadFrames = s.value("spread_frames").toDouble(&spreadOk);
         p.clicks = s.value("clicks").toInt(&clicksOk);
         p.calibratedAt = s.value("calibrated_at").toString();
-        if (adjustmentOk && measuredOk && reportedOk && spreadOk && clicksOk && p.valid())
-            profiles.push_back(std::move(p));
+        if (adjustmentOk && measuredOk && reportedOk && spreadOk && clicksOk && p.valid()) {
+            // Earlier versions saved one profile per measurement input. Retain
+            // the latest measurement for each device configuration.
+            const auto existing = std::find_if(profiles.begin(), profiles.end(),
+                [&](const auto& old) { return old.key.matchesDeviceConfiguration(p.key); });
+            if (existing == profiles.end()) profiles.push_back(std::move(p));
+            else {
+                const auto previousDate = QDateTime::fromString(existing->calibratedAt, Qt::ISODate);
+                const auto date = QDateTime::fromString(p.calibratedAt, Qt::ISODate);
+                if (!previousDate.isValid() || (date.isValid() && date >= previousDate))
+                    *existing = std::move(p);
+            }
+        }
     }
     s.endArray(); return profiles;
 }

@@ -11,7 +11,6 @@ public:
         std::function<jam2::EngineSnapshot()> snapshot;
         std::function<jam2::audio::StreamInfo()> stream;
         std::function<jam2::audio::InputSourceSlotSnapshot(std::size_t)> source;
-        std::function<std::optional<std::size_t>()> recordingChannel;
         std::function<bool()> networkRunning;
         std::function<bool(const jam2::EngineCommand&)> submit;
         std::function<std::shared_ptr<jam2::audio::RecordingCalibrationCapture>(std::size_t, QString&)> begin;
@@ -31,7 +30,7 @@ public:
     bool prepareForSource(std::optional<std::size_t> slot);
     void finishTest();
 private:
-    bool applyForChannel(std::optional<std::size_t> channel);
+    bool applyForDevice();
     UserPreferences& preferences_;
     Backend backend_;
     std::optional<RecordingCalibrationKey> appliedKey_;

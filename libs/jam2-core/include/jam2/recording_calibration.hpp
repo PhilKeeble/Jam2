@@ -10,7 +10,7 @@ namespace jam2::audio {
 struct StreamControl;
 // Shared by CoreAudio, ASIO and the deterministic backend. Device calibration
 // is separate from plugin processing delay and explicit manual adjustment.
-void set_recording_calibration(StreamControl& control, std::size_t channel, std::int64_t adjustment) noexcept;
+void set_recording_calibration(StreamControl& control, std::int64_t adjustment) noexcept;
 std::int64_t applied_recording_calibration_frames(const StreamControl& control) noexcept;
 std::uint64_t input_take_compensation_frames(const StreamControl& control) noexcept;
 

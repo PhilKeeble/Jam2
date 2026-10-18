@@ -26,10 +26,19 @@ RecordingCalibrationDialog::RecordingCalibrationDialog(RecordingCalibrationContr
     key_ = controller_.key(channel_);
     QStringList outputs;
     for (const int output : key_.outputChannels) outputs.push_back(QString::number(output + 1));
-    auto* route = new QLabel(QStringLiteral("Input %1 · Outputs %2 · %3 Hz · %4-frame buffer\n%5")
-        .arg(key_.physicalInput + 1).arg(outputs.join(QStringLiteral(" / "))).arg(key_.sampleRate).arg(key_.bufferFrames)
-        .arg(controller_.deviceName()), this);
+    auto* route = new QLabel(QStringLiteral("%1\nOutputs %2 - %3 Hz - %4-frame buffer")
+        .arg(controller_.deviceName()).arg(outputs.join(QStringLiteral(" / ")))
+        .arg(key_.sampleRate).arg(key_.bufferFrames), this);
     route->setWordWrap(true); layout->addWidget(route);
+    auto* inputLabel = new QLabel(QStringLiteral("Test input (correction applies to all device inputs)"), this);
+    layout->addWidget(inputLabel);
+    input_ = new QComboBox(this);
+    for (qsizetype index = 0; index < key_.inputChannels.size(); ++index) {
+        input_->addItem(QStringLiteral("Input %1").arg(key_.inputChannels.at(index) + 1),
+            static_cast<qulonglong>(index));
+    }
+    input_->setCurrentIndex(static_cast<int>(channel_));
+    applyMutedEditorStyle(input_); control(*input_, "input"); layout->addWidget(input_);
     method_ = new QComboBox(this); method_->addItem(QStringLiteral("Cable — recommended for audio interfaces"));
     method_->addItem(QStringLiteral("Microphone — laptop / built-in audio")); applyMutedEditorStyle(method_);
     control(*method_, "method"); layout->addWidget(method_);
@@ -44,6 +53,10 @@ RecordingCalibrationDialog::RecordingCalibrationDialog(RecordingCalibrationContr
     control(*start_, "start"); control(*save_, "save"); control(*reset_, "reset");
     control(*buttons->button(QDialogButtonBox::Cancel), "cancel"); layout->addWidget(buttons);
     connect(method_, &QComboBox::currentIndexChanged, this, [this] { result_ = {}; save_->setEnabled(false); refreshInstructions(); });
+    connect(input_, &QComboBox::currentIndexChanged, this, [this] {
+        channel_ = input_->currentData().toULongLong(); key_ = controller_.key(channel_);
+        result_ = {}; save_->setEnabled(false);
+    });
     connect(start_, &QPushButton::clicked, this, [this] { startTest(); });
     connect(reset_, &QPushButton::clicked, this, [this] {
         QString error;
@@ -94,14 +107,14 @@ void RecordingCalibrationDialog::startTest()
     key_ = controller_.key(channel_); QString error;
     capture_ = controller_.begin(channel_, error);
     if (!capture_) { status_->setText(error); return; }
-    result_ = {}; method_->setEnabled(false); start_->setEnabled(false);
+    result_ = {}; method_->setEnabled(false); input_->setEnabled(false); start_->setEnabled(false);
     reset_->setEnabled(false); save_->setEnabled(false);
     status_->setText(QStringLiteral("Playing and recording six test clicks…")); elapsed_.start(); poll_.start();
 }
 void RecordingCalibrationDialog::stopTest()
 {
     poll_.stop(); if (capture_) capture_->cancel(); controller_.finishTest();
-    method_->setEnabled(true); start_->setEnabled(true); reset_->setEnabled(true);
+    method_->setEnabled(true); input_->setEnabled(true); start_->setEnabled(true); reset_->setEnabled(true);
 }
 void RecordingCalibrationDialog::presentResult(jam2::audio::RecordingCalibrationCapture::Result result)
 {

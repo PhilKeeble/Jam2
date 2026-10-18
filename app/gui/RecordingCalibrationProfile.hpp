@@ -11,8 +11,13 @@ struct RecordingCalibrationKey {
     int bufferFrames = 0;
     QVector<int> inputChannels;
     QVector<int> outputChannels;
-    int physicalInput = -1;
+    int physicalInput = -1; // Input used to measure this device configuration.
     bool operator==(const RecordingCalibrationKey&) const = default;
+    bool matchesDeviceConfiguration(const RecordingCalibrationKey& other) const {
+        return backend == other.backend && deviceId == other.deviceId &&
+            sampleRate == other.sampleRate && bufferFrames == other.bufferFrames &&
+            inputChannels == other.inputChannels && outputChannels == other.outputChannels;
+    }
     bool valid() const {
         const auto validChannels = [](const QVector<int>& channels) {
             if (channels.isEmpty() || channels.size() > 1024) return false;

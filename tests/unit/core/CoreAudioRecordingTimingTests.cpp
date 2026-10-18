@@ -147,7 +147,7 @@ void testRecordedPulseAlignment()
             control.input_source_router = &router;
         }
         control.recording_latency_adjustment_frames.store(manual);
-        jam2::audio::set_recording_calibration(control, 0, calibration);
+        jam2::audio::set_recording_calibration(control, calibration);
         timing::publish_recording_latency(control, inputDelay, outputDelay);
         const auto delay = static_cast<std::uint64_t>(inputDelay + outputDelay + manual + calibration) +
             (peer == 1 ? router.recording_latency_frames() : 0);

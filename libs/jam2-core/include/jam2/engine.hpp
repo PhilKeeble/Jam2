@@ -291,6 +291,7 @@ struct EngineSnapshot {
     long driver_output_ready_latency_reduction_frames = 0;
     std::int64_t recording_latency_adjustment_frames = 0;
     std::int64_t recording_calibration_adjustment_frames = 0;
+    std::int64_t device_recording_calibration_frames = 0;
     std::uint64_t recording_source_latency_frames = 0;
     std::uint64_t recording_latency_compensation_frames = 0;
     bool playback_prefilled = false;

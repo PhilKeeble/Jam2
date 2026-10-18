@@ -452,7 +452,7 @@ struct StreamControl {
     std::atomic<long> driver_output_ready_error{0};
     std::atomic<long> driver_output_ready_latency_reduction_frames{0};
     std::atomic<std::int64_t> recording_latency_adjustment_frames{0};
-    std::atomic<std::uint64_t> recording_calibration_binding{0xffffffff00000000ULL};
+    std::atomic<std::int64_t> device_recording_calibration_frames{0};
     RecordingCalibrationCapture* recording_calibration = nullptr; // owned by Engine
     std::atomic<std::uint64_t> recording_latency_compensation_frames{0};
     std::atomic<int> test_input_mode{0};

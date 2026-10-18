@@ -21,28 +21,28 @@ RecordingCalibrationKey RecordingCalibrationController::key(std::size_t channel)
 }
 std::optional<std::size_t> RecordingCalibrationController::channelForSource(std::optional<std::size_t> slot) const
 {
-    std::optional<std::size_t> channel;
     for (std::size_t i = 0; i < jam2::audio::kMaximumInputSources; ++i) {
         if (slot && i != *slot) continue;
         const auto s = backend_.source(i);
         if (!s.configured || (!slot && !s.enabled)) continue;
-        if (s.kind != jam2::audio::InputSourceKind::Audio ||
-            s.first_channel == jam2::audio::kNoInputChannel ||
-            s.second_channel != jam2::audio::kNoInputChannel || channel) return {};
-        channel = s.first_channel;
+        if (s.kind == jam2::audio::InputSourceKind::Audio &&
+            s.first_channel < backend_.stream().channels.input.size()) return s.first_channel;
     }
-    return channel;
+    // The combined send can measure any physical input on the active device,
+    // even if that input is not currently included in the send.
+    if (!slot && !backend_.stream().channels.input.empty()) return 0;
+    return {};
 }
 QString RecordingCalibrationController::status(std::optional<std::size_t> slot) const
 {
     const auto channel = channelForSource(slot);
-    if (!channel) return QStringLiteral("Physical-input calibration is not used for MIDI instruments or combined/stereo sources. Select a single audio input.");
+    if (!channel) return QStringLiteral("Device input calibration is not used for a MIDI-only recording. Select an audio input or the combined send mix.");
     const auto k = key(*channel);
-    for (const auto& p : preferences_.recordingCalibrations) if (p.valid() && p.key == k)
-        return QStringLiteral("Calibrated input %1 · %2 Hz / %3 frames · Adjustment %4 ms")
-            .arg(k.physicalInput + 1).arg(k.sampleRate).arg(k.bufferFrames)
+    for (const auto& p : preferences_.recordingCalibrations) if (p.valid() && p.key.matchesDeviceConfiguration(k))
+        return QStringLiteral("Device calibrated - %1 Hz / %2 frames - Adjustment %3 ms (all physical inputs)")
+            .arg(k.sampleRate).arg(k.bufferFrames)
             .arg(p.adjustmentFrames * 1000. / k.sampleRate, 0, 'f', 2);
-    return QStringLiteral("No calibration for this input and audio configuration. Using reported device timing.");
+    return QStringLiteral("No calibration for this device and audio configuration. Using reported device timing.");
 }
 QString RecordingCalibrationController::unavailableReason() const
 {
@@ -92,7 +92,7 @@ bool RecordingCalibrationController::save(const RecordingCalibrationKey& k, Reco
     }
     auto previous = preferences_.recordingCalibrations;
     auto& profiles = preferences_.recordingCalibrations;
-    profiles.erase(std::remove_if(profiles.begin(), profiles.end(), [&](const auto& old) { return old.key == k; }), profiles.end());
+    profiles.erase(std::remove_if(profiles.begin(), profiles.end(), [&](const auto& old) { return old.key.matchesDeviceConfiguration(k); }), profiles.end());
     if (profiles.size() >= 128) { preferences_.recordingCalibrations = previous; error = QStringLiteral("The calibration profile limit was reached. Reset an unused profile first."); return false; }
     profiles.push_back(p);
     if (!UserPreferencesStore::saveChecked(preferences_)) {
@@ -104,7 +104,7 @@ bool RecordingCalibrationController::save(const RecordingCalibrationKey& k, Reco
 bool RecordingCalibrationController::reset(const RecordingCalibrationKey& k, QString& error)
 {
     auto previous = preferences_.recordingCalibrations; auto& profiles = preferences_.recordingCalibrations;
-    profiles.erase(std::remove_if(profiles.begin(), profiles.end(), [&](const auto& p) { return p.key == k; }), profiles.end());
+    profiles.erase(std::remove_if(profiles.begin(), profiles.end(), [&](const auto& p) { return p.key.matchesDeviceConfiguration(k); }), profiles.end());
     if (!UserPreferencesStore::saveChecked(preferences_)) {
         preferences_.recordingCalibrations = std::move(previous); error = QStringLiteral("Could not save calibration settings."); return false;
     }
@@ -112,29 +112,28 @@ bool RecordingCalibrationController::reset(const RecordingCalibrationKey& k, QSt
 }
 void RecordingCalibrationController::update()
 {
-    (void)applyForChannel(backend_.recordingChannel());
+    (void)applyForDevice();
 }
-bool RecordingCalibrationController::prepareForSource(std::optional<std::size_t> slot)
+bool RecordingCalibrationController::prepareForSource(std::optional<std::size_t>)
 {
-    return applyForChannel(channelForSource(slot));
+    return applyForDevice();
 }
-bool RecordingCalibrationController::applyForChannel(std::optional<std::size_t> channel)
+bool RecordingCalibrationController::applyForDevice()
 {
     const auto snapshot = backend_.snapshot();
     if (!snapshot.frame_clock_active) { appliedKey_.reset(); previousEngineFrame_ = 0; return false; }
     std::optional<RecordingCalibrationKey> wanted;
     std::int64_t adjustment = 0;
-    if (channel) {
-        const auto k = key(*channel);
-        for (const auto& p : preferences_.recordingCalibrations) if (p.valid() && p.key == k) { wanted = k; adjustment = p.adjustmentFrames; break; }
+    const auto k = key(0);
+    for (const auto& p : preferences_.recordingCalibrations) {
+        if (p.valid() && p.key.matchesDeviceConfiguration(k)) { wanted = p.key; adjustment = p.adjustmentFrames; break; }
     }
     const bool restarted = snapshot.engine_frame < previousEngineFrame_;
     previousEngineFrame_ = snapshot.engine_frame;
     if (!restarted && wanted == appliedKey_ && adjustment == appliedFrames_ &&
-        snapshot.recording_calibration_adjustment_frames == adjustment) return true;
+        snapshot.device_recording_calibration_frames == adjustment) return true;
     jam2::EngineCommand c; c.type = jam2::EngineCommandType::SetRecordingCalibration;
     c.enabled = wanted.has_value(); c.signed_value = adjustment;
-    c.frame = channel.value_or(jam2::audio::kNoInputChannel);
     if (!backend_.submit(c)) return false;
     appliedKey_ = wanted; appliedFrames_ = adjustment;
     return true;

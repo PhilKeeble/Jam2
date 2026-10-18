@@ -633,12 +633,6 @@ MainWindow::MainWindow(
     calibrationBackend.snapshot = [this] { return jam2_.engineSnapshot(); };
     calibrationBackend.stream = [this] { return jam2_.engineColdSnapshot().stream; };
     calibrationBackend.source = [this](std::size_t slot) { const auto* r = jam2_.inputSourceRouter(); return r ? r->slot_snapshot(slot) : jam2::audio::InputSourceSlotSnapshot{}; };
-    calibrationBackend.recordingChannel = [this]() -> std::optional<std::size_t> {
-        const auto* r = jam2_.inputSourceRouter();
-        if (!r || r->recording_input_kind() != jam2::audio::RecordingInputKind::PhysicalAudio ||
-            r->recording_input_channel() == jam2::audio::kNoInputChannel) return {};
-        return r->recording_input_channel();
-    };
     calibrationBackend.networkRunning = [this] { return jam2_.isNetworkRunning(); };
     calibrationBackend.submit = [this](const jam2::EngineCommand& c) { return jam2_.submit(c); };
     calibrationBackend.begin = [this](std::size_t c, QString& error) { return jam2_.beginRecordingCalibration(c, error); };
@@ -3068,6 +3062,8 @@ QJsonObject MainWindow::automationPerformanceSnapshot() const
             static_cast<qint64>(engine.recording_latency_adjustment_frames)},
         {QStringLiteral("recording_calibration_adjustment_frames"),
             static_cast<qint64>(engine.recording_calibration_adjustment_frames)},
+        {QStringLiteral("device_recording_calibration_frames"),
+            static_cast<qint64>(engine.device_recording_calibration_frames)},
         {QStringLiteral("recording_latency_compensation_frames"),
             static_cast<qint64>(engine.recording_latency_compensation_frames)},
         {QStringLiteral("input_source_router"), inputSourceRouter},
