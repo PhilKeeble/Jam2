@@ -3,6 +3,13 @@
 Jam2 is distributed under GPL-3.0-or-later. Its source tree and binary
 distribution include the following third-party components.
 
+## miniz 3.1.2
+
+The updater embeds miniz's ZIP reader and decompressor, from upstream commit
+`77d0dce8627735138c51770d1799a1ef48f2117d`, under the MIT License.
+See `libs/third_party/miniz/LICENSE` and `README.jam2.md`; binary packages include
+`licenses/miniz-LICENSE.txt`.
+
 ## Steinberg VST 3 SDK
 
 Jam2's private plugin-host helper includes portions of the Steinberg VST 3 SDK,

@@ -6,6 +6,7 @@ set(JAM2_PACKAGE_APP_FILES
     licenses/signalsmith-linear-LICENSE.txt
     licenses/DaisySP-LICENSE.txt
     licenses/VST3-SDK-LICENSE.txt)
+list(APPEND JAM2_PACKAGE_APP_FILES licenses/miniz-LICENSE.txt)
 if(WIN32)
     set(JAM2_PACKAGE_PLATFORM windows)
     set(JAM2_PACKAGE_ARCHITECTURES "x86_64")
@@ -16,6 +17,7 @@ if(WIN32)
         components/jamtaster/onnxruntime.dll
         components/pluginhost/jam2-plugin-worker.exe
         components/pluginhost/licenses/VST3-SDK-LICENSE.txt)
+    list(APPEND JAM2_PACKAGE_APP_FILES components/updater/jam2-updater.exe)
     foreach(notice IN ITEMS onnxruntime-LICENSE.txt onnxruntime-ThirdPartyNotices.txt
             eigen-COPYING.MPL2.txt demucs-onnx-LICENSE.txt MODEL_NOTICES.md)
         list(APPEND JAM2_PACKAGE_APP_FILES "components/jamtaster/licenses/${notice}")

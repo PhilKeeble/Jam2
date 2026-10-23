@@ -17,6 +17,48 @@ if(NOT Qt6_FOUND)
     )
 endif()
 
+add_library(jam2_miniz STATIC
+    "${CMAKE_SOURCE_DIR}/libs/third_party/miniz/miniz.c"
+    "${CMAKE_SOURCE_DIR}/libs/third_party/miniz/miniz_tinfl.c"
+    "${CMAKE_SOURCE_DIR}/libs/third_party/miniz/miniz_zip.c")
+target_include_directories(jam2_miniz SYSTEM PUBLIC "${CMAKE_SOURCE_DIR}/libs/third_party/miniz")
+target_compile_definitions(jam2_miniz PUBLIC
+    MINIZ_NO_ARCHIVE_WRITING_APIS MINIZ_NO_DEFLATE_APIS MINIZ_NO_ZLIB_APIS)
+if(MSVC)
+    target_compile_definitions(jam2_miniz PRIVATE _CRT_SECURE_NO_WARNINGS)
+endif()
+
+add_library(jam2_update STATIC
+    updater/UpdatePackage.cpp updater/UpdatePackage.hpp
+    updater/UpdateDownload.cpp updater/UpdateDownload.hpp
+    updater/UpdateLauncher.cpp updater/UpdateLauncher.hpp
+    updater/UpdaterPlatform.cpp updater/UpdaterPlatform.hpp)
+target_sources(jam2_update PRIVATE
+    updater/UpdateCheck.cpp updater/UpdateCheck.hpp
+    updater/UpdatePreparation.cpp updater/UpdatePreparation.hpp
+    updater/ApplicationUpdateService.cpp updater/ApplicationUpdateService.hpp)
+target_compile_features(jam2_update PUBLIC cxx_std_20)
+target_include_directories(jam2_update PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/updater")
+target_link_libraries(jam2_update PUBLIC Qt6::Core Qt6::Network PRIVATE jam2_miniz)
+if(APPLE)
+    target_link_libraries(jam2_update PRIVATE "-framework Security" "-framework CoreFoundation")
+endif()
+add_executable(jam2_updater updater/UpdaterMain.cpp)
+set_target_properties(jam2_updater PROPERTIES OUTPUT_NAME "jam2-updater")
+target_link_libraries(jam2_updater PRIVATE jam2_update)
+if(MSVC)
+    target_compile_options(jam2_update PRIVATE /W4 /permissive- /EHsc)
+    target_compile_options(jam2_updater PRIVATE /W4 /permissive- /EHsc)
+else()
+    target_compile_options(jam2_update PRIVATE -Wall -Wextra -Wpedantic)
+    target_compile_options(jam2_updater PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+if(APPLE)
+    set_target_properties(jam2_updater PROPERTIES
+        BUILD_RPATH "@executable_path/../Frameworks"
+        INSTALL_RPATH "@executable_path/../Frameworks")
+endif()
+
 if(APPLE AND "arm64" IN_LIST CMAKE_OSX_ARCHITECTURES AND "x86_64" IN_LIST CMAKE_OSX_ARCHITECTURES)
     include("${CMAKE_CURRENT_SOURCE_DIR}/../tools/release/VerifyMacArchitectures.cmake")
     foreach(qt_component IN ITEMS Core Gui Widgets Network)
@@ -499,6 +541,8 @@ add_executable(jam2 MACOSX_BUNDLE
     gui/JamSyncDialog.hpp
     gui/JamTasterDialog.cpp
     gui/JamTasterDialog.hpp
+    gui/UpdateDialog.cpp gui/UpdateDialog.hpp
+    gui/UpdateUi.cpp gui/UpdateUi.hpp
     gui/RecordingCalibrationController.cpp
     gui/RecordingCalibrationDialog.cpp
     gui/RecordingCalibrationController.hpp
@@ -636,6 +680,7 @@ target_include_directories(jam2 PRIVATE
 )
 
 target_link_libraries(jam2 PRIVATE
+    jam2_update
     jam2_asset_transfer
     jam2_automation_contract
     jam2_input_plugin_backend
@@ -715,8 +760,17 @@ if(WIN32)
     )
 endif()
 
-add_dependencies(jam2 jamtaster_worker jam2_plugin_worker)
+add_dependencies(jam2 jamtaster_worker jam2_plugin_worker jam2_updater)
+# A helper-only change must also refresh the staged application/bundle.
+set_property(TARGET jam2 APPEND PROPERTY LINK_DEPENDS "$<TARGET_FILE:jam2_updater>")
 if(WIN32)
+    add_custom_command(TARGET jam2 POST_BUILD
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${JAM2_RELEASE_DIR}/components/updater" "${JAM2_RELEASE_DIR}/licenses"
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "$<TARGET_FILE:jam2_updater>" "${JAM2_RELEASE_DIR}/components/updater/jam2-updater.exe"
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "${CMAKE_SOURCE_DIR}/libs/third_party/miniz/LICENSE" "${JAM2_RELEASE_DIR}/licenses/miniz-LICENSE.txt"
+        VERBATIM)
     set(JAMTASTER_RELEASE_ROOT "${JAM2_RELEASE_DIR}/components/jamtaster")
     add_custom_command(TARGET jamtaster_worker POST_BUILD
         COMMAND "${CMAKE_COMMAND}" -E make_directory
@@ -766,9 +820,16 @@ elseif(APPLE)
             "${JAM2_RELEASE_DIR}/components/jamtaster/models"
             "$<TARGET_BUNDLE_DIR:jam2>/Contents/Resources/jamtaster/licenses"
             "$<TARGET_BUNDLE_DIR:jam2>/Contents/Frameworks"
+            "${JAM2_RELEASE_DIR}/licenses"
         COMMAND "${CMAKE_COMMAND}" -E copy_if_different
             "$<TARGET_FILE:jamtaster_worker>"
             "$<TARGET_BUNDLE_DIR:jam2>/Contents/Helpers/jamtaster-worker"
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "$<TARGET_FILE:jam2_updater>"
+            "$<TARGET_BUNDLE_DIR:jam2>/Contents/Helpers/jam2-updater"
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "${CMAKE_SOURCE_DIR}/libs/third_party/miniz/LICENSE"
+            "${JAM2_RELEASE_DIR}/licenses/miniz-LICENSE.txt"
         COMMAND "${CMAKE_COMMAND}" -E copy_if_different
             "$<TARGET_FILE:jamtaster_onnxruntime>"
             "$<TARGET_BUNDLE_DIR:jam2>/Contents/Frameworks"

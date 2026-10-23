@@ -13,6 +13,8 @@
 #include "InputSourceDialogs.hpp"
 #include "JamSyncDialog.hpp"
 #include "JamTasterDialog.hpp"
+#include "UpdateUi.hpp"
+#include "BuildVersion.hpp"
 #include "LaneRecordingDialog.hpp"
 #include "SessionStartupDialogs.hpp"
 #include "SettingsDialog.hpp"
@@ -1164,8 +1166,18 @@ MainWindow::MainWindow(
     trackTimelineTimer_.setTimerType(Qt::PreciseTimer);
     QObject::connect(&trackTimelineTimer_, &QTimer::timeout, this, [this] { updateTrackTimeline(); });
     trackTimelineTimer_.start();
+    updateUi_ = std::make_unique<UpdateUi>(this, appReleaseDir().absolutePath(),
+        QString::fromLatin1(jam2::kVersion), [this] { return close(); });
+    updateUi_->presentationChanged = [this](const QString& text, const QString& tooltip) {
+        updatesButton_->setText(text); updatesButton_->setToolTip(tooltip);
+    };
+    connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit, this,
+        [this] { updateUi_->windowClosing(); });
     QTimer::singleShot(0, this, [this] { initializeStartupWorkflow(); });
 }
+
+void MainWindow::startAutomaticUpdateCheck() { updateUi_->startAutomaticCheck(); }
+void MainWindow::showUpdateDialog() { updateUi_->showDialog(); }
 
 MainWindow::~MainWindow()
 {
@@ -1239,6 +1251,7 @@ void MainWindow::closeEvent(QCloseEvent* event)
     } else {
         cleanupTransientTrackWavs();
     }
+    updateUi_->windowClosing();
     event->accept();
 }
 

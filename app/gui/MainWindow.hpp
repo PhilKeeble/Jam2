@@ -76,6 +76,7 @@ class LooperLaneStackWidget;
 class LevelMeterWidget;
 class JamTasterService;
 class JamTasterDialog;
+class UpdateUi;
 class GuiTestAgent;
 
 namespace jam2::practice {
@@ -101,6 +102,7 @@ public:
         std::unique_ptr<jam2::application::MidiInputBackend> midiInputBackend,
         std::unique_ptr<jam2::application::InputPluginBackend> inputPluginBackend);
     ~MainWindow() override;
+    void startAutomaticUpdateCheck();
 
 private:
     friend class MainWindowPages;
@@ -164,6 +166,7 @@ private:
     void showStartJamDialog();
     void showJoinJamDialog();
     void showSettingsDialog();
+    void showUpdateDialog();
     bool applyLocalAudioSettings(
         const AudioDevicePreference& desired,
         const QString& selectedDeviceId,
@@ -958,6 +961,8 @@ private:
     bool applyingBankTiming_ = false;
     std::unique_ptr<JamTasterService> jamTaster_;
     std::unique_ptr<JamTasterDialog> jamTasterDialog_;
+    std::unique_ptr<UpdateUi> updateUi_;
+    QPushButton* updatesButton_ = nullptr;
     quint64 jamTasterStatusRevision_ = 0;
     JamStorage jamStorage_;
 };

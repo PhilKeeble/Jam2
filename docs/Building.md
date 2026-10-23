@@ -28,6 +28,9 @@ For distribution, use `build-release.ps1 --version 0.8.1` on Windows or
 create the separate model archive. Outputs go to `dist/`. Add `--publish` with
 an explicit version to create/reuse the GitHub releases and upload the assets;
 this requires GitHub CLI and a one-time `gh auth login` on each machine.
+The private updater builds with the existing Qt Core/Network dependencies and a
+vendored miniz ZIP reader; it needs no curl, OpenSSL installation or external
+archiver at runtime. Manual updater tests are documented in RELEASE.md.
 See [RELEASE.md](../RELEASE.md) for the ZIP layouts, metadata, universal Mac
 dependencies and optional signing. The release version override does not edit
 the source checkout. Ordinary compile commands retain the development version.

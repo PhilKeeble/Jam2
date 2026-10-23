@@ -240,6 +240,14 @@ void MainWindowPages::build(MainWindow& w)
     w.connectionLabel_->setMaximumWidth(240);
     w.connectionLabel_->setAlignment(Qt::AlignCenter);
     auto* settingsButton = new QToolButton(&w);
+    w.updatesButton_ = new QPushButton(QStringLiteral("Updates"), &w);
+    w.updatesButton_->setObjectName(QStringLiteral("Jam2UpdatesButton"));
+    w.updatesButton_->setFixedHeight(32);
+    w.updatesButton_->setToolTip(QStringLiteral("Check for Jam2 updates or view download progress"));
+    jam2::gui::registerGuiControl(*w.updatesButton_, QStringLiteral("application.updates"),
+        QStringLiteral("application.update-dialog"), jam2::gui::GuiControlAvailability::Always);
+    QObject::connect(w.updatesButton_, &QPushButton::clicked, &w, [&w] { w.showUpdateDialog(); });
+    header->addWidget(w.updatesButton_);
     settingsButton->setObjectName(QStringLiteral("SettingsButton"));
     jam2::gui::registerGuiControl(
         *settingsButton, QStringLiteral("application.settings"),

@@ -8,8 +8,8 @@ Release plan; completed work is noted below.
 2. **Packaging and metadata (implemented; Mac execution still needs validation):** use the release scripts below to stamp a version, compile and produce the application ZIP and optional separate model ZIP. This establishes the file/model manifests before updater and downloader work.
 3. **Publishing (implemented; ready for live testing) and server flow:** use `--publish` to create/reuse releases and upload each OS ZIP with clobber. New app releases remain draft until both platforms and their referenced model releases are ready; then publish and remove previous stable app releases. Keep the existing server job that writes the published stable version to `/version.txt`; package metadata is fetched directly from the matching GitHub release when a newer version is detected.
 4. **Models on demand (implemented):** opening JamTaster checks the pinned models and offers their download with size, approval, progress, cancellation and verification. Network requests are asynchronous; hashing/extraction run on a low-priority worker. Failures offer Retry; closing the dialog cancels setup and returns to the jam. Downloads/extraction use one reusable `temp/jamtaster-models/` folder inside Jam2, cleaned on completion/cancellation/failure. Preserve installed models across app updates.
-5. **Updater helper:** first test installation from an already downloaded package. Implement clean process-exit handling, direct replacement of owned files, helper replacement and failure reporting. Preserve settings, models and user content; no backups or rollback.
-6. **Update interface:** connect asynchronous release checks, user approval, verified downloads and progress to the helper. Add **Restart and install** and **Install when Jam2 closes**, with one reusable staging folder.
+5. **Updater helper (implemented; macOS execution still needs validation):** Qt Core/Network handles HTTPS and miniz handles ZIP extraction inside the helper. Run a temporary helper/runtime copy from `temp/updater/`; download/unpack and verify in `update/`, then exit the preparation helper. Launch a separate installation pass only when Jam2 actually closes. Includes helper replacement, failure reporting and next-launch cleanup. Preserve settings, models and user content; no backups or rollback.
+6. **Update interface (implemented; ready for manual testing):** background startup checks and the header's **Updates** button use the styled update dialog. Show version/size before approval, progress through download/verification, cancellation, **Restart and install** and **Install on exit**. Closing a progress dialog leaves preparation running; closing a ready dialog defers installation without reopening Jam2. Cancelling the normal save/close prompt keeps the verified update ready for the next normal exit. Errors allow retry without stopping the jam.
 7. **End-to-end validation:** exercise older-to-newer releases, model reuse, cancellation, failed/corrupt downloads, locked files and interrupted installation. Check both operating systems and Mac architectures, staging cleanup and writes outside the Jam2 folder. Add relevant native CTests throughout the work; run optimized Release validation before distribution.
 8. **First updater-enabled release:** build/upload both OS ZIPs for the chosen version and verify the server's `/version.txt` and both GitHub `.zip.json` assets. The supplied version is authoritative; differing commits do not block publishing. Existing users install this release manually once; later releases use the updater.
 
@@ -17,15 +17,53 @@ Community/documentation work can proceed alongside these steps. Keep the connect
 
 ## Version tracking and updates
 
-- Generate the packaged and compiled versions from the release script's `--version` override, or CMake's development default `0.1.0` when omitted. The override does not edit source files or persist to later ordinary builds. The planned updater checks `https://jam2gether.com/version.txt`, requires a successful response, trims whitespace and compares major/minor/patch numerically. The endpoint remains a plain version number; unavailable metadata must not block startup.
+- Generate the packaged and compiled versions from the release script's `--version` override, or CMake's development default `0.1.0` when omitted. The override does not edit source files or persist to later ordinary builds. Jam2 checks `https://jam2gether.com/version.txt` asynchronously after startup, requires a successful response, trims whitespace and compares major/minor/patch numerically. The endpoint remains a plain version number; unavailable metadata does not block startup or open an unsolicited error popup. Use **Updates** to check manually or inspect errors.
 - Only when the advertised version is newer, GET the current OS's small `.zip.json` asset from that exact GitHub tag. For version `0.2.0`, use `https://github.com/PhilKeeble/Jam2/releases/download/v0.2.0/Jam2-windows.zip.json` or `Jam2-macos.zip.json`. Use the version-specific URL so a newer GitHub Latest release cannot change the selected update mid-check.
 - Validate the metadata's schema, version, tag, OS asset name, channel, download URL, byte count and SHA-256 before prompting. Fetching this JSON does not fetch the ZIP; download the ZIP only after user approval.
 - Keep exactly one `Jam2-windows.zip` and one `Jam2-macos.zip`, each with its adjacent `.zip.json`. Retain the server's existing version-sync job and website download links; preserve the previous version on failed or incomplete release checks. No additional website endpoint is required.
-- The planned updater downloads the exact advertised package after approval, with progress/cancellation, and verifies size, hash, platform and architecture. `package-manifest.json` records package-owned files/hashes (or link targets); its own filename is reserved and not self-hashed. `models.json` pins the model release and weight hashes for that installed app, even when the app is older than the server's release.
-- Use one `update/` folder inside Jam2 for downloads, staging and the running helper copy. Clear stale contents before each new download, never while installation is running; only a fully verified download is ready to install. Clean up after success.
-- Offer **Restart and install** or **Install when Jam2 closes**. Finish saves and stop workers before installation. Use direct replacement without backups or rollback; report failures, with manual reinstallation as the recovery path.
-- Ship a private C++ updater in `components/updater` on Windows and inside the Mac bundle. Run its copy from `update/` so it can replace the installed helper too. Preserve user data and models, and record the version only after successful replacement.
+- The helper downloads the approved package and verifies size, hash, platform and architecture. If the GitHub metadata changes after approval, stop before fetching the ZIP and require a fresh check. Downloading/extraction run in a helper process; staging its runtime uses a worker thread. `package-manifest.json` records package-owned files/hashes (or link targets); its own filename is reserved and not self-hashed. `models.json` pins the model release and weight hashes for that installed app, even when the app is older than the server's release.
+- Use one `update/` folder inside Jam2 for the downloaded ZIP, metadata and unpacked `package/`. The running helper and its required Qt runtime/TLS files live in `temp/updater/`. Clear stale download contents before each new download, never while installation is running; only a fully verified package is ready to install. Remove package/ZIP after success and remove the remaining staging/helper files on the next launch. A lock prevents another updater from using the same installation concurrently.
+- Offer **Restart and install** or **Install on exit**, with text explaining that restarting closes Jam2, stops the jam and reopens the updated app. A ready update defaults to normal-exit installation without reopening; **Discard update** removes it. Finish saves and stop workers before installation. If the save/close prompt is cancelled, stay open with the update queued. Preparation exits once verified, so deferred updates have no process-wait timeout. Use direct replacement without backups or rollback; report failures, with manual reinstallation as the recovery path.
+- Ship a private C++ updater in `components/updater` on Windows and inside the Mac bundle. Jam2 copies it and its Qt dependencies into `temp/updater/` before launching, so it can replace the installed helper and Qt files too. Qt's native TLS backends and the statically compiled miniz reader perform all HTTP and extraction work in process; no curl, tar, PowerShell or other external command is used at runtime. Preserve user data and models, and record the version only after successful replacement.
 - Replace owned files on Windows and the whole Mac bundle. Build Windows for Intel/AMD x64 only; Windows Arm support is out of scope. Target a universal Intel/Apple Silicon Mac app, including Qt, workers, updater and ONNX Runtime. Verify HTTPS dependencies and Mac packaging/signing; advertise only validated architectures.
+
+## Manual updater testing
+
+Close other Jam2 instances, or pass `--wait-pid PID` for the GUI instance that
+will close normally after saving. The helper waits up to two minutes; it never
+kills Jam2 or its workers. Windows locked-file checks run before replacement;
+Mac packages retain executable permissions/framework links and undergo native
+code-signature verification before the bundle is replaced.
+
+For a published updater-enabled release (substitute its actual version):
+
+```powershell
+.\release\jam2.exe debug update --version 0.1.2 --restart
+```
+
+On macOS use `./release/Jam2.app/Contents/MacOS/jam2 debug update` with the same
+arguments. This explicit command downloads and installs; the GUI now provides
+startup checks, approval/progress and restart/normal-exit choices as well.
+
+To test a local package, build with `build-release` and extract the matching OS
+ZIP into `release/update/package/`, with `package-manifest.json` directly inside
+that folder. Then run:
+
+```powershell
+.\release\jam2.exe debug update --version 0.1.2 --check-staged
+.\release\jam2.exe debug update --version 0.1.2 --install-staged --restart
+```
+
+Both staged modes avoid network requests; `--check-staged` only verifies files.
+The version must match the package. Progress is written to `update/status.json`,
+details to `temp/updater/updater.log`, and the final result to `update/result.json`.
+The next GUI launch reports an unreported failure and cleans temporary runtime
+files; failure details/downloads remain under `update/` until the next attempt.
+Successful updates clean both dedicated staging folders. Existing releases
+without the bundled helper cannot serve as updater-enabled target packages.
+For a live GUI test, publish a fresh updater-enabled version for both platforms,
+refresh the website's `/version.txt`, and run an older updater-enabled build.
+Merely having the old pre-updater ZIPs published is insufficient for this test.
 
 ## Release build scripts
 

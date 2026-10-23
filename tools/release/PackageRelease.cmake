@@ -73,6 +73,7 @@ elseif(JAM2_PACKAGE_PLATFORM STREQUAL "macos")
         -always-overwrite -no-strip -no-codesign
         "-executable=${bundle}/Contents/Helpers/jamtaster-worker"
         "-executable=${bundle}/Contents/Helpers/jam2-plugin-worker"
+        "-executable=${bundle}/Contents/Helpers/jam2-updater"
         COMMAND_ERROR_IS_FATAL ANY)
     file(GLOB_RECURSE bundle_files LIST_DIRECTORIES FALSE "${bundle}/*")
     set(sign_targets "")

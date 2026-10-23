@@ -340,6 +340,24 @@ becomes available while Global Play is running, it joins on a later beat at the
 corresponding song position without resetting `1.1` or the metronome accent.
 The scheduling grid continues silently underneath while Global Play is stopped.
 
+## Application Updates
+
+Jam2 checks for updates in the background after startup. Use **Updates** in the
+header to check manually or reopen progress. An available update shows the
+version and download size before **Download update**. Downloading and verification
+do not stop the jam. Closing the progress window keeps the download running;
+**Cancel update** stops it. Closing Jam2 during an incomplete download cancels it.
+
+Once verified, **Restart and install** closes Jam2 through its normal save/close
+flow, installs the update and reopens it. **Install on exit**, or closing the
+ready-update window, lets you keep playing and applies the update when you quit
+without reopening Jam2. Cancelling a save/close prompt keeps the update ready
+for the next normal exit. **Discard update** removes a queued update.
+
+Settings, models and user content stay intact. Failures offer a new check/retry;
+installation failures are reported on the next launch. Downloads use `update/`
+and the helper/runtime copy uses `temp/updater/`, both inside the Jam2 folder.
+
 ## JamTaster WAV Analysis
 
 JamTaster is an optional WAV-analysis component. Use the **JamTaster** button on

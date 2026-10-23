@@ -5,10 +5,14 @@
 #include "SessionController.hpp"
 #include "CliEntrypoint.hpp"
 #include "BuildVersion.hpp"
+#include "UpdateLauncher.hpp"
+#include "ApplicationPaths.hpp"
 
 #include <QApplication>
 #include <QCoreApplication>
 #include <QIcon>
+#include <QMessageBox>
+#include <QTimer>
 
 #include <array>
 #include <cstdint>
@@ -215,7 +219,8 @@ void applyCustomTheme(QApplication& app)
         QPushButton[active="true"] {
             color: #160e07; background: #e8a44a; border-color: #ffd68e;
         }
-        QPushButton#SessionAction, QPushButton#DataButton, QPushButton#DetailTool {
+        QPushButton#SessionAction, QPushButton#DataButton, QPushButton#DetailTool,
+        QPushButton#Jam2UpdatesButton {
             font-family: Bahnschrift; font-size: 8.5pt; padding: 6px 9px;
         }
         QPushButton#DataButton { color: #ffd68e; border-color: #986d36; }
@@ -517,12 +522,12 @@ void applyCustomTheme(QApplication& app)
         QDialog QRadioButton::indicator:disabled {
             background: #171e1f; border-color: #3b4749;
         }
-        QProgressBar#JamTasterProgress, QProgressBar#JamTasterModelProgress {
+        QProgressBar#JamTasterProgress, QProgressBar#JamTasterModelProgress, QProgressBar#Jam2UpdateProgress {
             background: #182022; color: #f4ead8;
             border: 1px solid #465658; border-radius: 4px;
             text-align: center; min-height: 18px;
         }
-        QProgressBar#JamTasterProgress::chunk, QProgressBar#JamTasterModelProgress::chunk {
+        QProgressBar#JamTasterProgress::chunk, QProgressBar#JamTasterModelProgress::chunk, QProgressBar#Jam2UpdateProgress::chunk {
             background: #e8a44a; border-radius: 3px;
         }
         QDialog QSlider:focus {
@@ -704,6 +709,8 @@ int jam2ApplicationMain(int argc, char* argv[])
         if (std::string_view(argv[1]) == "debug") {
             QCoreApplication app(argc, argv);
             setApplicationIdentity();
+            if (argc > 2 && std::string_view(argv[2]) == "update")
+                return jam2::update::runUpdateCommand(app.arguments().mid(3));
             return jam2RunDebugCommand(argc, argv);
         }
         if (SessionController::handlesNetworkCommand(argc, argv)) {
@@ -726,5 +733,28 @@ int jam2ApplicationMain(int argc, char* argv[])
     MainWindow window;
     window.resize(1920, 1080);
     window.show();
+    window.startAutomaticUpdateCheck();
+    QTimer::singleShot(0, &window, [&window] {
+        try {
+            const QString root = appReleaseDir().absolutePath();
+            const auto result = jam2::update::readResult(root);
+            if (!result) return;
+            if (!result->success && !result->reported)
+                QMessageBox::warning(&window, QStringLiteral("Jam2 update failed"), result->error);
+            auto* cleanup = new QTimer(&window);
+            cleanup->setInterval(500);
+            auto attempts = std::make_shared<int>(0);
+            QObject::connect(cleanup, &QTimer::timeout, cleanup, [cleanup, attempts, root] {
+                try {
+                    if (jam2::update::cleanupCompleted(root) || ++*attempts >= 10) {
+                        cleanup->stop(); cleanup->deleteLater();
+                    }
+                } catch (...) { cleanup->stop(); cleanup->deleteLater(); }
+            });
+            cleanup->start();
+        } catch (const std::exception& error) {
+            QMessageBox::warning(&window, QStringLiteral("Jam2 updater"), QString::fromUtf8(error.what()));
+        }
+    });
     return app.exec();
 }
