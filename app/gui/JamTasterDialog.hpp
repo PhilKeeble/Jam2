@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <memory>
 
 class QCheckBox;
 class QLabel;
@@ -13,6 +14,9 @@ class QLineEdit;
 class QProgressBar;
 class QPushButton;
 class JamTasterService;
+class ModelDownloadService;
+class QShowEvent;
+class QNetworkAccessManager;
 
 class JamTasterDialog final : public QDialog {
 public:
@@ -31,7 +35,8 @@ public:
         QString sourceHash,
         QString displayName,
         Callbacks callbacks,
-        QWidget* parent = nullptr);
+        QWidget* parent = nullptr,
+        QNetworkAccessManager* modelNetwork = nullptr);
     ~JamTasterDialog() override;
 
     void setSourceContext(
@@ -41,6 +46,9 @@ public:
         QString displayName);
 
 private:
+    void showEvent(QShowEvent* event) override;
+    void checkModels();
+    void refreshModelState();
     void chooseSource();
     void startAction(const QString& action);
     void startPendingAction();
@@ -56,6 +64,8 @@ private:
     static QJsonObject readJson(const QString& path);
 
     JamTasterService& service_;
+    std::unique_ptr<ModelDownloadService> modelDownload_;
+    bool modelsReady_ = true;
     QString projectRoot_;
     QString sourcePath_;
     QString sourceHash_;
@@ -70,6 +80,12 @@ private:
     std::uint64_t serviceObserverId_ = 0;
 
     QLineEdit* sourceEdit_ = nullptr;
+    QWidget* modelsPanel_ = nullptr;
+    QLabel* modelsLabel_ = nullptr;
+    QProgressBar* modelsProgress_ = nullptr;
+    QPushButton* downloadModelsButton_ = nullptr;
+    QPushButton* retryModelsButton_ = nullptr;
+    QPushButton* cancelModelsButton_ = nullptr;
     QLabel* progressLabel_ = nullptr;
     QProgressBar* progressBar_ = nullptr;
     QLabel* tempoValue_ = nullptr;

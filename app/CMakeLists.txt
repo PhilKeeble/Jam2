@@ -512,6 +512,8 @@ add_executable(jam2 MACOSX_BUNDLE
     gui/LooperAssetMaterializer.hpp
     jamtaster/JamTasterService.cpp
     jamtaster/JamTasterService.hpp
+    jamtaster/ModelDownloadService.cpp
+    jamtaster/ModelDownloadService.hpp
     gui/GenerationRecipe.cpp
     gui/GenerationRecipe.hpp
     gui/DetailSectionEdit.cpp
@@ -678,8 +680,6 @@ if(WIN32)
         COMMAND "${CMAKE_COMMAND}" -E remove_directory
             "${JAM2_RELEASE_DIR}/styles"
         COMMAND "${CMAKE_COMMAND}" -E remove_directory
-            "${JAM2_RELEASE_DIR}/tls"
-        COMMAND "${CMAKE_COMMAND}" -E remove_directory
             "${JAM2_RELEASE_DIR}/translations"
         COMMAND "${CMAKE_COMMAND}" -E remove_directory
             "${JAM2_RELEASE_DIR}/multimedia"
@@ -700,9 +700,13 @@ if(WIN32)
             "${JAM2_RELEASE_DIR}"
         COMMAND "${CMAKE_COMMAND}" -E make_directory
             "${JAM2_RELEASE_DIR}/platforms"
+            "${JAM2_RELEASE_DIR}/tls"
         COMMAND "${CMAKE_COMMAND}" -E copy_if_different
             "${QT_PLUGINS_DIR}/platforms/qwindows.dll"
             "${JAM2_RELEASE_DIR}/platforms"
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "${QT_PLUGINS_DIR}/tls/qschannelbackend.dll"
+            "${JAM2_RELEASE_DIR}/tls"
         COMMAND "${CMAKE_COMMAND}" -E copy_if_different
             "${CMAKE_CURRENT_SOURCE_DIR}/platform/qt.conf"
             "${JAM2_RELEASE_DIR}/qt.conf"

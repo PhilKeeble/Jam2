@@ -979,13 +979,14 @@ endif()
 add_executable(jam2_jamtaster_dialog_tests EXCLUDE_FROM_ALL
     unit/gui/JamTasterDialogBoundaryTests.cpp
     "${CMAKE_SOURCE_DIR}/app/gui/JamTasterDialog.cpp"
+    "${CMAKE_SOURCE_DIR}/app/jamtaster/ModelDownloadService.cpp"
     "${CMAKE_SOURCE_DIR}/app/jamtaster/JamTasterService.cpp")
 jam2_configure_test_target(jam2_jamtaster_dialog_tests)
 target_include_directories(jam2_jamtaster_dialog_tests PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/support"
     "${CMAKE_SOURCE_DIR}/app/gui"
     "${CMAKE_SOURCE_DIR}/app/jamtaster")
-target_link_libraries(jam2_jamtaster_dialog_tests PRIVATE Qt6::Core Qt6::Widgets)
+target_link_libraries(jam2_jamtaster_dialog_tests PRIVATE Qt6::Core Qt6::Widgets Qt6::Network)
 add_dependencies(jam2_jamtaster_dialog_tests jam2_jamtaster_service_worker)
 add_test(NAME jam2_jamtaster_dialog_units
     COMMAND $<TARGET_FILE:jam2_jamtaster_dialog_tests>
@@ -998,6 +999,26 @@ if(WIN32)
     set_tests_properties(jam2_jamtaster_dialog_units PROPERTIES
         ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Widgets>")
+endif()
+
+add_executable(jam2_jamtaster_model_download_tests EXCLUDE_FROM_ALL
+    unit/jamtaster/ModelDownloadTests.cpp
+    "${CMAKE_SOURCE_DIR}/app/jamtaster/ModelDownloadService.cpp"
+    "${CMAKE_SOURCE_DIR}/app/jamtaster/JamTasterService.cpp"
+    "${CMAKE_SOURCE_DIR}/app/gui/JamTasterDialog.cpp")
+jam2_configure_test_target(jam2_jamtaster_model_download_tests)
+target_include_directories(jam2_jamtaster_model_download_tests PRIVATE
+    "${CMAKE_SOURCE_DIR}/app/jamtaster" "${CMAKE_SOURCE_DIR}/app/gui")
+target_link_libraries(jam2_jamtaster_model_download_tests PRIVATE Qt6::Core Qt6::Widgets Qt6::Network)
+add_test(NAME jam2_jamtaster_model_download_units
+    COMMAND $<TARGET_FILE:jam2_jamtaster_model_download_tests>
+        "${CMAKE_COMMAND}" "${CMAKE_BINARY_DIR}/test-artifacts")
+set_tests_properties(jam2_jamtaster_model_download_units PROPERTIES
+    LABELS "unit;gui;jamtaster;model;download" TIMEOUT 90
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+if(WIN32)
+    set_tests_properties(jam2_jamtaster_model_download_units PROPERTIES
+        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Widgets>")
 endif()
 
 add_executable(jam2_jamtaster_project_support_tests EXCLUDE_FROM_ALL
@@ -1562,6 +1583,7 @@ add_custom_target(jam2_tests_unit
         jam2_jamtaster_worker_protocol_tests
         jam2_jamtaster_service_tests
         jam2_jamtaster_dialog_tests
+        jam2_jamtaster_model_download_tests
         jam2_jamtaster_project_support_tests)
 
 if(APPLE)
@@ -1607,6 +1629,7 @@ add_custom_target(jam2_tests_gui
         jam2_recording_calibration_tests
         jam2_detail_section_edit_tests
         jam2_jamtaster_dialog_tests
+        jam2_jamtaster_model_download_tests
         jam2_jamtaster_project_support_tests
         jam2_four_gui_agent_smoke
         jam2_four_gui_modal_integration

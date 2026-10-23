@@ -1,6 +1,7 @@
 #include "JamTasterDialog.hpp"
 
 #include "../jamtaster/JamTasterService.hpp"
+#include "../jamtaster/ModelDownloadService.hpp"
 
 #include <QCheckBox>
 #include <QDialogButtonBox>
@@ -19,6 +20,8 @@
 #include <QProgressBar>
 #include <QPushButton>
 #include <QScrollArea>
+#include <QShowEvent>
+#include <QTimer>
 #include <QVBoxLayout>
 
 #include <utility>
@@ -30,7 +33,8 @@ JamTasterDialog::JamTasterDialog(
     QString sourceHash,
     QString displayName,
     Callbacks callbacks,
-    QWidget* parent)
+    QWidget* parent,
+    QNetworkAccessManager* modelNetwork)
     : QDialog(parent)
     , service_(service)
     , projectRoot_(std::move(projectRoot))
@@ -57,6 +61,46 @@ JamTasterDialog::JamTasterDialog(
         content);
     introduction->setWordWrap(true);
     layout->addWidget(introduction);
+
+    modelDownload_ = std::make_unique<ModelDownloadService>(
+        service_.installationRoot(), service_.modelsPath(), nullptr, modelNetwork);
+    auto* modelsBox = new QGroupBox(QStringLiteral("JamTaster models"), content);
+    modelsPanel_ = modelsBox;
+    auto* modelsLayout = new QVBoxLayout(modelsBox);
+    modelsLabel_ = new QLabel(modelsBox);
+    modelsLabel_->setObjectName(QStringLiteral("JamTasterModelsStatus"));
+    modelsLabel_->setWordWrap(true);
+    modelsProgress_ = new QProgressBar(modelsBox);
+    modelsProgress_->setObjectName(QStringLiteral("JamTasterModelProgress"));
+    auto* modelButtons = new QHBoxLayout;
+    downloadModelsButton_ = new QPushButton(QStringLiteral("Download models"), modelsBox);
+    downloadModelsButton_->setObjectName(QStringLiteral("JamTasterDownloadModels"));
+    retryModelsButton_ = new QPushButton(QStringLiteral("Retry"), modelsBox);
+    retryModelsButton_->setObjectName(QStringLiteral("JamTasterRetryModels"));
+    cancelModelsButton_ = new QPushButton(QStringLiteral("Cancel download"), modelsBox);
+    cancelModelsButton_->setObjectName(QStringLiteral("JamTasterCancelModels"));
+    modelButtons->addWidget(downloadModelsButton_);
+    modelButtons->addWidget(retryModelsButton_);
+    modelButtons->addWidget(cancelModelsButton_);
+    modelButtons->addStretch();
+    modelsLayout->addWidget(modelsLabel_);
+    modelsLayout->addWidget(modelsProgress_);
+    modelsLayout->addLayout(modelButtons);
+    layout->addWidget(modelsBox);
+    modelsBox->hide();
+    connect(downloadModelsButton_, &QPushButton::clicked, this, [this] {
+        const auto answer = QMessageBox::question(this, QStringLiteral("Download JamTaster models"),
+            QStringLiteral("Download %1 MB of analysis models now?\n\n"
+                "Models are saved inside this Jam2 folder. Your jam can keep playing. "
+                "Closing JamTaster cancels the download.")
+                .arg(static_cast<double>(modelDownload_->downloadBytes()) / 1'000'000.0, 0, 'f', 1),
+            QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Yes);
+        if (answer == QMessageBox::Yes) modelDownload_->download();
+    });
+    connect(retryModelsButton_, &QPushButton::clicked, this, &JamTasterDialog::checkModels);
+    connect(cancelModelsButton_, &QPushButton::clicked, this, [this] { modelDownload_->cancel(); });
+    modelDownload_->statusChanged = [this] { refreshModelState(); };
+    connect(this, &QDialog::finished, this, [this] { modelDownload_->cancel(); });
 
     auto* sourceBox = new QGroupBox(QStringLiteral("Source WAV"), content);
     auto* sourceLayout = new QVBoxLayout(sourceBox);
@@ -256,7 +300,58 @@ JamTasterDialog::JamTasterDialog(
 
 JamTasterDialog::~JamTasterDialog()
 {
+    modelDownload_->statusChanged = {};
     service_.removeObserver(serviceObserverId_);
+}
+
+void JamTasterDialog::showEvent(QShowEvent* event)
+{
+    QDialog::showEvent(event);
+    QTimer::singleShot(0, this, [this] { if (isVisible()) checkModels(); });
+}
+
+void JamTasterDialog::checkModels()
+{
+    if (service_.taskActive() || modelDownload_->busy()) return;
+    if (!QFileInfo(service_.workerPath()).isFile()) {
+        modelsPanel_->show();
+        modelsLabel_->setText(service_.bundleStatus() +
+            QStringLiteral(" You can close JamTaster and continue the jam."));
+        modelsProgress_->hide();
+        downloadModelsButton_->hide();
+        cancelModelsButton_->hide();
+        retryModelsButton_->show();
+        return;
+    }
+    // Existing injected development/test bundles can supply their own models
+    // without a release manifest. Missing models always require pinned metadata.
+    if (!QFileInfo(QDir(service_.installationRoot()).filePath(QStringLiteral("models.json"))).exists() &&
+        service_.isAvailable()) return;
+    modelsReady_ = false;
+    modelDownload_->check();
+    refreshResultsUi();
+}
+
+void JamTasterDialog::refreshModelState()
+{
+    using State = ModelDownloadService::State;
+    const auto& status = modelDownload_->status();
+    modelsReady_ = status.state == State::Ready;
+    modelsPanel_->setVisible(status.state != State::Idle);
+    modelsLabel_->setText(status.message);
+    modelsProgress_->setVisible(status.state != State::Failed && status.state != State::Cancelled &&
+        status.state != State::AwaitingApproval);
+    modelsProgress_->setRange(0, status.percent < 0 ? 0 : 100);
+    if (status.percent >= 0) modelsProgress_->setValue(status.percent);
+    downloadModelsButton_->setVisible(status.state == State::AwaitingApproval);
+    retryModelsButton_->setVisible(status.state == State::Failed || status.state == State::Cancelled);
+    retryModelsButton_->setEnabled(!modelDownload_->busy());
+    cancelModelsButton_->setVisible(status.state == State::Checking ||
+        status.state == State::FetchingMetadata || status.state == State::Downloading ||
+        status.state == State::Installing);
+    cancelModelsButton_->setText(status.state == State::Downloading
+        ? QStringLiteral("Cancel download") : QStringLiteral("Cancel setup"));
+    refreshResultsUi();
 }
 
 void JamTasterDialog::setSourceContext(
@@ -302,6 +397,7 @@ void JamTasterDialog::chooseSource()
 
 void JamTasterDialog::startAction(const QString& action)
 {
+    if (!modelsReady_ || modelDownload_->busy()) return;
     if (!QFileInfo(sourcePath_).isFile()) {
         chooseSource();
         if (!QFileInfo(sourcePath_).isFile()) return;
@@ -455,9 +551,10 @@ bool JamTasterDialog::loadFullAnalysis(const QString& convertedSong)
 void JamTasterDialog::refreshResultsUi()
 {
     const bool running = service_.taskActive();
-    analyzeButton_->setEnabled(!running);
-    bpmButton_->setEnabled(!running);
-    stemsButton_->setEnabled(!running);
+    const bool canAnalyze = !running && modelsReady_ && !modelDownload_->busy();
+    analyzeButton_->setEnabled(canAnalyze);
+    bpmButton_->setEnabled(canAnalyze);
+    stemsButton_->setEnabled(canAnalyze);
 
     const bool hasTempo = !tempoResult_.isEmpty();
     const bool hasStems = !stemsResult_.isEmpty();
@@ -497,7 +594,8 @@ void JamTasterDialog::refreshResultsUi()
     applySelectedButton_->setEnabled(
         (!convertedSong_.isEmpty() || hasQuickResult) && hasSelection && !running);
     createSongButton_->setEnabled(
-        (!convertedSong_.isEmpty() || hasQuickResult) && !running);
+        (!convertedSong_.isEmpty() || hasQuickResult) && !running &&
+        (!convertedSong_.isEmpty() || canAnalyze));
 }
 
 QJsonObject JamTasterDialog::readJson(const QString& path)

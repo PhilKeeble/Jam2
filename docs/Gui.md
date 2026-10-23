@@ -353,10 +353,14 @@ analysis with it.
 Saved results can be applied independently: set the project tempo/grid, add the
 four stems to normal `imported/` lanes, apply selected musical data and
 arrangement to the current jam, or create a separate JamJar song. JamTaster's
-native worker, CPU inference runtime, and model weights are bundled with Jam2;
-there is no separate install, health check, repair, download, Python environment
-or CUDA package to manage. Analysis runs outside the Jam2 process and uses the
-available processor cores.
+native worker and CPU inference runtime are bundled with Jam2. Opening the dialog
+checks the models. Missing or damaged models offer **Download models** with the
+download size, an approval popup and progress through download, verification and
+installation. Failures show a brief error and **Retry**; **Close** cancels model
+setup and returns to the jam. Checks, downloads and extraction do not block the
+GUI or stop playback. Models and temporary files stay inside the Jam2 folder.
+No Python environment or CUDA package is needed. Analysis runs outside the Jam2
+process and uses the available processor cores.
 
 Analysis is owned by the main Jam2 window, so closing the JamTaster dialog does
 not stop the task or discard a queued analysis. Live

@@ -34,6 +34,7 @@ public:
     void removeObserver(std::uint64_t id);
 
     QString bundleRoot() const;
+    QString installationRoot() const;
     QString workerPath() const;
     QString modelsPath() const;
     QString bundleStatus() const;

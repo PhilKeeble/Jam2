@@ -45,6 +45,13 @@ foreach(model IN LISTS JAMTASTER_MODEL_FILES)
     endif()
 endforeach()
 list(SORT JAM2_PACKAGE_MODEL_NAMES)
+include("${CMAKE_SOURCE_DIR}/tools/release/ModelManifest.cmake")
+foreach(model IN LISTS JAM2_PACKAGE_MODEL_NAMES)
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+        "${CMAKE_SOURCE_DIR}/app/jamtaster/models/${model}.json")
+endforeach()
+jam2_write_model_manifest("${CMAKE_SOURCE_DIR}" "${JAM2_PACKAGE_MODEL_NAMES}"
+    "${JAM2_RELEASE_DIR}/models.json")
 list(REMOVE_DUPLICATES JAM2_PACKAGE_APP_FILES)
 configure_file("${CMAKE_SOURCE_DIR}/tools/release/release-package.cmake.in"
     "${CMAKE_BINARY_DIR}/release-package.cmake" @ONLY)

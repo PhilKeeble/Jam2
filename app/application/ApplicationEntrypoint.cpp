@@ -517,12 +517,12 @@ void applyCustomTheme(QApplication& app)
         QDialog QRadioButton::indicator:disabled {
             background: #171e1f; border-color: #3b4749;
         }
-        QProgressBar#JamTasterProgress {
+        QProgressBar#JamTasterProgress, QProgressBar#JamTasterModelProgress {
             background: #182022; color: #f4ead8;
             border: 1px solid #465658; border-radius: 4px;
             text-align: center; min-height: 18px;
         }
-        QProgressBar#JamTasterProgress::chunk {
+        QProgressBar#JamTasterProgress::chunk, QProgressBar#JamTasterModelProgress::chunk {
             background: #e8a44a; border-radius: 3px;
         }
         QDialog QSlider:focus {

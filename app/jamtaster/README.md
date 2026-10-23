@@ -6,10 +6,20 @@ a model/runtime failure cannot bring down a live Jam2 process.
 
 The application release contains the worker and ONNX Runtime. Model weights are
 distributed separately as `Jam2-models.zip`, containing just a `models/` folder
-with weights, sidecars and model notices. Extract it into `components/jamtaster/`
-inside the Jam2 folder on both Windows and macOS. The required model release URL
-and file hashes are recorded in the application ZIP's `models.json`. The in-app model downloader is planned;
-it is not implemented yet. Analysis does not use Python, pip, PyTorch or CUDA.
+with weights, sidecars and model notices. Opening JamTaster checks the installed
+weights against the pinned `models.json`. Missing or damaged models offer
+**Download models**, showing the compressed size before approval, followed by
+download, verification and installation progress. Metadata requests and downloads
+are asynchronous; hashing and extraction use a low-priority worker thread.
+Failures offer Retry; closing the dialog cancels setup and leaves the jam running.
+Models are installed under `components/jamtaster/models/` on Windows and macOS.
+One reusable `temp/jamtaster-models/` folder holds partial downloads and extraction
+and is removed after completion, cancellation or failure. A lock protects setup
+from another Jam2 instance. SHA-256 checks cover the ZIP and every weight; archive
+entries are checked before extraction, and all weights verify before installation.
+Manual installation can extract the pinned ZIP into `components/jamtaster/`.
+Ordinary compiles and release packaging generate the same root `models.json`.
+Analysis does not use Python, pip, PyTorch or CUDA.
 Inference is CPU-only and uses the machine's available hardware threads.
 
 ## Runtime boundary
