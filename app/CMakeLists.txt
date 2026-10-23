@@ -18,13 +18,10 @@ if(NOT Qt6_FOUND)
 endif()
 
 if(APPLE AND "arm64" IN_LIST CMAKE_OSX_ARCHITECTURES AND "x86_64" IN_LIST CMAKE_OSX_ARCHITECTURES)
+    include("${CMAKE_CURRENT_SOURCE_DIR}/../tools/release/VerifyMacArchitectures.cmake")
     foreach(qt_component IN ITEMS Core Gui Widgets Network)
         get_target_property(qt_binary Qt6::${qt_component} LOCATION)
-        execute_process(COMMAND /usr/bin/lipo -verify_arch arm64 x86_64 "${qt_binary}"
-            RESULT_VARIABLE qt_architecture_result OUTPUT_QUIET ERROR_QUIET)
-        if(NOT qt_architecture_result EQUAL 0)
-            message(FATAL_ERROR "Universal Mac releases require universal Qt libraries. Set QT_DIR to an Intel/Apple Silicon Qt installation; ${qt_component} is missing an architecture.")
-        endif()
+        jam2_require_universal_macos("${qt_binary}")
     endforeach()
 endif()
 

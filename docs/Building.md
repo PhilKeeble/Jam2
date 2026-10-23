@@ -121,6 +121,21 @@ Homebrew Qt is detected automatically. To use another Qt installation, set
 QT_DIR="$HOME/Qt/6.x/macos" bash ./compile.sh
 ```
 
+macOS release packages require Qt libraries containing both `arm64` and
+`x86_64`. Homebrew's native Qt installation is suitable for development on
+this Mac but cannot supply both architectures for a universal release. Install
+the macOS desktop kit with the [Qt Online Installer](https://doc.qt.io/qt-6/macos-installation.html)
+and select its prefix explicitly:
+
+```bash
+QT_DIR="$HOME/Qt/6.x/macos" bash ./build-release.sh --version 0.1.1 --publish
+```
+
+Replace `6.x` with the installed version. When switching an existing build
+between Homebrew and another Qt installation, clear CMake's cached Qt selection
+once with `cmake --fresh -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$HOME/Qt/6.x/macos"`
+before running the release script.
+
 Developers who need to invoke CMake directly can use the Homebrew Qt prefix:
 
 ```bash

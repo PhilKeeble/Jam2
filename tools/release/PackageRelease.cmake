@@ -59,6 +59,7 @@ if(JAM2_PACKAGE_PLATFORM STREQUAL "windows")
     copy_runtime("${JAM2_PACKAGE_TLS_SOURCE}" "${JAM2_PACKAGE_RELEASE}/tls/qschannelbackend.dll")
     set(executable "${JAM2_PACKAGE_RELEASE}/jam2.exe")
 elseif(JAM2_PACKAGE_PLATFORM STREQUAL "macos")
+    include("${CMAKE_CURRENT_LIST_DIR}/VerifyMacArchitectures.cmake")
     set(bundle "${JAM2_PACKAGE_RELEASE}/Jam2.app")
     set(executable "${bundle}/Contents/MacOS/jam2")
     if(NOT JAM2_SIGN_IDENTITY)
@@ -69,19 +70,22 @@ elseif(JAM2_PACKAGE_PLATFORM STREQUAL "macos")
         message(FATAL_ERROR "The existing Qt installation must provide macdeployqt for a self-contained Mac bundle")
     endif()
     execute_process(COMMAND "${JAM2_PACKAGE_QT_BIN}/macdeployqt" "${bundle}"
-        -always-overwrite -no-strip "-codesign=${JAM2_SIGN_IDENTITY}"
+        -always-overwrite -no-strip -no-codesign
         "-executable=${bundle}/Contents/Helpers/jamtaster-worker"
         "-executable=${bundle}/Contents/Helpers/jam2-plugin-worker"
         COMMAND_ERROR_IS_FATAL ANY)
     file(GLOB_RECURSE bundle_files LIST_DIRECTORIES FALSE "${bundle}/*")
+    set(sign_targets "")
     foreach(binary IN LISTS bundle_files)
         execute_process(COMMAND /usr/bin/file -b "${binary}" OUTPUT_VARIABLE kind
             COMMAND_ERROR_IS_FATAL ANY)
         if(kind MATCHES "Mach-O")
-            execute_process(COMMAND /usr/bin/lipo -verify_arch arm64 x86_64 "${binary}"
-                RESULT_VARIABLE architecture_result)
-            if(NOT architecture_result EQUAL 0)
-                message(FATAL_ERROR "Mac release requires both architectures in ${binary}. Use a universal Qt installation (QT_DIR).")
+            jam2_require_universal_macos("${binary}")
+            if(binary MATCHES "^(.+\\.framework)/")
+                # Sign the framework bundle, including its resource seal.
+                list(APPEND sign_targets "${CMAKE_MATCH_1}")
+            elseif(NOT binary STREQUAL executable)
+                list(APPEND sign_targets "${binary}")
             endif()
             execute_process(COMMAND /usr/bin/otool -L "${binary}" OUTPUT_VARIABLE dependencies
                 COMMAND_ERROR_IS_FATAL ANY)
@@ -96,6 +100,17 @@ elseif(JAM2_PACKAGE_PLATFORM STREQUAL "macos")
             endforeach()
         endif()
     endforeach()
+    # Qt deployment does not sign our Contents/Helpers executables. Sign all
+    # nested code after deployment has finished rewriting library paths, then
+    # sign the enclosing app. Descending paths put nested bundles first.
+    list(REMOVE_DUPLICATES sign_targets)
+    list(SORT sign_targets ORDER DESCENDING)
+    foreach(sign_target IN LISTS sign_targets)
+        execute_process(COMMAND /usr/bin/codesign --force --sign "${JAM2_SIGN_IDENTITY}" "${sign_target}"
+            COMMAND_ERROR_IS_FATAL ANY)
+    endforeach()
+    execute_process(COMMAND /usr/bin/codesign --force --sign "${JAM2_SIGN_IDENTITY}" "${bundle}"
+        COMMAND_ERROR_IS_FATAL ANY)
     execute_process(COMMAND /usr/bin/codesign --verify --deep --strict "${bundle}"
         COMMAND_ERROR_IS_FATAL ANY)
 else()

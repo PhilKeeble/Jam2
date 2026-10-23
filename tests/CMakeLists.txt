@@ -61,6 +61,20 @@ if(WIN32)
         ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
 endif()
 
+if(APPLE)
+    add_executable(jam2_mac_release_architecture_tests EXCLUDE_FROM_ALL
+        unit/build/MacReleaseArchitectureTests.cpp)
+    jam2_configure_test_target(jam2_mac_release_architecture_tests)
+    target_link_libraries(jam2_mac_release_architecture_tests PRIVATE Qt6::Core)
+    add_test(NAME jam2_mac_release_architecture_units
+        COMMAND $<TARGET_FILE:jam2_mac_release_architecture_tests>
+            "${CMAKE_COMMAND}" "${CMAKE_C_COMPILER}"
+            "${CMAKE_SOURCE_DIR}/tools/release/VerifyMacArchitectures.cmake"
+            "${CMAKE_BINARY_DIR}/test-artifacts")
+    set_tests_properties(jam2_mac_release_architecture_units PROPERTIES
+        LABELS "unit;build;release" TIMEOUT 60)
+endif()
+
 add_executable(jam2_audio_flow_interaction_tests EXCLUDE_FROM_ALL
     integration/network/AudioFlowInteractionTests.cpp)
 jam2_configure_test_target(jam2_audio_flow_interaction_tests)
@@ -1551,7 +1565,8 @@ add_custom_target(jam2_tests_unit
         jam2_jamtaster_project_support_tests)
 
 if(APPLE)
-    add_dependencies(jam2_tests_unit jam2_coreaudio_recording_timing_tests)
+    add_dependencies(jam2_tests_unit jam2_coreaudio_recording_timing_tests
+        jam2_mac_release_architecture_tests)
 endif()
 
 add_custom_target(jam2_tests_plugin
