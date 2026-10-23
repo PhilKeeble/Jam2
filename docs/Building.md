@@ -21,6 +21,17 @@ Git pull, download and verify the current LFS objects, and preserve existing
 local changes. They stop with an error instead of automatically merging a
 diverged branch or discarding local work.
 
+## Release packages
+
+For distribution, use `build-release.ps1 --version 0.8.1` on Windows or
+`bash build-release.sh --version 0.8.1` on macOS. Add `--include-models` to also
+create the separate model archive. Outputs go to `dist/`. Add `--publish` with
+an explicit version to create/reuse the GitHub releases and upload the assets;
+this requires GitHub CLI and a one-time `gh auth login` on each machine.
+See [RELEASE.md](../RELEASE.md) for the ZIP layouts, metadata, universal Mac
+dependencies and optional signing. The release version override does not edit
+the source checkout. Ordinary compile commands retain the development version.
+
 ## Windows
 
 Required tools:

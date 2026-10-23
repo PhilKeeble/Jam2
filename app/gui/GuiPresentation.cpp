@@ -5,13 +5,10 @@
 #include <QApplication>
 #include <QClipboard>
 #include <QComboBox>
-#include <QCoreApplication>
 #include <QDialog>
 #include <QDialogButtonBox>
-#include <QDir>
 #include <QEvent>
 #include <QFileDialog>
-#include <QFileInfo>
 #include <QGuiApplication>
 #include <QLabel>
 #include <QLayout>
@@ -231,77 +228,6 @@ FocusPreset focusPresetForKey(const QString& key)
         return {3200.0, 10.0, 3.5};
     }
     return {120.0, 12.0, 6.0};
-}
-
-QString& appReleaseRootOverride()
-{
-    static QString path;
-    return path;
-}
-
-QDir appReleaseDir()
-{
-    if (!appReleaseRootOverride().isEmpty()) {
-        return QDir(appReleaseRootOverride());
-    }
-    QDir appDir(QCoreApplication::applicationDirPath());
-
-    QDir bundleDir(appDir);
-    if (bundleDir.dirName() == QStringLiteral("MacOS") &&
-        bundleDir.cdUp() &&
-        bundleDir.dirName() == QStringLiteral("Contents") &&
-        bundleDir.cdUp() &&
-        bundleDir.dirName().endsWith(QStringLiteral(".app")) &&
-        bundleDir.cdUp()) {
-        return bundleDir;
-    }
-
-    if (appDir.dirName() == QStringLiteral("release")) {
-        return appDir;
-    }
-
-    QDir probe(appDir);
-    while (true) {
-        if (probe.exists(QStringLiteral("release"))) {
-            return QDir(probe.absoluteFilePath(QStringLiteral("release")));
-        }
-        if (!probe.cdUp()) {
-            break;
-        }
-    }
-
-    return appDir;
-}
-
-bool setAppReleaseRootForTesting(const QString& path, QString& error)
-{
-    error.clear();
-    const QFileInfo info(path);
-    if (!info.isAbsolute()) {
-        error = QStringLiteral("test storage root must be absolute");
-        return false;
-    }
-    const QString clean = QDir::cleanPath(info.absoluteFilePath());
-    if (clean.isEmpty() || !QDir().mkpath(clean)) {
-        error = QStringLiteral("test storage root could not be created");
-        return false;
-    }
-    appReleaseRootOverride() = clean;
-    return true;
-}
-
-QString appReleaseFilePath(const QString& folder, const QString& fileName)
-{
-    QDir dir = appReleaseDir();
-    dir.mkpath(folder);
-    return dir.absoluteFilePath(folder + QLatin1Char('/') + fileName);
-}
-
-QString appReleaseFolderPath(const QString& folder)
-{
-    QDir dir = appReleaseDir();
-    dir.mkpath(folder);
-    return dir.absoluteFilePath(folder);
 }
 
 bool isCustomFocusPreset(const QString& key)

@@ -4,6 +4,7 @@
 #include "MainWindow.hpp"
 #include "SessionController.hpp"
 #include "CliEntrypoint.hpp"
+#include "BuildVersion.hpp"
 
 #include <QApplication>
 #include <QCoreApplication>
@@ -660,6 +661,7 @@ void setApplicationIdentity()
 {
     QCoreApplication::setApplicationName(QStringLiteral("Jam2"));
     QCoreApplication::setOrganizationName(QStringLiteral("Jam2"));
+    QCoreApplication::setApplicationVersion(QString::fromLatin1(jam2::kVersion));
 }
 
 } // namespace
@@ -685,6 +687,10 @@ int jam2ApplicationMain(int argc, char* argv[])
     if (hasAutomationHandle && !debugRun && !debugGuiAgent) {
         std::cerr << "automation handles are accepted only by an explicitly reactive debug command\n";
         return 2;
+    }
+    if (argc == 2 && std::string_view(argv[1]) == "--version") {
+        std::cout << "Jam2 " << jam2::kVersion << '\n';
+        return 0;
     }
     if (argc > 1) {
         if (debugGuiAgent) {

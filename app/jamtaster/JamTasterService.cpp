@@ -1,4 +1,5 @@
 #include "JamTasterService.hpp"
+#include "../application/ApplicationPaths.hpp"
 
 #include <QCoreApplication>
 #include <QDir>
@@ -125,6 +126,9 @@ QString JamTasterService::workerPath() const
 
 QString JamTasterService::modelsPath() const
 {
+    if (bundleRootOverride_.isEmpty()) {
+        return appReleaseFolderPath(QStringLiteral("components/jamtaster/models"));
+    }
     return QDir(bundleRoot()).absoluteFilePath(QStringLiteral("models"));
 }
 

@@ -24,6 +24,7 @@ Usage:
   jam2 <command> [options]
 
 Commands:
+  --version                         Print the compiled application version
   list-devices                      List available low-latency audio devices
   test-device <id>                  Test supported sample rates and buffers
   local                             Run the local audio engine without networking

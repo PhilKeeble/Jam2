@@ -1,4 +1,5 @@
 #include "InputPluginBackend.hpp"
+#include "ApplicationPaths.hpp"
 
 #include "PluginHostService.hpp"
 
@@ -175,7 +176,15 @@ public:
         if (pluginPath.isEmpty()) return false;
 
         const QString workerPath = pluginhost::PluginHostService::workerExecutablePath();
-        const QString resultPath = QDir::temp().absoluteFilePath(
+        const QDir temporary(appReleaseFolderPath(QStringLiteral("temp")));
+        if (!temporary.exists()) {
+            const QString error = QStringLiteral("Could not create Jam2's temporary scan folder: %1")
+                .arg(temporary.absolutePath());
+            if (progress) progress(0, error);
+            else QMessageBox::warning(&parent, QStringLiteral("Input plugin"), error);
+            return false;
+        }
+        const QString resultPath = temporary.absoluteFilePath(
             QStringLiteral("jam2-vst3-probe-%1.txt")
                 .arg(QUuid::createUuid().toString(QUuid::WithoutBraces)));
         if (progress) progress(-1, QStringLiteral("Scanning VST3 in an isolated process…"));

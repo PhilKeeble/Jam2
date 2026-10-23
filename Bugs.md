@@ -67,3 +67,7 @@ https://www.youtube.com/watch?v=VagWXGotYRg - metal synth sounds - 28 mins, infe
 
 https://www.youtube.com/watch?v=_ertZZTaN3k - 4 mins in - trap
 
+# Tweaks
+
+Naming peers in a jam 
+friends type system 

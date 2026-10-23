@@ -1,8 +1,11 @@
 #include "UserPreferences.hpp"
+#include "../application/ApplicationPaths.hpp"
 #include "tuning_profile.hpp"
 
+#include <QDebug>
 #include <QDir>
 #include <QDateTime>
+#include <QFile>
 #include <QFileInfo>
 #include <QSettings>
 #include <QStandardPaths>
@@ -339,8 +342,7 @@ QString UserPreferencesStore::filePath()
     if (!preferencesFilePathOverride().isEmpty()) {
         return preferencesFilePathOverride();
     }
-    const QString root = QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation);
-    return QDir(root).filePath(QStringLiteral("preferences.ini"));
+    return appReleaseFilePath(QStringLiteral("settings"), QStringLiteral("preferences.ini"));
 }
 
 bool UserPreferencesStore::setFilePathForTesting(const QString& path, QString& error)
@@ -364,7 +366,22 @@ bool UserPreferencesStore::setFilePathForTesting(const QString& path, QString& e
 UserPreferences UserPreferencesStore::load()
 {
     UserPreferences out;
-    QSettings settings(filePath(), QSettings::IniFormat);
+    const QString path = filePath();
+    // Preserve existing users' preferences once, without replacing a portable
+    // INI or reading the user's profile when a test has isolated its storage.
+    if (preferencesFilePathOverride().isEmpty() && appReleaseRootOverride().isEmpty() &&
+        !QFileInfo::exists(path)) {
+        const QString legacyPath = QDir(QStandardPaths::writableLocation(
+            QStandardPaths::AppConfigLocation)).filePath(QStringLiteral("preferences.ini"));
+        if (QFileInfo(legacyPath).isFile()) {
+            QFile legacy(legacyPath);
+            if (!legacy.rename(path)) {
+                qWarning().noquote() << "Could not move preferences from" << legacyPath
+                    << "to" << path << ':' << legacy.errorString();
+            }
+        }
+    }
+    QSettings settings(path, QSettings::IniFormat);
     const int schemaVersion = settings.value(QStringLiteral("schema_version"), 1).toInt();
     if (schemaVersion < 1 || schemaVersion > UserPreferences::kSchemaVersion) {
         return out;

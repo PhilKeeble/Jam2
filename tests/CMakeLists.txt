@@ -41,6 +41,26 @@ if(WIN32)
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
 endif()
 
+add_executable(jam2_release_packaging_tests EXCLUDE_FROM_ALL
+    unit/build/ReleasePackagingTests.cpp)
+jam2_configure_test_target(jam2_release_packaging_tests)
+target_link_libraries(jam2_release_packaging_tests PRIVATE Qt6::Core)
+add_dependencies(jam2_release_packaging_tests jam2)
+add_test(NAME jam2_release_packaging_units
+    COMMAND $<TARGET_FILE:jam2_release_packaging_tests>
+        "${CMAKE_COMMAND}" "${CMAKE_BINARY_DIR}/release-package.cmake"
+        "${CMAKE_SOURCE_DIR}/tools/release/PackageRelease.cmake"
+        "${JAM2_TEST_PUBLIC_EXECUTABLE}" "${PROJECT_VERSION}")
+set_tests_properties(jam2_release_packaging_units PROPERTIES LABELS "unit;build;release" TIMEOUT 180)
+if(APPLE AND NOT ("arm64" IN_LIST CMAKE_OSX_ARCHITECTURES AND "x86_64" IN_LIST CMAKE_OSX_ARCHITECTURES))
+    # Ordinary native Mac development builds do not satisfy the universal ZIP contract.
+    set_tests_properties(jam2_release_packaging_units PROPERTIES DISABLED TRUE)
+endif()
+if(WIN32)
+    set_tests_properties(jam2_release_packaging_units PROPERTIES
+        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
+endif()
+
 add_executable(jam2_audio_flow_interaction_tests EXCLUDE_FROM_ALL
     integration/network/AudioFlowInteractionTests.cpp)
 jam2_configure_test_target(jam2_audio_flow_interaction_tests)
@@ -1485,6 +1505,7 @@ endforeach()
 add_custom_target(jam2_tests_unit
     DEPENDS
         jam2_release_build_configuration_tests
+        jam2_release_packaging_tests
         jam2
         jam2_automation_contract_tests
         jam2_jam_sync_policy_tests

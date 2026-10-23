@@ -17,6 +17,17 @@ if(NOT Qt6_FOUND)
     )
 endif()
 
+if(APPLE AND "arm64" IN_LIST CMAKE_OSX_ARCHITECTURES AND "x86_64" IN_LIST CMAKE_OSX_ARCHITECTURES)
+    foreach(qt_component IN ITEMS Core Gui Widgets Network)
+        get_target_property(qt_binary Qt6::${qt_component} LOCATION)
+        execute_process(COMMAND /usr/bin/lipo -verify_arch arm64 x86_64 "${qt_binary}"
+            RESULT_VARIABLE qt_architecture_result OUTPUT_QUIET ERROR_QUIET)
+        if(NOT qt_architecture_result EQUAL 0)
+            message(FATAL_ERROR "Universal Mac releases require universal Qt libraries. Set QT_DIR to an Intel/Apple Silicon Qt installation; ${qt_component} is missing an architecture.")
+        endif()
+    endforeach()
+endif()
+
 if(APPLE)
     add_library(jam2_mac_loopback STATIC
         gui/MacLoopbackCapture.hpp
@@ -274,7 +285,18 @@ if(NOT JAMTASTER_ONNXRUNTIME_ROOT)
         set(JAMTASTER_ONNXRUNTIME_ROOT
             "${CMAKE_CURRENT_SOURCE_DIR}/../libs/third_party/onnxruntime/windows-x64")
     elseif(APPLE)
-        if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$")
+        if("arm64" IN_LIST CMAKE_OSX_ARCHITECTURES AND "x86_64" IN_LIST CMAKE_OSX_ARCHITECTURES)
+            set(JAMTASTER_ONNXRUNTIME_ROOT "${CMAKE_BINARY_DIR}/universal-onnxruntime")
+            file(MAKE_DIRECTORY "${JAMTASTER_ONNXRUNTIME_ROOT}/lib")
+            execute_process(COMMAND /usr/bin/lipo -create
+                "${CMAKE_CURRENT_SOURCE_DIR}/../libs/third_party/onnxruntime/macos-arm64/lib/libonnxruntime.1.23.2.dylib"
+                "${CMAKE_CURRENT_SOURCE_DIR}/../libs/third_party/onnxruntime/macos-x64/lib/libonnxruntime.1.23.2.dylib"
+                -output "${JAMTASTER_ONNXRUNTIME_ROOT}/lib/libonnxruntime.1.23.2.dylib"
+                RESULT_VARIABLE JAM2_ONNX_LIPO_RESULT)
+            if(NOT JAM2_ONNX_LIPO_RESULT EQUAL 0)
+                message(FATAL_ERROR "Could not combine the vendored Intel and Arm ONNX runtimes; ensure both LFS files are downloaded")
+            endif()
+        elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$")
             set(JAMTASTER_ONNXRUNTIME_ROOT
                 "${CMAKE_CURRENT_SOURCE_DIR}/../libs/third_party/onnxruntime/macos-arm64")
         else()
@@ -288,6 +310,7 @@ set(JAMTASTER_ONNXRUNTIME_INCLUDE
 if(NOT EXISTS "${JAMTASTER_ONNXRUNTIME_INCLUDE}/onnxruntime_cxx_api.h")
     message(FATAL_ERROR "The vendored ONNX Runtime headers are missing")
 endif()
+unset(JAMTASTER_ONNXRUNTIME_LIBRARY CACHE)
 find_library(JAMTASTER_ONNXRUNTIME_LIBRARY
     NAMES onnxruntime onnxruntime.1.23.2
     PATHS "${JAMTASTER_ONNXRUNTIME_ROOT}/lib"
@@ -374,8 +397,10 @@ set(JAMTASTER_MODEL_FILES
     htdemucs_ft_3.onnx
     htdemucs_ft_3.onnx.json)
 foreach(model IN LISTS JAMTASTER_MODEL_FILES)
-    if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/jamtaster/models/${model}")
-        message(FATAL_ERROR "The bundled JamTaster model is missing: ${model}")
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/jamtaster/models/${model}")
+        list(APPEND JAMTASTER_AVAILABLE_MODEL_FILES "${model}")
+    elseif(model MATCHES "\\.json$")
+        message(FATAL_ERROR "The JamTaster model metadata is missing: ${model}")
     endif()
 endforeach()
 
@@ -601,6 +626,7 @@ if(APPLE)
 endif()
 
 target_include_directories(jam2 PRIVATE
+    "${CMAKE_BINARY_DIR}/generated"
     "${CMAKE_CURRENT_SOURCE_DIR}"
     "${CMAKE_CURRENT_SOURCE_DIR}/application"
     "${CMAKE_CURRENT_SOURCE_DIR}/cli"
@@ -715,7 +741,7 @@ if(WIN32)
             "${CMAKE_CURRENT_SOURCE_DIR}/jamtaster/MODEL_NOTICES.md"
             "${JAMTASTER_RELEASE_ROOT}/licenses/MODEL_NOTICES.md"
         COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-            ${JAMTASTER_MODEL_FILES}
+            ${JAMTASTER_AVAILABLE_MODEL_FILES}
             "${JAMTASTER_RELEASE_ROOT}/models"
         WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/jamtaster/models"
         VERBATIM)
@@ -732,9 +758,11 @@ if(WIN32)
         VERBATIM)
 elseif(APPLE)
     add_custom_command(TARGET jam2 POST_BUILD
+        COMMAND "${CMAKE_COMMAND}" -E remove_directory
+            "$<TARGET_BUNDLE_DIR:jam2>/Contents/Resources/jamtaster/models"
         COMMAND "${CMAKE_COMMAND}" -E make_directory
             "$<TARGET_BUNDLE_DIR:jam2>/Contents/Helpers"
-            "$<TARGET_BUNDLE_DIR:jam2>/Contents/Resources/jamtaster/models"
+            "${JAM2_RELEASE_DIR}/components/jamtaster/models"
             "$<TARGET_BUNDLE_DIR:jam2>/Contents/Resources/jamtaster/licenses"
             "$<TARGET_BUNDLE_DIR:jam2>/Contents/Frameworks"
         COMMAND "${CMAKE_COMMAND}" -E copy_if_different
@@ -759,8 +787,8 @@ elseif(APPLE)
             "${CMAKE_CURRENT_SOURCE_DIR}/jamtaster/MODEL_NOTICES.md"
             "$<TARGET_BUNDLE_DIR:jam2>/Contents/Resources/jamtaster/licenses/MODEL_NOTICES.md"
         COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-            ${JAMTASTER_MODEL_FILES}
-            "$<TARGET_BUNDLE_DIR:jam2>/Contents/Resources/jamtaster/models"
+            ${JAMTASTER_AVAILABLE_MODEL_FILES}
+            "${JAM2_RELEASE_DIR}/components/jamtaster/models"
         WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/jamtaster/models"
         VERBATIM)
     add_custom_command(TARGET jam2 POST_BUILD
@@ -779,3 +807,5 @@ endif()
 # Keep release staging last so the completed macOS bundle includes the private
 # worker, runtime and models before it is copied into release/.
 jam2_set_app_output(jam2)
+
+include("${CMAKE_SOURCE_DIR}/tools/release/ConfigureRelease.cmake")

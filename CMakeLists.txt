@@ -1,10 +1,30 @@
 cmake_minimum_required(VERSION 3.24)
 
+set(JAM2_BUILD_VERSION "0.1.0")
+if(DEFINED ENV{JAM2_RELEASE_VERSION} AND NOT "$ENV{JAM2_RELEASE_VERSION}" STREQUAL "")
+    set(JAM2_BUILD_VERSION "$ENV{JAM2_RELEASE_VERSION}")
+endif()
+if(NOT JAM2_BUILD_VERSION MATCHES "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$")
+    message(FATAL_ERROR "Jam2 version must be major.minor.patch without leading zeroes")
+endif()
+string(REPLACE "." ";" JAM2_VERSION_COMPONENTS "${JAM2_BUILD_VERSION}")
+foreach(component IN LISTS JAM2_VERSION_COMPONENTS)
+    if(component GREATER 65535)
+        message(FATAL_ERROR "Jam2 version components must be at most 65535")
+    endif()
+endforeach()
+if(CMAKE_HOST_APPLE AND "$ENV{JAM2_RELEASE_UNIVERSAL}" STREQUAL "1")
+    set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64" CACHE STRING "Release architectures" FORCE)
+endif()
+
 project(Jam2
-    VERSION 0.1.0
+    VERSION "${JAM2_BUILD_VERSION}"
     DESCRIPTION "Low-latency direct UDP music collaboration tool"
     LANGUAGES C CXX
 )
+message(STATUS "Jam2 version: ${PROJECT_VERSION}")
+configure_file(app/platform/BuildVersion.hpp.in generated/BuildVersion.hpp @ONLY)
+file(CONFIGURE OUTPUT "${CMAKE_BINARY_DIR}/generated/version.txt" CONTENT "${PROJECT_VERSION}\n")
 
 if(APPLE)
     enable_language(OBJCXX)
@@ -81,6 +101,12 @@ function(jam2_stage_release_binary target)
                 "${JAM2_RELEASE_DIR}/$<TARGET_FILE_NAME:${target}>"
             VERBATIM
         )
+    endif()
+    if(target STREQUAL "jam2")
+        add_custom_command(TARGET ${target} POST_BUILD
+            COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                "${CMAKE_BINARY_DIR}/generated/version.txt" "${JAM2_RELEASE_DIR}/version.txt"
+            VERBATIM)
     endif()
 endfunction()
 

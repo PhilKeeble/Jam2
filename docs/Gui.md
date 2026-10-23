@@ -50,6 +50,12 @@ These controls submit fixed-shape typed commands directly to the in-process engi
 
 ## Settings And Device Tests
 
+Preferences are stored in the single `settings/preferences.ini` file beside
+`jam2.exe` on Windows, or beside `Jam2.app` on macOS. Existing profile-based
+preferences move there on first launch if the portable INI does not already
+exist. VST3 scans use the adjacent `temp/` folder and remove their result files
+after scanning. Opening a JamJar elsewhere does not change these locations.
+
 The cog in the header opens persistent Audio, Create Connection, Create
 Defaults, Join Defaults, Logs, and Recording settings. Audio keeps Local Audio
 separate from Network Audio. Network Audio uses one shared device and channel
