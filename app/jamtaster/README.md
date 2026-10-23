@@ -5,10 +5,10 @@ remains `jam2`; analysis is executed by the private `jamtaster-worker` helper so
 a model/runtime failure cannot bring down a live Jam2 process.
 
 The application release contains the worker and ONNX Runtime. Model weights are
-distributed separately as `Jam2-models.zip`; extract the matching model archive
-into the Jam2 folder so it supplies `components/jamtaster/models` on both
-Windows and macOS. The required model release URL and file hashes are recorded
-in the application ZIP's `models.json`. The in-app model downloader is planned;
+distributed separately as `Jam2-models.zip`, containing just a `models/` folder
+with weights, sidecars and model notices. Extract it into `components/jamtaster/`
+inside the Jam2 folder on both Windows and macOS. The required model release URL
+and file hashes are recorded in the application ZIP's `models.json`. The in-app model downloader is planned;
 it is not implemented yet. Analysis does not use Python, pip, PyTorch or CUDA.
 Inference is CPU-only and uses the machine's available hardware threads.
 

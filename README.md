@@ -16,8 +16,9 @@ Jam2 is a small direct peer-to-peer music jamming tool for two people. It pairs 
 For LAN testing, use **No STUN** and a reachable LAN host/IP. For internet testing, leave STUN enabled unless you already know the public endpoint or port-forwarded address to use.
 
 JamTaster's model weights are a separate optional download. Use the model release
-linked in the application's `models.json` and extract `Jam2-models.zip` into the
-same Jam2 folder. Normal jamming does not require these models. See
+linked in the application's `models.json` and extract `Jam2-models.zip` into
+`components/jamtaster/` inside the Jam2 folder, giving `components/jamtaster/models/`.
+Normal jamming does not require these models. See
 [RELEASE.md](RELEASE.md) for release build scripts and package formats.
 
 ## Documentation
