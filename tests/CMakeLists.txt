@@ -62,6 +62,18 @@ if(WIN32)
 endif()
 
 if(APPLE)
+    add_executable(jam2_mac_release_signing_tests EXCLUDE_FROM_ALL
+        unit/build/MacReleaseSigningTests.cpp)
+    jam2_configure_test_target(jam2_mac_release_signing_tests)
+    target_link_libraries(jam2_mac_release_signing_tests PRIVATE Qt6::Core)
+    add_test(NAME jam2_mac_release_signing_units
+        COMMAND $<TARGET_FILE:jam2_mac_release_signing_tests>
+            "${CMAKE_COMMAND}" "${CMAKE_SOURCE_DIR}/build-release.sh"
+            "${CMAKE_SOURCE_DIR}/tools/release/PackageRelease.cmake"
+            "${CMAKE_BINARY_DIR}/test-artifacts")
+    set_tests_properties(jam2_mac_release_signing_units PROPERTIES
+        LABELS "unit;build;release" TIMEOUT 90)
+
     add_executable(jam2_mac_release_architecture_tests EXCLUDE_FROM_ALL
         unit/build/MacReleaseArchitectureTests.cpp)
     jam2_configure_test_target(jam2_mac_release_architecture_tests)
@@ -1566,7 +1578,7 @@ add_custom_target(jam2_tests_unit
 
 if(APPLE)
     add_dependencies(jam2_tests_unit jam2_coreaudio_recording_timing_tests
-        jam2_mac_release_architecture_tests)
+        jam2_mac_release_architecture_tests jam2_mac_release_signing_tests)
 endif()
 
 add_custom_target(jam2_tests_plugin

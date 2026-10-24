@@ -105,14 +105,19 @@ elseif(JAM2_PACKAGE_PLATFORM STREQUAL "macos")
     # sign the enclosing app. Descending paths put nested bundles first.
     list(REMOVE_DUPLICATES sign_targets)
     list(SORT sign_targets ORDER DESCENDING)
-    foreach(sign_target IN LISTS sign_targets)
-        execute_process(COMMAND /usr/bin/codesign --force --sign "${JAM2_SIGN_IDENTITY}" "${sign_target}"
+    if(JAM2_MACOS_FINALIZE_SCRIPT)
+        # The release entry point signs/notarizes before manifests and archives.
+        include("${JAM2_MACOS_FINALIZE_SCRIPT}")
+    else()
+        foreach(sign_target IN LISTS sign_targets)
+            execute_process(COMMAND /usr/bin/codesign --force --sign "${JAM2_SIGN_IDENTITY}" "${sign_target}"
+                COMMAND_ERROR_IS_FATAL ANY)
+        endforeach()
+        execute_process(COMMAND /usr/bin/codesign --force --sign "${JAM2_SIGN_IDENTITY}" "${bundle}"
             COMMAND_ERROR_IS_FATAL ANY)
-    endforeach()
-    execute_process(COMMAND /usr/bin/codesign --force --sign "${JAM2_SIGN_IDENTITY}" "${bundle}"
-        COMMAND_ERROR_IS_FATAL ANY)
-    execute_process(COMMAND /usr/bin/codesign --verify --deep --strict "${bundle}"
-        COMMAND_ERROR_IS_FATAL ANY)
+        execute_process(COMMAND /usr/bin/codesign --verify --deep --strict "${bundle}"
+            COMMAND_ERROR_IS_FATAL ANY)
+    endif()
 else()
     message(FATAL_ERROR "Unsupported release platform: ${JAM2_PACKAGE_PLATFORM}")
 endif()
