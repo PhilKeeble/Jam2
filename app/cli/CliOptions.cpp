@@ -32,6 +32,7 @@ Commands:
   network join <jam2-url>           Join a direct Jam2 session
   debug describe                    Describe the automation interface
   debug run <scenario.json>         Run a bounded automation scenario
+  debug update --version X.Y.Z      Start the updater (see debug update --help)
 
 Help:
   jam2 -h | --help | help

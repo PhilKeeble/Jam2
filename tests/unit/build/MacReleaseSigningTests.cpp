@@ -55,7 +55,8 @@ file(MAKE_DIRECTORY "${app}/Contents/MacOS" "${app}/Contents/Helpers"
     "${app}/Contents/Frameworks/Fixture.framework/Versions/A" "${JAM2_RELEASE_WORK}/qt")
 file(WRITE "${JAM2_RELEASE_WORK}/qt/macdeployqt" "fake deployment tool")
 foreach(path IN ITEMS "Contents/MacOS/jam2" "Contents/Helpers/jam2-plugin-worker"
-        "Contents/Helpers/jamtaster-worker" "Contents/Frameworks/Fixture.framework/Versions/A/Fixture")
+        "Contents/Helpers/jamtaster-worker" "Contents/Helpers/jam2-updater"
+        "Contents/Frameworks/Fixture.framework/Versions/A/Fixture")
     file(WRITE "${app}/${path}" "unsigned fixture")
 endforeach()
 file(WRITE "${JAM2_PACKAGE_CONFIG}" "set(JAM2_PACKAGE_SOURCE [==[${JAM2_RELEASE_WORK}]==])\n"
@@ -105,8 +106,12 @@ function(execute_process)
         if(target STREQUAL app)
             file(WRITE "${app}/Contents/MacOS/jam2" "signed fixture")
         endif()
-    elseif(invocation MATCHES "/codesign --verify" OR invocation MATCHES "/macdeployqt")
-        # These platform operations are represented by the recorded events.
+    elseif(invocation MATCHES "/macdeployqt")
+        if(NOT invocation MATCHES "-executable=${app}/Contents/Helpers/jam2-updater")
+            message(FATAL_ERROR "Updater dependency deployment missing")
+        endif()
+    elseif(invocation MATCHES "/codesign --verify")
+        # Signature validation is represented by the recorded event.
     elseif(invocation MATCHES "/file -b")
         set(output "Mach-O")
     elseif(invocation MATCHES "/lipo" OR invocation MATCHES "/otool")
@@ -209,10 +214,12 @@ int main(int argc, char** argv)
             require((result.code == 0) == success, "release success follows signing/notarization result");
             const auto signatures = read(work + QStringLiteral("/signatures")).trimmed().split('\n');
             const QSet<QByteArray> unique(signatures.begin(), signatures.end());
-            const int signedCount = scenario == QStringLiteral("sign-failure") ? 1 : 4;
+            const int signedCount = scenario == QStringLiteral("sign-failure") ? 1 : 5;
             require(signatures.size() == signedCount && unique.size() == signedCount,
                 "each nested target and the enclosing app are signed exactly once");
-            if (signedCount == 4) {
+            if (signedCount == 5) {
+                require(unique.contains((work + QStringLiteral("/release/Jam2.app/Contents/Helpers/jam2-updater")).toUtf8()),
+                    "the merged updater helper participates in the single signing pass");
                 require(signatures.last() == (work + QStringLiteral("/release/Jam2.app")).toUtf8(),
                     "the enclosing app is signed after all nested code");
             }

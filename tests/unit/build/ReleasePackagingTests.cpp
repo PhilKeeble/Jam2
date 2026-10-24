@@ -73,7 +73,7 @@ int main(int argc, char** argv)
         const QDir bundle(QFileInfo(executable).absolutePath() + QStringLiteral("/../.."));
         // Verify the private helpers independently as well as the enclosing
         // bundle: macdeployqt's own signing can omit Contents/Helpers.
-        for (const QString& helper : {QStringLiteral("jamtaster-worker"), QStringLiteral("jam2-plugin-worker")}) {
+        for (const QString& helper : {QStringLiteral("jamtaster-worker"), QStringLiteral("jam2-plugin-worker"), QStringLiteral("jam2-updater")}) {
             run(QStringLiteral("/usr/bin/codesign"), {QStringLiteral("--verify"), QStringLiteral("--strict"),
                 bundle.filePath(QStringLiteral("Contents/Helpers/") + helper)});
         }
@@ -102,6 +102,13 @@ int main(int argc, char** argv)
             QStringLiteral("tf"), archive}).split('\n');
         require(entries.contains("version.txt") && entries.contains("package-manifest.json") &&
                 entries.contains("models.json"), "application ZIP carries its version and manifests");
+        require(entries.contains("licenses/miniz-LICENSE.txt"), "release package includes the ZIP reader's license");
+#ifdef Q_OS_WIN
+        require(entries.contains("components/updater/jam2-updater.exe") &&
+                entries.contains("tls/qschannelbackend.dll"), "Windows release carries updater and native TLS backend");
+#else
+        require(entries.contains("Jam2.app/Contents/Helpers/jam2-updater"), "Mac release carries the updater inside the app bundle");
+#endif
         const QString extracted = temporary.filePath(QStringLiteral("extracted"));
         require(QDir().mkpath(extracted), "could not create manifest inspection directory");
         run(cmake, {QStringLiteral("-E"), QStringLiteral("chdir"), extracted, cmake,

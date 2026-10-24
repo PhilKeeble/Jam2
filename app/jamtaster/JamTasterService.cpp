@@ -109,6 +109,11 @@ QString JamTasterService::bundleRoot() const
 #endif
 }
 
+QString JamTasterService::installationRoot() const
+{
+    return bundleRootOverride_.isEmpty() ? appReleaseDir().absolutePath() : bundleRootOverride_;
+}
+
 QString JamTasterService::workerPath() const
 {
     if (!workerPathOverride_.isEmpty()) return workerPathOverride_;
@@ -150,7 +155,7 @@ bool JamTasterService::validateBundle(QString& error) const
     };
     for (const char* name : models) {
         if (!QFileInfo(QDir(modelsPath()).absoluteFilePath(QString::fromLatin1(name))).isFile()) {
-            error = QStringLiteral("The bundled JamTaster model %1 is missing. Reinstall this Jam2 build.")
+            error = QStringLiteral("The JamTaster model %1 is missing. Open JamTaster to download the models.")
                 .arg(QString::fromLatin1(name));
             return false;
         }

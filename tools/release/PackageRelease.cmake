@@ -73,6 +73,7 @@ elseif(JAM2_PACKAGE_PLATFORM STREQUAL "macos")
         -always-overwrite -no-strip -no-codesign
         "-executable=${bundle}/Contents/Helpers/jamtaster-worker"
         "-executable=${bundle}/Contents/Helpers/jam2-plugin-worker"
+        "-executable=${bundle}/Contents/Helpers/jam2-updater"
         COMMAND_ERROR_IS_FATAL ANY)
     file(GLOB_RECURSE bundle_files LIST_DIRECTORIES FALSE "${bundle}/*")
     set(sign_targets "")
@@ -134,8 +135,9 @@ endif()
 file(WRITE "${JAM2_PACKAGE_RELEASE}/version.txt" "${JAM2_PACKAGE_VERSION}\n")
 
 # Sidecars are small, checked-in build inputs. App builds do not require weights.
-set(model_entries "")
-set(model_total 0)
+include("${CMAKE_CURRENT_LIST_DIR}/ModelManifest.cmake")
+jam2_write_model_manifest("${JAM2_PACKAGE_SOURCE}" "${JAM2_PACKAGE_MODEL_NAMES}"
+    "${JAM2_PACKAGE_RELEASE}/models.json")
 set(model_payload "models/MODEL_NOTICES.md")
 foreach(model IN LISTS JAM2_PACKAGE_MODEL_NAMES)
     if(NOT model MATCHES "^[a-z0-9_]+\\.onnx$")
@@ -151,11 +153,6 @@ foreach(model IN LISTS JAM2_PACKAGE_MODEL_NAMES)
             OR NOT hash MATCHES "^[0-9a-f]+$" OR NOT hash_length EQUAL 64)
         message(FATAL_ERROR "Invalid model metadata: ${source}.json")
     endif()
-    if(model_entries)
-        string(APPEND model_entries ",\n")
-    endif()
-    string(APPEND model_entries "    {\"path\":\"${model}\",\"bytes\":${bytes},\"sha256\":\"${hash}\"}")
-    math(EXPR model_total "${model_total} + ${bytes}")
     if(JAM2_INCLUDE_MODELS)
         if(NOT EXISTS "${source}")
             message(FATAL_ERROR "Model weights are missing; fetch Git LFS files before using --include-models: ${model}")
@@ -173,13 +170,7 @@ foreach(model IN LISTS JAM2_PACKAGE_MODEL_NAMES)
         list(APPEND model_payload "models/${model}" "models/${model}.json")
     endif()
 endforeach()
-string(SHA256 model_identity "${model_entries}")
-string(SUBSTRING "${model_identity}" 0 16 model_identity)
-set(model_tag "models-${model_identity}")
 set(repository_url "https://github.com/PhilKeeble/Jam2/releases/download")
-write_json("${JAM2_PACKAGE_RELEASE}/models.json"
-    "{\n  \"schema\":1,\n  \"tag\":\"${model_tag}\",\n  \"asset\":\"Jam2-models.zip\",\n  \"archive_root\":\"models/\",\n  \"url\":\"${repository_url}/${model_tag}/Jam2-models.zip\",\n  \"unpacked_bytes\":${model_total},\n  \"files\":[\n${model_entries}\n  ]\n}")
-file(SHA256 "${JAM2_PACKAGE_RELEASE}/models.json" model_manifest_hash)
 list(APPEND JAM2_PACKAGE_APP_FILES version.txt models.json)
 
 set(payload "")

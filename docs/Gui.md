@@ -340,6 +340,24 @@ becomes available while Global Play is running, it joins on a later beat at the
 corresponding song position without resetting `1.1` or the metronome accent.
 The scheduling grid continues silently underneath while Global Play is stopped.
 
+## Application Updates
+
+Jam2 checks for updates in the background after startup. Use **Updates** in the
+header to check manually or reopen progress. An available update shows the
+version and download size before **Download update**. Downloading and verification
+do not stop the jam. Closing the progress window keeps the download running;
+**Cancel update** stops it. Closing Jam2 during an incomplete download cancels it.
+
+Once verified, **Restart and install** closes Jam2 through its normal save/close
+flow, installs the update and reopens it. **Install on exit**, or closing the
+ready-update window, lets you keep playing and applies the update when you quit
+without reopening Jam2. Cancelling a save/close prompt keeps the update ready
+for the next normal exit. **Discard update** removes a queued update.
+
+Settings, models and user content stay intact. Failures offer a new check/retry;
+installation failures are reported on the next launch. Downloads use `update/`
+and the helper/runtime copy uses `temp/updater/`, both inside the Jam2 folder.
+
 ## JamTaster WAV Analysis
 
 JamTaster is an optional WAV-analysis component. Use the **JamTaster** button on
@@ -353,10 +371,14 @@ analysis with it.
 Saved results can be applied independently: set the project tempo/grid, add the
 four stems to normal `imported/` lanes, apply selected musical data and
 arrangement to the current jam, or create a separate JamJar song. JamTaster's
-native worker, CPU inference runtime, and model weights are bundled with Jam2;
-there is no separate install, health check, repair, download, Python environment
-or CUDA package to manage. Analysis runs outside the Jam2 process and uses the
-available processor cores.
+native worker and CPU inference runtime are bundled with Jam2. Opening the dialog
+checks the models. Missing or damaged models offer **Download models** with the
+download size, an approval popup and progress through download, verification and
+installation. Failures show a brief error and **Retry**; **Close** cancels model
+setup and returns to the jam. Checks, downloads and extraction do not block the
+GUI or stop playback. Models and temporary files stay inside the Jam2 folder.
+No Python environment or CUDA package is needed. Analysis runs outside the Jam2
+process and uses the available processor cores.
 
 Analysis is owned by the main Jam2 window, so closing the JamTaster dialog does
 not stop the task or discard a queued analysis. Live
