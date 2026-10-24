@@ -18,5 +18,6 @@ private:
 };
 void preflightWritableFile(const QString& path);
 void configureHelperProcess(QProcess& process);
+void restartApplication(const QString& root);
 void verifyMacSignature(const QString& bundle);
 } // namespace jam2::update

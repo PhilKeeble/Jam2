@@ -11,7 +11,6 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QLockFile>
-#include <QProcess>
 #include <QSaveFile>
 #include <QSslSocket>
 #include <QTextStream>
@@ -111,10 +110,7 @@ int main(int argc, char** argv)
                 QTextStream(stderr) << "Staged package cleanup will be retried on the next launch.\n";
             QFile::remove(QDir(root).filePath(QStringLiteral("update/package.zip")));
             if (restart) {
-                QProcess process;
-                process.setProgram(QDir(root).filePath(executableRelativePath()));
-                process.setWorkingDirectory(root);
-                if (!process.startDetached()) throw std::runtime_error("The update was installed, but Jam2 could not restart. Start it manually.");
+                restartApplication(root);
             }
         };
         if (staged) {

@@ -39,6 +39,17 @@ if(WIN32)
         "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Widgets>")
 endif()
 
+add_executable(jam2_updater_restart_tests EXCLUDE_FROM_ALL unit/updater/UpdaterRestartTests.cpp)
+jam2_configure_test_target(jam2_updater_restart_tests)
+target_link_libraries(jam2_updater_restart_tests PRIVATE jam2_update)
+add_test(NAME jam2_updater_restart_units COMMAND $<TARGET_FILE:jam2_updater_restart_tests>
+    "${CMAKE_BINARY_DIR}/test-artifacts")
+set_tests_properties(jam2_updater_restart_units PROPERTIES LABELS "unit;updater" TIMEOUT 30)
+if(WIN32)
+    set_tests_properties(jam2_updater_restart_units PROPERTIES ENVIRONMENT_MODIFICATION
+        "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
+endif()
+
 add_executable(jam2_updater_tests EXCLUDE_FROM_ALL unit/updater/UpdaterTests.cpp)
 jam2_configure_test_target(jam2_updater_tests)
 target_link_libraries(jam2_updater_tests PRIVATE jam2_update jam2_miniz)
@@ -1580,6 +1591,7 @@ add_custom_target(jam2_tests_unit
         jam2_release_build_configuration_tests
         jam2_release_packaging_tests
         jam2_updater_tests
+        jam2_updater_restart_tests
         jam2_application_update_tests
         jam2
         jam2_automation_contract_tests

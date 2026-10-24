@@ -1,4 +1,8 @@
 #include "UpdaterPlatform.hpp"
+#include "UpdatePackage.hpp"
+#ifdef Q_OS_MACOS
+#include "UpdaterMacApplication.hpp"
+#endif
 
 #include <QDir>
 #include <QFile>
@@ -92,6 +96,21 @@ void configureHelperProcess(QProcess& process)
     });
 #else
     (void)process;
+#endif
+}
+
+void restartApplication(const QString& root)
+{
+    require(QFileInfo(QDir(root).filePath(executableRelativePath())).isFile(),
+        QStringLiteral("The update was installed, but the Jam2 executable is missing. Reinstall Jam2."));
+#ifdef Q_OS_MACOS
+    restartMacApplication(QDir(root).filePath(QStringLiteral("Jam2.app")));
+#else
+    QProcess process;
+    process.setProgram(QDir(root).filePath(executableRelativePath()));
+    process.setWorkingDirectory(root);
+    require(process.startDetached(),
+        QStringLiteral("The update was installed, but Jam2 could not restart. Start it manually."));
 #endif
 }
 
