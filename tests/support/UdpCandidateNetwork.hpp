@@ -6,6 +6,7 @@
 #include <QTimer>
 #include <QtEndian>
 #include <future>
+#include <chrono>
 #include <thread>
 #include <map>
 #include <set>
@@ -25,6 +26,9 @@ class CandidateNetwork {
     quint16 server_;
     std::map<quint16, std::unique_ptr<Route>> routes_;
     quint64 directCount_ = 0;
+    int mediaProofDelayMs_ = 0;
+    quint64 delayedMediaProofs_ = 0;
+    std::chrono::steady_clock::time_point mediaProofUntil_;
     std::set<quint64> suppressedStreams;
     QString suppressedPeer;
     int suppressCount = 0;
@@ -32,7 +36,10 @@ class CandidateNetwork {
     std::set<quint16> blockedPairPorts;
     std::set<QString> firstMembership;
 public:
+    void delayMediaProof(int milliseconds) { mediaProofDelayMs_ = milliseconds; }
+    quint64 delayedMediaProofs() const { return delayedMediaProofs_; }
     bool blockFirst = true, blockMesh = false, blockLeave = false, invalidLan = false;
+    bool impairMultiplex = true;
     quint64 leavesDropped = 0;
     quint64 dropped = 0, duplicated = 0;
     explicit CandidateNetwork(quint16 server) : server_(server) {
@@ -107,10 +114,19 @@ public:
                     blockedPairPorts.contains(route->local) && blockedPairPorts.contains(sender->local)) {
                     ++dropped; continue;
                 }
+                // Delay only raw audio-runtime HELLO/ACK proof, not the
+                // multiplex handoff/authentication. Model slow audio attachment.
+                if (mediaProofDelayMs_ > 0 && packet.size() >= 6 && packet.startsWith("JAM2") &&
+                    (packet[5] == 1 || packet[5] == 2)) {
+                    const auto now = std::chrono::steady_clock::now();
+                    if (mediaProofUntil_ == std::chrono::steady_clock::time_point{})
+                        mediaProofUntil_ = now + std::chrono::milliseconds(mediaProofDelayMs_);
+                    if (now < mediaProofUntil_) { ++delayedMediaProofs_; continue; }
+                }
                 ++directCount_;
-                if (packet.startsWith("J2MX") && directCount_ % 19 == 0) { ++dropped; continue; }
+                if (impairMultiplex && packet.startsWith("J2MX") && directCount_ % 19 == 0) { ++dropped; continue; }
                 sender->socket.writeDatagram(packet, QHostAddress::LocalHost, local);
-                if (packet.startsWith("J2MX") && directCount_ % 23 == 0) {
+                if (impairMultiplex && packet.startsWith("J2MX") && directCount_ % 23 == 0) {
                     sender->socket.writeDatagram(packet, QHostAddress::LocalHost, local); ++duplicated;
                 }
             }
@@ -156,6 +172,19 @@ public:
     void blockCurrentPair(const QString& a, const QString& b) {
         QMetaObject::invokeMethod(context_, [this, a, b] { network_->blockCurrentPair(a, b); },
             Qt::BlockingQueuedConnection);
+    }
+    void setMultiplexImpairment(bool enabled) {
+        QMetaObject::invokeMethod(context_, [this, enabled] { network_->impairMultiplex = enabled; },
+            Qt::BlockingQueuedConnection);
+    }
+    void delayMediaProof(int milliseconds) {
+        QMetaObject::invokeMethod(context_, [this, milliseconds] { network_->delayMediaProof(milliseconds); },
+            Qt::BlockingQueuedConnection);
+    }
+    quint64 delayedMediaProofs() const {
+        quint64 result = 0;
+        QMetaObject::invokeMethod(context_, [&] { result = network_->delayedMediaProofs(); }, Qt::BlockingQueuedConnection);
+        return result;
     }
     int suppressedCount() const {
         int result = 0;

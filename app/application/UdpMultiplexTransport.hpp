@@ -17,7 +17,8 @@ public:
         jam2::Endpoint server{"jam2gether.com", 40404};
         QString bindHost = QStringLiteral("0.0.0.0");
         int maximumPeers = 0;
-        quint64 controlBytesPerSecond = 65536, assetBytesPerSecond = 131072;
+        // Zero removes the fixed asset rate cap; reliable-stream congestion control still applies.
+        quint64 controlBytesPerSecond = 65536, assetBytesPerSecond = 0;
         quint64 linkRepairSilenceMs = 10000;
     };
     struct LinkSnapshot {

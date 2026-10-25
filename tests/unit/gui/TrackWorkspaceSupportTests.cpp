@@ -712,6 +712,21 @@ void testSynchronizedSongStructure()
         "duplicate section identities must reject without partial mutation");
 }
 
+void testSharedReferenceClassification()
+{
+    QJsonObject wire;
+    TrackReferenceMetadata{"drums", "recipe-hash", 123.0, true}.writeTo(wire);
+    LooperLane received;
+    received.originKind = "peer";
+    TrackReferenceMetadata::fromJson(wire).applyTo(received);
+    require(received.referenceKind == "drums" && received.referenceSourceSignature == "recipe-hash" &&
+        received.referenceBpm == 123.0 && received.referenceStale,
+        "generic WAV sharing must retain reference identity so idea clearing can remove it");
+    const auto legacy = TrackReferenceMetadata::fromJson({});
+    require(legacy.kind.isEmpty() && legacy.bpm == 0 && !legacy.stale,
+        "legacy custom track offers remain ordinary WAV tracks");
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -719,6 +734,7 @@ int main(int argc, char** argv)
     QCoreApplication application(argc, argv);
     try {
         QTemporaryDir root = makeRoot();
+        testSharedReferenceClassification();
         testMetadataAndRejection(root.path());
         testTrackSidecarJson(root.path());
         testExactStagingAndRepair(root.path());

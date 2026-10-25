@@ -6,6 +6,7 @@
 #include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QDateTime>
+#include <QElapsedTimer>
 #include <QDir>
 #include <QDirIterator>
 #include <QFile>
@@ -33,6 +34,7 @@ using namespace std::chrono_literals;
 
 int failures = 0;
 bool largeUdpFixtures = false;
+bool bulkUdpFixtures = false;
 class TestSignaler {
 public:
     QProcess process;
@@ -85,7 +87,7 @@ void appendU32(QByteArray& bytes, quint32 value)
 QByteArray pcm16Wav(int variant)
 {
     constexpr quint32 sampleRate = 48000;
-    const quint32 frames = largeUdpFixtures ? 48000 : 1024;
+    const quint32 frames = bulkUdpFixtures ? 2 * 1024 * 1024 : largeUdpFixtures ? 48000 : 1024;
     const quint32 dataBytes = frames * 2;
     QByteArray bytes;
     bytes.reserve(static_cast<qsizetype>(44 + dataBytes));
@@ -575,6 +577,22 @@ bool waitForAll(
     }
     fail(QStringLiteral("timed out waiting for ") + description);
     for (std::size_t index = 0; index < states.size(); ++index) {
+        if (!send(coordinator.peer(index), {{"type", "song.snapshot"},
+                {"id", QStringLiteral("failed-song-%1").arg(index)}})) continue;
+        const auto full = receive(coordinator.peer(index), QStringLiteral("song.snapshot"), 5s);
+        if (!full) continue;
+        const auto root = qEnvironmentVariable("JAM2_TEST_ARTIFACT_ROOT", QDir::tempPath());
+        QFile stateFile(QDir(root).filePath(QStringLiteral("failed-state-%1.json").arg(index + 1)));
+        if (stateFile.open(QIODevice::WriteOnly)) {
+            stateFile.write(QJsonDocument(states[index]).toJson());
+        }
+        QFile file(QDir(root).filePath(QStringLiteral("failed-song-%1.json").arg(index + 1)));
+        if (file.open(QIODevice::WriteOnly)) {
+            file.write(qUncompress(QByteArray::fromBase64(
+                full->value("song_zlib_base64").toString().toLatin1())));
+        }
+    }
+    for (std::size_t index = 0; index < states.size(); ++index) {
         const QJsonObject jam = states[index].value(QStringLiteral("jam")).toObject();
         const QJsonObject content = states[index].value(QStringLiteral("content")).toObject();
         const QJsonObject transfer = content.value(QStringLiteral("transfer")).toObject();
@@ -787,10 +805,17 @@ int main(int argc, char* argv[])
     }
     TestSignaler signaler;
     const bool serverMode = argc >= 3;
+    const bool bulkOnly = argc == 4 && QString::fromLocal8Bit(argv[3]) == QStringLiteral("unthrottled");
+    bulkUdpFixtures = bulkOnly;
+    const bool sharingOnly = argc == 4 && QString::fromLocal8Bit(argv[3]) == QStringLiteral("sharing");
     const bool recoveryOnly = argc == 4 && QString::fromLocal8Bit(argv[3]) == QStringLiteral("recovery");
     largeUdpFixtures = serverMode;
     if (serverMode && !signaler.start(QString::fromLocal8Bit(argv[2]))) {
         fail(QStringLiteral("could not start real Go signaler")); return 1;
+    }
+    if (bulkOnly) {
+        signaler.network->delayMediaProof(4000);
+        signaler.network->setMultiplexImpairment(false);
     }
     QTemporaryDir fixtureFolder;
     QString automaticWavPath;
@@ -860,6 +885,18 @@ int main(int argc, char* argv[])
         if (!receive(coordinator.peer(index), QStringLiteral("hello"))) return 1;
     }
     portReservations.release();
+    if (sharingOnly) {
+        if (!apply(coordinator, 1, {{"type", "jam.create"}, {"id", "prejoin-local-session"},
+                {"strategy", "direct"}, {"port", ports[1]}, {"test_input", "tone-440"}})) return 1;
+        if (!apply(coordinator, 1, {{"type", "looper.import"}, {"id", "prejoin-wav"},
+                {"lane", -1}, {"source_path", automaticWavPath}})) return 1;
+        std::array<QJsonObject, 4> beforeJoin;
+        if (!waitForAll(coordinator, "local WAV ready before joining",
+            [&](std::size_t i, const QJsonObject& state) {
+                return i != 1 || assetReady(state, automaticWavHash, true);
+            }, beforeJoin, false)) return 1;
+        if (!apply(coordinator, 1, {{"type", "jam.leave"}, {"id", "prejoin-local-leave"}})) return 1;
+    }
 
     if (!send(coordinator.peer(0), {
             {QStringLiteral("type"), QStringLiteral("jam.create")},
@@ -890,12 +927,146 @@ int main(int argc, char* argv[])
 
     std::array<QJsonObject, FourPeerCoordinator::kPeerCount> states;
     if (!waitForAll(coordinator, QStringLiteral("initial song/view reconciliation"),
-            meshReady, states)) return 1;
+            [&](std::size_t i, const QJsonObject& state) {
+                return sharingOnly ? meshOperational(i, state) && transferIdle(state) &&
+                    assetCount(state, automaticWavHash) == 1 : meshReady(i, state);
+            }, states)) return 1;
+    if (sharingOnly && !verifyAssetFiles(states, automaticWavHash)) return 1;
     if (serverMode) for (const auto& state : states) {
         const auto multiplex = state.value(QStringLiteral("jam")).toObject().value(QStringLiteral("udp_multiplex")).toObject();
         if (!multiplex.value(QStringLiteral("enabled")).toBool() || multiplex.value(QStringLiteral("links")).toArray().size() != 3) {
             fail(QStringLiteral("shared WAV workflow did not use exactly three physical UDP peer links")); return 1;
         }
+    }
+
+    if (bulkOnly) {
+        if (signaler.network->delayedMediaProofs() < 8) {
+            fail("slow audio attachment did not suppress enough media proofs"); return 1;
+        }
+        for (std::size_t i = 0; i < 4; ++i) {
+            QDirIterator logs(coordinator.storageRoot(i), {"*.log"}, QDir::Files, QDirIterator::Subdirectories);
+            while (logs.hasNext()) {
+                QFile log(logs.next());
+                if (log.open(QIODevice::ReadOnly) && log.readAll().contains("proof=failed")) {
+                    fail("a usable multiplex was falsely failed while audio attachment was delayed"); return 1;
+                }
+            }
+            const auto mux = states[i].value("jam").toObject().value("udp_multiplex").toObject();
+            if (mux.value("asset_bytes_per_second").toInteger(-1) != 0) {
+                fail("bulk regression still has a fixed WAV rate cap"); return 1;
+            }
+        }
+        std::array<qint64, 4> receivedBefore{};
+        for (int i = 0; i < 4; ++i) receivedBefore[i] = states[i].value("jam").toObject()
+            .value("udp_multiplex").toObject().value("audio_packets_received").toInteger();
+        QElapsedTimer transferTime; transferTime.start();
+        if (!apply(coordinator, 0, {{"type", "looper.import"}, {"id", "unthrottled-wav"},
+                {"lane", -1}, {"source_path", automaticWavPath}})) return 1;
+        if (!waitForAll(coordinator, "unthrottled WAV reached the complete four-peer mesh",
+            [&](std::size_t i, const QJsonObject& state) {
+                return meshOperational(i, state) && transferIdle(state) && assetReady(state, automaticWavHash, true);
+            }, states) || !verifyAssetFiles(states, automaticWavHash)) return 1;
+        const auto elapsedMs = qMax<qint64>(1, transferTime.elapsed());
+        const auto bytes = QFileInfo(automaticWavPath).size();
+        for (int i = 0; i < 4; ++i) {
+            const auto mux = states[i].value("jam").toObject().value("udp_multiplex").toObject();
+            if (mux.value("audio_packets_received").toInteger() <= receivedBefore[i] + 100 ||
+                mux.value("audio_queue_drops").toInteger() != 0) {
+                fail("audio did not continue cleanly during unthrottled WAV fan-out"); return 1;
+            }
+        }
+        std::cout << "unthrottled_wav raw_bytes=" << bytes << " recipients=3 elapsed_ms=" << elapsedMs
+            << " aggregate_bytes_per_second=" << bytes * 3 * 1000 / elapsedMs
+            << " delayed_media_proofs=" << signaler.network->delayedMediaProofs() << '\n';
+        if (!shutDown(coordinator)) return 1;
+        return failures == 0 ? 0 : 1;
+    }
+
+    if (sharingOnly) {
+        // Hold a real receive/write boundary, leaving the joiner's displayed
+        // arrangement at its previous revision while the creator adds a WAV.
+        if (!apply(coordinator, 1, {{"type", "looper.transfer.pause"}, {"id", "hold-new-wav"},
+                {"point", "incoming-chunk"}}) ||
+            !apply(coordinator, 0, {{"type", "looper.import"}, {"id", "import-during-remote-edit"},
+                {"lane", -1}, {"source_path", manualWavPath}})) return 1;
+        if (!waitForAll(coordinator, "pending WAV metadata and visible progress",
+            [&](std::size_t i, const QJsonObject& state) {
+                if (i != 1) return true;
+                const auto content = state.value("content").toObject();
+                return content.value("transfer").toObject().value("pause_active") == "incoming-chunk" &&
+                    content.value("incoming_wav_total_bytes").toInteger() > 0 &&
+                    content.value("track_transfer_status").toString().startsWith("RECEIVING WAV") &&
+                    content.value("track_sync_last_applied_host_arrangement_revision").toInteger() <
+                        content.value("arrangement_revision").toInteger();
+            }, states, false)) return 1;
+        const auto previousRevision = states[0].value("content").toObject().value("arrangement_revision").toInteger();
+        const auto editingLane = assetIndex(states[1], automaticWavHash);
+        if (editingLane < 0 || !apply(coordinator, 1, {
+                {"type", "invoke"}, {"id", "edit-name-while-wav-pending"},
+                {"control", QStringLiteral("looper.lane.%1.rename").arg(editingLane)},
+                {"operation", "click-async"}}) ||
+            !apply(coordinator, 1, {{"type", "invoke"}, {"id", "pending-wav-name"},
+                {"control", "looper.lane-rename-dialog.name"}, {"operation", "set-text"}, {"value", "Edited during WAV"}}) ||
+            !apply(coordinator, 1, {{"type", "invoke"}, {"id", "save-pending-wav-name"},
+                {"control", "looper.lane-rename-dialog.save"}, {"operation", "click"}})) return 1;
+        if (!waitForAll(coordinator, "creator accepted concurrent metadata without deleting its import",
+            [&](std::size_t i, const QJsonObject& state) {
+                return i != 0 || (assetCount(state, manualWavHash) == 1 &&
+                    state.value("content").toObject().value("arrangement_revision").toInteger() > previousRevision &&
+                    state.value("content").toObject().value("lane_names").toArray().contains("Edited during WAV"));
+            }, states, false)) return 1;
+        // An independent Idea-scope update must retain pending track metadata.
+        if (!apply(coordinator, 0, {{"type", "idea.generate"}, {"id", "idea-while-wav-pending"},
+                {"parts", "beats"}, {"seed", 4831}})) return 1;
+        const auto afterIdea = snapshot(coordinator.peer(0), 1, 500);
+        if (!afterIdea) return 1;
+        const auto ideaRevision = afterIdea->value("content").toObject().value("arrangement_revision").toInteger();
+        if (!waitForAll(coordinator, "idea update retained the in-flight WAV",
+            [&](std::size_t i, const QJsonObject& state) {
+                if (i != 1) return true;
+                const auto content = state.value("content").toObject();
+                return content.value("arrangement_revision").toInteger() >= ideaRevision &&
+                    content.value("incoming_asset_active").toBool() &&
+                    content.value("transfer").toObject().value("pause_active") == "incoming-chunk";
+            }, states, false)) return 1;
+        if (!apply(coordinator, 1, {{"type", "looper.transfer.release"}, {"id", "release-new-wav"}})) return 1;
+        if (!waitForAll(coordinator, "import and concurrent metadata converged without further user actions",
+            [&](std::size_t i, const QJsonObject& state) {
+                return meshOperational(i, state) && transferIdle(state) &&
+                    assetCount(state, automaticWavHash) == 1 && assetCount(state, manualWavHash) == 1;
+            }, states) || !verifyAssetFiles(states, automaticWavHash) ||
+            !verifyAssetFiles(states, manualWavHash)) return 1;
+        for (std::size_t i = 0; i < 4; ++i) {
+            const auto lane = assetIndex(states[i], automaticWavHash);
+            const auto names = states[i].value("content").toObject().value("lane_names").toArray();
+            if (lane < 0 || names.at(lane).toString() != "Edited during WAV") {
+                fail("concurrent lane edit was not retained alongside the new WAV"); return 1;
+            }
+        }
+        const auto referenceLane = assetIndex(states[1], automaticWavHash);
+        if (!apply(coordinator, 1, {{"type", "invoke"}, {"id", "mark-legacy-reference"},
+                {"control", QStringLiteral("looper.lane.%1.rename").arg(referenceLane)}, {"operation", "click-async"}}) ||
+            !apply(coordinator, 1, {{"type", "invoke"}, {"id", "reference-name"},
+                {"control", "looper.lane-rename-dialog.name"}, {"operation", "set-text"}, {"value", "Practice Drums"}}) ||
+            !apply(coordinator, 1, {{"type", "invoke"}, {"id", "save-reference-name"},
+                {"control", "looper.lane-rename-dialog.save"}, {"operation", "click"}})) return 1;
+        if (!waitForAll(coordinator, "reference identity ready on all peers",
+            [&](std::size_t, const QJsonObject& state) {
+                return transferIdle(state) && state.value("content").toObject()
+                    .value("lane_names").toArray().contains("Practice Drums");
+            }, states)) return 1;
+        if (!apply(coordinator, 1, {{"type", "invoke"}, {"id", "clear-references"},
+                {"control", "performance.home.idea.clear"}, {"operation", "click-async"}}) ||
+            !apply(coordinator, 1, {{"type", "invoke"}, {"id", "confirm-clear-references"},
+                {"control", "idea.clear-dialog.all-sections"}, {"operation", "click"}})) return 1;
+        if (!waitForAll(coordinator, "reference removal propagated without resurrecting WAVs",
+            [&](std::size_t i, const QJsonObject& state) {
+                return meshOperational(i, state) && transferIdle(state) &&
+                    assetCount(state, automaticWavHash) == 0 && assetCount(state, manualWavHash) == 1;
+            }, states)) return 1;
+        if (!shutDown(coordinator)) return 1;
+        std::cout << "Four-peer WAV startup, concurrent metadata, scope, reference clearing and progress checks passed\n";
+        return failures == 0 ? 0 : 1;
     }
 
     if (serverMode) {

@@ -2254,6 +2254,10 @@ void MainWindow::resetTrackSyncSessionState()
     deferredSongSetSourcePeerToken_.clear();
     looperArrangementRevision_ = 0;
     lastAppliedHostArrangementRevision_ = 0;
+    trackWorkspace_.automaticTrackSharePending = false;
+    trackWorkspace_.sharingPolicyReceived = false;
+    trackWorkspace_.stagedHostSong = {};
+    trackWorkspace_.stagedHostSongRevision = 0;
     updateAssetChannelRequirement();
 }
 
@@ -2695,6 +2699,10 @@ QJsonObject MainWindow::automationContentSnapshot() const
     return {
         {QStringLiteral("arrangement_revision"), static_cast<double>(
             sessionController_.snapshot().arrangementRevision)},
+        {QStringLiteral("track_sync_staged_host_revision"), trackWorkspace_.stagedHostSongRevision},
+        {QStringLiteral("automatic_track_share_pending"), trackWorkspace_.automaticTrackSharePending},
+        {QStringLiteral("incoming_wav_received_bytes"), assetTransfer_.incomingProgress().receivedBytes},
+        {QStringLiteral("incoming_wav_total_bytes"), assetTransfer_.incomingProgress().totalBytes},
         {QStringLiteral("track_sync_local_arrangement_revision"),
             looperArrangementRevision_},
         {QStringLiteral("track_sync_last_applied_host_arrangement_revision"),
@@ -4901,6 +4909,7 @@ void MainWindow::applySessionSnapshot(const SharedSessionController::Snapshot& s
     updateTrackControls();
     updateSharedRecordingPresentation();
     maybeFinishRecordingGroup();
+    flushAutomaticTrackShare();
     if (incomingAssetWorkflow_ == IncomingAssetWorkflow::None &&
         (!pendingTrackContributions_.isEmpty() || !pendingLooperAssetHashes_.isEmpty())) {
         QTimer::singleShot(0, this, [this] { requestNextPendingAsset(); });
@@ -4937,7 +4946,10 @@ void MainWindow::handleControlEvent(
                     .arg(stats.maxQueuedOutputBytes)
                     .arg(stats.outputHighWaterRejects));
             }
-            if (performanceHome_ && assetChannelWorkRequired() &&
+            // A served peer closes its on-demand stream normally when done.
+            // Other peers may still have work; that does not make this close
+            // an outgoing connection failure or a global retry condition.
+            if (!serverSide && performanceHome_ && assetChannelWorkRequired() &&
                 performanceHome_->trackTransferStatus().isEmpty()) {
                 performanceHome_->setTrackTransferStatus(
                     QStringLiteral("TRACK SHARE ERROR — asset connection retrying"));
@@ -5127,11 +5139,8 @@ void MainWindow::handleControlEvent(
     } else if (event.type == TransportEventType::Authenticated) {
         setMixRemotePeerVisible(true);
         if (automaticWavSharingEnabled()) {
-            if (serverSide) {
-                QTimer::singleShot(0, this, [this] { shareLocalTracks(); });
-            } else {
-                shareLocalTracks();
-            }
+            trackWorkspace_.automaticTrackSharePending = true;
+            flushAutomaticTrackShare();
         }
     } else if (event.type == TransportEventType::Failure && !serverSide &&
                !event.retryable &&
@@ -5931,6 +5940,14 @@ void MainWindow::applyJamSyncPolicy(JamSyncPolicy policy, bool fromJam)
             if (publishWavs && automaticWavSharingEnabled()) shareLocalTracks();
         });
     }
+    if (fromJam) {
+        const bool firstPolicy = !trackWorkspace_.sharingPolicyReceived;
+        trackWorkspace_.sharingPolicyReceived = true;
+        if (firstPolicy) trackWorkspace_.automaticTrackSharePending = automaticWavSharingEnabled();
+        flushAutomaticTrackShare();
+        if (!deferredSongSetMessage_.isEmpty() && !songAssetCheckRetryTimer_.isActive())
+            songAssetCheckRetryTimer_.start(0);
+    }
     appendLog(QStringLiteral("jam sync policy %1: lanes=%2 wavs=%3 playback=%4 ideas=%5 metronome=%6 recordings=%7")
         .arg(fromJam ? QStringLiteral("applied") : QStringLiteral("changed"))
         .arg(policy.trackLanes ? QStringLiteral("on") : QStringLiteral("off"))
@@ -6347,9 +6364,14 @@ void MainWindow::auditWavCompatibilityForSession(int expectedSampleRate, bool sh
                 const int pending = pendingWavCompatibilityAuditRate_;
                 pendingWavCompatibilityAuditRate_ = 0;
                 auditWavCompatibilityForSession(pending, showModal);
-            } else if (automaticWavSharingEnabled() && jam2_.isNetworkRunning()) {
-                shareLocalTracks();
+            } else if (arrangementConverted && automaticWavSharingEnabled() &&
+                       jam2_.isNetworkRunning()) {
+                // A read-only compatibility audit must not request every peer's
+                // older displayed tracks back into a newer arrangement. Only
+                // newly converted local WAVs need another offer.
+                publishLocalTrackBatch({});
             }
+            flushAutomaticTrackShare();
         },
         [this, cleanupCreatedResults](const QString& error) {
             wavCompatibilityAuditRunning_ = false;
@@ -10442,6 +10464,20 @@ void MainWindow::toggleSelectedLooperLaneSolo()
     regeneratePreparedMix();
 }
 
+void MainWindow::flushAutomaticTrackShare()
+{
+    if (!trackWorkspace_.automaticTrackSharePending || !automaticWavSharingEnabled() ||
+        !jam2_.isNetworkRunning() || !sessionController_.isConnected() ||
+        wavCompatibilityAuditRunning_ || pendingWavCompatibilityAuditRate_ > 0 ||
+        sessionController_.snapshot().remotePeerCount <= 0) return;
+    if (sessionController_.snapshot().role == SharedSessionController::Role::Joiner &&
+        !trackWorkspace_.sharingPolicyReceived) return;
+    trackWorkspace_.automaticTrackSharePending = false;
+    shareLocalTracks();
+    if (!deferredSongSetMessage_.isEmpty() && !songAssetCheckRetryTimer_.isActive())
+        songAssetCheckRetryTimer_.start(0);
+}
+
 void MainWindow::syncLooperArrangement()
 {
     const SharedSessionController::Role role = sessionController_.snapshot().role;
@@ -12292,7 +12328,7 @@ void MainWindow::publishLocalTrackBatch(const QString& requestedBatchId)
                    trackOfferAssetPaths_.size() >= kMaxLooperTrackContributions) {
                 trackOfferAssetPaths_.erase(trackOfferAssetPaths_.begin());
             }
-            const QJsonObject track{
+            QJsonObject track{
                 {QStringLiteral("recording_id"), contributionId},
                 {QStringLiteral("bank"), bankIndex},
                 {QStringLiteral("target_lane_id"), lane.id},
@@ -12306,6 +12342,8 @@ void MainWindow::publishLocalTrackBatch(const QString& requestedBatchId)
                 {QStringLiteral("loop_end_frame"), QString::number(lane.loopEndFrame)},
                 {QStringLiteral("loop_enabled"), lane.loopEnabled},
             };
+            TrackReferenceMetadata{lane.referenceKind, lane.referenceSourceSignature,
+                lane.referenceBpm, lane.referenceStale}.writeTo(track);
             tracks.append(track);
             batchHashes.insert(lane.assetHash);
             trackOfferAssetPaths_.insert(lane.assetHash, looperAssetAbsolutePath(lane));
@@ -12503,6 +12541,7 @@ void MainWindow::handleTrackBatchOffer(
             offerFrame(track, QStringLiteral("loop_start_frame"), -1),
             offerFrame(track, QStringLiteral("loop_end_frame"), -1),
             track.value(QStringLiteral("loop_enabled")).toBool(),
+            TrackReferenceMetadata::fromJson(track),
         });
         insertedAny = true;
         if (!validatedTrackAssetHashes_.contains(hash)) {
@@ -12721,6 +12760,7 @@ void MainWindow::noteTrackAssetProgress(
     bool receiving)
 {
     const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    updateTrackTransferPresentation();
     if (receiving) {
         for (const PendingTrackContribution& contribution : pendingTrackContributions_) {
             if (contribution.assetHash == hash &&
@@ -12754,6 +12794,7 @@ void MainWindow::releaseHeldTrackSnapshotIfReady()
 
 void MainWindow::requestNextPendingAsset()
 {
+    updateTrackTransferPresentation();
     if (automationOfferPauseActive_) return;
     if (incomingAssetWorkflow_ != IncomingAssetWorkflow::None) {
         return;
@@ -13175,6 +13216,10 @@ void MainWindow::applyPendingTrackContributions()
                 lane.originKind = QStringLiteral("peer");
                 arrangementChanged = true;
             }
+            if (lane.referenceKind.isEmpty() && !contribution.reference.kind.isEmpty()) {
+                contribution.reference.applyTo(lane);
+                arrangementChanged = true;
+            }
             if (lane.localOnly) {
                 lane.localOnly = false;
                 arrangementChanged = true;
@@ -13198,6 +13243,7 @@ void MainWindow::applyPendingTrackContributions()
             lane.sourceFrames = contribution.sourceFrames;
             lane.localOnly = false;
             lane.originKind = QStringLiteral("peer");
+            contribution.reference.applyTo(lane);
             if (!contribution.name.trimmed().isEmpty() &&
                 (lane.name.trimmed().isEmpty() || isDefaultEmptyTrackName(lane.name))) {
                 lane.name = contribution.name;
@@ -13222,6 +13268,7 @@ void MainWindow::applyPendingTrackContributions()
             lane.sourceFrames = contribution.sourceFrames;
             lane.localOnly = false;
             lane.originKind = QStringLiteral("peer");
+            contribution.reference.applyTo(lane);
             lane.startFrame = contribution.startFrame;
             lane.stopFrame = contribution.stopFrame;
             lane.loopStartFrame = contribution.loopStartFrame;
@@ -13310,6 +13357,27 @@ bool MainWindow::assetChannelWorkRequired() const noexcept
 void MainWindow::updateAssetChannelRequirement()
 {
     sessionController_.setAssetChannelRequired(assetChannelWorkRequired());
+    updateTrackTransferPresentation();
+}
+
+void MainWindow::updateTrackTransferPresentation()
+{
+    if (!performanceHome_) return;
+    if (incomingAssetWorkflow_ != IncomingAssetWorkflow::None) {
+        const auto progress = assetTransfer_.incomingProgress();
+        performanceHome_->setTrackTransferStatus(progress.totalBytes > 0
+            ? QStringLiteral("RECEIVING WAV\u2026 %1 / %2 KiB")
+                .arg((progress.receivedBytes + 1023) / 1024).arg((progress.totalBytes + 1023) / 1024)
+            : QStringLiteral("WAITING FOR WAV\u2026"));
+    } else {
+        const auto status = performanceHome_->trackTransferStatus();
+        if (status.startsWith(QStringLiteral("RECEIVING WAV")) ||
+            status.startsWith(QStringLiteral("WAITING FOR WAV")) ||
+            (!assetChannelWorkRequired() && status ==
+                QStringLiteral("TRACK SHARE ERROR ??? asset connection retrying"))) {
+            performanceHome_->setTrackTransferStatus(QString{});
+        }
+    }
 }
 
 bool MainWindow::sendAssetControlTo(
@@ -13376,20 +13444,13 @@ void MainWindow::handleSongSet(
         appendLog(QStringLiteral("rejected arrangement outside the collaborative proposal or creator snapshot path"));
         return;
     }
-    if (songScope == SongSyncScope::Tracks && hostAuthoritative &&
-        !trackWorkspace_.outgoingTrackSharePendingPeers.isEmpty()) {
-        const int incomingRevision = message.value(
-            QStringLiteral("arrangement_revision")).toInt();
-        const int heldRevision = trackWorkspace_.heldTrackShareSongSet.value(
-            QStringLiteral("arrangement_revision")).toInt(-1);
-        if (incomingRevision > heldRevision) {
-            trackWorkspace_.heldTrackShareSongSet = message;
-            trackWorkspace_.heldTrackShareSongSourcePeerToken = sourcePeerToken;
-        }
-        appendLog(QStringLiteral(
-            "held arrangement revision %1 until %2 outgoing Track Sync batch(es) complete")
-            .arg(incomingRevision)
-            .arg(trackWorkspace_.outgoingTrackSharePendingPeers.size()));
+    if (hostAuthoritative && sessionController_.snapshot().role == SharedSessionController::Role::Joiner &&
+        (!trackWorkspace_.sharingPolicyReceived ||
+         (trackWorkspace_.automaticTrackSharePending && automaticWavSharingEnabled()))) {
+        // The first song can precede jam.sync.set. Keep local tracks until the
+        // authoritative sharing policy allows (or forbids) their publication.
+        deferredSongSetMessage_ = message;
+        deferredSongSetSourcePeerToken_ = sourcePeerToken;
         return;
     }
     if (fromPeerProposal) {
@@ -13416,10 +13477,11 @@ void MainWindow::handleSongSet(
                     .arg(currentRevision)
                     .arg(mergedChanges)
                     .arg(mergeConflicts));
-                QTimer::singleShot(0, this,
-                    [this, rebased, sourcePeerToken] {
-                        handleSongSet(rebased, sourcePeerToken);
-                    });
+                // Rebase within this ordered control-message dispatch. Posting
+                // it to the event loop lets a later WAV batch offer overtake
+                // its own arrangement; replay then falsely supersedes that
+                // offer and releases the sender's still-unpublished WAV.
+                handleSongSet(rebased, sourcePeerToken);
                 return;
             }
             appendLog(QStringLiteral(
@@ -13561,7 +13623,12 @@ void MainWindow::handleSongSet(
             }
         }
     }
-    QJsonObject normalizedSong = songToJson(true);
+    if (hostAuthoritative && revision < trackWorkspace_.stagedHostSongRevision) return;
+    // Compose scopes immediately, before asynchronous WAV validation. The
+    // displayed model can lag several incoming revisions during a download.
+    QJsonObject normalizedSong = hostAuthoritative &&
+        trackWorkspace_.stagedHostSongRevision > lastAppliedHostArrangementRevision_
+        ? trackWorkspace_.stagedHostSong : songToJson(true);
     if (!reconcileSynchronizedSongStructure(normalizedSong, normalizedIncomingSong)) {
         appendLog(QStringLiteral("rejected shared song with inconsistent section/bank identities"));
         return;
@@ -13683,9 +13750,25 @@ void MainWindow::handleSongSet(
         return;
     }
     const QJsonObject song = preserveLocalOnlyLanes(normalizedSong);
+    const std::uint64_t checkRevision = ++songAssetCheckRevision_;
+    if (hostAuthoritative) {
+        trackWorkspace_.stagedHostSong = song;
+        trackWorkspace_.stagedHostSongRevision = revision;
+        if (!trackWorkspace_.outgoingTrackSharePendingPeers.isEmpty()) {
+            const int heldRevision = trackWorkspace_.heldTrackShareSongSet.value(
+                QStringLiteral("arrangement_revision")).toInt(-1);
+            if (revision >= heldRevision) {
+                trackWorkspace_.heldTrackShareSongSet = message;
+                trackWorkspace_.heldTrackShareSongSourcePeerToken = sourcePeerToken;
+            }
+            appendLog(QStringLiteral(
+                "held arrangement revision %1 until %2 outgoing Track Sync batch(es) complete")
+                .arg(revision).arg(trackWorkspace_.outgoingTrackSharePendingPeers.size()));
+            return;
+        }
+    }
     const QString workspaceFolder = projectPersistence_.workspaceFolder();
     const QString assetFolder = QDir(workspaceFolder).absoluteFilePath(QStringLiteral("wavs"));
-    const std::uint64_t checkRevision = ++songAssetCheckRevision_;
     auto missing = std::make_shared<QStringList>();
     auto resolvedPaths = std::make_shared<QMap<QString, QString>>();
     auto assetFailure = std::make_shared<QString>();
@@ -13736,6 +13819,13 @@ void MainWindow::handleSongSet(
             }
             if (deferIncomingControlForLaneRecording(
                     message, sourcePeerToken)) {
+                return;
+            }
+            if (hostAuthoritative && !trackWorkspace_.outgoingTrackSharePendingPeers.isEmpty()) {
+                // Local sharing may have started while file validation ran.
+                // Re-enter the normal hold path before installing an older
+                // host model that could remove the still-unpublished WAV.
+                handleSongSet(message, sourcePeerToken);
                 return;
             }
             if (!assetFailure->isEmpty()) {
@@ -15078,6 +15168,10 @@ bool MainWindow::loadSongJson(const QJsonObject& object, SongLoadOrigin origin)
     // the GUI or looper model.
     if (!preserveListeningMix) discardPreparedMix(false);
     chordModel_ = loadedSong;
+    // Install the validated lanes before renaming their managed workspace.
+    // relocateManagedPaths must update the incoming model, otherwise assigning
+    // loadedLooper afterward restores paths into the directory just moved.
+    looperProject_ = std::move(loadedLooper);
     if (!jamStorage_.isSaved() &&
         chordModel_.title() != jamStorage_.displayName()) {
         const QString oldRoot = jamStorage_.rootFolder();
@@ -15090,7 +15184,7 @@ bool MainWindow::loadSongJson(const QJsonObject& object, SongLoadOrigin origin)
     }
     const int expectedSampleRate = activeTrackSampleRate();
     bool needsCompatibilityAudit = false;
-    for (LooperBank& bank : loadedLooper.banks()) {
+    for (LooperBank& bank : looperProject_.banks()) {
         for (LooperLane& lane : bank.lanes) {
             if (lane.assetPath.trimmed().isEmpty()) {
                 lane.sampleRateCompatible = true;
@@ -15101,7 +15195,6 @@ bool MainWindow::loadSongJson(const QJsonObject& object, SongLoadOrigin origin)
             needsCompatibilityAudit = true;
         }
     }
-    looperProject_ = std::move(loadedLooper);
     arrangementRunning_ = false;
     arrangementArmed_ = false;
     arrangementResetBankAfterStop_ = false;
@@ -15125,10 +15218,19 @@ bool MainWindow::loadSongJson(const QJsonObject& object, SongLoadOrigin origin)
         startArrangement();
     }
     startDeferredPracticeReferenceRenders();
+    if (origin == SongLoadOrigin::Project && automaticWavSharingEnabled() &&
+        jam2_.isNetworkRunning()) {
+        // Opening local content is a publication action. Receiving a shared
+        // snapshot (and merely auditing it) must not request old tracks back.
+        trackWorkspace_.automaticTrackSharePending = true;
+    }
     if (needsCompatibilityAudit) {
         QTimer::singleShot(0, this, [this, expectedSampleRate] {
             auditWavCompatibilityForSession(expectedSampleRate, true);
+            flushAutomaticTrackShare();
         });
+    } else {
+        flushAutomaticTrackShare();
     }
     return true;
 }
@@ -16098,12 +16200,17 @@ void MainWindow::sendSongSnapshot(
     }
     const int revision = looperArrangementRevision_ + 1;
     if (!sessionController_.isServer()) {
+        // Received metadata may still be waiting for WAVs. Only the applied
+        // model can be the base of an edit serialized from the local project.
+        const quint64 proposalBase = scope == SongSyncScope::Tracks
+            ? static_cast<quint64>(lastAppliedHostArrangementRevision_)
+            : before.arrangementRevision;
         const QJsonObject proposal{
             {QStringLiteral("type"), QStringLiteral("song.set")},
             {QStringLiteral("revision"), revision},
             {QStringLiteral("arrangement_revision"), 0},
             {QStringLiteral("base_arrangement_revision"),
-                static_cast<qint64>(before.arrangementRevision)},
+                static_cast<qint64>(proposalBase)},
             {QStringLiteral("host_authoritative"), false},
             {QStringLiteral("sync_scope"), scopeName},
             {QStringLiteral("track_playing"), trackPlayingOverride.value_or(
@@ -16122,14 +16229,14 @@ void MainWindow::sendSongSnapshot(
             appendLog(QStringLiteral(
                 "could not queue collaborative arrangement edit: bytes=%1 base_revision=%2")
                 .arg(bytes)
-                .arg(before.arrangementRevision));
+                .arg(proposalBase));
             return;
         }
         looperArrangementRevision_ = revision;
         appendLog(QStringLiteral(
             "submitted collaborative arrangement edit: bytes=%1 base_revision=%2")
             .arg(bytes)
-            .arg(before.arrangementRevision));
+            .arg(proposalBase));
         return;
     }
     const bool trackPlaying = trackPlayingOverride.value_or(
@@ -16637,6 +16744,7 @@ void MainWindow::clearPracticeIdea()
         ? QStringLiteral("all sections")
         : QStringLiteral("Section %1").arg(
             QChar(QLatin1Char('A').unicode() + targetBank));
+    if (removedReferences) syncLooperArrangement();
     appendLog(removedReferences
         ? QStringLiteral("cleared idea and generated reference tracks from %1; custom tracks retained").arg(scope)
         : QStringLiteral("cleared idea from %1; custom tracks retained").arg(scope));
@@ -16683,7 +16791,7 @@ bool MainWindow::applyPracticeIdea(
          appliedIdea->meterDenominator != previousPattern.beat_unit ||
          appliedIdea->tempoPulseUnits != previousPattern.tempo_pulse_units);
     if (affectsLiveBank || timingChanged) stopTrackForPracticeIdeaGeneration();
-    clearPracticeReferenceWavs(false, targetBank);
+    const bool removedReferences = clearPracticeReferenceWavs(false, targetBank);
     if (useIdeaTiming) {
         LooperBankTiming generatedTiming;
         generatedTiming.bpm = appliedIdea->bpm;
@@ -16728,6 +16836,7 @@ bool MainWindow::applyPracticeIdea(
                 ? std::optional<bool>(false) : std::nullopt,
             syncScope);
     }
+    if (removedReferences) syncLooperArrangement();
     return true;
 }
 

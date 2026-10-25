@@ -73,6 +73,8 @@ public:
     bool armAutomationDropOutgoingStarts(int count, QString& error);
     void clearAutomationPause();
     QJsonObject automationSnapshot() const;
+    struct IncomingProgress { qint64 receivedBytes = 0, totalBytes = 0; };
+    IncomingProgress incomingProgress() const noexcept;
     bool incomingTransferActive() const noexcept;
     bool workPending() const noexcept;
 
@@ -108,6 +110,7 @@ private:
     int incomingLooperAssetDoneChunks_ = 0;
     quint64 incomingLooperAssetGeneration_ = 0;
     QTimer incomingLooperAssetTimer_;
+    QElapsedTimer incomingTransferElapsed_;
 
     QList<QPair<QString, QString>> outgoingLooperAssetQueue_;
     QString outgoingLooperAssetPath_;
@@ -123,6 +126,7 @@ private:
     bool outgoingLooperAssetReadPending_ = false;
     QByteArray outgoingLooperAssetPreparedChunk_;
     QElapsedTimer outgoingLooperAssetProgress_;
+    QElapsedTimer outgoingTransferElapsed_;
     QTimer outgoingLooperAssetTimer_;
     quint64 outgoingLooperAssetGeneration_ = 0;
     bool publishedWorkPending_ = false;

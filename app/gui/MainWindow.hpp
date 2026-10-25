@@ -382,6 +382,8 @@ private:
         bool alignToRunningTransport = false);
     void sendPreparedTrackLevel();
     void syncLooperArrangement();
+    void flushAutomaticTrackShare();
+    void updateTrackTransferPresentation();
     QString looperAssetAbsolutePath(const LooperLane& lane) const;
     bool materializeLooperAssets(const QString& projectFolder);
     QString selectedDeviceId() const;

@@ -1212,6 +1212,23 @@ void test_unavailable_asset_reports_without_waiting_for_start(const QString& fol
     expect(receiver.abandoned == 1, "duplicate failure abandoned a later workflow");
 }
 
+void test_incoming_progress_tracks_received_bytes(const QString& folder)
+{
+    const auto wav = pcm16Wav(32, 1300);
+    const auto hash = sha256(wav);
+    DeferredContext context(folder); context.expectAsset(hash);
+    AssetTransferService transfer(context);
+    expect(transfer.incomingProgress().totalBytes == 0, "idle receiver has no byte progress");
+    transfer.receiveStart(startMessage(hash, wav.size()), context.expectedSource);
+    expect(transfer.incomingProgress().receivedBytes == 0 &&
+        transfer.incomingProgress().totalBytes == wav.size(), "START exposes the actual WAV size");
+    transfer.receiveChunk(chunk(hash, wav), context.expectedSource);
+    expect(transfer.incomingProgress().receivedBytes == wav.size(), "validated received chunk advances byte progress");
+    transfer.cancel(); context.runAll();
+    expect(transfer.incomingProgress().receivedBytes == 0 && transfer.incomingProgress().totalBytes == 0,
+        "cancelled transfer does not retain stale progress");
+}
+
 } // namespace
 
 int main(int argc, char* argv[])
@@ -1221,6 +1238,7 @@ int main(int argc, char* argv[])
     expect(folder.isValid(), "asset test folder is available");
     if (folder.isValid()) {
         test_unavailable_asset_reports_without_waiting_for_start(folder.path());
+        test_incoming_progress_tracks_received_bytes(folder.path());
         test_chunk_sequence_rejects_duplicate_and_wrong_source();
         test_arrangement_validation_reuses_received_assets(folder.path());
         test_send_paths_use_the_project_root(folder.path());

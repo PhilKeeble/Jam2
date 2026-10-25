@@ -21,6 +21,31 @@
 #include <stdexcept>
 #include <vector>
 
+TrackReferenceMetadata TrackReferenceMetadata::fromJson(const QJsonObject& object)
+{
+    return {object.value(QStringLiteral("reference_kind")).toString(),
+        object.value(QStringLiteral("reference_source_signature")).toString(),
+        object.value(QStringLiteral("reference_bpm")).toDouble(),
+        object.value(QStringLiteral("reference_stale")).toBool()};
+}
+
+void TrackReferenceMetadata::writeTo(QJsonObject& object) const
+{
+    if (kind.isEmpty()) return;
+    object.insert(QStringLiteral("reference_kind"), kind);
+    object.insert(QStringLiteral("reference_source_signature"), sourceSignature);
+    object.insert(QStringLiteral("reference_bpm"), bpm);
+    object.insert(QStringLiteral("reference_stale"), stale);
+}
+
+void TrackReferenceMetadata::applyTo(LooperLane& lane) const
+{
+    lane.referenceKind = kind;
+    lane.referenceSourceSignature = sourceSignature;
+    lane.referenceBpm = bpm;
+    lane.referenceStale = stale;
+}
+
 namespace {
 
 std::filesystem::path nativeFilePath(const QString& path)

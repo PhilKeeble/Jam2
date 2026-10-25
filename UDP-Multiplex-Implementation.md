@@ -46,10 +46,12 @@ The outer reliable datagram format uses `J2MX`, a fixed 42-byte header,
 up to 1024 bytes of content and a 16-byte HMAC tag. Channel and stream identifiers
 keep control and assets independent. Each logical queue is bounded at 256 KiB;
 out-of-order receive storage is bounded by a 64-fragment window. Loss recovery
-uses adaptive retransmission timing and a congestion window. Default aggregate
-sender budgets are 64 KiB/s for control and 128 KiB/s for asset data, with a
-4096-byte burst allowance. These budgets do not reserve capacity on the physical
-uplink; congestion effects still require measurement on real networks.
+uses adaptive retransmission timing and a congestion window. The control sender
+budget is 64 KiB/s with a 4096-byte burst allowance. The current experimental
+default has no fixed asset rate cap (`asset_bytes_per_second=0`), including asset
+ACKs; they do not consume the GUI control budget. A nonzero asset configuration
+still enables the aggregate token bucket. Congestion windows, bounded queues,
+chunk acknowledgements and bounded per-stream scheduling remain active.
 
 The creator checks in every 15 seconds while admission is open. At capacity,
 it finishes introductions and their acknowledgements before pausing. A small
@@ -207,6 +209,126 @@ server fallback after two blocked opens, and automatic repair of a failed
 non-creator mesh tuple. These controlled checks do not replace real macOS and
 NAT testing. No DSP, audio codec, resampler, jitter-buffer or mixer changes
 are part of these repairs.
+
+## WAV-sharing synchronization repairs (25 October, later logs)
+
+The later Windows `185149` / macOS `185309` logs show a model synchronization
+failure rather than a jam-ending transport timeout. The creator imported a
+2,375,302-byte WAV at 19:00:00.162 UTC. The Mac started receiving it at
+19:00:01.441, submitted a track edit against received revision 11 at
+19:00:12.010 while that revision was still awaiting the WAV, and cancelled the
+transfer at 19:00:13.982 after the creator accepted the edit. Its displayed
+arrangement was older than the revision it claimed as its edit base. The
+creator consequently treated the absent imported lane as a deliberate removal.
+
+Track proposals now identify their last **applied** authoritative revision, so
+the existing three-way metadata merge can preserve a newer creator import.
+Rebasing runs within the ordered control-message dispatch: deferring it to the
+event loop allowed its following WAV offer to overtake it, then falsely
+superseded that offer and released the sender's unpublished WAV too early.
+Incoming scoped song updates also compose over the latest staged authoritative
+model before asynchronous file validation. Idea and track updates received
+during a download no longer repeatedly project over the older displayed model
+and lose each other's changes. Outgoing initial WAV offers hold installation
+of the authoritative snapshot until the offers have been reconciled, including
+when publication starts during asynchronous validation.
+
+Automatic initial sharing waits for authenticated membership, the creator's
+sharing policy, and completion of the WAV compatibility audit. It is retriggered
+when those prerequisites become ready. A read-only compatibility audit no
+longer initiates a two-way share of every peer's displayed tracks: that feedback
+loop could restore references that another peer had just removed. Actual local
+resampling can still publish its converted assets. Explicitly opening a local
+saved project also schedules automatic publication after its metadata audit,
+including relative-path WAVs during an existing jam.
+
+Reference identity, generation signature, tempo and stale state survive generic
+Track Sync offers, with the same validation bounds as song metadata. Clearing
+or replacing generated ideas publishes the resulting reference-lane removals
+through the track scope as well as the idea scope. Custom WAV lanes remain.
+
+Adopting a creator's jam name installs the validated incoming lanes before
+relocating workspace paths. Installing them afterward restored paths into the
+directory that had just been moved, leaving visible lanes with unreadable WAVs.
+
+The receive indicator now reports accepted WAV bytes against the declared
+file size. A served peer's normal on-demand asset-stream closure is not a
+global retry error; the transient retry indicator clears when sharing is idle.
+At the time of those logs, the asset budget was 131,072 bytes/s including
+multiplex overhead: the observed 1,616,888-byte reference took about 13 seconds
+and the imported 2,375,302-byte file required roughly 19 seconds. The subsequent
+uncapped-transfer experiment below changes that budget. No DSP, audio codec,
+resampler, jitter-buffer or mixer behavior is changed by these repairs.
+
+The native `jam2_udp_four_sharing_races_integration` workflow uses exactly four
+real app processes with fake audio and the real Go signaller behind injected
+UDP network behavior. It checks a WAV retained across leaving a local jam and
+joining another creator, hashes the actual files on every peer, holds a WAV at
+the incoming-write boundary while a real lane rename and a scoped idea update
+occur, verifies convergence without further user actions, and clears shared
+references through the real confirmation dialog while retaining a custom WAV.
+Failure artifacts retain per-peer model and presentation state. Unit coverage
+checks accepted-byte progress, reference metadata round trips and invalid
+reference fields. Real macOS/NAT validation remains a separate manual check.
+
+Validated in the optimized Windows Release build (`release/jam2.exe`):
+
+- `jam2_track_workspace_support_units` ??? passed.
+- `jam2_asset_transfer_units` ??? passed.
+- `jam2_listening_tools_units` ??? passed.
+- `jam2_four_shared_content_integration` ??? passed (46.77 s).
+- `jam2_udp_four_shared_content_integration` ??? passed (172.87 s).
+- `jam2_four_wav_interruption_integration` ??? passed (37.23 s).
+- `jam2_udp_four_recovery_integration` ??? passed (108.20 s).
+- `jam2_udp_four_sharing_races_integration` ??? passed (38.91 s).
+
+The interruption workflow's offer gate now recognizes a pending arrangement
+asset as well as a pending contribution: a newer authoritative snapshot may
+legitimately supersede the offer without releasing the pre-byte pause. Both
+paths still exercise the real leave/rejoin and WAV ownership recovery.
+
+## Uncapped WAV and slow audio startup experiment
+
+The brief failed edge at 18:53:38.398 UTC was the audio runtime's proof deadline,
+not a failed multiplex handoff. The Mac received its contract at 18:53:35.478
+but reported its audio network runtime ready at 18:53:38.725. The creator's
+eight probes plus response grace expired before that startup completed; its
+edge became active about 200 ms after the failed status.
+
+Server-mode media proof now continues on the same socket for up to 40 HELLOs,
+spaced at least 250 ms apart, with the existing one-second final response grace. There
+is no minimum wait: a matching ACK activates it immediately. Direct/STUN keep
+their previous eight-attempt policy. The mesh diagnostic includes
+`endpoint_proof_attempt_limit`. This changes network startup proof, not audio
+processing.
+
+For this branch's throughput experiment, asset data and asset ACKs bypass the
+fixed byte-rate buckets by default. GUI control pacing, reliable congestion
+control, bounded queues, the four-chunk application window and the transport's
+per-stream scheduling quantum remain. Sent/received WAV log records include
+`elapsed_ms` and `payload_bytes_per_second`; receive timing includes validation
+and atomic commit, while send timing runs from validated source readiness
+through queueing DONE.
+
+The exactly-four-peer `jam2_udp_four_unthrottled_wav_integration` uses real app
+processes and the real Go signaller. Only its test translator blocks media
+HELLO/ACK packets for four seconds, simulating delayed audio attachment while
+the physical handoff and control connection proceed. It requires no failed
+proof state, then measures a 4,194,348-byte WAV reaching all three receiving
+peers, checks file hashes, continued audio packet reception and zero multiplex
+audio queue drops. The benchmark disables artificial loss/duplication; the
+separate reliability and recovery tests retain those faults.
+
+Measured local result: 10,898 ms end-to-end for the three recipients, or
+1,154,619 aggregate payload bytes/s (about 1.10 MiB/s). This is a local
+application/transport measurement, not an Internet throughput prediction.
+
+All ten targeted native Release checks passed for this experiment: the new
+unthrottled WAV test, asset-transfer units, UDP multiplex units, UDP control
+transport units, four-peer transport, impaired rotation, four-peer public-mode
+application, four-peer LAN application, WAV-sharing races and four-peer recovery.
+The tested Windows executable is `release/jam2.exe`; the four-second delay is
+exclusive to the test translator and is not a production startup delay.
 
 ## Remaining experiments
 

@@ -733,8 +733,12 @@ int main(int argc, char* argv[])
                         return false;
                     }
                     if (pause == QStringLiteral("offer")) {
+                        // A later authoritative arrangement can supersede the
+                        // offer while retaining ownership of its missing WAV.
+                        // Both paths are still held before requesting bytes.
                         return content.value(QStringLiteral(
-                            "pending_track_contribution_count")).toInt() > 0;
+                            "pending_track_contribution_count")).toInt() > 0 ||
+                            content.value(QStringLiteral("pending_asset_count")).toInt() > 0;
                     }
                     if (pause == QStringLiteral("outgoing-validation")) {
                         return transfer.value(QStringLiteral(

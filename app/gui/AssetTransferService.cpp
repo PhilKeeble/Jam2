@@ -208,6 +208,11 @@ QJsonObject AssetTransferService::automationSnapshot() const
     };
 }
 
+AssetTransferService::IncomingProgress AssetTransferService::incomingProgress() const noexcept
+{
+    return {incomingSequence_.acceptedBytes(), incomingLooperAssetBytesExpected_};
+}
+
 bool AssetTransferService::incomingTransferActive() const noexcept
 {
     return incomingWorkerState_ != nullptr && incomingSequence_.active();
@@ -412,6 +417,7 @@ void AssetTransferService::continueSend()
                 outgoingLooperAssetNextChunk_ = -1;
                 outgoingLooperAssetAckedChunks_ = 0;
                 outgoingLooperAssetProgress_.start();
+                outgoingTransferElapsed_.start();
                 publishWorkState();
                 continueSend();
             },
@@ -579,14 +585,16 @@ void AssetTransferService::continueSend()
     context_.appendAssetLog(QStringLiteral(
         "sent looper asset: raw_bytes=%1 chunks=%2 binary_body_bytes=%3 "
         "authenticated_chunk_wire_bytes=%4 replaced_text_data_characters=%5 "
-        "window_chunks=%6 hash=%7")
+        "window_chunks=%6 hash=%7 elapsed_ms=%8 payload_bytes_per_second=%9")
         .arg(outgoingLooperAssetBytes_)
         .arg(outgoingLooperAssetNextChunk_)
         .arg(binaryBodyBytes)
         .arg(authenticatedWireBytes)
         .arg(replacedEncodedDataCharacters)
         .arg(kAssetChunkWindow)
-        .arg(outgoingLooperAssetHash_));
+        .arg(outgoingLooperAssetHash_)
+        .arg(outgoingTransferElapsed_.elapsed())
+        .arg(outgoingLooperAssetBytes_ * 1000 / qMax<qint64>(1, outgoingTransferElapsed_.elapsed())));
     resetOutgoing();
 }
 
@@ -682,6 +690,7 @@ void AssetTransferService::resetOutgoing()
     outgoingLooperAssetReadPending_ = false;
     outgoingLooperAssetPreparedChunk_.clear();
     outgoingLooperAssetProgress_.invalidate();
+    outgoingTransferElapsed_.invalidate();
     publishWorkState();
 }
 
@@ -714,6 +723,7 @@ void AssetTransferService::clearIncoming(bool abandonExpected)
     incomingSequence_.reset();
     incomingWorkerState_.reset();
     incomingLooperAssetHash_.clear();
+    incomingTransferElapsed_.invalidate();
     incomingLooperAssetSourceToken_.clear();
     incomingLooperAssetBytesExpected_ = 0;
     incomingLooperAssetQueue_.clear();
@@ -790,6 +800,7 @@ void AssetTransferService::receiveStart(const QJsonObject& message, const QStrin
     incomingLooperAssetHash_ = hash;
     incomingLooperAssetSourceToken_ = sourcePeerToken;
     incomingLooperAssetBytesExpected_ = static_cast<qint64>(declaredBytes);
+    incomingTransferElapsed_.start();
     incomingLooperAssetTimer_.start(kLooperAssetProgressDeadlineMs);
     publishWorkState();
     context_.noteAssetProgress(hash, sourcePeerToken, true);
@@ -1052,6 +1063,11 @@ void AssetTransferService::finalizeIncoming()
             }
             const QString output = state->outputPath;
             const QString expectedHash = state->expectedHash;
+            context_.appendAssetLog(QStringLiteral(
+                "received looper asset: raw_bytes=%1 elapsed_ms=%2 payload_bytes_per_second=%3 hash=%4")
+                .arg(state->expectedBytes).arg(incomingTransferElapsed_.elapsed())
+                .arg(state->expectedBytes * 1000 / qMax<qint64>(1, incomingTransferElapsed_.elapsed()))
+                .arg(expectedHash));
             state->temporaryPath.clear();
             clearIncoming(false);
             context_.acceptIncomingAsset(expectedHash, output, state->actualFrames);

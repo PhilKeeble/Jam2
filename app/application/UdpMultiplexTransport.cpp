@@ -109,7 +109,7 @@ struct UdpMultiplexTransport::Impl {
         key = control_protocol::decodeHex(config.keyHex, 16);
         const QByteArray sid = control_protocol::decodeHex(config.sessionHex, 8);
         if (key.size() != 16 || sid.size() != 8 || !token(config.localToken) || peerId(config.localToken) == 0 ||
-            config.maximumPeers < 0 || config.controlBytesPerSecond < 1024 || config.assetBytesPerSecond < 1024 || config.linkRepairSilenceMs < 1000)
+            config.maximumPeers < 0 || config.controlBytesPerSecond < 1024 || (config.assetBytesPerSecond != 0 && config.assetBytesPerSecond < 1024) || config.linkRepairSilenceMs < 1000)
             throw std::runtime_error("Invalid UDP multiplex configuration");
         for (char byte : sid) session = (session << 8) | static_cast<unsigned char>(byte);
         std::copy(key.begin(), key.end(), nativeKey.begin());
@@ -436,13 +436,16 @@ struct UdpMultiplexTransport::Impl {
     bool muxSend(const std::shared_ptr<Link>& link, const QByteArray& packet)
     {
         if (!link->socket || link->phase != Phase::Active || packet.size() < 8) return false;
-        const bool asset = packet[6] == static_cast<char>(UdpMuxChannel::Asset) &&
-            packet[5] == static_cast<char>(UdpMuxKind::Data);
+        const bool assetChannel = packet[6] == static_cast<char>(UdpMuxChannel::Asset);
+        const bool asset = assetChannel && packet[5] == static_cast<char>(UdpMuxKind::Data);
         auto& budget = asset ? assetBudget : controlBudget;
         const auto charge = static_cast<double>(packet.size() + 28);
-        if (budget < charge) { ++counters.budgetDeferrals; return false; }
+        // In uncapped mode, asset ACKs must not consume the GUI control
+        // budget or impose a second, hidden WAV throughput cap.
+        const bool limited = !assetChannel || config.assetBytesPerSecond != 0;
+        if (limited && budget < charge) { ++counters.budgetDeferrals; return false; }
         if (link->socket->send_to(link->remote, view(packet)).outcome != jam2::UdpSendOutcome::Sent) { ++counters.sendErrors; return false; }
-        budget -= charge;
+        if (limited) budget -= charge;
         (asset ? counters.assetBytesSent : counters.controlBytesSent) += static_cast<quint64>(packet.size());
         return true;
     }

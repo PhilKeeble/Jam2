@@ -264,6 +264,11 @@ Bound and pace control/bulk sends so retry or asset traffic cannot monopolize th
 network loop, socket queue or creator's uplink. Preserve timely control progress
 as well as audio progress.
 
+Current branch experiment: the fixed asset byte-rate cap is disabled to measure
+natural multiplex throughput. Reliable congestion control and bounded scheduling
+remain active; logs record actual payload bytes/s and elapsed transfer time.
+Revisit the aggregate budget below using the resulting real-network tests.
+
 Apply a creator-wide outgoing asset budget across all recipients, not a separate
 unrestricted full-rate budget per peer. Sending a WAV to six participants can
 multiply creator uplink traffic even though every transfer shares its recipient's

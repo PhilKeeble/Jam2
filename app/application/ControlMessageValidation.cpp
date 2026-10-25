@@ -59,7 +59,17 @@ bool isValidTrackOffer(const QJsonObject& track)
     qint64 stopFrame = -1;
     qint64 loopStartFrame = -1;
     qint64 loopEndFrame = -1;
-    return isUuid(track.value(QStringLiteral("recording_id")).toString()) &&
+    const auto optionalText = [&](const char* key, qsizetype maximum) {
+        return track.value(key).isUndefined() || isBoundedString(track.value(key), maximum);
+    };
+    const auto bpm = track.value("reference_bpm");
+    const auto signature = track.value("reference_source_signature").toString();
+    return optionalText("reference_kind", 16) && optionalText("reference_source_signature", 64) &&
+        (signature.isEmpty() || isSha256Hex(signature)) &&
+        (bpm.isUndefined() || (bpm.isDouble() && std::isfinite(bpm.toDouble()) &&
+            bpm.toDouble() >= 0 && bpm.toDouble() <= 400)) &&
+        (track.value("reference_stale").isUndefined() || track.value("reference_stale").isBool()) &&
+        isUuid(track.value(QStringLiteral("recording_id")).toString()) &&
         isBoundedInteger(track.value(QStringLiteral("bank")), 0,
             limits::kMaximumLooperBankCount - 1) &&
         !targetLaneId.isEmpty() && targetLaneId.size() <= 80 &&

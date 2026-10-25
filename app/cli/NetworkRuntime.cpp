@@ -1864,6 +1864,10 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
             : jam2::PeerEndpointState::Failed;
     };
     constexpr std::uint64_t kAuthenticatedPeerLivenessTimeoutUs = 3000000ULL;
+    // A punched multiplex can be ready while the remote audio runtime is still
+    // attaching its device and applying the initial session. Continue proving
+    // that same socket instead of declaring it failed after only ~3 seconds.
+    const std::uint32_t endpoint_proof_attempt_limit = options.datagram_transport ? 40U : 8U;
     auto reset_peer_proof = [&](
                                 MeshPeerState& peer,
                                 bool liveness_reprobe,
@@ -2479,6 +2483,7 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                           << " peer_id=" << peer.peer_id.value
                           << " endpoint_proof_state=" << endpoint_proof_name(peer_endpoint_state(peer.peer_id))
                           << " endpoint_proof_attempts=" << peer.proof_attempts
+                          << " endpoint_proof_attempt_limit=" << endpoint_proof_attempt_limit
                           << " endpoint_proof_successes=" << peer.proof_successes
                           << " endpoint_proof_failures=" << peer.proof_failures
                           << " endpoint_unverified_drops=" << peer.proof_unverified_drops
@@ -3264,7 +3269,7 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                 auto& peer = entry.second;
                 auto endpoint_state = peer_endpoint_state(peer.peer_id);
                 if (endpoint_state == jam2::PeerEndpointState::Probing &&
-                    peer.proof_attempts >= 8 &&
+                    peer.proof_attempts >= endpoint_proof_attempt_limit &&
                     now >= peer.proof_deadline_us) {
                     network_session.setPeerEndpointState(peer.peer_id, jam2::PeerEndpointState::Failed);
                     endpoint_state = jam2::PeerEndpointState::Failed;
@@ -3284,7 +3289,7 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                     }
                 }
                 if (endpoint_state != jam2::PeerEndpointState::Active) {
-                    if (peer.proof_attempts >= 8 || now < peer.next_probe_us) {
+                    if (peer.proof_attempts >= endpoint_proof_attempt_limit || now < peer.next_probe_us) {
                         continue;
 
                     }
@@ -3301,7 +3306,7 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                 }
                 if (endpoint_state == jam2::PeerEndpointState::Probing) {
                     ++peer.proof_attempts;
-                    if (peer.proof_attempts == 8) {
+                    if (peer.proof_attempts == endpoint_proof_attempt_limit) {
 
                         peer.proof_deadline_us = now + 1000000ULL;
                     }

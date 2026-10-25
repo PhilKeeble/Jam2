@@ -9,6 +9,7 @@
 #include "ProjectPersistenceCoordinator.hpp"
 #include "SharedTrackController.hpp"
 #include "TrackRecordingWorkflow.hpp"
+#include "TrackWorkspaceSupport.hpp"
 #include "ListeningToolsController.hpp"
 
 #include <QJsonObject>
@@ -61,6 +62,7 @@ public:
         qint64 loopStartFrame = -1;
         qint64 loopEndFrame = -1;
         bool loopEnabled = false;
+        TrackReferenceMetadata reference;
     };
 
     enum class IncomingAssetWorkflow {
@@ -161,6 +163,10 @@ public:
     QString deferredSongSetSourcePeerToken;
     int looperArrangementRevision = 0;
     int lastAppliedHostArrangementRevision = 0;
+    bool automaticTrackSharePending = false;
+    bool sharingPolicyReceived = false;
+    QJsonObject stagedHostSong;
+    int stagedHostSongRevision = 0;
     QMap<quint64, QJsonObject> authoritativeTrackHistory;
 
 private:

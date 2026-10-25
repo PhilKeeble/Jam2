@@ -27,6 +27,7 @@
 #include <QFileInfo>
 #include <QHeaderView>
 #include <QJsonArray>
+#include <QJsonDocument>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
@@ -560,6 +561,21 @@ void GuiTestAgent::handle(const QJsonObject& command)
     const QString type = command.value(QStringLiteral("type")).toString();
     if (!boundedRequestId(command)) {
         reject(command, QStringLiteral("id must be a bounded non-empty string"));
+        return;
+    }
+    if (type == QStringLiteral("song.snapshot")) {
+        if (!onlyFields(command, {"format", "type", "id"})) {
+            reject(command, QStringLiteral("unsupported field for song.snapshot"));
+            return;
+        }
+        const auto packed = qCompress(QJsonDocument(window_.songToJson(true))
+            .toJson(QJsonDocument::Compact)).toBase64();
+        if (packed.size() > 48 * 1024) {
+            reject(command, QStringLiteral("song snapshot exceeds automation frame budget"));
+            return;
+        }
+        emitEvent(type, {{QStringLiteral("id"), command.value(QStringLiteral("id"))},
+            {QStringLiteral("song_zlib_base64"), QString::fromLatin1(packed)}});
         return;
     }
     if (type == QStringLiteral("inventory") || type == QStringLiteral("snapshot")) {

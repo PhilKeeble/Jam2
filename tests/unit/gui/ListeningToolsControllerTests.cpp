@@ -3,6 +3,7 @@
 #include "ControlMessageValidation.hpp"
 
 #include <QApplication>
+#include <QJsonArray>
 #include <QCheckBox>
 #include <QTemporaryDir>
 #include <QFile>
@@ -294,6 +295,24 @@ void testValidationAndDialog() {
     auto invalid = unavailable; invalid["sha256"] = "invalid";
     require(!evaluateControlMessage(invalid, ControlMessageSource::AuthenticatedPeer).accepted,
         "malformed asset failure was accepted");
+    QJsonObject referenceTrack{{"recording_id", "11111111-1111-4111-8111-111111111111"},
+        {"bank", 0}, {"target_lane_id", "reference-lane"}, {"sha256", QString(64, 'a')},
+        {"name", "Section A Drums"}, {"sample_rate", 48000}, {"source_frames", "48000"},
+        {"reference_kind", "drums"}, {"reference_source_signature", QString(64, 'b')},
+        {"reference_bpm", 123.0}, {"reference_stale", false}};
+    auto referenceOffer = [&](const QJsonObject& track) {
+        return QJsonObject{{"type", "looper.track.batch.offer"},
+            {"batch_id", "22222222-2222-4222-8222-222222222222"}, {"tracks", QJsonArray{track}}};
+    };
+    require(evaluateControlMessage(referenceOffer(referenceTrack), ControlMessageSource::AuthenticatedPeer).accepted,
+        "reference metadata on a shared WAV is valid");
+    referenceTrack["reference_bpm"] = -1;
+    require(!evaluateControlMessage(referenceOffer(referenceTrack), ControlMessageSource::AuthenticatedPeer).accepted,
+        "invalid reference tempo rejected at the authenticated boundary");
+    referenceTrack["reference_bpm"] = 123.0;
+    referenceTrack["reference_source_signature"] = QString(1025, 'x');
+    require(!evaluateControlMessage(referenceOffer(referenceTrack), ControlMessageSource::AuthenticatedPeer).accepted,
+        "reference metadata cannot bypass string bounds");
     JamSyncDialog dialog({}, false, false);
     QCheckBox* listening = nullptr;
     QCheckBox* playback = nullptr;

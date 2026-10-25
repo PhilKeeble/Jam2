@@ -6,6 +6,18 @@
 #include <QJsonObject>
 #include <QString>
 
+// Classification belongs to the track even when its WAV arrives through a
+// generic share batch rather than an authoritative song snapshot.
+struct TrackReferenceMetadata {
+    QString kind;
+    QString sourceSignature;
+    double bpm = 0;
+    bool stale = false;
+    static TrackReferenceMetadata fromJson(const QJsonObject& object);
+    void writeTo(QJsonObject& object) const;
+    void applyTo(LooperLane& lane) const;
+};
+
 struct WavMetadata {
     int audioFormat = 0;
     int sampleRate = 0;
