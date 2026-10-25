@@ -5,6 +5,7 @@
 
 #include <QJsonObject>
 #include <QString>
+#include <QSet>
 
 // Classification belongs to the track even when its WAV arrives through a
 // generic share batch rather than an authoritative song snapshot.
@@ -17,6 +18,31 @@ struct TrackReferenceMetadata {
     void writeTo(QJsonObject& object) const;
     void applyTo(LooperLane& lane) const;
 };
+
+// A presentation overlay only: pending bytes never enter the playing project.
+struct PendingTrackLane {
+    LooperLane lane;
+    bool contribution = false;
+    QString fallbackId;
+};
+
+enum class TrackWavAvailability { Ready, Waiting, Receiving, Validating, WaitingForBatch };
+
+struct TrackLanePresentation {
+    LooperLane lane;
+    TrackWavAvailability availability = TrackWavAvailability::Ready;
+    qint64 receivedBytes = 0;
+    qint64 totalBytes = 0;
+    bool pending() const noexcept { return availability != TrackWavAvailability::Ready; }
+};
+
+QVector<TrackLanePresentation> presentPendingTrackLanes(
+    const QVector<LooperLane>& applied,
+    const QVector<PendingTrackLane>& pending,
+    const QSet<QString>& validatedHashes,
+    const QString& incomingHash,
+    qint64 receivedBytes,
+    qint64 totalBytes);
 
 struct WavMetadata {
     int audioFormat = 0;

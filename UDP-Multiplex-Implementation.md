@@ -330,6 +330,74 @@ application, four-peer LAN application, WAV-sharing races and four-peer recovery
 The tested Windows executable is `release/jam2.exe`; the four-second delay is
 exclusive to the test translator and is not a production startup delay.
 
+## Incoming WAV placeholders and audio-burst measurements
+
+Incoming lane metadata now drives a presentation overlay while its WAV is
+queued or downloading. It retains the advertised source length, timeline
+position and crop/loop region, so the clip occupies its expected space before
+the audio arrives. The clip shows waiting, accepted-byte percentage/KiB,
+validation, or waiting-for-other-tracks state. Waveform/file controls become
+available when the existing validated, atomic application path installs the
+asset. Pending lanes are read-only; existing lanes remain editable. The playing
+project and audio processing continue to use their existing validated content.
+
+The overlay consumes arrangement snapshots and Track Sync offers, matches
+stable lane identities and hashes, and avoids duplicating a pending lane when
+both describe the same WAV. An occupied contribution target keeps its existing
+lane and receives a separate placeholder. Cancelled/superseded transfers remove
+their overlays through the existing pending-metadata lifecycle. Progress updates
+repaint the widget without rebuilding waveforms or the mix for each chunk.
+The creator-mediated transfer topology and wire format remain as before.
+
+A final impaired-network rerun also exposed a reference-clear ordering race:
+a track rename could be accepted while the sender was still editing from the
+preceding revision. Deleting the same WAV then conflicted with its newer name,
+and the accompanying Idea clear was rejected as stale. Reconciliation now
+keeps deletion authoritative over metadata-only edits of the same WAV, in
+both arrival orders, while preserving a concurrent replacement with different
+bytes. Idea proposals may cross track-only revisions when their Idea content,
+section structure and bank timing are unchanged. Genuine Idea/timing conflicts
+still take the existing rejection path. Native model cases cover these
+boundaries; the four-peer clearing check now requires the Idea notes to clear
+as well as removal of the reference WAV and retention of custom WAVs.
+
+Native coverage includes presentation state/progress/validation/cancellation,
+identity conflicts, actual widget rendering and mutation gating. The impaired
+four-peer sharing test pauses a real incoming chunk, requires a visible
+placeholder before the playing model contains the asset, retains an independent
+lane edit and Idea update during that pause, then checks all four peers converge
+with no remaining placeholders. Direct four-peer sharing and WAV interruption
+tests also pass.
+
+In the supplied Windows field runs, the two loss transitions were at
+21:25:44.870 and 21:45:47.356. Largest audio arrival gaps were 148.131 and
+145.280 ms; the corresponding Mac maxima were 108.956 and 111.205 ms.
+No WAV transfer was active at either event. Measured core receive-loop/callback
+maxima did not acquire a matching long stall, and packets subsequently bunched
+or reordered. The playback target returned to 1.333 ms; the second event
+briefly sampled a 10.667 ms target and later 9.750 ms before returning, rather
+than retaining the outage as permanent latency. These observations do not
+identify Wi-Fi as the confirmed cause.
+
+Structured multiplex stats now include cumulative
+`worker_loop_gap_max_us`, `worker_service_max_us` and
+`worker_lock_wait_max_us`. They measure the separate transport worker, which
+the older core-loop counters could not distinguish from a delivery interruption.
+Measurements are outside real-time audio callbacks. The loop-gap maximum
+includes the worker's normal wait (up to 10 ms) and idle periods; it is not
+itself a per-packet network latency measurement.
+
+The unthrottled four-peer test additionally submits three large arrangement
+edits with WAV traffic idle, exercising the pattern near the field bursts.
+The measured local run delivered 768,274 raw JSON bytes in those three
+proposals (compression reduced their wire traffic), with worker loop gaps
+at most 11,489 us, worker service at most 778 us, lock wait at most 280 us,
+continued audio reception and zero multiplex audio queue drops. The WAV
+benchmark itself took 9,831 ms to reach all three recipients. This local test
+did not reproduce the field interruption and does not exclude a Wi-Fi or
+platform scheduling issue. No jitter/buffer/DSP tuning or shutdown-stat changes
+were made for this investigation.
+
 ## Remaining experiments
 
 Keep the creator-mediated asset star for now. Measure fan-out congestion and

@@ -65,6 +65,12 @@ QJsonObject mergeLaneObject(
     return merged;
 }
 
+bool sameWavIdentity(const QJsonObject& first, const QJsonObject& second)
+{
+    const QString hash = first.value(QStringLiteral("asset_hash")).toString().toLower();
+    return !hash.isEmpty() && hash == second.value(QStringLiteral("asset_hash")).toString().toLower();
+}
+
 QSet<QString> newAssetHashes(
     const QMap<QString, QJsonObject>& base,
     const QMap<QString, QJsonObject>& branch)
@@ -80,6 +86,27 @@ QSet<QString> newAssetHashes(
 }
 
 } // namespace
+
+bool canRebaseIdeaOverTrackEdits(const QJsonObject& baseSong, const QJsonObject& currentSong)
+{
+    if (!baseSong.value(QStringLiteral("sections")).isArray() ||
+        !currentSong.value(QStringLiteral("sections")).isArray()) return false;
+    QJsonObject baseIdea = baseSong, currentIdea = currentSong;
+    baseIdea.remove(QStringLiteral("looper"));
+    currentIdea.remove(QStringLiteral("looper"));
+    if (baseIdea != currentIdea) return false;
+    const auto baseBanks = baseSong.value(QStringLiteral("looper")).toObject()
+        .value(QStringLiteral("banks")).toArray();
+    const auto currentBanks = currentSong.value(QStringLiteral("looper")).toObject()
+        .value(QStringLiteral("banks")).toArray();
+    if (baseBanks.size() != currentBanks.size()) return false;
+    for (int i = 0; i < baseBanks.size(); ++i) {
+        for (const auto& field : {QStringLiteral("id"), QStringLiteral("timing")})
+            if (baseBanks[i].toObject().value(field) != currentBanks[i].toObject().value(field))
+                return false;
+    }
+    return true;
+}
 
 QJsonObject mergeConcurrentLooperMetadata(
     const QJsonObject& baseSong,
@@ -142,7 +169,8 @@ QJsonObject mergeConcurrentLooperMetadata(
             }
             if (!inCurrent && !inProposed) continue;
             if (!inCurrent) {
-                if (proposedMap.value(key) != baseMap.value(key)) {
+                if (proposedMap.value(key) != baseMap.value(key) &&
+                    !sameWavIdentity(baseMap.value(key), proposedMap.value(key))) {
                     mergedMap.insert(key, proposedMap.value(key));
                     ++changes;
                     ++collisions;
@@ -152,7 +180,11 @@ QJsonObject mergeConcurrentLooperMetadata(
                 continue;
             }
             if (!inProposed) {
-                if (currentMap.value(key) != baseMap.value(key)) {
+                // Removing a WAV also removes its metadata. A preceding
+                // rename/placement edit must not restore the deleted content;
+                // a concurrent replacement with different bytes is retained.
+                if (currentMap.value(key) != baseMap.value(key) &&
+                    !sameWavIdentity(baseMap.value(key), currentMap.value(key))) {
                     mergedMap.insert(key, currentMap.value(key));
                     ++collisions;
                 } else {

@@ -2696,7 +2696,21 @@ QJsonObject MainWindow::automationContentSnapshot() const
             activePreparedMix.sampleRate,
             static_cast<qint64>(std::llround(bankExactOutputFrames(looperProject_.activeBankIndex(),
                 activeTrackSampleRate()) / std::clamp(activePreparedMix.listeningSpeed, 0.1, 2.0))));
+    QJsonArray pendingWavViews;
+    if (looperStack_) for (const auto& view : looperStack_->laneViews()) {
+        if (!view.transfer.pending()) continue;
+        pendingWavViews.append(QJsonObject{
+            {QStringLiteral("id"), view.lane.id}, {QStringLiteral("hash"), view.lane.assetHash},
+            {QStringLiteral("source_frames"), view.sourceFrames},
+            {QStringLiteral("start_frame"), view.lane.startFrame},
+            {QStringLiteral("stop_frame"), view.lane.stopFrame},
+            {QStringLiteral("received_bytes"), view.transfer.receivedBytes},
+            {QStringLiteral("total_bytes"), view.transfer.totalBytes},
+            {QStringLiteral("validating"), view.transfer.availability == TrackWavAvailability::Validating},
+        });
+    }
     return {
+        {QStringLiteral("pending_wav_views"), pendingWavViews},
         {QStringLiteral("arrangement_revision"), static_cast<double>(
             sessionController_.snapshot().arrangementRevision)},
         {QStringLiteral("track_sync_staged_host_revision"), trackWorkspace_.stagedHostSongRevision},
@@ -7408,10 +7422,13 @@ void MainWindow::refreshLooperLanes()
         jam2::practice::practiceIdeaSignature(
             generatedChord,
             generatedBeat);
-    views.reserve(bank.lanes.size());
-    for (const LooperLane& lane : bank.lanes) {
+    const auto presentedLanes = trackWorkspace_.presentedLanes(viewedBankIndex_);
+    views.reserve(presentedLanes.size());
+    for (const auto& presented : presentedLanes) {
+        const LooperLane& lane = presented.lane;
         LooperLaneStackWidget::LaneView view;
         view.lane = lane;
+        view.transfer = presented;
         view.sourceFrames = lane.sourceFrames;
         if (lane.referenceStale ||
             (!lane.referenceKind.isEmpty() && lane.referenceBpm > 0.0 &&
@@ -7425,8 +7442,8 @@ void MainWindow::refreshLooperLanes()
         if (!lane.sampleRateCompatible) {
             view.lane.name += QStringLiteral(" [unavailable: WAV conversion failed]");
         }
-        view.assetPath = looperAssetAbsolutePath(lane);
-        if (!lane.assetPath.trimmed().isEmpty()) {
+        view.assetPath = presented.pending() ? QString{} : looperAssetAbsolutePath(lane);
+        if (!presented.pending() && !lane.assetPath.trimmed().isEmpty()) {
             const auto cached = looperWaveformCache_.constFind(view.assetPath);
             if (cached != looperWaveformCache_.cend()) {
                 view.peaks = cached.value().peaks;
@@ -12568,6 +12585,7 @@ void MainWindow::handleTrackBatchOffer(
         performanceHome_->setTrackTransferStatus(
             QStringLiteral("RECEIVING TRACKS\u2026  0 / %1").arg(tracks.size()));
     }
+    refreshLooperLanes();
     if (automationOfferPauseActive_) return;
     if (automationOfferPauseArmed_) {
         automationOfferPauseArmed_ = false;
@@ -12761,6 +12779,10 @@ void MainWindow::noteTrackAssetProgress(
 {
     const qint64 now = QDateTime::currentMSecsSinceEpoch();
     updateTrackTransferPresentation();
+    if (receiving && looperStack_) {
+        const auto progress = assetTransfer_.incomingProgress();
+        looperStack_->setWavTransferProgress(hash, progress.receivedBytes, progress.totalBytes);
+    }
     if (receiving) {
         for (const PendingTrackContribution& contribution : pendingTrackContributions_) {
             if (contribution.assetHash == hash &&
@@ -12794,6 +12816,7 @@ void MainWindow::releaseHeldTrackSnapshotIfReady()
 
 void MainWindow::requestNextPendingAsset()
 {
+    refreshLooperLanes();
     updateTrackTransferPresentation();
     if (automationOfferPauseActive_) return;
     if (incomingAssetWorkflow_ != IncomingAssetWorkflow::None) {
@@ -13456,22 +13479,26 @@ void MainWindow::handleSongSet(
     if (fromPeerProposal) {
         const quint64 currentRevision = sessionController_.snapshot().arrangementRevision;
         if (proposalBaseRevision != currentRevision) {
-            if (songScope == SongSyncScope::Tracks &&
-                trackWorkspace_.authoritativeTrackHistory.contains(proposalBaseRevision)) {
+            const auto currentSong = songToJson(true);
+            if (trackWorkspace_.authoritativeTrackHistory.contains(proposalBaseRevision) &&
+                (songScope == SongSyncScope::Tracks || canRebaseIdeaOverTrackEdits(
+                    trackWorkspace_.authoritativeTrackHistory.value(proposalBaseRevision), currentSong))) {
                 int mergedChanges = 0;
                 int mergeConflicts = 0;
                 QJsonObject rebased = message;
-                rebased.insert(QStringLiteral("song"), mergeConcurrentLooperMetadata(
+                rebased.insert(QStringLiteral("song"), songScope == SongSyncScope::Tracks
+                    ? mergeConcurrentLooperMetadata(
                     trackWorkspace_.authoritativeTrackHistory.value(proposalBaseRevision),
-                    songToJson(true),
+                    currentSong,
                     message.value(QStringLiteral("song")).toObject(),
                     &mergedChanges,
-                    &mergeConflicts));
+                    &mergeConflicts) : message.value(QStringLiteral("song")).toObject());
                 rebased.insert(QStringLiteral("base_arrangement_revision"),
                     static_cast<qint64>(currentRevision));
                 appendLog(QStringLiteral(
-                    "rebased stale track metadata from peer %1: base=%2 current=%3 "
-                    "merged_changes=%4 conflicts_kept_local=%5")
+                    "rebased stale %1 metadata from peer %2: base=%3 current=%4 "
+                    "merged_changes=%5 conflicts_kept_local=%6")
+                    .arg(songScope == SongSyncScope::Tracks ? QStringLiteral("track") : QStringLiteral("idea"))
                     .arg(sourcePeerToken.left(8))
                     .arg(proposalBaseRevision)
                     .arg(currentRevision)
@@ -13760,6 +13787,7 @@ void MainWindow::handleSongSet(
             if (revision >= heldRevision) {
                 trackWorkspace_.heldTrackShareSongSet = message;
                 trackWorkspace_.heldTrackShareSongSourcePeerToken = sourcePeerToken;
+                refreshLooperLanes();
             }
             appendLog(QStringLiteral(
                 "held arrangement revision %1 until %2 outgoing Track Sync batch(es) complete")

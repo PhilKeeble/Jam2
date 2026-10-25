@@ -488,6 +488,44 @@ int main(int argc, char* argv[])
                deliberateLaterDuplicate.value(QStringLiteral("looper")).toObject()).size() == 3,
         "deduplication does not collapse a duplicate introduced by a later sequential edit");
 
+    auto renamed = currentSame;
+    renamed.insert("name", "Practice Drums");
+    const auto deleteAfterRename = mergeConcurrentLooperMetadata(baseWithSame,
+        songWithLanes({emptyLane, renamed}), baseSong);
+    expect(firstBankLanes(deleteAfterRename.value("looper").toObject()).size() == 1,
+        "a WAV deletion based before an in-flight rename removes the same content");
+    const auto staleRenameAfterDelete = mergeConcurrentLooperMetadata(baseWithSame,
+        baseSong, songWithLanes({emptyLane, renamed}));
+    expect(firstBankLanes(staleRenameAfterDelete.value("looper").toObject()).size() == 1,
+        "a late rename cannot resurrect the same deleted WAV");
+    auto replacement = renamed;
+    replacement.insert("asset_hash", QString(64, QLatin1Char('c')));
+    const auto replaceAfterDelete = mergeConcurrentLooperMetadata(baseWithSame,
+        baseSong, songWithLanes({emptyLane, replacement}));
+    const auto deleteAfterReplace = mergeConcurrentLooperMetadata(baseWithSame,
+        songWithLanes({emptyLane, replacement}), baseSong);
+    expect(firstBankLanes(replaceAfterDelete.value("looper").toObject()).size() == 2 &&
+        firstBankLanes(deleteAfterReplace.value("looper").toObject()).size() == 2,
+        "deleting old WAV bytes preserves a concurrent replacement with different bytes");
+    auto ideaBase = baseWithSame;
+    ideaBase.insert("sections", QJsonArray{QJsonObject{{"id", "section-a"}, {"chords", QJsonArray{"C"}}}});
+    auto trackRenamed = songWithLanes({emptyLane, renamed});
+    trackRenamed.insert("sections", ideaBase.value("sections"));
+    expect(canRebaseIdeaOverTrackEdits(ideaBase, trackRenamed),
+        "an Idea clear can cross an in-flight track rename");
+    auto otherIdea = trackRenamed;
+    otherIdea.insert("sections", QJsonArray{QJsonObject{{"id", "section-a"}, {"chords", QJsonArray{"G"}}}});
+    expect(!canRebaseIdeaOverTrackEdits(ideaBase, otherIdea) &&
+        !canRebaseIdeaOverTrackEdits({}, {}),
+        "rebasing never overwrites a concurrent Idea or accepts missing metadata");
+    auto otherTiming = trackRenamed;
+    auto timingLooper = otherTiming.value("looper").toObject();
+    auto timingBanks = timingLooper.value("banks").toArray();
+    auto timingBank = timingBanks[0].toObject(); timingBank.insert("timing", QJsonObject{{"bpm", 150}});
+    timingBanks[0] = timingBank; timingLooper.insert("banks", timingBanks); otherTiming.insert("looper", timingLooper);
+    expect(!canRebaseIdeaOverTrackEdits(ideaBase, otherTiming),
+        "a concurrent timing change still rejects the stale Idea");
+
     const QJsonObject different = laneObject(
         QStringLiteral("different-import"), QString(64, QLatin1Char('c')),
         QStringLiteral("Different"));

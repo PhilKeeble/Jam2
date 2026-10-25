@@ -108,6 +108,8 @@ public:
     bool sendAssetBinary(const QString& peerToken, const QByteArray& payload) override;
     void assetWorkStateChanged(bool pending) override;
 
+    QVector<TrackLanePresentation> presentedLanes(int bankIndex) const;
+
     SharedTrackController trackController;
     jam2::gui::ListeningToolsController listeningTools;
     LooperProject looperProject;

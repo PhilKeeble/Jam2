@@ -826,6 +826,48 @@ void testLooperWaveformGridAlignment()
     }
 }
 
+void testPendingWavWidget()
+{
+    LooperLaneStackWidget widget;
+    widget.resize(1200, 320);
+    auto pending = looperLanes()[1];
+    pending.transfer = {pending.lane, TrackWavAvailability::Waiting};
+    auto playing = looperLanes()[0];
+    widget.setLanes({playing, pending}, 0, 0, -1, 48000, 96000, 120, 1, true);
+    int mutations = 0;
+    widget.onRemove = [&](int) { ++mutations; };
+    widget.onWavDropped = [&](int, const QString&) { ++mutations; };
+    widget.onRegionCommitted = [&](int, qint64, qint64, qint64) { ++mutations; };
+    widget.show();
+    QApplication::processEvents();
+    const QImage waiting = widget.grab().toImage();
+    QString error;
+    expect(!widget.invokeGuiVirtualControl("looper.lane.1.remove", "click", {}, error) &&
+        !widget.invokeGuiVirtualControl("looper.lane.1.wav.drop", "drop-file", "other.wav", error) &&
+        !widget.invokeGuiVirtualControl("looper.lane.1.region", "set-region",
+            QVariantMap{{"start_frame", 0}, {"source_start_frame", 0}, {"source_end_frame", 100}}, error) &&
+        mutations == 0, "pending WAV controls cannot mutate the playing project");
+    widget.setWavTransferProgress(pending.lane.assetHash, 25, 100);
+    const QImage quarter = widget.grab().toImage();
+    const QString artifacts = qEnvironmentVariable("JAM2_TEST_ARTIFACT_ROOT");
+    if (!artifacts.isEmpty()) expect(quarter.save(QDir(artifacts).filePath("pending-wav-progress.png")),
+        "pending WAV presentation is saved for visual inspection");
+    expect(widget.laneViews()[1].transfer.receivedBytes == 25 &&
+        widget.laneViews()[1].transfer.availability == TrackWavAvailability::Receiving &&
+        waiting != quarter, "accepted progress is visible inside the pending clip");
+    widget.setWavTransferProgress("unrelated", 90, 100);
+    expect(widget.laneViews()[1].transfer.receivedBytes == 25,
+        "another WAV cannot update this clip's progress");
+    widget.setWavTransferProgress(pending.lane.assetHash, 100, 100);
+    expect(widget.laneViews()[1].transfer.availability == TrackWavAvailability::Validating &&
+        widget.grab().toImage() != quarter, "100 percent displays validation before waveform installation");
+    expect(widget.invokeGuiVirtualControl("looper.lane.0.remove", "click", {}, error) && mutations == 1,
+        "existing lanes remain editable while another WAV is pending");
+    widget.setLanes({playing}, 0, 0, -1, 48000, 96000, 120, 1, true);
+    expect(widget.laneViews().size() == 1 && !widget.laneViews()[0].transfer.pending(),
+        "removing pending metadata removes its visible placeholder");
+}
+
 void testLooperLaneWidget()
 {
     LooperLaneStackWidget widget;
@@ -1692,6 +1734,7 @@ int main(int argc, char** argv)
     testConnectionGuidance();
     testMeterWidget();
     testLooperLaneWidget();
+    testPendingWavWidget();
     testLooperWaveformGridAlignment();
     testMetronomeWidgets();
     testBeatGridWidgets();

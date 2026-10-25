@@ -712,6 +712,54 @@ void testSynchronizedSongStructure()
         "duplicate section identities must reject without partial mutation");
 }
 
+void testPendingWavPresentation()
+{
+    LooperLane playing;
+    playing.id = "playing"; playing.assetHash = "old"; playing.assetPath = "old.wav";
+    playing.sourceFrames = 48000;
+    LooperLane incoming;
+    incoming.id = "new"; incoming.assetHash = "new-hash"; incoming.name = "Incoming";
+    incoming.sampleRate = 48000; incoming.sourceFrames = 96000;
+    incoming.startFrame = 12000; incoming.stopFrame = 108000;
+    QVector<PendingTrackLane> pending{{incoming}};
+    auto views = presentPendingTrackLanes({playing}, pending, {}, {}, 0, 0);
+    require(views.size() == 2 && !views[0].pending() && views[0].lane.assetPath == "old.wav" &&
+        views[1].availability == TrackWavAvailability::Waiting &&
+        views[1].lane.sourceFrames == 96000 && views[1].lane.startFrame == 12000 &&
+        views[1].lane.stopFrame == 108000 && views[1].lane.assetPath.isEmpty(),
+        "metadata displays the pending extent without changing the playing lane");
+    views = presentPendingTrackLanes({playing}, pending, {}, "new-hash", 25, 100);
+    require(views[1].availability == TrackWavAvailability::Receiving &&
+        views[1].receivedBytes == 25 && views[1].totalBytes == 100,
+        "accepted bytes are attached only to their WAV");
+    views = presentPendingTrackLanes({playing}, pending, {}, "other-hash", 25, 100);
+    require(views[1].totalBytes == 0 && views[1].availability == TrackWavAvailability::Waiting,
+        "unrelated transfers cannot advance another placeholder");
+    views = presentPendingTrackLanes({playing}, pending, {}, "new-hash", 150, 100);
+    require(views[1].receivedBytes == 100 && views[1].availability == TrackWavAvailability::Validating,
+        "full byte arrival still waits for validation");
+    views = presentPendingTrackLanes({playing}, pending, {"new-hash"}, {}, 0, 0);
+    require(views[1].availability == TrackWavAvailability::WaitingForBatch,
+        "validated bytes wait for atomic batch application");
+    incoming.assetPath = "validated.wav";
+    views = presentPendingTrackLanes({playing, incoming}, pending, {"new-hash"}, {}, 0, 0);
+    require(views.size() == 2 && !views[1].pending() && views[1].lane.assetPath == "validated.wav",
+        "validated application replaces the placeholder without duplicating the lane");
+    views = presentPendingTrackLanes({playing}, {}, {}, {}, 0, 0);
+    require(views.size() == 1 && views[0].lane.id == "playing",
+        "cancellation removes the overlay and retains playing audio");
+    incoming.id = "playing"; incoming.assetPath.clear();
+    views = presentPendingTrackLanes({playing}, {{incoming, true, "contribution"}}, {}, {}, 0, 0);
+    require(views.size() == 2 && !views[0].pending() && views[1].lane.id == "contribution",
+        "an occupied contribution target retains its lane and gets a distinct placeholder");
+    incoming.id = "new";
+    auto olderOffer = incoming; olderOffer.startFrame = 0;
+    views = presentPendingTrackLanes({playing},
+        {{incoming}, {olderOffer, true, "contribution"}}, {}, {}, 0, 0);
+    require(views.size() == 2 && views[1].lane.startFrame == 12000,
+        "a batch offer does not overwrite newer snapshot placement or duplicate its placeholder");
+}
+
 void testSharedReferenceClassification()
 {
     QJsonObject wire;
@@ -735,6 +783,7 @@ int main(int argc, char** argv)
     try {
         QTemporaryDir root = makeRoot();
         testSharedReferenceClassification();
+        testPendingWavPresentation();
         testMetadataAndRejection(root.path());
         testTrackSidecarJson(root.path());
         testExactStagingAndRepair(root.path());

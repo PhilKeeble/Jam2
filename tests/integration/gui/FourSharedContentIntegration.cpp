@@ -978,6 +978,38 @@ int main(int argc, char* argv[])
         std::cout << "unthrottled_wav raw_bytes=" << bytes << " recipients=3 elapsed_ms=" << elapsedMs
             << " aggregate_bytes_per_second=" << bytes * 3 * 1000 / elapsedMs
             << " delayed_media_proofs=" << signaler.network->delayedMediaProofs() << '\n';
+        // The field bursts followed arrangement edits with no WAV active.
+        // Exercise large real proposals separately from the bulk transfer.
+        for (int i = 0; i < 4; ++i) receivedBefore[i] = states[i].value("jam").toObject()
+            .value("udp_multiplex").toObject().value("audio_packets_received").toInteger();
+        const auto controlBefore = states[1].value("jam").toObject()
+            .value("udp_multiplex").toObject().value("control_bytes_sent").toInteger();
+        for (const int beats : {512, 508, 504}) {
+            if (!apply(coordinator, 1, {{"type", "song.resize"},
+                    {"id", QStringLiteral("large-arrangement-%1").arg(beats)}, {"section", 0}, {"beats", beats}}))
+                return 1;
+            if (!waitForAll(coordinator, "large arrangement and ongoing audio converged",
+                [&](std::size_t i, const QJsonObject& state) {
+                    return meshOperational(i, state) && transferIdle(state) &&
+                        state.value("jam").toObject().value("udp_multiplex").toObject()
+                            .value("audio_packets_received").toInteger() > receivedBefore[i] + 100;
+                }, states)) return 1;
+        }
+        for (int i = 0; i < 4; ++i) {
+            const auto mux = states[i].value("jam").toObject().value("udp_multiplex").toObject();
+            if (mux.value("audio_queue_drops").toInteger() != 0 ||
+                mux.value("worker_service_max_us").toInteger() <= 0 ||
+                mux.value("worker_loop_gap_max_us").toInteger() <= 0) {
+                fail("large metadata interrupted audio delivery or omitted worker measurements"); return 1;
+            }
+            std::cout << "metadata_audio peer=" << i + 1
+                << " worker_loop_gap_max_us=" << mux.value("worker_loop_gap_max_us").toInteger()
+                << " worker_service_max_us=" << mux.value("worker_service_max_us").toInteger()
+                << " worker_lock_wait_max_us=" << mux.value("worker_lock_wait_max_us").toInteger()
+                << " audio_queue_drops=" << mux.value("audio_queue_drops").toInteger() << '\n';
+        }
+        std::cout << "large_metadata_proposal_bytes=" << states[1].value("jam").toObject()
+            .value("udp_multiplex").toObject().value("control_bytes_sent").toInteger() - controlBefore << '\n';
         if (!shutDown(coordinator)) return 1;
         return failures == 0 ? 0 : 1;
     }
@@ -993,7 +1025,16 @@ int main(int argc, char* argv[])
             [&](std::size_t i, const QJsonObject& state) {
                 if (i != 1) return true;
                 const auto content = state.value("content").toObject();
-                return content.value("transfer").toObject().value("pause_active") == "incoming-chunk" &&
+                bool placeholder = false;
+                for (const auto& value : content.value("pending_wav_views").toArray()) {
+                    const auto view = value.toObject();
+                    placeholder |= view.value("hash") == manualWavHash &&
+                        view.value("source_frames").toInteger() > 0 &&
+                        view.value("start_frame").toInteger(-1) >= 0 &&
+                        view.value("total_bytes").toInteger() == QFileInfo(manualWavPath).size();
+                }
+                return placeholder && assetCount(state, manualWavHash) == 0 &&
+                    content.value("transfer").toObject().value("pause_active") == "incoming-chunk" &&
                     content.value("incoming_wav_total_bytes").toInteger() > 0 &&
                     content.value("track_transfer_status").toString().startsWith("RECEIVING WAV") &&
                     content.value("track_sync_last_applied_host_arrangement_revision").toInteger() <
@@ -1033,7 +1074,8 @@ int main(int argc, char* argv[])
         if (!waitForAll(coordinator, "import and concurrent metadata converged without further user actions",
             [&](std::size_t i, const QJsonObject& state) {
                 return meshOperational(i, state) && transferIdle(state) &&
-                    assetCount(state, automaticWavHash) == 1 && assetCount(state, manualWavHash) == 1;
+                    assetCount(state, automaticWavHash) == 1 && assetCount(state, manualWavHash) == 1 &&
+                    state.value("content").toObject().value("pending_wav_views").toArray().isEmpty();
             }, states) || !verifyAssetFiles(states, automaticWavHash) ||
             !verifyAssetFiles(states, manualWavHash)) return 1;
         for (std::size_t i = 0; i < 4; ++i) {
@@ -1062,7 +1104,10 @@ int main(int argc, char* argv[])
         if (!waitForAll(coordinator, "reference removal propagated without resurrecting WAVs",
             [&](std::size_t i, const QJsonObject& state) {
                 return meshOperational(i, state) && transferIdle(state) &&
-                    assetCount(state, automaticWavHash) == 0 && assetCount(state, manualWavHash) == 1;
+                    assetCount(state, automaticWavHash) == 0 && assetCount(state, manualWavHash) == 1 &&
+                    state.value("content").toObject().value("first_section").toObject().value("generated_kind").toString().isEmpty() &&
+                    state.value("content").toObject().value("first_section").toObject().value("chord_0").toString().isEmpty() &&
+                    state.value("content").toObject().value("first_section").toObject().value("beat_0").toString().isEmpty();
             }, states)) return 1;
         if (!shutDown(coordinator)) return 1;
         std::cout << "Four-peer WAV startup, concurrent metadata, scope, reference clearing and progress checks passed\n";

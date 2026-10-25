@@ -41,6 +41,7 @@ public:
         quint64 audioPacketsSent = 0, audioPacketsReceived = 0, audioQueueDrops = 0;
         quint64 assetBytesSent = 0, controlBytesSent = 0, invalidMuxPackets = 0;
         quint64 assetBytesReceived = 0, controlBytesReceived = 0, budgetDeferrals = 0, sendErrors = 0;
+        quint64 workerLoopGapMaxUs = 0, workerServiceMaxUs = 0, workerLockWaitMaxUs = 0;
         quint64 linkRepairSilenceMs = 0;
         quint64 controlBytesPerSecond = 0, assetBytesPerSecond = 0;
         std::vector<LinkSnapshot> links;

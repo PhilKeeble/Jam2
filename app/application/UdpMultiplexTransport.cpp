@@ -688,18 +688,25 @@ struct UdpMultiplexTransport::Impl {
     void run()
     {
         try {
+            quint64 previousCycle = 0;
             while (!stopping) {
                 std::vector<std::shared_ptr<jam2::UdpSocket>> keepAlive;
                 std::vector<const jam2::UdpSocket*> sockets;
                 quint64 wait = 10000;
+                const auto lockStart = jam2::monotonic_us();
                 {
                     std::lock_guard lock(mutex);
                     const auto now = jam2::monotonic_us();
+                    counters.workerLockWaitMaxUs = qMax(counters.workerLockWaitMaxUs, now - lockStart);
+                    if (previousCycle)
+                        counters.workerLoopGapMaxUs = qMax(counters.workerLoopGapMaxUs, now - previousCycle);
+                    previousCycle = now;
                     processCommands(now); readSockets(now); timers(now);
                     keepAlive.push_back(signalSocket);
                     for (const auto& [peer, link] : links) { (void)peer; if (link->socket) keepAlive.push_back(link->socket); }
                     for (const auto& [peer, link] : retainedLinks) { (void)peer; if (link->socket) keepAlive.push_back(link->socket); }
                     for (const auto& socket : keepAlive) sockets.push_back(socket.get());
+                    counters.workerServiceMaxUs = qMax(counters.workerServiceMaxUs, jam2::monotonic_us() - now);
                 }
                 jam2::UdpSocket::waitForAny(sockets, wait, &commandWake->signal);
             }

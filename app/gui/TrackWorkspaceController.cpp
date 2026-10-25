@@ -25,6 +25,48 @@ TrackWorkspaceController::TrackWorkspaceController(
     fileWorkers.setExpiryTimeout(30000);
 }
 
+QVector<TrackLanePresentation> TrackWorkspaceController::presentedLanes(int bankIndex) const
+{
+    if (bankIndex < 0 || bankIndex >= looperProject.banks().size()) return {};
+    QVector<PendingTrackLane> pending;
+    // Keep the latest composed host snapshot, including scoped updates that
+    // arrive while the preceding WAV is still being downloaded.
+    const QJsonObject previewSong = !heldTrackShareSongSet.isEmpty()
+        ? stagedHostSong
+        : pendingSongSet;
+    LooperProject preview;
+    if (!previewSong.isEmpty() &&
+        preview.loadJson(previewSong.value(QStringLiteral("looper")).toObject())) {
+        const auto& bankId = looperProject.banks().at(bankIndex).id;
+        for (const auto& bank : preview.banks()) {
+            if (bank.id != bankId) continue;
+            for (const auto& lane : bank.lanes) pending.append({lane});
+        }
+    }
+    for (const auto& contribution : pendingTrackContributions) {
+        if (contribution.bankIndex != bankIndex) continue;
+        LooperLane lane;
+        lane.id = contribution.targetLaneId.isEmpty()
+            ? contribution.contributionId : contribution.targetLaneId;
+        lane.assetHash = contribution.assetHash;
+        lane.name = contribution.name;
+        lane.sampleRate = contribution.sampleRate;
+        lane.sourceFrames = contribution.sourceFrames;
+        lane.startFrame = contribution.startFrame;
+        lane.stopFrame = contribution.stopFrame;
+        lane.loopStartFrame = contribution.loopStartFrame;
+        lane.loopEndFrame = contribution.loopEndFrame;
+        lane.loopEnabled = contribution.loopEnabled;
+        lane.originKind = QStringLiteral("peer");
+        contribution.reference.applyTo(lane);
+        pending.append({std::move(lane), true, contribution.contributionId});
+    }
+    const auto progress = assetTransfer.incomingProgress();
+    return presentPendingTrackLanes(looperProject.banks().at(bankIndex).lanes,
+        pending, validatedTrackAssetHashes, incomingAssetHash,
+        progress.receivedBytes, progress.totalBytes);
+}
+
 TrackWorkspaceController::~TrackWorkspaceController()
 {
     assetTransfer.cancel();

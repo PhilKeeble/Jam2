@@ -3,6 +3,7 @@
 #include "GuiTheme.hpp"
 #include "GuiControlContract.hpp"
 #include "LooperProject.hpp"
+#include "TrackWorkspaceSupport.hpp"
 #include "SectionTimeline.hpp"
 
 #include <QColor>
@@ -121,6 +122,7 @@ public:
         QString assetPath;
         qint64 sourceFrames = 0;
         std::vector<float> peaks;
+        TrackLanePresentation transfer;
     };
 
     explicit LooperLaneStackWidget(QWidget* parent = nullptr)
@@ -187,6 +189,22 @@ public:
         }
         updateMinimumHeight();
         update();
+    }
+
+    const QVector<LaneView>& laneViews() const noexcept { return lanes_; }
+
+    void setWavTransferProgress(const QString& hash, qint64 received, qint64 total)
+    {
+        bool changed = false;
+        for (auto& view : lanes_) {
+            if (!view.transfer.pending() || view.lane.assetHash != hash) continue;
+            view.transfer.totalBytes = qMax<qint64>(0, total);
+            view.transfer.receivedBytes = qBound<qint64>(0, received, view.transfer.totalBytes);
+            view.transfer.availability = total <= 0 ? TrackWavAvailability::Waiting
+                : received >= total ? TrackWavAvailability::Validating : TrackWavAvailability::Receiving;
+            changed = true;
+        }
+        if (changed) update();
     }
 
     void setGridPosition(
@@ -322,9 +340,15 @@ public:
                 {QStringLiteral("solo"), view.lane.solo},
                 {QStringLiteral("gain_db"), view.lane.gainDb},
                 {QStringLiteral("has_wav"), !view.assetPath.isEmpty()},
+                {QStringLiteral("wav_pending"), view.transfer.pending()},
+                {QStringLiteral("wav_received_bytes"), view.transfer.receivedBytes},
+                {QStringLiteral("wav_total_bytes"), view.transfer.totalBytes},
+                {QStringLiteral("asset_hash"), view.lane.assetHash},
+                {QStringLiteral("source_frames"), view.sourceFrames},
+                {QStringLiteral("start_frame"), view.lane.startFrame},
                 {QStringLiteral("playhead_ms"), playheadMs_},
                 {QStringLiteral("grid_position_ms"), gridPositionMs_},
-                {QStringLiteral("enabled"), !interactionsProtected_},
+                {QStringLiteral("enabled"), !interactionsProtected_ && !view.transfer.pending()},
             };
             const auto addClick = [&](const QString& suffix, const QString& contract) {
                 controls.push_back(makeGuiVirtualControl(
@@ -434,6 +458,10 @@ public:
             parts.at(1) != QStringLiteral("lane") || !laneOk || lane < 0 ||
             lane >= lanes_.size()) {
             error = QStringLiteral("looper virtual target is invalid or stale");
+            return false;
+        }
+        if (lanes_.at(lane).transfer.pending()) {
+            error = QStringLiteral("WAV is still being received and validated");
             return false;
         }
         const QString action = parts.mid(3).join(QLatin1Char('.'));
@@ -568,6 +596,10 @@ protected:
             QWidget::mousePressEvent(event);
             return;
         }
+        if (laneIndex < lanes_.size() && lanes_.at(laneIndex).transfer.pending()) {
+            event->accept();
+            return;
+        }
         const QString control = controlAt(laneIndex, pos);
         selectLane(laneIndex);
         if (interactionsProtected_) {
@@ -654,6 +686,7 @@ protected:
     {
         const int nextLane = laneAt(event->position().toPoint());
         if (!interactionsProtected_ && nextLane >= 0 &&
+            (nextLane >= lanes_.size() || !lanes_.at(nextLane).transfer.pending()) &&
             event->mimeData()->hasUrls() && event->mimeData()->urls().size() == 1) {
             if (dropLane_ != nextLane) {
                 dropLane_ = nextLane;
@@ -682,7 +715,8 @@ protected:
         const QList<QUrl> urls = event->mimeData()->urls();
         dropLane_ = -1;
         update();
-        if (interactionsProtected_ || lane < 0 || urls.size() != 1 ||
+        if (interactionsProtected_ || lane < 0 ||
+            (lane < lanes_.size() && lanes_.at(lane).transfer.pending()) || urls.size() != 1 ||
             !urls.front().isLocalFile() || !onWavDropped) {
             event->ignore();
             return;
@@ -1091,7 +1125,10 @@ private:
                 2, 2);
         }
 
+        painter.save();
+        if (realLane && lanes_[row].transfer.pending()) painter.setOpacity(0.5);
         drawLaneHeader(painter, row, lane, realLane);
+        painter.restore();
         drawLaneWaveform(painter, row, realLane);
         if (row == dropLane_) {
             painter.setBrush(theme::withAlpha(theme::accent, 28));
@@ -1407,9 +1444,10 @@ private:
         const bool audible = laneIsAudible(row);
         const QColor waveformColor = laneWaveformColor(row);
         if (lanes_[row].peaks.empty()) {
+            const bool pending = lanes_[row].transfer.pending();
             const bool remoteMissing = lanes_[row].lane.assetPath.trimmed().isEmpty() &&
                 !lanes_[row].lane.assetHash.isEmpty();
-            if (!remoteMissing) {
+            if (!remoteMissing && !pending) {
                 painter.setPen(theme::withAlpha(theme::textMuted, 130));
                 painter.drawText(area.adjusted(12, 0, -12, 0), Qt::AlignCenter,
                     QStringLiteral("Loading waveform\u2026"));
@@ -1425,6 +1463,13 @@ private:
             for (int x = clip.left() - clip.height(); x < clip.right(); x += 18) {
                 painter.drawLine(x, clip.bottom(), x + clip.height(), clip.top());
             }
+            if (pending && lanes_[row].transfer.totalBytes > 0) {
+                const double fraction = static_cast<double>(lanes_[row].transfer.receivedBytes) /
+                    static_cast<double>(lanes_[row].transfer.totalBytes);
+                painter.fillRect(QRect(clip.left() + 1, clip.top() + 1,
+                    static_cast<int>((clip.width() - 2) * fraction), clip.height() - 2),
+                    theme::withAlpha(pendingColor, 75));
+            }
             painter.setClipping(false);
             QFont pendingFont(QStringLiteral("Bahnschrift"));
             pendingFont.setPixelSize(11);
@@ -1436,11 +1481,25 @@ private:
             const QString duration = QStringLiteral("%1:%2")
                 .arg(seconds / 60)
                 .arg(seconds % 60, 2, 10, QLatin1Char('0'));
+            QString pendingText = QStringLiteral("REMOTE WAV  \u00b7  AUDIO NOT SHARED  \u00b7  %1").arg(duration);
+            if (pending) {
+                const auto& transfer = lanes_[row].transfer;
+                if (transfer.availability == TrackWavAvailability::WaitingForBatch)
+                    pendingText = QStringLiteral("WAV READY \u00b7 WAITING FOR OTHER TRACKS");
+                else if (transfer.availability == TrackWavAvailability::Validating)
+                    pendingText = QStringLiteral("VALIDATING WAV\u2026");
+                else if (transfer.totalBytes > 0)
+                    pendingText = QStringLiteral("RECEIVING WAV  %1%  \u00b7  %2 / %3 KiB")
+                        .arg(static_cast<int>(100.0 * transfer.receivedBytes / transfer.totalBytes))
+                        .arg((transfer.receivedBytes + 1023) / 1024)
+                        .arg((transfer.totalBytes + 1023) / 1024);
+                else pendingText = QStringLiteral("WAITING FOR WAV  \u00b7  %1").arg(duration);
+            }
             painter.drawText(
                 clip.adjusted(10, 0, -10, 0),
                 Qt::AlignCenter,
                 QFontMetrics(pendingFont).elidedText(
-                    QStringLiteral("REMOTE WAV  \u00b7  AUDIO NOT SHARED  \u00b7  %1").arg(duration),
+                    pendingText,
                     Qt::ElideRight,
                     qMax(1, clip.width() - 20)));
             painter.restore();

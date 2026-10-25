@@ -46,6 +46,59 @@ void TrackReferenceMetadata::applyTo(LooperLane& lane) const
     lane.referenceStale = stale;
 }
 
+QVector<TrackLanePresentation> presentPendingTrackLanes(
+    const QVector<LooperLane>& applied,
+    const QVector<PendingTrackLane>& pending,
+    const QSet<QString>& validatedHashes,
+    const QString& incomingHash,
+    qint64 receivedBytes,
+    qint64 totalBytes)
+{
+    QVector<TrackLanePresentation> result;
+    result.reserve(applied.size() + pending.size());
+    for (const auto& lane : applied) result.append({lane});
+    for (const auto& item : pending) {
+        if (item.lane.assetHash.isEmpty() || item.lane.sourceFrames <= 0) continue;
+        int index = -1;
+        bool alreadyApplied = false;
+        for (int i = 0; i < result.size(); ++i) {
+            const auto& current = result.at(i);
+            if (current.lane.id == item.lane.id ||
+                (item.contribution && current.lane.assetHash == item.lane.assetHash)) {
+                index = i;
+                alreadyApplied = current.lane.assetHash == item.lane.assetHash &&
+                    ((item.contribution && current.pending()) || !current.lane.assetPath.isEmpty());
+                break;
+            }
+        }
+        if (alreadyApplied) continue;
+        LooperLane lane = item.lane;
+        // Contributions may fill an empty target; an occupied target retains
+        // its audio and a separate placeholder uses the contribution identity.
+        if (item.contribution && index >= 0 &&
+            !result.at(index).lane.assetHash.isEmpty() &&
+            result.at(index).lane.assetHash != lane.assetHash) {
+            lane.id = item.fallbackId;
+            index = -1;
+            for (int i = 0; i < result.size(); ++i)
+                if (result.at(i).lane.id == lane.id) { index = i; break; }
+        }
+        lane.assetPath.clear();
+        TrackLanePresentation view{lane, TrackWavAvailability::Waiting};
+        if (validatedHashes.contains(lane.assetHash)) {
+            view.availability = TrackWavAvailability::WaitingForBatch;
+        } else if (lane.assetHash == incomingHash && totalBytes > 0) {
+            view.totalBytes = totalBytes;
+            view.receivedBytes = qBound<qint64>(0, receivedBytes, totalBytes);
+            view.availability = view.receivedBytes == totalBytes
+                ? TrackWavAvailability::Validating : TrackWavAvailability::Receiving;
+        }
+        if (index >= 0) result[index] = std::move(view);
+        else result.append(std::move(view));
+    }
+    return result;
+}
+
 namespace {
 
 std::filesystem::path nativeFilePath(const QString& path)
