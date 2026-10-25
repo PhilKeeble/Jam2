@@ -402,3 +402,15 @@ silently introduce these topology/protocol changes in the initial transport work
   an unproved NAT or firewall cause.
 - Public-service exposure and hardening beyond existing authentication/basic
   bounds, after the controlled feasibility work.
+
+
+### NOTES FROM PHIL - DO NOT TOUCH
+
+look into the datagram spec for the control plane and how we can make it the most efficient messages possible
+look into the start and mesh topology, i think the multiplex should allow this to be a true mesh only with the creator only being reliable for pulling people into the mesh, but needs careful arrangement and ordering around conflicting controls that might be coming in from multiple peers in a safe way, it also needs to handle wav transfers in a way that avoids congestion 
+look into the cotnrol planes response handlers and how we are controlling acknowledgement and receipt
+
+when joining a jam you need to choose a bind port / ip even when joining a jam2 server one
+
+output from the jam2 server can stop spamming to make it clearer
+

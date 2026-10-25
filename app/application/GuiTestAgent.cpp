@@ -1001,6 +1001,17 @@ void GuiTestAgent::handle(const QJsonObject& command)
         });
         return;
     }
+    if (type == QStringLiteral("jam.control.reconnect")) {
+        if (!onlyFields(command, {"format", "type", "id"}) ||
+            !window_.sessionController_.reconnectControlStream()) {
+            reject(command, QStringLiteral("control stream cannot reconnect in the current mode"));
+            return;
+        }
+        emitEvent(QStringLiteral("command_applied"), {
+            {QStringLiteral("id"), command.value(QStringLiteral("id"))},
+            {QStringLiteral("jam"), window_.automationJamSnapshot()}});
+        return;
+    }
     if (type == QStringLiteral("jam.leave")) {
         if (!onlyFields(command, {"format", "type", "id"})) {
             reject(command, QStringLiteral("unsupported field for automation jam leave"));

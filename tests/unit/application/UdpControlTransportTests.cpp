@@ -34,7 +34,9 @@ template<class Condition> void until(Condition condition)
 class Bytes final : public ControlConnection, public std::enable_shared_from_this<Bytes> {
 public:
     std::weak_ptr<Bytes> remote;
-    bool connected = true;
+    bool connected = true, paused = false;
+    jam2::application::ControlTransport kind = jam2::application::ControlTransport::Tcp;
+    jam2::application::ControlTransport transport() const override { return kind; }
     QPointer<QObject> context;
     DataHandler data;
     DisconnectHandler disconnected;
@@ -42,11 +44,11 @@ public:
     qint64 buffered = 0, highWater = 0;
     void drain()
     {
-        if (!context || !data || !connected) return;
+        if (!context || !data || !connected || paused) return;
         const std::weak_ptr<Bytes> weak = shared_from_this();
         QMetaObject::invokeMethod(context, [weak] {
             const auto self = weak.lock();
-            if (!self || !self->connected) return;
+            if (!self || !self->connected || self->paused) return;
             while (!self->input.empty() && self->data) {
                 const QByteArray bytes = std::move(self->input.front());
                 self->input.pop_front(); self->buffered -= bytes.size();
@@ -102,6 +104,66 @@ auto endpoints()
     auto first = std::make_shared<Bytes>(), second = std::make_shared<Bytes>();
     first->remote = second; second->remote = first;
     return std::make_pair(first, second);
+}
+
+
+void framingProgressDeadline()
+{
+    using namespace jam2::application;
+    ControlFrameDeadline deadline;
+    deadline.received(0);
+    require(deadline.remaining(ControlTransport::ReliableUdp, 9999) == 1, "UDP idle bound is not ten seconds");
+    deadline.received(9000);
+    require(deadline.remaining(ControlTransport::ReliableUdp, 10000) == 9000, "new bytes did not extend UDP idle deadline");
+    require(deadline.remaining(ControlTransport::Tcp, 5000) == 0, "legacy TCP absolute bound changed");
+    deadline.received(200000);
+    require(deadline.remaining(ControlTransport::ReliableUdp, 200001) == 9999, "progressing message acquired an absolute UDP timeout");
+    require(deadline.remaining(ControlTransport::ReliableUdp, 210000) == 0, "stalled message has no idle deadline");
+
+    const QString session = "0123456789abcdef", key = "0123456789abcdef0123456789abcdef";
+    ControlServer server;
+    ControlClient client;
+    auto [toServer, toClient] = endpoints();
+    toServer->kind = toClient->kind = ControlTransport::ReliableUdp;
+    require(server.listenViaTransport(session, key), "configure progress deadline test");
+    server.acceptTransport(toServer);
+    client.connectViaTransport(toClient, session, key, QString(32, '2'), "127.0.0.1:50000");
+    until([&] { return client.isConnected() && server.hasPeer(); });
+    toServer->paused = toClient->paused = true;
+    QJsonObject fromClient, fromServer;
+    server.onMessage = [&](const QString&, const QJsonObject& message) { fromClient = message; };
+    client.onMessage = [&](const QJsonObject& message) { fromServer = message; };
+    const QJsonObject message{{"type", "debug.test"}, {"payload", QString(4000, 'x')}};
+    require(client.send(message) && server.sendTo(QString(32, '2'), message), "queue delayed frames");
+    auto release = [](const std::shared_ptr<Bytes>& bytes, bool all) {
+        do {
+            if (bytes->input.empty()) break;
+            auto part = bytes->input.front(); bytes->input.pop_front();
+            bytes->buffered -= part.size(); bytes->data(part);
+        } while (all);
+    };
+    auto wait = [](int ms) {
+        QElapsedTimer clock; clock.start();
+        while (clock.elapsed() < ms) {
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 5); QThread::msleep(2);
+        }
+    };
+    release(toServer, false); release(toClient, false);
+    wait(4100);
+    release(toServer, false); release(toClient, false);
+    wait(4100);
+    require(client.isConnected() && server.hasPeer() &&
+        server.stats().frameTimeouts == 0 && client.stats().frameTimeouts == 0,
+        "progressing frames were disconnected after five seconds");
+    release(toServer, true); release(toClient, true);
+    until([&] { return fromClient == message && fromServer == message; });
+    require(client.send(message), "queue intentionally stalled frame");
+    release(toServer, false);
+    wait(9300);
+    require(server.hasPeer(), "UDP frame expired before ten seconds without progress");
+    wait(900);
+    require(server.stats().frameTimeouts == 1, "ten-second idle frame was not expired");
+    client.close(); server.close();
 }
 
 void authenticatedUdpStreamsUnderLoss()
@@ -260,6 +322,7 @@ int main(int argc, char** argv)
 {
     QCoreApplication app(argc, argv);
     try {
+        framingProgressDeadline();
         authenticatedControlAndAssets();
         authenticatedUdpStreamsUnderLoss();
         std::cout << "native control/asset transport boundary checks passed\n";

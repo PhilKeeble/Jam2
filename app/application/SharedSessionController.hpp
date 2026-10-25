@@ -15,6 +15,8 @@
 #include <QVector>
 
 #include <functional>
+#include <set>
+#include <utility>
 #include <string>
 #include <vector>
 
@@ -151,6 +153,7 @@ public:
     bool endSession(const QString& detail = QStringLiteral("The jam creator ended the session"));
     void close();
     void refresh();
+    bool reconnectControlStream();
     void setReconnectEnabled(bool enabled);
 
     void updateLocalEndpoint(const QString& endpoint);
@@ -217,11 +220,14 @@ private:
     };
 
     bool startMultiplex(bool creator);
+    void recoverMultiplexPeer(const QString& peer);
+    void introducePair(const QString& a, const QString& b);
     void introduceMeshPeer(const QString& token);
     void connectionWarning(const QString& a, const QString& b, const QString& detail, bool broadcast);
     void handleServerEvent(const jam2::control_protocol::TransportEvent& event);
     void handleClientEvent(const jam2::control_protocol::TransportEvent& event);
     void handleAssetClientEvent(const jam2::control_protocol::TransportEvent& event);
+    void interruptAssetJoiner();
     void handleAuthenticatedPeer(const QString& token, const QJsonObject& message);
     void handleDisconnectedPeer(const QString& token);
     void handleClientMessage(const QJsonObject& message);
@@ -279,6 +285,7 @@ private:
     bool failureRetryable_ = false;
     QJsonObject editorState_;
     QJsonObject arrangementState_;
+    QMap<QString, quint64> controlRecoveryDeadlines_;
     int heartbeatIntervalMs_ = kDefaultHeartbeatIntervalMs;
     int heartbeatMissLimit_ = kDefaultHeartbeatMissLimit;
     int heartbeatSequence_ = 0;
@@ -298,6 +305,7 @@ private:
     QTimer assetReconnectTimer_;
     QTimer assetIdleCloseTimer_;
     QTimer heartbeatTimer_;
+    QTimer multiplexDiagnosticsTimer_;
     QTimer heartbeatDeadlineTimer_;
     ControlServer server_;
     ControlClient client_;
@@ -305,4 +313,5 @@ private:
     bool assetChannelRequired_ = false;
     std::shared_ptr<jam2::application::UdpMultiplexTransport> multiplex_;
     QSet<QString> introductionWarnings_;
+    std::set<std::pair<QString, QString>> recoveringUdpPairs_;
 };

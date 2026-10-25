@@ -438,6 +438,7 @@ bool jam2::application::isTrackSyncControlMessageType(const QString& type) noexc
         type == QStringLiteral("looper.recording.resync.state") ||
         type == QStringLiteral("looper.asset.request") ||
         type == QStringLiteral("looper.asset.start") ||
+        type == QStringLiteral("looper.asset.unavailable") ||
         type == QStringLiteral("looper.asset.done") ||
         type == QStringLiteral("bank.request") ||
         type == QStringLiteral("bank.prepare") ||
@@ -451,6 +452,7 @@ bool jam2::application::isManualTrackShareControlMessageType(const QString& type
     return type == QStringLiteral("looper.track.share.request") ||
         type == QStringLiteral("looper.track.batch.offer") ||
         type == QStringLiteral("looper.track.batch.complete") ||
+        type == QStringLiteral("looper.asset.unavailable") ||
         type == QStringLiteral("looper.asset.request");
 }
 
@@ -535,6 +537,10 @@ bool jam2::application::validateControlMessage(
         return isBoundedInteger(message.value(QStringLiteral("sequence")), 1,
             (std::numeric_limits<int>::max)())
             ? true : (reason = QStringLiteral("heartbeat sequence is invalid"), false);
+    }
+    if (type == QStringLiteral("session.udp.recover")) {
+        return jam2::control_protocol::peerIdFromToken(message.value(QStringLiteral("peer")).toString()).has_value()
+            ? true : (reason = QStringLiteral("UDP repair target is invalid"), false);
     }
     if (type == QStringLiteral("session.udp.introduce")) {
         return jam2::control_protocol::decodeHex(message.value(QStringLiteral("nonce")).toString(), 16).size() == 16 &&
@@ -854,6 +860,11 @@ bool jam2::application::validateControlMessage(
                 limits::kMaximumAssetChunkBytes)
             ? true : (reason = QStringLiteral("asset start is invalid"), false);
     }
+    if (type == QStringLiteral("looper.asset.unavailable")) {
+        return isSha256Hex(message.value(QStringLiteral("sha256")).toString().toLower()) &&
+            isBoundedString(message.value(QStringLiteral("reason")), 256)
+            ? true : (reason = QStringLiteral("asset failure is invalid"), false);
+    }
     if (type == QStringLiteral("looper.asset.done")) {
         return isSha256Hex(message.value(QStringLiteral("sha256")).toString().toLower()) &&
             isBoundedInteger(message.value(QStringLiteral("chunks")), 1,
@@ -898,7 +909,8 @@ jam2::application::ControlMessageDecision jam2::application::evaluateControlMess
         type == QStringLiteral("looper.recording.group.recover") ||
         type == QStringLiteral("looper.recording.resync.state");
 
-    const bool peerOnly = type == QStringLiteral("session.heartbeat.ack") ||
+    const bool peerOnly = type == QStringLiteral("session.udp.recover") ||
+        type == QStringLiteral("session.heartbeat.ack") ||
         type == QStringLiteral("session.endpoint.update") ||
         type == QStringLiteral("jam.sync.request") ||
         type == QStringLiteral("jam.metronome.state.request") ||

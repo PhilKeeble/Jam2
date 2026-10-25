@@ -15,6 +15,23 @@
 namespace {
 void require(bool value, const char* message) { if (!value) throw std::runtime_error(message); }
 
+void localRouteDiscovery()
+{
+    jam2::NetworkRuntime runtime;
+    jam2::UdpSocket wildcard, explicitLocal;
+    wildcard.bind({"0.0.0.0", 0});
+    explicitLocal.bind({"127.0.0.1", 0});
+    const auto remote = jam2::resolve_udp_endpoint(explicitLocal.local_endpoint());
+    const auto local = wildcard.local_endpoint_for(remote);
+    require(local.host == "127.0.0.1" && local.port == wildcard.local_endpoint().port,
+        "LAN candidate did not preserve the exact bound media port");
+    const auto fixed = explicitLocal.local_endpoint_for(remote);
+    require(fixed.host == "127.0.0.1" && fixed.port == explicitLocal.local_endpoint().port,
+        "explicit socket bind changed during route discovery");
+    std::array<std::uint8_t, 8> bytes{};
+    require(!explicitLocal.recv_from_for(bytes, 0), "local route discovery sent an unsolicited packet");
+}
+
 void invitationCompatibility()
 {
     jam2::SessionInfo info{{"jam2gether.com", 40404}, 0x123456789abcdef0ULL, {}};
@@ -79,6 +96,30 @@ void reliableDeliveryWithLossDuplicationAndReordering()
     require(sender.stats().retransmitted > 0 && receiver.stats().reordered > 0 &&
         receiver.stats().duplicates > 0, "fault injection did not exercise recovery");
     require(sender.stats().smoothed_rtt_us > 0 && !sender.failed(), "RTT/reliability state failed");
+}
+
+
+void initialRtoLearnsHotspotLatencyWithoutInventingLoss()
+{
+    jam2::ReliableUdpStream sender, receiver;
+    std::vector<std::uint8_t> input(64 * 1024, 42), output;
+    std::deque<std::pair<std::uint64_t, std::uint64_t>> acks;
+    require(sender.enqueue(input), "enqueue hotspot latency fixture");
+    for (std::uint64_t now = 1; now < 10000000 && !sender.empty(); now += 1000) {
+        sender.poll(now, 2, [&](auto sequence, auto bytes, bool) {
+            receiver.receive(sequence, bytes,
+                [&](auto part) { output.insert(output.end(), part.begin(), part.end()); },
+                [&](auto seq) { acks.emplace_back(seq, now + 420000); });
+            return true;
+        });
+        while (!acks.empty() && acks.front().second <= now) {
+            sender.acknowledge(acks.front().first, now); acks.pop_front();
+        }
+    }
+    require(sender.empty() && output == input, "lossless hotspot latency prevented reliable delivery");
+    require(sender.stats().retransmitted == 0, "lossless 420ms RTT triggered premature retransmission and congestion collapse");
+    require(sender.stats().smoothed_rtt_us >= 420000 && sender.stats().congestion_window > 4,
+        "retransmission ambiguity prevented RTT learning on a hotspot");
 }
 
 void audioRoutingRetainsNativePacketBytes()
@@ -179,6 +220,8 @@ void boundsBackpressureAndIndependentChannels()
 int main()
 {
     try {
+        initialRtoLearnsHotspotLatencyWithoutInventingLoss();
+        localRouteDiscovery();
         invitationCompatibility();
         reliableDeliveryWithLossDuplicationAndReordering();
         boundsBackpressureAndIndependentChannels();

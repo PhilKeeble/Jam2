@@ -10,8 +10,9 @@
 
 namespace jam2::application {
 
+enum class UdpStreamRetirement { Replaced, PeerLeft };
 enum class UdpMuxChannel : quint8 { Control = 1, Asset = 2 };
-enum class UdpMuxKind : quint8 { Open = 1, OpenAck, Data, Ack, Close, CloseAck };
+enum class UdpMuxKind : quint8 { Open = 1, OpenAck, Data, Ack, Close, CloseAck, PeerLeave };
 struct UdpMuxFrame {
     UdpMuxKind kind = UdpMuxKind::Data;
     UdpMuxChannel channel = UdpMuxChannel::Control;
@@ -41,6 +42,9 @@ public:
     quint64 streamId() const noexcept { return stream_; }
     UdpMuxChannel channel() const noexcept { return channel_; }
     bool terminal() const;
+    bool reusable() const;
+    void retire(UdpStreamRetirement reason = UdpStreamRetirement::Replaced);
+    ControlTransport transport() const override { return ControlTransport::ReliableUdp; }
     QString failure() const;
     jam2::ReliableUdpStream::Stats stats() const;
     quint64 inputDeferrals() const;

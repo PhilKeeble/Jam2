@@ -75,6 +75,8 @@ private:
         jam2::application::ControlConnection::Pointer connection;
         std::unique_ptr<QTimer> authenticationTimer;
         std::unique_ptr<QTimer> frameTimer;
+        QElapsedTimer frameClock;
+        jam2::application::ControlFrameDeadline frameDeadline;
         QByteArray buffer;
         QByteArray serverNonce;
         QByteArray transcript;

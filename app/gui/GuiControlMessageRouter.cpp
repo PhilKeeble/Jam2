@@ -92,6 +92,8 @@ void GuiControlMessageRouter::dispatch(
         if (handlers.assetTransfer) handlers.assetTransfer->handleRequest(message, sourcePeerToken);
     } else if (type == QStringLiteral("looper.asset.start")) {
         if (handlers.assetTransfer) handlers.assetTransfer->receiveStart(message, sourcePeerToken);
+    } else if (type == QStringLiteral("looper.asset.unavailable")) {
+        if (handlers.assetTransfer) handlers.assetTransfer->receiveUnavailable(message, sourcePeerToken);
     } else if (type == QStringLiteral("looper.asset.done")) {
         if (handlers.assetTransfer) handlers.assetTransfer->receiveDone(message, sourcePeerToken);
     }

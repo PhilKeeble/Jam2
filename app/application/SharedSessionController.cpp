@@ -10,6 +10,7 @@
 #include "ControlProtocol.hpp"
 
 #include <QHostAddress>
+#include <QJsonDocument>
 #include <QJsonArray>
 #include <QNetworkInterface>
 #include <QUuid>
@@ -185,6 +186,11 @@ SharedSessionController::SharedSessionController(QObject* parent)
             true,
             true}, false);
     });
+    QObject::connect(&multiplexDiagnosticsTimer_, &QTimer::timeout, this, [this] {
+        if (!closing_ && multiplex_ && onSignalerStatus)
+            onSignalerStatus(QStringLiteral("UDP multiplex stats ") +
+                QString::fromUtf8(QJsonDocument(multiplexDiagnostics()).toJson(QJsonDocument::Compact)));
+    });
     heartbeatTimer_.setSingleShot(false);
     QObject::connect(&heartbeatTimer_, &QTimer::timeout, this, [this] {
         sendHeartbeat();
@@ -209,6 +215,12 @@ SharedSessionController::SharedSessionController(QObject* parent)
         }
         if (!matchesContractSampleRate(message, contract_.sampleRate)) {
             ++validationRejections_;
+            return;
+        }
+        if (type == QStringLiteral("session.udp.recover")) {
+            const auto target = message.value(QStringLiteral("peer")).toString();
+            if (multiplex_ && peers_.contains(token) && peers_.contains(target) && token != target)
+                introducePair(token, target);
             return;
         }
         if (type == QStringLiteral("session.heartbeat.ack")) {
@@ -324,10 +336,10 @@ bool SharedSessionController::startMultiplex(bool creator)
     multiplex_->onJoinRequest = [this](const QString& peer) {
         if (closing_ || role_ != Role::Creator) return;
         const int remote = peers_.size() - (peers_.contains(creator_.localToken) ? 1 : 0);
-        if (creator_.sessionPeerLimit > 0 && remote >= creator_.sessionPeerLimit) {
+        if (!peers_.contains(peer) && creator_.sessionPeerLimit > 0 && remote >= creator_.sessionPeerLimit) {
             multiplex_->rejectPeer(peer); return;
         }
-        multiplex_->introduce(creator_.localToken, peer, QString::fromLatin1(QUuid::createUuid().toRfc4122().toHex()));
+        introducePair(creator_.localToken, peer);
     };
     multiplex_->onLinkReady = [this](const QString& peer) {
         if (closing_ || !multiplex_) return;
@@ -362,9 +374,32 @@ bool SharedSessionController::startMultiplex(bool creator)
             }
         } else connection->close();
     };
+    multiplex_->onPeerLeft = [this](const QString& peer) {
+        if (closing_) return;
+        controlRecoveryDeadlines_.remove(peer);
+        if (role_ == Role::Creator && peers_.contains(peer)) handleDisconnectedPeer(peer);
+        else if (peer == coordinatorToken_) handleClientMessage(QJsonObject{
+            {QStringLiteral("type"), QStringLiteral("session.end")},
+            {QStringLiteral("detail"), QStringLiteral("The jam creator left the session")}});
+    };
+    multiplex_->onLinkStalled = [this](const QString& peer) { recoverMultiplexPeer(peer); };
+    multiplex_->onStreamFailed = [this](const QString& peer, UdpMuxChannel channel, const QString& detail) {
+        if (closing_ || role_ != Role::Joiner || peer != coordinatorToken_) return;
+        if (onSignalerStatus) onSignalerStatus(detail);
+        if (channel == UdpMuxChannel::Control) scheduleReconnect();
+        else if (assetChannelRequired_ && !assetReconnectTimer_.isActive()) assetReconnectTimer_.start();
+    };
     multiplex_->onSignalerStatus = [this](const QString& detail) { if (!closing_ && onSignalerStatus) onSignalerStatus(detail); };
     multiplex_->onPairFailure = [this](const QString& a, const QString& b, const QString& detail) {
         if (!closing_) connectionWarning(a, b, detail, role_ == Role::Creator);
+        if (!closing_ && role_ == Role::Creator && peers_.contains(a) && peers_.contains(b) &&
+            recoveringUdpPairs_.contains({(std::min)(a, b), (std::max)(a, b)})) {
+            const std::weak_ptr<UdpMultiplexTransport> transport = multiplex_;
+            QTimer::singleShot(5000, this, [this, transport, a, b] {
+                if (transport.lock() == multiplex_ && multiplex_ && !closing_ &&
+                    peers_.contains(a) && peers_.contains(b)) introducePair(a, b);
+            });
+        }
     };
     UdpMultiplexTransport::Config config;
     config.creator = creator;
@@ -375,12 +410,46 @@ bool SharedSessionController::startMultiplex(bool creator)
         : jam2::Endpoint{joiner_.host.toStdString(), joiner_.port};
     config.maximumPeers = creator ? creator_.sessionPeerLimit : 0;
     QString error;
-    if (multiplex_->start(config, error)) return true;
+    if (multiplex_->start(config, error)) {
+        multiplexDiagnosticsTimer_.setInterval(2000);
+        multiplexDiagnosticsTimer_.start();
+        return true;
+    }
     multiplex_.reset();
     fail(TransportFailure::TransportError, error, false);
     publishTransportEvent(TransportEvent{TransportEventType::Failure,
         TransportFailure::TransportError, error}, creator);
     return false;
+}
+
+void SharedSessionController::recoverMultiplexPeer(const QString& peer)
+{
+    if (!multiplex_ || closing_ || !peers_.contains(peer)) return;
+    if (onSignalerStatus) onSignalerStatus(QStringLiteral("Repairing UDP peer link through rendezvous: %1").arg(peer.left(8)));
+    if (role_ == Role::Creator) introducePair(creator_.localToken, peer);
+    else if (peer == coordinatorToken_) {
+        multiplex_->recoverPeer(peer);
+        setLifecycle(Lifecycle::Reconnecting);
+    } else if (client_.isConnected()) {
+        send(QJsonObject{{QStringLiteral("type"), QStringLiteral("session.udp.recover")},
+            {QStringLiteral("peer"), peer}});
+    }
+}
+
+void SharedSessionController::introducePair(const QString& a, const QString& b)
+{
+    if (!multiplex_ || role_ != Role::Creator || a == b) return;
+    if (peers_.contains(a) && peers_.contains(b))
+        recoveringUdpPairs_.insert({(std::min)(a, b), (std::max)(a, b)});
+    const auto request = QString::fromLatin1(QUuid::createUuid().toRfc4122().toHex());
+    for (const auto& target : {a, b}) {
+        if (target == creator_.localToken) continue;
+        // The creator's own peer can reach rendezvous without its failed
+        // control stream. Other mesh edges use the surviving star links.
+        server_.sendTo(target, QJsonObject{{QStringLiteral("type"), QStringLiteral("session.udp.introduce")},
+                {QStringLiteral("nonce"), request}, {QStringLiteral("peer"), target == a ? b : a}});
+    }
+    multiplex_->introduce(a, b, request);
 }
 
 void SharedSessionController::introduceMeshPeer(const QString& token)
@@ -430,13 +499,23 @@ QJsonObject SharedSessionController::multiplexDiagnostics() const
     const auto endpoint = [](const jam2::Endpoint& value) { return value.port ? QString::fromStdString(jam2::endpoint_to_string(value)) : QString{}; };
     for (const auto& link : stats.links) links.append(QJsonObject{
         {QStringLiteral("peer"), link.peer}, {QStringLiteral("phase"), static_cast<int>(link.phase)},
+        {QStringLiteral("route"), link.route},
         {QStringLiteral("attempt"), link.attempt}, {QStringLiteral("hello_sent"), link.helloSent},
         {QStringLiteral("local"), endpoint(link.local)}, {QStringLiteral("remote"), endpoint(link.remote)},
         {QStringLiteral("observed"), endpoint(link.observed)},
         {QStringLiteral("received_hello"), link.receivedHello}, {QStringLiteral("received_ack"), link.receivedAck},
         {QStringLiteral("control_queued_bytes"), static_cast<qint64>(link.controlQueued)},
         {QStringLiteral("asset_queued_bytes"), static_cast<qint64>(link.assetQueued)},
-        {QStringLiteral("retransmissions"), static_cast<qint64>(link.retransmissions)}});
+        {QStringLiteral("retransmissions"), static_cast<qint64>(link.retransmissions)},
+        {QStringLiteral("control_stream"), QString::number(link.controlStream)},
+        {QStringLiteral("asset_stream"), QString::number(link.assetStream)},
+        {QStringLiteral("control_rtt_us"), static_cast<qint64>(link.controlRttUs)},
+        {QStringLiteral("asset_rtt_us"), static_cast<qint64>(link.assetRttUs)},
+        {QStringLiteral("control_window_packets"), link.controlWindow},
+        {QStringLiteral("asset_window_packets"), link.assetWindow},
+        {QStringLiteral("input_deferrals"), static_cast<qint64>(link.inputDeferrals)},
+        {QStringLiteral("last_receive_age_ms"), static_cast<qint64>(link.lastReceiveAgeMs)},
+        {QStringLiteral("retained_audio_local"), endpoint(link.retainedAudioLocal)}});
     return {{QStringLiteral("enabled"), multiplex_ != nullptr}, {QStringLiteral("running"), stats.running},
         {QStringLiteral("registered"), stats.registered}, {QStringLiteral("admission_paused"), stats.admissionPaused},
         {QStringLiteral("pause_confirmed"), stats.pauseConfirmed},
@@ -450,6 +529,13 @@ QJsonObject SharedSessionController::multiplexDiagnostics() const
         {QStringLiteral("control_bytes_sent"), static_cast<qint64>(stats.controlBytesSent)},
         {QStringLiteral("asset_bytes_sent"), static_cast<qint64>(stats.assetBytesSent)},
         {QStringLiteral("invalid_mux_packets"), static_cast<qint64>(stats.invalidMuxPackets)},
+        {QStringLiteral("control_bytes_received"), static_cast<qint64>(stats.controlBytesReceived)},
+        {QStringLiteral("asset_bytes_received"), static_cast<qint64>(stats.assetBytesReceived)},
+        {QStringLiteral("mux_budget_deferrals"), static_cast<qint64>(stats.budgetDeferrals)},
+        {QStringLiteral("mux_send_errors"), static_cast<qint64>(stats.sendErrors)},
+        {QStringLiteral("link_repair_silence_ms"), static_cast<qint64>(stats.linkRepairSilenceMs)},
+        {QStringLiteral("frame_idle_timeout_ms"), 10000},
+        {QStringLiteral("same_socket_recovery_attempts"), 2},
         {QStringLiteral("links"), links}};
 }
 
@@ -617,6 +703,7 @@ void SharedSessionController::reset(bool stopRuntime)
     assetReconnectTimer_.stop();
     assetIdleCloseTimer_.stop();
     heartbeatTimer_.stop();
+    multiplexDiagnosticsTimer_.stop();
     heartbeatDeadlineTimer_.stop();
     server_.close();
     client_.close();
@@ -627,11 +714,13 @@ void SharedSessionController::reset(bool stopRuntime)
     }
     if (multiplex_) { multiplex_->stop(); multiplex_.reset(); }
     introductionWarnings_.clear();
+    recoveringUdpPairs_.clear();
     role_ = Role::Inactive;
     lifecycle_ = Lifecycle::Inactive;
     creator_ = {};
     joiner_ = {};
     peers_.clear();
+    controlRecoveryDeadlines_.clear();
     membershipAssembly_ = {};
     coordinatorToken_.clear();
     editorAuthorityToken_.clear();
@@ -660,6 +749,15 @@ void SharedSessionController::reset(bool stopRuntime)
     authorizationRejections_ = 0;
     lastHeartbeat_.invalidate();
     publishSnapshot();
+}
+
+bool SharedSessionController::reconnectControlStream()
+{
+    if (role_ != Role::Joiner || closing_ || !multiplex_ || !client_.isConnected()) return false;
+    interruptAssetJoiner();
+    client_.close();
+    scheduleReconnect();
+    return true;
 }
 
 void SharedSessionController::refresh()
@@ -1023,7 +1121,7 @@ void SharedSessionController::handleClientEvent(const TransportEvent& event)
         // connectionless, so an old NAT mapping can be dead while ordinary
         // sends still report success. Force the retained runtime to prove its
         // direct edges again instead of preserving a stale Active state.
-        if (!firstAuthentication && runtime_ != nullptr) {
+        if (!firstAuthentication && runtime_ != nullptr && !multiplex_) {
             (void)runtime_->reprobePeers();
         }
         setLifecycle(Lifecycle::Authenticated);
@@ -1031,11 +1129,11 @@ void SharedSessionController::handleClientEvent(const TransportEvent& event)
             connectAssetJoiner();
         }
     } else if (event.type == TransportEventType::Disconnected && !closing_) {
-        assetReconnectTimer_.stop();
-        assetClient_.close();
+        interruptAssetJoiner();
         scheduleReconnect();
     } else if (event.type == TransportEventType::Failure) {
         if (event.retryable) {
+            if (multiplex_) interruptAssetJoiner();
             failure_ = event.failure;
             failureDetail_ = event.detail;
             failureRetryable_ = true;
@@ -1053,6 +1151,14 @@ void SharedSessionController::handleClientEvent(const TransportEvent& event)
         }
     }
     publishTransportEvent(event, false);
+}
+
+void SharedSessionController::interruptAssetJoiner()
+{
+    const bool hadWork = assetChannelRequired_;
+    assetReconnectTimer_.stop();
+    assetClient_.close();
+    if (hadWork && onAssetDisconnected) onAssetDisconnected(QString{});
 }
 
 void SharedSessionController::handleAssetClientEvent(const TransportEvent& incoming)
@@ -1123,6 +1229,7 @@ void SharedSessionController::handleAuthenticatedPeer(
         return;
     }
 
+    controlRecoveryDeadlines_.remove(token);
     Peer peer;
     peer.endpoint = endpoint;
     peer.peerId = *peerId;
@@ -1154,6 +1261,25 @@ void SharedSessionController::handleAuthenticatedPeer(
 
 void SharedSessionController::handleDisconnectedPeer(const QString& token)
 {
+    if (!closing_ && role_ == Role::Creator && multiplex_ && peers_.contains(token) &&
+        multiplex_->peerEndpoint(peers_.value(token).peerId)) {
+        // A logical control failure does not invalidate this punched media
+        // socket. Keep membership while the joiner reopens/authenticates a
+        // fresh logical stream. Explicit peer leave bypasses this grace.
+        if (!controlRecoveryDeadlines_.contains(token)) multiplex_->prepareRecovery(token);
+        if (!controlRecoveryDeadlines_.contains(token))
+            controlRecoveryDeadlines_[token] = jam2::monotonic_us() +
+                static_cast<quint64>(heartbeatIntervalMs_) * heartbeatMissLimit_ * 1000;
+        // Also notify pending asset work when no asset stream authenticated
+        // yet: ControlServer cannot associate that unauthenticated stream
+        // with this token, but the GUI's outstanding request already can.
+        if (onAssetDisconnected) onAssetDisconnected(token);
+        if (onSignalerStatus) onSignalerStatus(QStringLiteral(
+            "UDP control stream lost; retaining audio socket while peer reconnects: %1").arg(token.left(8)));
+        return;
+    }
+    controlRecoveryDeadlines_.remove(token);
+    std::erase_if(recoveringUdpPairs_, [&](const auto& pair) { return pair.first == token || pair.second == token; });
     if (role_ == Role::Creator && peers_.remove(token) > 0) {
         if (multiplex_) multiplex_->removePeer(token);
         if (editorAuthorityToken_ == token) {
@@ -1607,7 +1733,10 @@ void SharedSessionController::connectJoiner()
         return;
     }
     if (multiplex_) {
-        multiplex_->openStream(multiplex_->coordinatorToken(), jam2::application::UdpMuxChannel::Control);
+        if (everAuthenticated_ && reconnectAttempts_ > 2) {
+            reconnectAttempts_ = 0;
+            recoverMultiplexPeer(multiplex_->coordinatorToken());
+        } else multiplex_->openStream(multiplex_->coordinatorToken(), jam2::application::UdpMuxChannel::Control);
         return;
     }
     client_.connectToHost(
@@ -1645,6 +1774,14 @@ void SharedSessionController::sendHeartbeat(const QString& targetToken)
     if (role_ != Role::Creator || closing_) {
         return;
     }
+    const auto expired = controlRecoveryDeadlines_;
+    for (auto it = expired.cbegin(); it != expired.cend(); ++it) {
+        if (jam2::monotonic_us() < it.value()) continue;
+        if (!multiplex_) { controlRecoveryDeadlines_.remove(it.key()); continue; }
+        controlRecoveryDeadlines_[it.key()] = jam2::monotonic_us() +
+            static_cast<quint64>(heartbeatIntervalMs_) * heartbeatMissLimit_ * 1000;
+        introducePair(creator_.localToken, it.key());
+    }
     heartbeatSequence_ = heartbeatSequence_ >= (std::numeric_limits<int>::max)()
         ? 1 : heartbeatSequence_ + 1;
     const QJsonObject heartbeat{
@@ -1681,6 +1818,11 @@ void SharedSessionController::checkHeartbeatDeadline()
 void SharedSessionController::expireCoordinatorHeartbeat()
 {
     if (role_ != Role::Joiner || closing_ || !reconnectEnabled_) {
+        return;
+    }
+    if (multiplex_) {
+        recoverMultiplexPeer(coordinatorToken_);
+        lastHeartbeat_.restart();
         return;
     }
     reconnectEnabled_ = false;

@@ -547,12 +547,13 @@ bool leaveAndRejoin(
     std::array<QJsonObject, FourPeerCoordinator::kPeerCount>& states,
     const QString& label)
 {
+    const auto departingToken = states[peer].value(QStringLiteral("jam")).toObject().value(QStringLiteral("local_token")).toString();
     if (!apply(coordinator, peer, {
             {QStringLiteral("type"), QStringLiteral("jam.leave")},
             {QStringLiteral("id"), label + QStringLiteral("-leave")},
         })) return false;
     if (!waitForAll(coordinator, label + QStringLiteral(" disconnect cleanup"),
-            [peer](std::size_t index, const QJsonObject& state) {
+            [peer, departingToken](std::size_t index, const QJsonObject& state) {
                 const QJsonObject jam = state.value(QStringLiteral("jam")).toObject();
                 if (index == peer) {
                     return jam.value(QStringLiteral("role")).toString() ==
@@ -561,7 +562,8 @@ bool leaveAndRejoin(
                         transferIdle(state);
                 }
                 return jam.value(QStringLiteral("remote_peer_count")).toInt() == 2 &&
-                    jam.value(QStringLiteral("active_remote_peer_count")).toInt() == 2;
+                    jam.value(QStringLiteral("active_remote_peer_count")).toInt() == 2 &&
+                    state.value(QStringLiteral("content")).toObject().value(QStringLiteral("incoming_asset_source")).toString() != departingToken;
             }, states, false, 90s) || !verifyNoPartials(coordinator, peer)) {
         return false;
     }

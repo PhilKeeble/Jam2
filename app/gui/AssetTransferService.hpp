@@ -62,6 +62,7 @@ public:
     void receiveAck(const QJsonObject& message, const QString& sourcePeerToken);
     void receiveChunk(const QByteArray& payload, const QString& sourcePeerToken);
     void receiveDone(const QJsonObject& message, const QString& sourcePeerToken);
+    void receiveUnavailable(const QJsonObject& message, const QString& sourcePeerToken);
 
     // Private GUI-agent controls used only by native real-process tests. A gate
     // stops at an observed lifecycle boundary until the test explicitly

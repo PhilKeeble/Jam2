@@ -247,6 +247,21 @@ void UdpSocket::bind(const Endpoint& endpoint)
     }
 }
 
+Endpoint UdpSocket::local_endpoint_for(const ResolvedUdpEndpoint& destination) const
+{
+    Endpoint local = local_endpoint();
+    if (local.host != "0.0.0.0") return local;
+    // UDP connect selects a local route without emitting a datagram. Use an
+    // independent RAII probe so the real socket remains connectionless and can
+    // receive both server notifications and direct peer traffic.
+    UdpSocket route;
+    const auto address = to_sockaddr(destination);
+    if (::connect(route.handle_, reinterpret_cast<const sockaddr*>(&address), sizeof(address)) != 0)
+        throw std::runtime_error("failed to discover local UDP route: " + socket_error_text());
+    local.host = route.local_endpoint().host;
+    return local;
+}
+
 void UdpSocket::waitForAny(std::span<const UdpSocket* const> sockets,
                            std::uint64_t timeout_us, RealtimeWakeSignal* command_wake)
 {

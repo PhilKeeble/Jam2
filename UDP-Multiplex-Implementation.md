@@ -125,6 +125,89 @@ packets; they do not reproduce a carrier NAT. Broadband/hotspot testing remains
 necessary. No public deployment or Internet connectivity result is implied by
 the local checks.
 
+
+## LAN testing option
+
+Start the companion server with:
+
+```sh
+./rendezvous --jam2-server --allow-local --listen 0.0.0.0:40404
+```
+
+Use updated UDP-Multiplex builds on both peers, place them on the same LAN,
+and choose Jam2 Server normally. No client flag or invitation format changes
+are needed. Each media candidate includes the actual outbound interface address
+and its exact bound socket port. Route discovery does not send an extra probe
+or connect the real media socket.
+
+When enabled, the server offers local endpoints on attempt one only when both
+peers share the same observed public IPv4 and have valid local candidates.
+A failed local attempt rotates both sockets and falls back to public endpoints.
+The original ten-pair total bound remains. Without the flag, or when one peer
+has no local hint, existing public rendezvous behavior remains.
+
+Inspect link logs for `route=lan, remote=192.168?:PORT` (or a local address
+appropriate to the test) and `udp_multiplex.links[].route` in diagnostics.
+Sharing a public IP is a heuristic; HELLO/ACK proof decides whether the local
+path actually works. The signaling socket continues its existing server
+checkins, while the selected media socket carries audio/control/WAV directly.
+
+Additional native coverage:
+- `jam2_udp_four_peer_local_integration`: four native peers, all six direct LAN
+  edges, control and binary assets, while simulated public mappings are blocked.
+- `jam2_udp_four_peer_local_fallback_integration`: intentionally unusable LAN
+  hints, fresh socket rotation and successful public endpoint fallback.
+- `jam2_udp_four_application_local_integration`: four public Release Jam2
+  processes, three logged LAN links each and measured decoded PCM.
+
+## Failure recovery and diagnostics (25 October 2026)
+
+The supplied Windows and Mac logs show control frame timeouts followed by
+peer removal, rather than a process crash. A requested WAV failed local
+validation on the Mac before transfer began; the old combined error does not
+identify which validation condition failed.
+
+Multiplexed framing now uses a **10-second idle deadline**, refreshed by new
+ordered message bytes. A message can take longer overall while progressing.
+TCP retains its existing framing policy. Reliable fragments are acknowledged
+and retransmitted on the same UDP socket. Initial retransmission timing is one
+second so ordinary mobile RTT can be measured without immediately classifying
+every initial packet as lost; adaptive timing retains a scheduling margin.
+
+A control-stream failure retains peer membership and the proven physical audio
+socket. Recovery first opens/authenticates a fresh logical control stream on the
+same socket. After two failed attempts, the creator coordinates a fresh server
+introduction for that pair. Usable old audio sockets remain selected until a
+replacement pair proves connectivity. Other peer pairs retain their sockets.
+Existing-peer repair can wake the directory while admission is paused/full.
+A persistent silent media edge can request creator-coordinated repair, including
+B-C mesh links. Explicit leave still removes a peer; a transient logical control
+fault is not treated as leaving. Exhausted ongoing repair rounds can retry.
+
+Ensure-open requests are idempotent while a logical stream is opening/live.
+Fresh authenticated stream identities can retire stranded old logical streams,
+and outgoing open failures notify the controller instead of silently stalling.
+
+An unavailable or changed source WAV now produces a specific validation reason
+and authenticated `looper.asset.unavailable` control response. The receiver can
+release/retry its request promptly rather than waiting silently for 60 seconds.
+This does not reconstruct the original missing/mismatched Mac file.
+
+The GUI log records structured `UDP multiplex stats` every two seconds:
+current queues, stream identities, RTT/window sizes, retransmissions, input
+deferrals, sent/received multiplexed bytes, pacing deferrals, send errors and
+retained audio sockets. Audio CSV byte counters exclude multiplexed traffic;
+raw arrangement JSON size and cumulative high-water marks alone cannot prove
+a current flood or uplink saturation.
+
+Native coverage includes slow progressing frames, ten-second idle expiry,
+lossless 420 ms RTT without premature retransmissions, repeated asset opens,
+exactly-four-peer WAV sharing under loss/duplication, same-socket recovery,
+server fallback after two blocked opens, and automatic repair of a failed
+non-creator mesh tuple. These controlled checks do not replace real macOS and
+NAT testing. No DSP, audio codec, resampler, jitter-buffer or mixer changes
+are part of these repairs.
+
 ## Remaining experiments
 
 Keep the creator-mediated asset star for now. Measure fan-out congestion and

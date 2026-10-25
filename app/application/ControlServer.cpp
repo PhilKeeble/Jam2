@@ -404,6 +404,8 @@ void ControlServer::acceptPeer(const ControlConnection::Pointer& connection)
     peer->frameTimer = std::make_unique<QTimer>();
     peer->authenticationTimer->setSingleShot(true);
     peer->frameTimer->setSingleShot(true);
+    peer->frameTimer->setTimerType(Qt::PreciseTimer);
+    peer->frameClock.start();
     peers_.push_back(peer);
     ++stats_.acceptedConnections;
     stats_.activeConnections = static_cast<quint64>(peers_.size());
@@ -451,6 +453,7 @@ void ControlServer::acceptPeer(const ControlConnection::Pointer& connection)
             }
             current->receivedAnyInput = current->receivedAnyInput || !bytes.isEmpty();
             current->buffer += bytes;
+            if (!bytes.isEmpty()) current->frameDeadline.received(current->frameClock.elapsed());
             stats_.maxBufferedInputBytes = std::max<quint64>(
                 stats_.maxBufferedInputBytes, current->buffer.size());
             stats_.maxBufferedInputBytes = std::max<quint64>(
@@ -465,7 +468,7 @@ void ControlServer::acceptPeer(const ControlConnection::Pointer& connection)
             }
         });
 
-    peer->authenticationTimer->start(kAuthenticationDeadlineMs);
+    peer->authenticationTimer->start(connection->authenticationDeadlineMs());
     publishEvent(TransportEvent{
         TransportEventType::ChallengeSent,
         TransportFailure::None,
@@ -571,8 +574,9 @@ void ControlServer::readPeer(const PeerHandle& peer)
         if (result == TakeFrameResult::NeedMore) {
             if (peer->buffer.isEmpty()) {
                 peer->frameTimer->stop();
-            } else if (!peer->frameTimer->isActive()) {
-                peer->frameTimer->start(kIncompleteFrameDeadlineMs);
+            } else {
+                if (peer->frameDeadline.began < 0) peer->frameDeadline.received(peer->frameClock.elapsed());
+                peer->frameTimer->start(peer->frameDeadline.remaining(peer->connection->transport(), peer->frameClock.elapsed()));
             }
             return;
         }
@@ -586,6 +590,7 @@ void ControlServer::readPeer(const PeerHandle& peer)
             return;
         }
         peer->frameTimer->stop();
+        peer->frameDeadline.clear();
         ++handled;
         ++stats_.framesReceived;
 

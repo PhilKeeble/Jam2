@@ -87,6 +87,7 @@ public:
         const QString& hash,
         const QString& sourcePeerToken) const override;
     void abandonIncomingAsset(const QString& hash) override;
+    void discardPendingAssetRequestFromPeer(const QString& peerToken);
     void acceptIncomingAsset(
         const QString& hash,
         const QString& path,

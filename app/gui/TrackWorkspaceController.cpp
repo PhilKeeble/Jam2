@@ -165,6 +165,22 @@ bool TrackWorkspaceController::incomingAssetExpected(
         incomingAssetSourcePeerToken == sourcePeerToken;
 }
 
+void TrackWorkspaceController::discardPendingAssetRequestFromPeer(const QString& peerToken)
+{
+    // Requests awaiting START have no ReceiveSequence yet, so the transfer
+    // service cannot identify their owner during disconnect cleanup.
+    if (incomingAssetWorkflow == IncomingAssetWorkflow::None ||
+        incomingAssetSourcePeerToken != peerToken || assetTransfer.incomingTransferActive()) return;
+    const auto hash = incomingAssetHash;
+    ++incomingAssetRequestGeneration;
+    incomingAssetWorkflow = IncomingAssetWorkflow::None;
+    incomingAssetHash.clear();
+    incomingAssetSourcePeerToken.clear();
+    pendingTrackAssetSources.remove(hash);
+    appendAssetLog(QStringLiteral("released pending looper asset request after peer interruption: hash=%1 source=%2")
+        .arg(hash, peerToken.left(8)));
+}
+
 void TrackWorkspaceController::abandonIncomingAsset(const QString& hash)
 {
     const QString failedSource = incomingAssetSourcePeerToken;

@@ -19,12 +19,14 @@ public:
     static constexpr std::size_t kQueueBytes = 256 * 1024;
     static constexpr std::size_t kReceiveWindow = 64;
     static constexpr std::uint64_t kMaximumUnacknowledgedUs = 15000000;
+    // Bootstrap above ordinary mobile RTT so unambiguous first ACKs can
+    // establish an RTT estimate instead of every fragment being retransmitted.
     struct Stats {
         std::uint64_t sent = 0, retransmitted = 0, acknowledged = 0;
         std::uint64_t received = 0, duplicates = 0, reordered = 0, rejected = 0;
         std::uint64_t queue_rejected = 0, timeouts = 0;
         std::size_t queue_high_water_bytes = 0, reorder_high_water_bytes = 0;
-        std::uint64_t smoothed_rtt_us = 0, retransmit_timeout_us = 250000;
+        std::uint64_t smoothed_rtt_us = 0, retransmit_timeout_us = 1000000;
         double congestion_window = 4.0;
     };
     using Transmit = std::function<bool(std::uint64_t, std::span<const std::uint8_t>, bool)>;
@@ -47,7 +49,7 @@ public:
 private:
     struct Fragment {
         std::vector<std::uint8_t> bytes;
-        std::uint64_t first_sent_us = 0, last_sent_us = 0, retry_us = 250000;
+        std::uint64_t first_sent_us = 0, last_sent_us = 0, retry_us = 1000000;
         unsigned transmissions = 0;
     };
     std::deque<std::vector<std::uint8_t>> queue_;

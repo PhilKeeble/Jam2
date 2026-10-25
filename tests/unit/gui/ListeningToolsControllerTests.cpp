@@ -282,6 +282,18 @@ void testValidationAndDialog() {
     introduction[QStringLiteral("nonce")] = QStringLiteral("invalid");
     require(!evaluateControlMessage(introduction, ControlMessageSource::Coordinator).accepted,
         "malformed mesh introduction rejected");
+    const QJsonObject repair{{"type", "session.udp.recover"}, {"peer", QString(32, 'b')}};
+    require(evaluateControlMessage(repair, ControlMessageSource::AuthenticatedPeer).accepted &&
+        !evaluateControlMessage(repair, ControlMessageSource::Coordinator).accepted,
+        "repair requests retain peer-to-creator authority");
+    const QJsonObject unavailable{{"type", "looper.asset.unavailable"},
+        {"sha256", QString(64, 'a')}, {"reason", "asset file is unavailable"}};
+    require(evaluateControlMessage(unavailable, ControlMessageSource::AuthenticatedPeer).accepted &&
+        evaluateControlMessage(unavailable, ControlMessageSource::Coordinator).accepted,
+        "both asset providers can report an unavailable hash");
+    auto invalid = unavailable; invalid["sha256"] = "invalid";
+    require(!evaluateControlMessage(invalid, ControlMessageSource::AuthenticatedPeer).accepted,
+        "malformed asset failure was accepted");
     JamSyncDialog dialog({}, false, false);
     QCheckBox* listening = nullptr;
     QCheckBox* playback = nullptr;

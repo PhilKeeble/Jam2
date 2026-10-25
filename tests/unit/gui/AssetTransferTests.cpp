@@ -736,8 +736,9 @@ void test_sample_rate_mismatch_is_rejected_in_both_directions(const QString& fol
         AssetTransferService transfer(context);
         transfer.queueSend(hash, QStringLiteral("peer-b"));
         context.runAll();
-        expect(context.controls.isEmpty() && context.binaries.isEmpty(),
-            "outgoing WAV outside the session sample-rate contract emits no transfer data");
+        expect(context.controls.size() == 1 && context.controls.front().value("type") == "looper.asset.unavailable" &&
+                context.controls.front().value("reason").toString().contains("sample rate") && context.binaries.isEmpty(),
+            "outgoing sample-rate mismatch explicitly rejects the request without transferring invalid audio");
     }
 }
 
@@ -1188,6 +1189,29 @@ void test_private_automation_gates_are_explicit_and_cancel_safe(const QString& f
     }
 }
 
+void test_unavailable_asset_reports_without_waiting_for_start(const QString& folder)
+{
+    const auto wav = pcm16Wav(32, 1200);
+    const auto hash = sha256(wav);
+    DeferredContext sender(folder), receiver(folder);
+    receiver.expectAsset(hash);
+    AssetTransferService outgoing(sender), incoming(receiver);
+    outgoing.queueSend(hash, receiver.expectedSource);
+    sender.runAll();
+    expect(sender.controls.size() == 1 &&
+        sender.controls.front().value("type") == "looper.asset.unavailable",
+        "missing WAV produces an explicit authenticated failure");
+    expect(!outgoing.workPending(), "failed validation retained asset-stream demand");
+    const auto failure = sender.controls.front();
+    incoming.receiveUnavailable(failure, "other-peer");
+    expect(receiver.abandoned == 0, "unrelated peer cancelled an asset request");
+    incoming.receiveUnavailable(failure, receiver.expectedSource);
+    expect(receiver.abandoned == 1 && !receiver.active,
+        "receiver immediately released the unavailable request");
+    incoming.receiveUnavailable(failure, receiver.expectedSource);
+    expect(receiver.abandoned == 1, "duplicate failure abandoned a later workflow");
+}
+
 } // namespace
 
 int main(int argc, char* argv[])
@@ -1196,6 +1220,7 @@ int main(int argc, char* argv[])
     QTemporaryDir folder;
     expect(folder.isValid(), "asset test folder is available");
     if (folder.isValid()) {
+        test_unavailable_asset_reports_without_waiting_for_start(folder.path());
         test_chunk_sequence_rejects_duplicate_and_wrong_source();
         test_arrangement_validation_reuses_received_assets(folder.path());
         test_send_paths_use_the_project_root(folder.path());

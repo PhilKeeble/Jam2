@@ -82,8 +82,10 @@ void ReliableUdpStream::acknowledge(std::uint64_t sequence, std::uint64_t now_us
             rtt_variation_us_ = (3 * rtt_variation_us_ + difference) / 4;
             stats_.smoothed_rtt_us = (7 * stats_.smoothed_rtt_us + sample) / 8;
         }
+        // Keep a scheduler margin even when measured RTT variation reaches
+        // zero; an ACK due on the polling tick must not imply packet loss.
         stats_.retransmit_timeout_us = std::clamp(
-            stats_.smoothed_rtt_us + 4 * rtt_variation_us_,
+            stats_.smoothed_rtt_us + (std::max)(std::uint64_t{10000}, 4 * rtt_variation_us_),
             std::uint64_t{100000}, std::uint64_t{2000000});
     }
     queued_bytes_ -= fragment.bytes.size();

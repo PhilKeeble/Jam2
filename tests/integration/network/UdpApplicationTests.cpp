@@ -48,10 +48,14 @@ int main(int argc, char** argv) {
         }
     };
     try {
-        require(argc == 3, "requires release/jam2 and real Go rendezvous server");
+        require(argc == 3 || argc == 4, "requires release/jam2 and real Go rendezvous server");
+        const bool local = argc == 4;
+        require(!local || QString::fromLocal8Bit(argv[3]) == "local", "unknown native application test mode");
         QUdpSocket reserve; require(reserve.bind(QHostAddress::LocalHost, 0), "reserve signaler port");
         const auto port = reserve.localPort(); reserve.close();
-        Child signaler(QString::fromLocal8Bit(argv[2]), {"--jam2-server", "--listen", QStringLiteral("127.0.0.1:%1").arg(port)});
+        QStringList serverArguments{"--jam2-server", "--listen", QStringLiteral("127.0.0.1:%1").arg(port)};
+        if (local) serverArguments << "--allow-local";
+        Child signaler(QString::fromLocal8Bit(argv[2]), serverArguments);
         const auto executable = QString::fromLocal8Bit(argv[1]);
         const auto artifact = qEnvironmentVariable("JAM2_TEST_ARTIFACT_ROOT", QDir::tempPath());
         auto statsArguments = [&](int i) { return QStringList{"--stats", "enabled", "--stats-interval-ms", "250",
@@ -90,6 +94,8 @@ int main(int argc, char** argv) {
             require(child->process.exitCode() == 0 && child->process.exitStatus() == QProcess::NormalExit,
                 "native application returned failure");
             const auto output = QString::fromUtf8(child->output);
+            if (local) require(output.count(QStringLiteral("route=lan")) == 3,
+                "application did not establish all three remote links via LAN multiplex");
             bool fullMeshSample = false;
             const QDir folder(QDir(artifact).filePath(QString::number(index)));
             for (const auto& name : folder.entryList({"*.csv"}, QDir::Files)) {

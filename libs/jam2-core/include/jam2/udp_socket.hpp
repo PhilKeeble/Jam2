@@ -104,6 +104,8 @@ public:
 
     void bind(const Endpoint& endpoint);
     Endpoint local_endpoint() const;
+    // Discover the outbound interface without sending a probe or connecting this media socket.
+    Endpoint local_endpoint_for(const ResolvedUdpEndpoint& destination) const;
     static void waitForAny(std::span<const UdpSocket* const> sockets,
         std::uint64_t timeout_us, RealtimeWakeSignal* command_wake = nullptr);
     void set_send_buffer_size(int bytes);

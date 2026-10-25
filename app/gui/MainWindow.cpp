@@ -1044,6 +1044,8 @@ MainWindow::MainWindow(
             assetTransfer_.receiveStart(message, sourcePeerToken);
         } else if (type == QStringLiteral("looper.asset.ack")) {
             assetTransfer_.receiveAck(message, sourcePeerToken);
+        } else if (type == QStringLiteral("looper.asset.unavailable")) {
+            assetTransfer_.receiveUnavailable(message, sourcePeerToken);
         } else if (type == QStringLiteral("looper.asset.done")) {
             assetTransfer_.receiveDone(message, sourcePeerToken);
         } else {
@@ -1056,12 +1058,16 @@ MainWindow::MainWindow(
         assetTransfer_.receiveChunk(payload, sourcePeerToken);
     };
     sessionController_.onAssetDisconnected = [this](const QString& sourcePeerToken) {
+        trackWorkspace_.discardPendingAssetRequestFromPeer(sourcePeerToken);
         assetTransfer_.peerDisconnected(sourcePeerToken);
+        updateAssetChannelRequirement();
+        QTimer::singleShot(0, this, [this] { requestNextPendingAsset(); });
     };
     sessionController_.onPeerAuthenticated = [this](const QString& token, const QJsonObject& message) {
         handleMeshPeerAuthenticated(token, message);
     };
     sessionController_.onPeerDisconnected = [this](const QString& token) {
+        trackWorkspace_.discardPendingAssetRequestFromPeer(token);
         assetTransfer_.peerDisconnected(token);
         if (pendingSongSourcePeerToken_ == token) {
             ++songAssetCheckRevision_;
@@ -1115,6 +1121,8 @@ MainWindow::MainWindow(
             }
         }
         releaseHeldTrackSnapshotIfReady();
+        updateAssetChannelRequirement();
+        QTimer::singleShot(0, this, [this] { requestNextPendingAsset(); });
         localMeshPeerTokens_.remove(token);
         updateMixRemotePeers();
         if (sessionController_.isServer() && sharedBankLaunch_.active()) {
@@ -2498,6 +2506,9 @@ QJsonObject MainWindow::automationJamSnapshot() const
         {QStringLiteral("grid_mapping_error_frames"), network.has_value()
             ? static_cast<qint64>(network->grid_mapping_error_frames)
             : 0LL},
+        {QStringLiteral("control_connected"), sessionController_.isConnected()},
+        {QStringLiteral("control_completed_connections"), static_cast<qint64>(sessionController_.clientStats().completedConnections)},
+        {QStringLiteral("control_reconnect_attempts"), session.reconnectAttempts},
         {QStringLiteral("local_token"), session.localToken},
         {QStringLiteral("coordinator_token"), session.coordinatorToken},
         {QStringLiteral("failure"), session.failureDetail},
@@ -13305,6 +13316,10 @@ bool MainWindow::sendAssetControlTo(
     const QString& targetPeerToken,
     const QJsonObject& message)
 {
+    // Validation can fail before the on-demand asset stream authenticates.
+    // Report it over the already authenticated control stream immediately.
+    if (message.value(QStringLiteral("type")) == QStringLiteral("looper.asset.unavailable"))
+        return sessionController_.sendTo(targetPeerToken, message);
     return sessionController_.sendAssetTo(targetPeerToken, message);
 }
 

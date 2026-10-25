@@ -4,6 +4,7 @@
 #include "NativeTcpTransport.hpp"
 
 #include <QJsonObject>
+#include <QElapsedTimer>
 #include <QTimer>
 
 #include <functional>
@@ -94,6 +95,8 @@ private:
     quint64 connectionGeneration_ = 0;
     QTimer authenticationTimer_;
     QTimer frameTimer_;
+    QElapsedTimer frameClock_;
+    jam2::application::ControlFrameDeadline frameDeadline_;
     QByteArray buffer_;
     QByteArray masterKey_;
     QByteArray serverNonce_;

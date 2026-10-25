@@ -1,3 +1,4 @@
+#include "../../support/UdpCandidateNetwork.hpp"
 #include "UdpMultiplexTransport.hpp"
 #include "ControlClient.hpp"
 #include "ControlServer.hpp"
@@ -33,87 +34,16 @@ quint64 id(int i) { return *jam2::control_protocol::peerIdFromToken(peer(i)); }
 // candidate still registers with the actual Go server from its own socket.
 // The translator can block a whole candidate tuple, as an admission failure,
 // without substituting a second implementation of the handshake.
-class CandidateNetwork {
-    struct Route {
-        QUdpSocket socket;
-        quint16 local = 0;
-        QString peer, request;
-        int attempt = 0;
-    };
-    QUdpSocket ingress_;
-    quint16 server_;
-    std::map<quint16, std::unique_ptr<Route>> routes_;
-    quint64 directCount_ = 0;
-    std::set<QString> firstMembership;
-public:
-    bool blockFirst = true, blockMesh = false, blockLeave = false;
-    quint64 leavesDropped = 0;
-    quint64 dropped = 0, duplicated = 0;
-    explicit CandidateNetwork(quint16 server) : server_(server) {
-        require(ingress_.bind(QHostAddress::LocalHost, 0), "bind simulated NAT ingress");
-    }
-    quint16 port() const { return ingress_.localPort(); }
-    void pump() {
-        while (ingress_.hasPendingDatagrams()) {
-            QHostAddress address; quint16 local = 0;
-            QByteArray packet(static_cast<int>(ingress_.pendingDatagramSize()), '\0');
-            ingress_.readDatagram(packet.data(), packet.size(), &address, &local);
-            auto& route = routes_[local];
-            if (!route) {
-                route = std::make_unique<Route>(); route->local = local;
-                require(route->socket.bind(QHostAddress::LocalHost, 0), "bind simulated NAT mapping");
-            }
-            const auto object = QJsonDocument::fromJson(packet).object();
-            if (blockLeave && object.value("type") == "jam_leave") { ++leavesDropped; continue; }
-            const auto kind = object.value("type").toString();
-            if (blockFirst && (kind == "jam_admit" || kind == "jam_remove" || kind == "jam_reject") &&
-                firstMembership.insert(kind + object.value("to").toString()).second) { ++dropped; continue; }
-            if (object.value("type") == "jam_candidate") {
-                route->peer = object.value("peer").toString();
-                route->request = object.value("nonce").toString();
-                route->attempt = object.value("attempt").toInt();
-            }
-            route->socket.writeDatagram(packet, QHostAddress::LocalHost, server_);
-        }
-        for (auto& [local, route] : routes_) {
-            while (route->socket.hasPendingDatagrams()) {
-                QHostAddress source; quint16 from = 0;
-                QByteArray packet(static_cast<int>(route->socket.pendingDatagramSize()), '\0');
-                route->socket.readDatagram(packet.data(), packet.size(), &source, &from);
-                if (from == server_) {
-                    const auto message = QJsonDocument::fromJson(packet).object();
-                    const auto kind = message.value("type").toString();
-                    if (blockFirst && kind.endsWith("_ack") &&
-                        firstMembership.insert(kind + message.value("peer").toString()).second) { ++dropped; continue; }
-                    ingress_.writeDatagram(packet, QHostAddress::LocalHost, local); continue;
-                }
-                const auto found = routes_.find(from);
-                if (found == routes_.end()) continue;
-                auto& sender = found->second;
-                if ((blockFirst && (route->attempt == 1 || sender->attempt == 1)) ||
-                    (blockMesh && route->peer == peer(1) && sender->peer == peer(2)) ||
-                    (blockMesh && route->peer == peer(2) && sender->peer == peer(1))) {
-                    ++dropped; continue;
-                }
-                ++directCount_;
-                if (packet.startsWith("J2MX") && directCount_ % 19 == 0) { ++dropped; continue; }
-                sender->socket.writeDatagram(packet, QHostAddress::LocalHost, local);
-                if (packet.startsWith("J2MX") && directCount_ % 23 == 0) {
-                    sender->socket.writeDatagram(packet, QHostAddress::LocalHost, local); ++duplicated;
-                }
-            }
-        }
-    }
-};
-
 struct Server {
     QProcess process;
     quint16 port;
-    Server(const QString& executable) {
+    Server(const QString& executable, bool allowLocal = false) {
         QUdpSocket reserve; require(reserve.bind(QHostAddress::LocalHost, 0), "reserve server port");
         port = reserve.localPort(); reserve.close();
         process.setProcessChannelMode(QProcess::MergedChannels);
-        process.start(executable, {"--jam2-server", "--listen", QStringLiteral("127.0.0.1:%1").arg(port)});
+        QStringList arguments{"--jam2-server", "--listen", QStringLiteral("127.0.0.1:%1").arg(port)};
+        if (allowLocal) arguments << "--allow-local";
+        process.start(executable, arguments);
         require(process.waitForStarted(5000), "start real Go server");
     }
     ~Server() { process.kill(); process.waitForFinished(5000); }
@@ -157,15 +87,19 @@ int main(int argc, char** argv) {
             return reusableInvitationRestart(QString::fromLocal8Bit(argv[1]));
         const bool impaired = argc >= 3;
         const bool partial = argc >= 3 && QString::fromLocal8Bit(argv[2]) == "partial";
-        Server server(QString::fromLocal8Bit(argv[1]));
+        const bool local = argc >= 3 && QString::fromLocal8Bit(argv[2]) == "local";
+        const bool localFallback = argc >= 3 && QString::fromLocal8Bit(argv[2]) == "local-fallback";
+        Server server(QString::fromLocal8Bit(argv[1]), local || localFallback);
         CandidateNetwork network(server.port);
-        network.blockMesh = partial;
+        network.blockMesh = partial; network.invalidLan = localFallback;
         QTimer pump;
         QObject::connect(&pump, &QTimer::timeout, &app, [&] { network.pump(); });
         if (impaired) pump.start(1);
         const QString session = "0123456789abcdef", key = "0123456789abcdef0123456789abcdef";
         std::array<std::unique_ptr<UdpMultiplexTransport>, 4> peers;
         std::array<std::unique_ptr<ControlClient>, 4> control, asset;
+        std::array<ControlConnection::Pointer, 4> controlStreams;
+        std::array<int, 4> controlOpens{}, assetOpens{};
         ControlServer coordinator;
         require(coordinator.listenViaTransport(session, key), "configure actual control protocol");
         std::set<QString> authenticated;
@@ -205,6 +139,8 @@ int main(int argc, char** argv) {
                 const auto observed = peers[index]->observedEndpoint(token);
                 require(observed.has_value(), "Go server returned own public candidate");
                 auto& client = channel == UdpMuxChannel::Asset ? asset[index] : control[index];
+                if (channel == UdpMuxChannel::Control) { controlStreams[index] = connection; ++controlOpens[index]; }
+                else ++assetOpens[index];
                 client->connectViaTransport(connection, session, key, peer(index),
                     QString::fromStdString(jam2::endpoint_to_string(*observed)),
                     channel == UdpMuxChannel::Asset ? ControlClient::Channel::Asset : ControlClient::Channel::Control);
@@ -249,8 +185,10 @@ int main(int argc, char** argv) {
         start(2);
         until([&] { audio(); return control[2]->isConnected() && (partial || peers[1]->peerEndpoint(id(2)).has_value()); },
             "third peer joined full mesh while first edge streams");
-        peers[1]->openStream(peer(0), UdpMuxChannel::Asset);
-        until([&] { audio(); return asset[1]->isConnected(); }, "asset stream authentication");
+        for (int repeat = 0; repeat < 8; ++repeat) peers[1]->openStream(peer(0), UdpMuxChannel::Asset);
+        until([&] { audio(); peers[1]->openStream(peer(0), UdpMuxChannel::Asset);
+            return asset[1]->isConnected(); }, "asset stream authentication despite repeated open requests");
+        require(assetOpens[1] == 1, "repeated ensure-open requests replaced an opening stream");
         QByteArray content(64000, '\0');
         for (int i = 0; i < content.size(); ++i) content[i] = static_cast<char>((i * 37) % 251);
         require(asset[1]->sendBinary(content), "queue actual authenticated binary asset");
@@ -268,7 +206,15 @@ int main(int argc, char** argv) {
         if (impaired) {
             require(network.dropped > 0, "candidate tuple impairment was not exercised");
             for (int i = 0; i < 4; ++i) for (const auto& link : peers[i]->snapshot().links) {
-                require(link.attempt >= 2, "blocked first candidate was reused or falsely connected");
+                if (local) {
+                    require(link.attempt == 1 && link.route == "lan", "LAN media did not bypass the blocked public mapping");
+                    const int remote = link.peer[0].unicode() - '1';
+                    for (const auto& reverse : peers[remote]->snapshot().links) if (reverse.peer == peer(i))
+                        require(link.remote.port == reverse.local.port, "LAN offer used a port other than the real media socket");
+                } else {
+                    require(link.attempt >= 2, "blocked first candidate was reused or falsely connected");
+                    require(link.route == "public", "failed LAN path did not fall back to public candidates");
+                }
                 if (partial && ((i == 1 && link.peer == peer(2)) || (i == 2 && link.peer == peer(1))))
                     require(link.attempt == 10 && link.phase == UdpMultiplexTransport::LinkPhase::Failed,
                         "partial edge did not exhaust exactly ten fresh pairs");
@@ -279,9 +225,34 @@ int main(int argc, char** argv) {
         ticker.restart();
         until([&] { audio(); return ticker.elapsed() > 500; }, "audio while server paused");
         require(peers[0]->snapshot().signalPacketsSent == before, "full jam kept sending to rendezvous");
+        // Repeated sharing must reuse a live stream, then reopen a deliberately
+        // closed logical stream without rotating the proven media socket.
+        for (int round = 0; round < 3; ++round) {
+            for (int repeat = 0; repeat < 8; ++repeat) peers[1]->openStream(peer(0), UdpMuxChannel::Asset);
+            const auto expected = content.repeated(round + 2);
+            require(asset[1]->sendBinary(content), "queue repeated asset content");
+            until([&] { audio(); return receivedAsset == expected; }, "repeated asset byte integrity");
+            require(assetOpens[1] == 1 && control[1]->isConnected(), "repeat sharing closed logical control or asset stream");
+        }
         asset[1]->close();
-        until([&] { return !asset[1]->isConnected(); }, "asset close");
+        until([&] { audio(); return coordinator.stats().assetActiveConnections == 0; }, "remote asset close");
+        peers[1]->openStream(peer(0), UdpMuxChannel::Asset);
+        peers[1]->openStream(peer(0), UdpMuxChannel::Asset);
+        until([&] { audio(); return asset[1]->isConnected(); }, "asset reopen on same socket");
+        require(assetOpens[1] == 2, "closed asset stream was not reopened once");
         require(control[1]->isConnected() && peers[1]->peerEndpoint(id(0)), "asset close tore down physical/control link");
+        // Simulate loss of the old logical stream without its CLOSE reaching
+        // the creator. A fresh logical stream must authenticate on the exact
+        // same established physical pair, including when the old owner lives.
+        const auto stable = peers[1]->snapshot().links.front().local.port;
+        std::dynamic_pointer_cast<UdpStreamConnection>(controlStreams[1])->retire();
+        until([&] { return !control[1]->isConnected(); }, "old logical stream is closing");
+        peers[1]->openStream(peer(0), UdpMuxChannel::Control);
+        until([&] { audio(); return controlOpens[1] == 2 && control[1]->isConnected(); },
+            "control recovery authenticated over retained physical socket");
+        require(peers[1]->snapshot().links.front().local.port == stable &&
+            peers[0]->snapshot().links.front().local.port == original,
+            "logical recovery rotated a proven media socket");
         peers[0]->removePeer(peer(3));
         until([&] { audio(); return peers[0]->snapshot().registered && !peers[0]->snapshot().admissionPaused; },
             "vacancy resumed registration");

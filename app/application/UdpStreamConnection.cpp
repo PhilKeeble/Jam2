@@ -48,11 +48,12 @@ std::optional<UdpMuxFrame> decodeUdpMux(const QByteArray& bytes, quint64 session
     if (bytes.size() != kPrefixBytes + length + kTagBytes) return {};
     const auto kind = static_cast<UdpMuxKind>(static_cast<quint8>(bytes[5]));
     const auto channel = static_cast<UdpMuxChannel>(static_cast<quint8>(bytes[6]));
-    if (kind < UdpMuxKind::Open || kind > UdpMuxKind::CloseAck ||
+    if (kind < UdpMuxKind::Open || kind > UdpMuxKind::PeerLeave ||
         (channel != UdpMuxChannel::Control && channel != UdpMuxChannel::Asset)) return {};
     const auto tag = QMessageAuthenticationCode::hash(
         bytes.first(bytes.size() - kTagBytes), key, QCryptographicHash::Sha256).left(kTagBytes);
     if (!control_protocol::constantTimeEqual(tag, bytes.last(kTagBytes))) return {};
+    if (kind == UdpMuxKind::PeerLeave && channel != UdpMuxChannel::Control) return {};
     const auto sequence = get64(bytes, 32);
     if ((kind == UdpMuxKind::Data && (sequence == 0 || length == 0)) ||
         (kind == UdpMuxKind::Ack && (sequence == 0 || length != 0)) ||
@@ -144,6 +145,16 @@ qint64 UdpStreamConnection::maxPendingReadBytes() const
 bool UdpStreamConnection::terminal() const
 {
     std::lock_guard lock(mutex_); return closed_;
+}
+void UdpStreamConnection::retire(UdpStreamRetirement reason)
+{
+    std::lock_guard lock(mutex_);
+    finish(reason == UdpStreamRetirement::PeerLeft ? QStringLiteral("Peer left UDP link")
+        : QStringLiteral("UDP logical stream replaced"));
+}
+bool UdpStreamConnection::reusable() const
+{
+    std::lock_guard lock(mutex_); return !closed_ && !closing_ && !draining_;
 }
 QString UdpStreamConnection::failure() const
 {

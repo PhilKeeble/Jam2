@@ -1,4 +1,5 @@
 #include "FourPeerCoordinator.hpp"
+#include "UdpCandidateNetwork.hpp"
 #include "LoopbackPortReservations.hpp"
 #include "TestTiming.hpp"
 
@@ -37,13 +38,20 @@ public:
     QProcess process;
     QString endpoint;
     bool started = false;
+    std::unique_ptr<ThreadedCandidateNetwork> network;
     bool start(const QString& executable) {
         QUdpSocket reserve;
         if (!reserve.bind(QHostAddress::LocalHost, 0)) return false;
         endpoint = QStringLiteral("127.0.0.1:%1").arg(reserve.localPort()); reserve.close();
         process.setProcessChannelMode(QProcess::MergedChannels);
         process.start(executable, {"--jam2-server", "--listen", endpoint});
-        started = process.waitForStarted(5000); return started;
+        started = process.waitForStarted(5000);
+        if (started) {
+            const auto port = endpoint.mid(endpoint.lastIndexOf(':') + 1).toUShort();
+            network = std::make_unique<ThreadedCandidateNetwork>(port);
+            endpoint = QStringLiteral("127.0.0.1:%1").arg(network->port());
+        }
+        return started;
     }
     ~TestSignaler() {
         if (!started) return;
@@ -632,6 +640,7 @@ bool waitForAll(
                 const QStringList lines = QString::fromUtf8(file.readAll()).split(QLatin1Char('\n'));
                 QStringList relevant;
                 for (const QString& line : lines) {
+                    if (line.contains(QStringLiteral("UDP multiplex stats"))) continue;
                     if (line.contains(QStringLiteral("asset"), Qt::CaseInsensitive) ||
                         line.contains(QStringLiteral("Track Sync"), Qt::CaseInsensitive) ||
                         line.contains(QStringLiteral("WAV"), Qt::CaseInsensitive)) {
@@ -677,7 +686,7 @@ bool applyConcurrently(
     return true;
 }
 
-bool meshReady(std::size_t index, const QJsonObject& state)
+bool meshOperational(std::size_t index, const QJsonObject& state)
 {
     const QJsonObject jam = state.value(QStringLiteral("jam")).toObject();
     const QJsonObject content = state.value(QStringLiteral("content")).toObject();
@@ -687,15 +696,21 @@ bool meshReady(std::size_t index, const QJsonObject& state)
         jam.value(QStringLiteral("active_remote_peer_count")).toInt() == 3 &&
         jam.value(QStringLiteral("network_attachment_ready")).toBool() &&
         jam.value(QStringLiteral("network_running")).toBool() &&
+        jam.value(QStringLiteral("control_connected")).toBool() &&
         jam.value(QStringLiteral("failure")).toString().isEmpty() &&
         jam.contains(QStringLiteral("asset_client_connection_attempts")) &&
-        jam.value(QStringLiteral("asset_client_connection_attempts")).toInt() == 0 &&
         !jam.value(QStringLiteral("asset_channel_required")).toBool() &&
         !jam.value(QStringLiteral("asset_channel_connected")).toBool() &&
         jam.value(QStringLiteral("asset_server_active_connections")).toInt() == 0 &&
         content.value(QStringLiteral("track_transfer_status")).toString().isEmpty() &&
         content.value(QStringLiteral("arrangement_revision")).toInteger() >= 1 &&
         content.value(QStringLiteral("title")) == content.value(QStringLiteral("title_view"));
+}
+
+bool meshReady(std::size_t index, const QJsonObject& state)
+{
+    return meshOperational(index, state) &&
+        state.value(QStringLiteral("jam")).toObject().value(QStringLiteral("asset_client_connection_attempts")).toInt() == 0;
 }
 
 bool arrangementMatches(
@@ -766,12 +781,13 @@ bool shutDown(FourPeerCoordinator& coordinator)
 int main(int argc, char* argv[])
 {
     QCoreApplication application(argc, argv);
-    if (argc != 2 && argc != 3) {
+    if (argc != 2 && argc != 3 && argc != 4) {
         std::cerr << "usage: jam2_four_shared_content_integration <release-jam2> [Go-server]\n";
         return 2;
     }
     TestSignaler signaler;
-    const bool serverMode = argc == 3;
+    const bool serverMode = argc >= 3;
+    const bool recoveryOnly = argc == 4 && QString::fromLocal8Bit(argv[3]) == QStringLiteral("recovery");
     largeUdpFixtures = serverMode;
     if (serverMode && !signaler.start(QString::fromLocal8Bit(argv[2]))) {
         fail(QStringLiteral("could not start real Go signaler")); return 1;
@@ -879,6 +895,106 @@ int main(int argc, char* argv[])
         const auto multiplex = state.value(QStringLiteral("jam")).toObject().value(QStringLiteral("udp_multiplex")).toObject();
         if (!multiplex.value(QStringLiteral("enabled")).toBool() || multiplex.value(QStringLiteral("links")).toArray().size() != 3) {
             fail(QStringLiteral("shared WAV workflow did not use exactly three physical UDP peer links")); return 1;
+        }
+    }
+
+    if (serverMode) {
+        const auto links = [](const QJsonObject& state) {
+            QMap<QString, QString> result;
+            const auto mux = state.value("jam").toObject().value("udp_multiplex").toObject();
+            for (const auto& entry : mux.value("links").toArray()) {
+                const auto link = entry.toObject(); result[link.value("peer").toString()] = link.value("local").toString();
+            }
+            return result;
+        };
+        std::array<QMap<QString, QString>, 4> original;
+        for (int i = 0; i < 4; ++i) original[i] = links(states[i]);
+        const auto joiningToken = states[1].value("jam").toObject().value("local_token").toString();
+        const auto creatorToken = states[0].value("jam").toObject().value("local_token").toString();
+        const auto completed = states[1].value("jam").toObject().value("control_completed_connections").toInteger();
+        if (!apply(coordinator, 1, {{"type", "jam.control.reconnect"}, {"id", "same-socket-control-recovery"}})) return 1;
+        if (!waitForAll(coordinator, "control recovery on the proven socket",
+            [&](std::size_t i, const QJsonObject& state) {
+                return meshReady(i, state) && (i != 1 ||
+                    state.value("jam").toObject().value("control_completed_connections").toInteger() > completed);
+            }, states)) return 1;
+        for (int i = 0; i < 4; ++i) if (links(states[i]) != original[i]) {
+            fail("logical recovery changed a physical audio socket"); return 1;
+        }
+
+        signaler.network->suppressControlOpens(joiningToken, 2);
+        if (!apply(coordinator, 1, {{"type", "jam.control.reconnect"}, {"id", "control-recovery-server-fallback"}})) return 1;
+        if (!waitForAll(coordinator, "server fallback after two failed same-socket stream attempts",
+            [&](std::size_t i, const QJsonObject& state) {
+                const auto current = links(state);
+                const auto remote = i == 0 ? joiningToken : creatorToken;
+                return meshReady(i, state) && (i > 1 || current.value(remote) != original[i].value(remote));
+            }, states)) return 1;
+        if (signaler.network->suppressedCount() != 2) { fail("did not exercise two failed logical opens"); return 1; }
+        for (int i = 0; i < 4; ++i) {
+            auto retained = original[i], current = links(states[i]);
+            if (i == 0) { retained.remove(joiningToken); current.remove(joiningToken); }
+            if (i == 1) { retained.remove(creatorToken); current.remove(creatorToken); }
+            if (retained != current) { fail("repair interrupted an unaffected mesh edge"); return 1; }
+        }
+        if (recoveryOnly) {
+            std::array<QMap<QString, QString>, 4> wavPorts;
+            for (int i = 0; i < 4; ++i) wavPorts[i] = links(states[i]);
+            if (!apply(coordinator, 1, {{"type", "looper.transfer.pause"}, {"id", "wav-before-control-recovery"},
+                    {"point", "outgoing-validation"}}) ||
+                !apply(coordinator, 1, {{"type", "looper.import"}, {"id", "wav-recovery-import"},
+                    {"lane", -1}, {"source_path", automaticWavPath}})) return 1;
+            if (!waitForAll(coordinator, "WAV validation gate before control interruption",
+                [](std::size_t i, const QJsonObject& state) {
+                    return i != 1 || state.value("content").toObject().value("transfer").toObject()
+                        .value("pause_active") == "outgoing-validation";
+                }, states, false)) return 1;
+            const auto beforeWavRecovery = states[1].value("jam").toObject()
+                .value("control_completed_connections").toInteger();
+            if (!apply(coordinator, 1, {{"type", "jam.control.reconnect"}, {"id", "resume-pending-wav-on-same-socket"}})) return 1;
+            if (!waitForAll(coordinator, "WAV recovery after control interruption",
+                [&](std::size_t i, const QJsonObject& state) {
+                    return meshOperational(i, state) && transferIdle(state) && assetCount(state, automaticWavHash) == 1 &&
+                        (i != 1 || state.value("jam").toObject().value("control_completed_connections").toInteger() > beforeWavRecovery);
+                }, states) || !verifyAssetFiles(states, automaticWavHash)) return 1;
+            for (int i = 0; i < 4; ++i) if (wavPorts[i] != links(states[i])) {
+                fail("WAV/control recovery rotated a proven physical socket"); return 1;
+            }
+            for (int i = 0; i < 4; ++i) original[i] = links(states[i]);
+            const auto otherToken = states[2].value("jam").toObject().value("local_token").toString();
+            signaler.network->blockCurrentPair(joiningToken, otherToken);
+            bool membershipLost = false;
+            if (!waitForAll(coordinator, "automatic repair of a failed non-creator mesh pair",
+                [&](std::size_t i, const QJsonObject& state) {
+                    const auto jam = state.value("jam").toObject();
+                    membershipLost |= !jam.value("network_running").toBool() || jam.value("remote_peer_count").toInt() != 3;
+                    const auto remote = i == 1 ? otherToken : joiningToken;
+                    return meshOperational(i, state) && (i != 1 && i != 2 ||
+                        links(state).value(remote) != original[i].value(remote));
+                }, states)) return 1;
+            if (membershipLost) { fail("media outage removed membership or stopped the audio runtime"); return 1; }
+            for (int i = 0; i < 4; ++i) {
+                auto retained = original[i], current = links(states[i]);
+                if (i == 1) { retained.remove(otherToken); current.remove(otherToken); }
+                if (i == 2) { retained.remove(joiningToken); current.remove(joiningToken); }
+                if (retained != current) { fail("mesh repair rotated an unaffected socket"); return 1; }
+            }
+            if (!apply(coordinator, 1, {{"type", "jam.leave"}, {"id", "leave-after-udp-repair"}})) return 1;
+            if (!waitForAll(coordinator, "explicit peer leave after UDP recovery",
+                [](std::size_t i, const QJsonObject& state) {
+                    const auto jam = state.value("jam").toObject();
+                    return i == 1 ? jam.value("role") == "inactive" && !jam.value("network_running").toBool()
+                        : jam.value("remote_peer_count").toInt() == 2;
+                }, states, false)) return 1;
+            if (!apply(coordinator, 1, {{"type", "jam.join"}, {"id", "same-invitation-rejoin-after-udp-repair"},
+                    {"port", ports[1]}, {"invite_url", invite}})) return 1;
+            if (!waitForAll(coordinator, "same invitation rejoin after explicit UDP leave",
+                [&](std::size_t i, const QJsonObject& state) {
+                    return meshOperational(i, state) && transferIdle(state) && assetCount(state, automaticWavHash) == 1;
+                }, states) || !verifyAssetFiles(states, automaticWavHash)) return 1;
+            if (!shutDown(coordinator)) return 1;
+            std::cout << "Four-peer control reuse, fallback and automatic mesh recovery passed\n";
+            return failures == 0 ? 0 : 1;
         }
     }
 

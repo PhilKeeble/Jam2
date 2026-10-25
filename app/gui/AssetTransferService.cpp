@@ -245,6 +245,17 @@ bool AssetTransferService::pauseForAutomation(
     return true;
 }
 
+void AssetTransferService::receiveUnavailable(const QJsonObject& message, const QString& sourcePeerToken)
+{
+    const auto hash = message.value(QStringLiteral("sha256")).toString().toLower();
+    if (!isSha256Hex(hash) || !context_.incomingAssetExpected(hash, sourcePeerToken)) return;
+    context_.appendAssetLog(QStringLiteral("peer could not supply requested looper asset %1: %2")
+        .arg(hash, message.value(QStringLiteral("reason")).toString()));
+    if (incomingLooperAssetHash_ == hash && incomingLooperAssetSourceToken_ == sourcePeerToken)
+        discardIncoming();
+    context_.abandonIncomingAsset(hash);
+}
+
 void AssetTransferService::handleRequest(const QJsonObject& message, const QString& sourcePeerToken)
 {
     const QJsonArray hashes = message.value(QStringLiteral("hashes")).toArray();
@@ -352,10 +363,14 @@ void AssetTransferService::continueSend()
         const bool started = context_.startAssetFileTask(
             [path, hash, expectedSampleRate, validation] {
                 const QFileInfo workerInfo(path);
-                if (path.isEmpty() || !workerInfo.isFile() || workerInfo.size() <= 0 ||
-                    workerInfo.size() > kMaxLooperAssetBytes || sha256FileHex(path) != hash) {
-                    validation->error = QStringLiteral("asset unavailable, hash-mismatched, or outside transfer bounds");
-                    return;
+                if (path.isEmpty() || !workerInfo.isFile()) {
+                    validation->error = QStringLiteral("asset file is unavailable"); return;
+                }
+                if (workerInfo.size() <= 0 || workerInfo.size() > kMaxLooperAssetBytes) {
+                    validation->error = QStringLiteral("asset file size is outside transfer bounds"); return;
+                }
+                if (sha256FileHex(path) != hash) {
+                    validation->error = QStringLiteral("asset file no longer matches the requested SHA-256"); return;
                 }
                 const jam2::wav::InspectResult inspected = jam2::wav::inspect_pcm16_file(
                     nativeFilePath(path), static_cast<std::uint64_t>(kMaxLooperAssetBytes));
@@ -381,6 +396,11 @@ void AssetTransferService::continueSend()
                 if (!validation->error.isEmpty()) {
                     context_.appendAssetLog(QStringLiteral("looper asset validation failed hash=%1: %2")
                         .arg(hash, validation->error));
+                    if (!context_.sendAssetControl(targetPeerToken, QJsonObject{
+                            {QStringLiteral("type"), QStringLiteral("looper.asset.unavailable")},
+                            {QStringLiteral("sha256"), hash},
+                            {QStringLiteral("reason"), validation->error.left(256)}}))
+                        context_.appendAssetLog(QStringLiteral("could not report unavailable looper asset: ") + hash);
                     continueSend();
                     return;
                 }

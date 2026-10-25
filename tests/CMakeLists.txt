@@ -1806,9 +1806,15 @@ endif()
 if(JAM2_RENDEZVOUS_TEST_SERVER)
     add_test(NAME jam2_udp_four_shared_content_integration
         COMMAND $<TARGET_FILE:jam2_four_shared_content_integration> "${JAM2_TEST_PUBLIC_EXECUTABLE}" "${JAM2_RENDEZVOUS_TEST_SERVER}")
-    set_tests_properties(jam2_udp_four_shared_content_integration PROPERTIES LABELS "integration;gui;network;four-peer;shared-content;udp-multiplex" TIMEOUT 180)
+    set_tests_properties(jam2_udp_four_shared_content_integration PROPERTIES LABELS "integration;gui;network;four-peer;shared-content;udp-multiplex" TIMEOUT 240)
     if(WIN32)
         set_tests_properties(jam2_udp_four_shared_content_integration PROPERTIES ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
+    endif()
+    add_test(NAME jam2_udp_four_recovery_integration
+        COMMAND $<TARGET_FILE:jam2_four_shared_content_integration> "${JAM2_TEST_PUBLIC_EXECUTABLE}" "${JAM2_RENDEZVOUS_TEST_SERVER}" recovery)
+    set_tests_properties(jam2_udp_four_recovery_integration PROPERTIES LABELS "integration;gui;network;four-peer;udp-multiplex;recovery" TIMEOUT 120)
+    if(WIN32)
+        set_tests_properties(jam2_udp_four_recovery_integration PROPERTIES ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
     endif()
     add_dependencies(jam2_tests_network jam2_four_shared_content_integration)
     add_executable(jam2_udp_application_tests EXCLUDE_FROM_ALL integration/network/UdpApplicationTests.cpp)
@@ -1816,9 +1822,11 @@ if(JAM2_RENDEZVOUS_TEST_SERVER)
     target_link_libraries(jam2_udp_application_tests PRIVATE Qt6::Core Qt6::Network)
     add_test(NAME jam2_udp_four_application_integration COMMAND $<TARGET_FILE:jam2_udp_application_tests>
         "${JAM2_TEST_PUBLIC_EXECUTABLE}" "${JAM2_RENDEZVOUS_TEST_SERVER}")
-    set_tests_properties(jam2_udp_four_application_integration PROPERTIES LABELS "integration;network;four-peer;udp-multiplex;audio" TIMEOUT 45)
+    add_test(NAME jam2_udp_four_application_local_integration COMMAND $<TARGET_FILE:jam2_udp_application_tests>
+        "${JAM2_TEST_PUBLIC_EXECUTABLE}" "${JAM2_RENDEZVOUS_TEST_SERVER}" local)
+    set_tests_properties(jam2_udp_four_application_integration jam2_udp_four_application_local_integration PROPERTIES LABELS "integration;network;four-peer;udp-multiplex;audio" TIMEOUT 45)
     if(WIN32)
-        set_tests_properties(jam2_udp_four_application_integration PROPERTIES ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
+        set_tests_properties(jam2_udp_four_application_integration jam2_udp_four_application_local_integration PROPERTIES ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
     endif()
     add_dependencies(jam2_tests_network jam2_udp_application_tests)
     add_dependencies(jam2_tests_all jam2_udp_application_tests)
@@ -1837,14 +1845,18 @@ if(JAM2_RENDEZVOUS_TEST_SERVER)
         COMMAND $<TARGET_FILE:jam2_udp_four_peer_tests> "${JAM2_RENDEZVOUS_TEST_SERVER}")
     add_test(NAME jam2_udp_reused_invitation_integration
         COMMAND $<TARGET_FILE:jam2_udp_four_peer_tests> "${JAM2_RENDEZVOUS_TEST_SERVER}" restart)
+    add_test(NAME jam2_udp_four_peer_local_integration
+        COMMAND $<TARGET_FILE:jam2_udp_four_peer_tests> "${JAM2_RENDEZVOUS_TEST_SERVER}" local)
+    add_test(NAME jam2_udp_four_peer_local_fallback_integration
+        COMMAND $<TARGET_FILE:jam2_udp_four_peer_tests> "${JAM2_RENDEZVOUS_TEST_SERVER}" local-fallback)
     add_test(NAME jam2_udp_four_peer_rotation_integration
         COMMAND $<TARGET_FILE:jam2_udp_four_peer_tests> "${JAM2_RENDEZVOUS_TEST_SERVER}" impaired)
     add_test(NAME jam2_udp_four_peer_partial_integration
         COMMAND $<TARGET_FILE:jam2_udp_four_peer_tests> "${JAM2_RENDEZVOUS_TEST_SERVER}" partial)
-    set_tests_properties(jam2_udp_four_peer_integration jam2_udp_four_peer_rotation_integration jam2_udp_four_peer_partial_integration jam2_udp_reused_invitation_integration PROPERTIES
+    set_tests_properties(jam2_udp_four_peer_integration jam2_udp_four_peer_rotation_integration jam2_udp_four_peer_partial_integration jam2_udp_reused_invitation_integration jam2_udp_four_peer_local_integration jam2_udp_four_peer_local_fallback_integration PROPERTIES
         LABELS "integration;network;udp-multiplex;four-peer;shared-content" TIMEOUT 60)
     if(WIN32)
-        set_tests_properties(jam2_udp_four_peer_integration jam2_udp_four_peer_rotation_integration jam2_udp_four_peer_partial_integration jam2_udp_reused_invitation_integration PROPERTIES
+        set_tests_properties(jam2_udp_four_peer_integration jam2_udp_four_peer_rotation_integration jam2_udp_four_peer_partial_integration jam2_udp_reused_invitation_integration jam2_udp_four_peer_local_integration jam2_udp_four_peer_local_fallback_integration PROPERTIES
             ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
     endif()
     add_dependencies(jam2_tests_network jam2_udp_four_peer_tests)

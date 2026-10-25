@@ -16,13 +16,15 @@ ControlClient::ControlClient(QObject* parent)
 {
     authenticationTimer_.setSingleShot(true);
     frameTimer_.setSingleShot(true);
+    frameTimer_.setTimerType(Qt::PreciseTimer);
     QObject::connect(&authenticationTimer_, &QTimer::timeout, this, [this] {
         if (!isConnected()) {
             ++stats_.authenticationTimeouts;
             reject(
                 QStringLiteral("TCP control authentication timeout"),
                 TransportFailure::AuthenticationTimeout,
-                true);
+                true,
+                connection_ && connection_->transport() == jam2::application::ControlTransport::ReliableUdp);
         }
     });
     QObject::connect(&frameTimer_, &QTimer::timeout, this, [this] {
@@ -31,7 +33,8 @@ ControlClient::ControlClient(QObject* parent)
             reject(
                 QStringLiteral("TCP control incomplete-frame timeout"),
                 TransportFailure::FrameTimeout,
-                true);
+                true,
+                connection_ && connection_->transport() == jam2::application::ControlTransport::ReliableUdp);
         }
     });
 }
@@ -69,7 +72,9 @@ void ControlClient::installConnection(
             }
         });
     failureReportedForAttempt_ = false;
-    authenticationTimer_.start(kAuthenticationDeadlineMs);
+    frameClock_.start();
+    frameDeadline_.clear();
+    authenticationTimer_.start(connection->authenticationDeadlineMs());
     publishEvent(TransportEvent{
         TransportEventType::Connected,
         TransportFailure::None,
@@ -251,6 +256,7 @@ void ControlClient::readConnection(
     }
     readScheduled_ = false;
     buffer_ += bytes;
+    if (!bytes.isEmpty()) frameDeadline_.received(frameClock_.elapsed());
     stats_.maxBufferedInputBytes = std::max<quint64>(stats_.maxBufferedInputBytes, buffer_.size());
     stats_.maxBufferedInputBytes = std::max<quint64>(
         stats_.maxBufferedInputBytes,
@@ -264,8 +270,9 @@ void ControlClient::readConnection(
         if (result == TakeFrameResult::NeedMore) {
             if (buffer_.isEmpty()) {
                 frameTimer_.stop();
-            } else if (!frameTimer_.isActive()) {
-                frameTimer_.start(kIncompleteFrameDeadlineMs);
+            } else {
+                if (frameDeadline_.began < 0) frameDeadline_.received(frameClock_.elapsed());
+                frameTimer_.start(frameDeadline_.remaining(connection->transport(), frameClock_.elapsed()));
             }
             return;
         }
@@ -278,6 +285,7 @@ void ControlClient::readConnection(
             return;
         }
         frameTimer_.stop();
+        frameDeadline_.clear();
         ++handled;
         ++stats_.framesReceived;
 
