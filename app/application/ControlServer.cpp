@@ -9,7 +9,7 @@
 #include <utility>
 
 using namespace jam2::control_protocol;
-using jam2::application::NativeTcpConnection;
+using jam2::application::ControlConnection;
 
 namespace {
 
@@ -53,7 +53,7 @@ ControlServer::Stats ControlServer::stats() const
     return snapshot;
 }
 
-bool ControlServer::listen(quint16 port, const QString& sessionHex, const QString& keyHex)
+bool ControlServer::prepareSession(const QString& sessionHex, const QString& keyHex)
 {
     close();
     sessionHex_ = sessionHex.toLower();
@@ -67,11 +67,32 @@ bool ControlServer::listen(quint16 port, const QString& sessionHex, const QStrin
     }
     authenticationFailuresInWindow_ = 0;
     authenticationFailureWindow_.restart();
+    return true;
+}
+
+bool ControlServer::listenViaTransport(const QString& sessionHex, const QString& keyHex)
+{
+    if (!prepareSession(sessionHex, keyHex)) return false;
+    transportListening_ = true;
+    publishEvent(TransportEvent{TransportEventType::Listening, TransportFailure::None,
+        QStringLiteral("UDP multiplex control listening")});
+    return true;
+}
+
+void ControlServer::acceptTransport(const ControlConnection::Pointer& connection)
+{
+    if (transportListening_ && connection) acceptPeer(connection);
+    else if (connection) connection->close();
+}
+
+bool ControlServer::listen(quint16 port, const QString& sessionHex, const QString& keyHex)
+{
+    if (!prepareSession(sessionHex, keyHex)) return false;
     const quint64 generation = ++listenGeneration_;
     if (!server_.listen(
             port,
             this,
-            [this, generation](const NativeTcpConnection::Pointer& connection) {
+            [this, generation](const ControlConnection::Pointer& connection) {
                 if (generation != listenGeneration_ || !server_.isListening()) {
                     connection->close();
                     return;
@@ -103,6 +124,7 @@ bool ControlServer::listen(quint16 port, const QString& sessionHex, const QStrin
 void ControlServer::close()
 {
     ++listenGeneration_;
+    transportListening_ = false;
     server_.close();
     const QList<PeerHandle> peers = std::move(peers_);
     peers_.clear();
@@ -301,7 +323,7 @@ QString ControlServer::errorString() const
 }
 
 ControlServer::PeerHandle ControlServer::findPeer(
-    const NativeTcpConnection::Pointer& connection) const
+    const ControlConnection::Pointer& connection) const
 {
     for (const PeerHandle& peer : peers_) {
         if (peer && peer->connection == connection) {
@@ -359,7 +381,7 @@ bool ControlServer::authenticationWorkAvailable()
     return authenticationFailuresInWindow_ < kMaxAuthenticationFailuresPerWindow;
 }
 
-void ControlServer::acceptPeer(const NativeTcpConnection::Pointer& connection)
+void ControlServer::acceptPeer(const ControlConnection::Pointer& connection)
 {
     if (!connection || !connection->isConnected()) {
         return;
@@ -577,7 +599,7 @@ void ControlServer::readPeer(const PeerHandle& peer)
                     TransportFailure::AuthenticationRejected);
                 return;
             }
-            const NativeTcpConnection::Pointer connection = peer->connection;
+            const ControlConnection::Pointer connection = peer->connection;
             handleHandshake(peer, message);
             if (!connection || !findPeer(connection) || !connection->isConnected()) {
                 return;
@@ -787,7 +809,7 @@ void ControlServer::handleHandshake(const PeerHandle& peer, const QJsonObject& m
         false,
         true,
         assetChannel});
-    const NativeTcpConnection::Pointer connection = peer->connection;
+    const ControlConnection::Pointer connection = peer->connection;
     if (!assetChannel && connection && findPeer(connection) && onAuthenticated) {
         QJsonObject authenticatedMessage{
             {QStringLiteral("peer_token"), token},
@@ -803,7 +825,7 @@ bool ControlServer::writeFrame(
     const QByteArray& frame,
     bool closeAfterWrite)
 {
-    const NativeTcpConnection::Pointer connection = peer ? peer->connection : nullptr;
+    const ControlConnection::Pointer connection = peer ? peer->connection : nullptr;
     if (!connection || !connection->isConnected() || frame.isEmpty()) {
         return false;
     }
@@ -837,7 +859,7 @@ void ControlServer::rejectPeer(
     TransportFailure failure,
     bool abort)
 {
-    const NativeTcpConnection::Pointer connection = peer ? peer->connection : nullptr;
+    const ControlConnection::Pointer connection = peer ? peer->connection : nullptr;
     if (!connection || !findPeer(connection)) {
         return;
     }

@@ -433,6 +433,13 @@ UserPreferences UserPreferencesStore::load()
     out.create.stunTimeoutMs = settings.value(QStringLiteral("stun_timeout_ms"), out.create.stunTimeoutMs).toInt();
     out.create.stunRetries = settings.value(QStringLiteral("stun_retries"), out.create.stunRetries).toInt();
     out.create.noStun = settings.value(QStringLiteral("no_stun"), out.create.noStun).toBool();
+    if (settings.contains(QStringLiteral("connection_strategy"))) {
+        try { out.create.strategy = jam2::parse_connection_strategy(settings.value(QStringLiteral("connection_strategy")).toString().toStdString()); }
+        catch (const std::exception&) { out.create.strategy = jam2::ConnectionStrategy::Jam2Server; }
+    } else if (settings.contains(QStringLiteral("no_stun")) || settings.contains(QStringLiteral("stun_server"))) {
+        out.create.strategy = out.create.noStun ? jam2::ConnectionStrategy::Direct : jam2::ConnectionStrategy::Stun;
+    }
+    out.create.noStun = out.create.strategy != jam2::ConnectionStrategy::Stun;
     out.create.maxPeers = settings.value(QStringLiteral("max_peers"), out.create.maxPeers).toInt();
     out.create.sampleRate = settings.value(QStringLiteral("sample_rate"), out.create.sampleRate).toInt();
     out.create.audioFormat = settings.value(QStringLiteral("audio_format"), out.create.audioFormat).toString();
@@ -677,7 +684,8 @@ bool UserPreferencesStore::saveChecked(const UserPreferences& p)
     settings.setValue(QStringLiteral("stun_server"), p.create.stunServer);
     settings.setValue(QStringLiteral("stun_timeout_ms"), p.create.stunTimeoutMs);
     settings.setValue(QStringLiteral("stun_retries"), p.create.stunRetries);
-    settings.setValue(QStringLiteral("no_stun"), p.create.noStun);
+    settings.setValue(QStringLiteral("no_stun"), p.create.strategy != jam2::ConnectionStrategy::Stun);
+    settings.setValue(QStringLiteral("connection_strategy"), QString::fromLatin1(jam2::connection_strategy_text(p.create.strategy).data()));
     settings.setValue(QStringLiteral("max_peers"), p.create.maxPeers);
     settings.setValue(QStringLiteral("sample_rate"), p.create.sampleRate);
     settings.setValue(QStringLiteral("audio_format"), p.create.audioFormat);

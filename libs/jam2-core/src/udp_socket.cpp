@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <stdexcept>
+#include <vector>
 
 #if defined(_WIN32)
 #include <ws2tcpip.h>
@@ -13,6 +14,7 @@
 #include <netdb.h>
 #include <fcntl.h>
 #include <sys/select.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <sys/uio.h>
 #include <unistd.h>
@@ -245,6 +247,50 @@ void UdpSocket::bind(const Endpoint& endpoint)
     }
 }
 
+void UdpSocket::waitForAny(std::span<const UdpSocket* const> sockets,
+                           std::uint64_t timeout_us, RealtimeWakeSignal* command_wake)
+{
+    const int timeout_ms = static_cast<int>((std::min<std::uint64_t>)(timeout_us, 60000000ULL) + 999) / 1000;
+#if defined(_WIN32)
+    if (sockets.size() + (command_wake ? 1U : 0U) <= WSA_MAXIMUM_WAIT_EVENTS) {
+        std::vector<WSAEVENT> events;
+        events.reserve(sockets.size() + 1);
+        for (const auto* socket : sockets) events.push_back(socket->receive_event_);
+        if (command_wake) events.push_back(command_wake->event_);
+        if (events.empty()) return;
+        const DWORD result = WSAWaitForMultipleEvents(static_cast<DWORD>(events.size()),
+            events.data(), FALSE, static_cast<DWORD>(timeout_ms), FALSE);
+        if (result == WSA_WAIT_FAILED) throw std::runtime_error("UDP link wait failed: " + socket_error_text());
+        if (result == WSA_WAIT_TIMEOUT) return;
+        for (std::size_t index = 0; index < sockets.size(); ++index) {
+            if (WSAWaitForMultipleEvents(1, &events[index], FALSE, 0, FALSE) == WSA_WAIT_EVENT_0) {
+                WSANETWORKEVENTS received{};
+                if (WSAEnumNetworkEvents(sockets[index]->handle_, events[index], &received) != 0)
+                    throw std::runtime_error("UDP link event failed: " + socket_error_text());
+            }
+        }
+        if (command_wake && WSAWaitForMultipleEvents(1, &command_wake->event_, FALSE, 0, FALSE) == WSA_WAIT_EVENT_0)
+            command_wake->consume();
+        return;
+    }
+    // WSAPoll avoids imposing Windows' event-count limit on experimental meshes.
+    std::vector<WSAPOLLFD> reads;
+    reads.reserve(sockets.size());
+    for (const auto* socket : sockets) reads.push_back({socket->handle_, POLLRDNORM, 0});
+    if (WSAPoll(reads.data(), static_cast<ULONG>(reads.size()), (std::min)(timeout_ms, 2)) == SOCKET_ERROR)
+        throw std::runtime_error("UDP link poll failed: " + socket_error_text());
+    if (command_wake) command_wake->waitFor(0);
+#else
+    std::vector<pollfd> reads;
+    reads.reserve(sockets.size() + 1);
+    for (const auto* socket : sockets) reads.push_back({socket->handle_, POLLIN, 0});
+    if (command_wake) reads.push_back({command_wake->read_handle_, POLLIN, 0});
+    const int result = poll(reads.data(), reads.size(), timeout_ms);
+    if (result < 0 && errno != EINTR) throw std::runtime_error("UDP link poll failed: " + socket_error_text());
+    if (result > 0 && command_wake && (reads.back().revents & POLLIN) != 0) command_wake->consume();
+#endif
+}
+
 Endpoint UdpSocket::local_endpoint() const
 {
     sockaddr_in addr{};
@@ -422,6 +468,38 @@ void RealtimeWakeSignal::consume() noexcept
         !pending_.exchange(true, std::memory_order_acq_rel)) {
         signalNative();
     }
+}
+
+void RealtimeWakeSignal::waitFor(std::uint64_t timeout_us, RealtimeWakeSignal* additional)
+{
+    timeout_us = (std::min<std::uint64_t>)(timeout_us, 24ULL * 60ULL * 60ULL * 1000000ULL);
+    if (additional == this) additional = nullptr;
+#if defined(_WIN32)
+    const WSAEVENT events[2]{event_, additional ? additional->event_ : event_};
+    const DWORD count = additional ? 2U : 1U;
+    const DWORD result = WSAWaitForMultipleEvents(
+        count, events, FALSE, static_cast<DWORD>((timeout_us + 999) / 1000), FALSE);
+    if (result == WSA_WAIT_FAILED) throw std::runtime_error("transport wake wait failed: " + socket_error_text());
+    if (result == WSA_WAIT_TIMEOUT) return;
+    for (DWORD i = 0; i < count; ++i) {
+        if (WSAWaitForMultipleEvents(1, &events[i], FALSE, 0, FALSE) == WSA_WAIT_EVENT_0) {
+            (i == 0 ? this : additional)->consume();
+        }
+    }
+#else
+    fd_set reads;
+    FD_ZERO(&reads);
+    FD_SET(read_handle_, &reads);
+    int maximum = read_handle_;
+    if (additional) { FD_SET(additional->read_handle_, &reads); maximum = (std::max)(maximum, additional->read_handle_); }
+    timeval timeout{static_cast<long>(timeout_us / 1000000), static_cast<long>(timeout_us % 1000000)};
+    const int result = select(maximum + 1, &reads, nullptr, nullptr, &timeout);
+    if (result < 0 && errno != EINTR) throw std::runtime_error("transport wake wait failed: " + socket_error_text());
+    if (result > 0) {
+        if (FD_ISSET(read_handle_, &reads)) consume();
+        if (additional && FD_ISSET(additional->read_handle_, &reads)) additional->consume();
+    }
+#endif
 }
 
 std::uint64_t RealtimeWakeSignal::signalCount() const noexcept

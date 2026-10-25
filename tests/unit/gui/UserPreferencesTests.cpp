@@ -30,6 +30,9 @@ int main(int argc, char** argv)
         UserPreferences expected;
         require(UserPreferencesStore::load().sync.listeningTools,
             "missing listening sync preference defaults on");
+        require(UserPreferencesStore::load().create.strategy == jam2::ConnectionStrategy::Jam2Server,
+            "new preferences default to Server strategy");
+        expected.create.strategy = jam2::ConnectionStrategy::Direct;
         expected.sync.listeningTools = false;
         expected.recording.preferredMode = QStringLiteral("loopback");
         expected.recording.input.outputFolder = QStringLiteral("input-folder");
@@ -52,6 +55,8 @@ int main(int argc, char** argv)
         UserPreferencesStore::save(expected);
 
         const UserPreferences actual = UserPreferencesStore::load();
+        require(actual.create.strategy == jam2::ConnectionStrategy::Direct && actual.create.noStun,
+            "typed connection strategy round-trips");
         require(!actual.sync.listeningTools, "listening sync preference round-trips disabled state");
         require(actual.recording.preferredMode == expected.recording.preferredMode &&
                 actual.recording.input.outputFolder == expected.recording.input.outputFolder &&
@@ -329,6 +334,13 @@ int main(int argc, char** argv)
                 customPacketDefault.join.tuning == previousPacketDefault.join.tuning,
             "restoring the Fast packet default preserves customized presets");
 
+        for (const bool manual : {false, true}) {
+            const auto path = directory.filePath(manual ? QStringLiteral("legacy-direct.ini") : QStringLiteral("legacy-stun.ini"));
+            { QSettings legacy(path, QSettings::IniFormat); legacy.setValue(QStringLiteral("create/no_stun"), manual); }
+            require(UserPreferencesStore::setFilePathForTesting(path, error), "legacy strategy path rejected");
+            require(UserPreferencesStore::load().create.strategy == (manual ? jam2::ConnectionStrategy::Direct : jam2::ConnectionStrategy::Stun),
+                "legacy no-STUN setting did not migrate to typed strategy");
+        }
         std::cout << "Jam2 user preference tests passed\n";
         return 0;
     } catch (const std::exception& error) {

@@ -478,6 +478,11 @@ add_executable(jam2 MACOSX_BUNDLE
     application/AutomationChannel.hpp
     application/ControlClient.cpp
     application/ControlClient.hpp
+    application/ControlConnection.hpp
+    application/UdpMultiplexTransport.cpp
+    application/UdpMultiplexTransport.hpp
+    application/UdpStreamConnection.cpp
+    application/UdpStreamConnection.hpp
     application/ContentLimits.hpp
     application/ControlMessageValidation.cpp
     application/ControlMessageValidation.hpp

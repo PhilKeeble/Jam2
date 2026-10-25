@@ -57,6 +57,7 @@ add_library(jam2_core STATIC
     src/pitch_analyzer.cpp
     src/prepared_track_source.cpp
     src/protocol.cpp
+    src/reliable_udp_stream.cpp
     src/session_authority.cpp
     src/track_take_recorder.cpp
     src/stun.cpp

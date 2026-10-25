@@ -266,8 +266,11 @@ std::optional<SettingsDialogResult> SettingsDialog::run(
 
     auto* createBind = new QLineEdit(preferences_.create.bindHost, &dialog);
     auto* createPort = makeSpin(preferences_.create.port, 1, 65535);
-    auto* createManualEndpoint = new QCheckBox(QStringLiteral("Use manual public endpoint (disable STUN)"), &dialog);
-    createManualEndpoint->setChecked(preferences_.create.noStun);
+    auto* createStrategy = new QComboBox(&dialog);
+    createStrategy->addItem(QStringLiteral("Jam2 Server"), static_cast<int>(jam2::ConnectionStrategy::Jam2Server));
+    createStrategy->addItem(QStringLiteral("STUN"), static_cast<int>(jam2::ConnectionStrategy::Stun));
+    createStrategy->addItem(QStringLiteral("Direct"), static_cast<int>(jam2::ConnectionStrategy::Direct));
+    createStrategy->setCurrentIndex(createStrategy->findData(static_cast<int>(preferences_.create.strategy)));
     auto* createPublicHost = new QLineEdit(preferences_.create.publicHost, &dialog);
     auto* createStun = new QLineEdit(preferences_.create.stunServer, &dialog);
     auto* createStunTimeout = makeSpin(preferences_.create.stunTimeoutMs, 1, 60000);
@@ -279,8 +282,8 @@ std::optional<SettingsDialogResult> SettingsDialog::run(
     auto* connectionForm = new QFormLayout(connectionContent);
     connectionForm->addRow(QStringLiteral("Bind host"), createBind);
     connectionForm->addRow(QStringLiteral("Port"), createPort);
-    connectionForm->addRow(QString(), createManualEndpoint);
-    connectionForm->addRow(QStringLiteral("Public endpoint host"), createPublicHost);
+    connectionForm->addRow(QStringLiteral("Connection strategy"), createStrategy);
+    connectionForm->addRow(QStringLiteral("Your Public IPv4 Address"), createPublicHost);
     connectionForm->addRow(QStringLiteral("STUN server"), createStun);
     connectionForm->addRow(QStringLiteral("STUN timeout ms"), createStunTimeout);
     connectionForm->addRow(QStringLiteral("STUN retries"), createStunRetries);
@@ -288,13 +291,15 @@ std::optional<SettingsDialogResult> SettingsDialog::run(
     connectionForm->addRow(QStringLiteral("Socket send buffer (0 = system)"), createSocketSend);
     connectionForm->addRow(QStringLiteral("Socket receive buffer (0 = system)"), createSocketReceive);
     auto updateDiscoveryControls = [=] {
-        const bool manual = createManualEndpoint->isChecked();
-        createPublicHost->setEnabled(manual);
-        createStun->setEnabled(!manual);
-        createStunTimeout->setEnabled(!manual);
-        createStunRetries->setEnabled(!manual);
+        const auto strategy = static_cast<jam2::ConnectionStrategy>(createStrategy->currentData().toInt());
+        connectionForm->setRowVisible(createPublicHost, strategy == jam2::ConnectionStrategy::Direct);
+        connectionForm->setRowVisible(createStun, strategy == jam2::ConnectionStrategy::Stun);
+        connectionForm->setRowVisible(createStunTimeout, strategy == jam2::ConnectionStrategy::Stun);
+        connectionForm->setRowVisible(createStunRetries, strategy == jam2::ConnectionStrategy::Stun);
+        connectionForm->setRowVisible(createBind, strategy != jam2::ConnectionStrategy::Jam2Server);
+        connectionForm->setRowVisible(createPort, strategy != jam2::ConnectionStrategy::Jam2Server);
     };
-    QObject::connect(createManualEndpoint, &QCheckBox::toggled, &dialog, updateDiscoveryControls);
+    QObject::connect(createStrategy, qOverload<int>(&QComboBox::currentIndexChanged), &dialog, updateDiscoveryControls);
     updateDiscoveryControls();
 
     struct TuningEditors {
@@ -1277,7 +1282,7 @@ std::optional<SettingsDialogResult> SettingsDialog::run(
     registerPageControls(QStringLiteral("create-connection"),
         "application.settings-create-connection", {
             {createBind, "bind-host"}, {createPort, "port"},
-            {createManualEndpoint, "manual-endpoint"},
+            {createStrategy, "connection-strategy"},
             {createPublicHost, "public-host"}, {createStun, "stun-server"},
             {createStunTimeout, "stun-timeout"},
             {createStunRetries, "stun-retries"},
@@ -1472,7 +1477,8 @@ std::optional<SettingsDialogResult> SettingsDialog::run(
         updated.joinJamAudio = updated.networkAudio;
     }
     updated.create.bindHost = createBind->text().trimmed(); updated.create.port = createPort->value();
-    updated.create.noStun = createManualEndpoint->isChecked(); updated.create.publicHost = createPublicHost->text().trimmed();
+    updated.create.strategy = static_cast<jam2::ConnectionStrategy>(createStrategy->currentData().toInt());
+    updated.create.noStun = updated.create.strategy != jam2::ConnectionStrategy::Stun; updated.create.publicHost = createPublicHost->text().trimmed();
     updated.create.stunServer = createStun->text().trimmed(); updated.create.stunTimeoutMs = createStunTimeout->value();
     updated.create.stunRetries = createStunRetries->value(); updated.create.maxPeers = createMaxPeers->value();
     updated.create.socketSendBuffer = createSocketSend->value(); updated.create.socketRecvBuffer = createSocketReceive->value();

@@ -799,7 +799,9 @@ MainWindow::MainWindow(
             sessionRuntimeDraft_.configuration.publicHost =
                 QString::fromStdString(startup.public_candidate->host);
         }
-        if (sessionController_.isServer()) {
+        if (sessionController_.isServer() && sessionRuntimeDraft_.configuration.strategy == jam2::ConnectionStrategy::Jam2Server) {
+            showPendingMeshInviteUrl();
+        } else if (sessionController_.isServer()) {
             const QString advertised = activePublicEndpoint_.isEmpty() ? local : activePublicEndpoint_;
 
             meshPeerEndpoints_[meshPeerToken()] = advertised;
@@ -846,6 +848,11 @@ MainWindow::MainWindow(
                 : pendingJamRuntimeError_);
             QTimer::singleShot(0, this, [this] { stopJam(true); });
         }
+    };
+    sessionController_.onSignalerStatus = [this](const QString& detail) { appendLog(detail); };
+    sessionController_.onConnectionWarning = [this](const QString& detail) {
+        appendLog(detail);
+        if (!automationSuppressDialogs_) QMessageBox::warning(this, QStringLiteral("Incomplete UDP mesh"), detail);
     };
     sessionController_.onTransportEvent = [this](
         const jam2::control_protocol::TransportEvent& event,
@@ -1903,6 +1910,10 @@ void MainWindow::showJamRecordingImportDialog(const QString& folder)
 
 QString MainWindow::meshInviteUrl() const
 {
+    if (sessionRuntimeDraft_.configuration.strategy == jam2::ConnectionStrategy::Jam2Server) {
+        jam2::SessionInfo info{sessionRuntimeDraft_.configuration.rendezvousServer, sessionId_, sessionKey_, jam2::ConnectionStrategy::Jam2Server};
+        return QString::fromStdString(jam2::make_jam_url(info));
+    }
     if (!activePublicEndpoint_.isEmpty()) {
         jam2::SessionInfo info;
         info.endpoint = jam2::parse_endpoint(activePublicEndpoint_.toStdString());
@@ -2310,7 +2321,10 @@ void MainWindow::startJam(bool createSession)
                         configuration.tuning.profile,
                         configuration.sampleRate,
                         configuration.tuning.frameSize,
-                    }})) {
+                    },
+                    SharedSessionController::kDefaultHeartbeatIntervalMs,
+                    SharedSessionController::kDefaultHeartbeatMissLimit,
+                    configuration.strategy, configuration.rendezvousServer})) {
                 const QString error = QStringLiteral("control server failed: ") + sessionController_.errorString();
                 appendLog(error);
                 showJamFailure(error);
@@ -2324,6 +2338,7 @@ void MainWindow::startJam(bool createSession)
             const jam2::SessionInfo info = jam2::parse_jam_url(url);
             sessionId_ = info.session_id;
             sessionKey_ = info.key;
+            sessionRuntimeDraft_.configuration.strategy = info.strategy;
             meshPeerEndpoints_.clear();
             meshPeerEndpoints_[meshPeerToken()] = localMeshEndpoint(false);
             if (!sessionController_.startJoiner(SharedSessionController::JoinerConfig{
@@ -2335,6 +2350,10 @@ void MainWindow::startJam(bool createSession)
                 localMeshEndpoint(false),
                 {},
                 false,
+                2000, 15,
+                SharedSessionController::kDefaultHeartbeatIntervalMs,
+                SharedSessionController::kDefaultHeartbeatMissLimit,
+                info.strategy,
             })) {
                 showJamFailure(sessionController_.snapshot().failureDetail.isEmpty()
                     ? QStringLiteral("The join connection could not be started.")
@@ -2361,7 +2380,9 @@ bool MainWindow::startAutomationJam(
     int localPort,
     const QString& inviteUrl,
     Jam2TestInputMode testInput,
-    QString& error)
+    QString& error,
+    jam2::ConnectionStrategy strategy,
+    jam2::Endpoint rendezvousServer)
 {
     error.clear();
     if (localPort < 1024 || localPort > 65535) {
@@ -2387,6 +2408,8 @@ bool MainWindow::startAutomationJam(
     configuration.publicHost = QStringLiteral("127.0.0.1");
     configuration.port = localPort;
     configuration.noStun = true;
+    configuration.strategy = strategy;
+    configuration.rendezvousServer = std::move(rendezvousServer);
     configuration.maxPeers = 4;
     configuration.runtime.diagnostics = false;
     configuration.runtime.waitMs = 15000;
@@ -2484,6 +2507,7 @@ QJsonObject MainWindow::automationJamSnapshot() const
             sessionController_.assetChannelConnected()},
         {QStringLiteral("asset_client_connection_attempts"), static_cast<qint64>(
             sessionController_.assetClientStats().connectionAttempts)},
+        {QStringLiteral("udp_multiplex"), sessionController_.multiplexDiagnostics()},
         {QStringLiteral("asset_server_active_connections"), static_cast<qint64>(
             sessionController_.serverStats().assetActiveConnections)},
         {QStringLiteral("last_startup_failure"), lastJamFailureDialog_},
@@ -5521,6 +5545,9 @@ QString MainWindow::meshPeerToken()
 
 QString MainWindow::localMeshEndpoint(bool createSession) const
 {
+    // Server mode learns each actual candidate from the signaler; hidden
+    // legacy public/bind settings must not become advertised media endpoints.
+    if (sessionRuntimeDraft_.configuration.strategy == jam2::ConnectionStrategy::Jam2Server) return {};
     if (createSession && !activePublicEndpoint_.isEmpty()) {
         return activePublicEndpoint_;
     }
@@ -14737,12 +14764,15 @@ Jam2RuntimeOptions MainWindow::runtimeOptions() const
     const LocalTuningPreference& tuning = configuration.tuning;
     const RuntimePreference& runtime = configuration.runtime;
     Jam2RuntimeOptions options;
-    options.bind = jam2::parse_bind_endpoint(meshBindEndpoint().toStdString());
-    if (!configuration.stunServer.trimmed().isEmpty()) {
+    options.bind = configuration.strategy == jam2::ConnectionStrategy::Jam2Server
+        ? jam2::Endpoint{"0.0.0.0", 0} : jam2::parse_bind_endpoint(meshBindEndpoint().toStdString());
+    if (configuration.strategy == jam2::ConnectionStrategy::Stun && !configuration.stunServer.trimmed().isEmpty()) {
         options.stun_server = jam2::parse_endpoint(
             configuration.stunServer.trimmed().toStdString());
     }
-    options.no_stun = configuration.noStun;
+    options.connection_strategy = configuration.strategy;
+    options.rendezvous_server = configuration.rendezvousServer;
+    options.no_stun = configuration.strategy != jam2::ConnectionStrategy::Stun;
     options.stun_timeout_ms = configuration.stunTimeoutMs;
     options.stun_retries = configuration.stunRetries;
     options.wait_ms = runtime.waitMs;

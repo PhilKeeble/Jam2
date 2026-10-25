@@ -3,10 +3,12 @@
 #include "ControlClient.hpp"
 #include "ControlServer.hpp"
 #include "RuntimeContracts.hpp"
+#include "UdpMultiplexTransport.hpp"
 
 #include <QJsonObject>
 #include <QElapsedTimer>
 #include <QMap>
+#include <QSet>
 #include <QObject>
 #include <QString>
 #include <QTimer>
@@ -118,6 +120,8 @@ public:
         SessionContract contract;
         int heartbeatIntervalMs = kDefaultHeartbeatIntervalMs;
         int heartbeatMissLimit = kDefaultHeartbeatMissLimit;
+        jam2::ConnectionStrategy strategy = jam2::ConnectionStrategy::Stun;
+        jam2::Endpoint rendezvousServer{"jam2gether.com", 40404};
     };
 
     struct JoinerConfig {
@@ -133,6 +137,7 @@ public:
         int reconnectAttemptLimit = 15;
         int heartbeatIntervalMs = kDefaultHeartbeatIntervalMs;
         int heartbeatMissLimit = kDefaultHeartbeatMissLimit;
+        jam2::ConnectionStrategy strategy = jam2::ConnectionStrategy::Stun;
     };
 
     explicit SharedSessionController(QObject* parent = nullptr);
@@ -170,6 +175,10 @@ public:
     bool isServer() const noexcept { return role_ == Role::Creator; }
     QString errorString() const;
     Snapshot snapshot() const;
+    jam2::application::UdpMultiplexTransport::Snapshot multiplexSnapshot() const;
+    QJsonObject multiplexDiagnostics() const;
+    std::function<void(const QString&)> onConnectionWarning;
+    std::function<void(const QString&)> onSignalerStatus;
     ControlServer::Stats serverStats() const { return server_.stats(); }
     ControlClient::Stats clientStats() const { return client_.stats(); }
     ControlClient::Stats assetClientStats() const { return assetClient_.stats(); }
@@ -207,6 +216,9 @@ private:
         QMap<int, QJsonObject> pages;
     };
 
+    bool startMultiplex(bool creator);
+    void introduceMeshPeer(const QString& token);
+    void connectionWarning(const QString& a, const QString& b, const QString& detail, bool broadcast);
     void handleServerEvent(const jam2::control_protocol::TransportEvent& event);
     void handleClientEvent(const jam2::control_protocol::TransportEvent& event);
     void handleAssetClientEvent(const jam2::control_protocol::TransportEvent& event);
@@ -291,4 +303,6 @@ private:
     ControlClient client_;
     ControlClient assetClient_;
     bool assetChannelRequired_ = false;
+    std::shared_ptr<jam2::application::UdpMultiplexTransport> multiplex_;
+    QSet<QString> introductionWarnings_;
 };

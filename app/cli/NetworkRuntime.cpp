@@ -1854,6 +1854,7 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
         // Keep the fallback silence clock on the host clock so synthetic
         // device drift cannot mask a capture/sender ownership regression.
         0);
+    if (options.datagram_transport) network_session.setDatagramTransport(options.datagram_transport);
     network_session_control = &network_session;
     auto& packet_schedule = network_session.schedule();
     auto peer_endpoint_state = [&](jam2::PeerId peer_id) {

@@ -66,6 +66,8 @@ public:
     std::uint64_t signalCount() const noexcept;
     std::uint64_t consumptionCount() const noexcept;
     std::uint64_t lastSignalTimeUs() const noexcept;
+    // Wait for queued transport input or the existing audio-capture notification.
+    void waitFor(std::uint64_t timeout_us, RealtimeWakeSignal* additional = nullptr);
 
 private:
     friend class UdpSocket;
@@ -102,6 +104,8 @@ public:
 
     void bind(const Endpoint& endpoint);
     Endpoint local_endpoint() const;
+    static void waitForAny(std::span<const UdpSocket* const> sockets,
+        std::uint64_t timeout_us, RealtimeWakeSignal* command_wake = nullptr);
     void set_send_buffer_size(int bytes);
     void set_recv_buffer_size(int bytes);
     int send_buffer_size() const;
@@ -121,6 +125,19 @@ private:
 #else
     int handle_{-1};
 #endif
+};
+
+// Network-only socket routing seam. Legacy sessions keep their owned UdpSocket;
+// Server mode supplies a link transport whose selected socket is per peer.
+class NetworkDatagramTransport {
+public:
+    virtual ~NetworkDatagramTransport() = default;
+    virtual UdpSendResult sendToPeer(
+        std::uint64_t peer_id, const ResolvedUdpEndpoint& endpoint,
+        std::span<const std::uint8_t> bytes) noexcept = 0;
+    virtual std::optional<UdpSocket::ReceivedDatagram> receiveFor(
+        std::span<std::uint8_t> buffer, std::uint64_t timeout_us,
+        RealtimeWakeSignal* capture_wake) = 0;
 };
 
 } // namespace jam2

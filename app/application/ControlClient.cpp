@@ -8,7 +8,7 @@
 #include <memory>
 
 using namespace jam2::control_protocol;
-using jam2::application::NativeTcpConnection;
+using jam2::application::ControlConnection;
 using jam2::application::NativeTcpError;
 
 ControlClient::ControlClient(QObject* parent)
@@ -42,7 +42,7 @@ ControlClient::~ControlClient()
 }
 
 void ControlClient::installConnection(
-    const NativeTcpConnection::Pointer& connection,
+    const ControlConnection::Pointer& connection,
     quint64 generation)
 {
     if (!connection || generation != connectionGeneration_ || manualClose_) {
@@ -53,7 +53,7 @@ void ControlClient::installConnection(
     }
     connection_ = connection;
     ++stats_.completedConnections;
-    const std::weak_ptr<NativeTcpConnection> weakConnection = connection;
+    const std::weak_ptr<ControlConnection> weakConnection = connection;
     connection->start(
         this,
         [this, weakConnection, generation](const QByteArray& bytes) {
@@ -76,14 +76,9 @@ void ControlClient::installConnection(
         QStringLiteral("TCP connected; waiting for bounded auth challenge")});
 }
 
-void ControlClient::connectToHost(
-    const QString& host,
-    quint16 port,
-    const QString& sessionHex,
-    const QString& keyHex,
-    const QString& meshPeerToken,
-    const QString& meshUdpEndpoint,
-    Channel channel)
+bool ControlClient::prepareConnection(
+    const QString& sessionHex, const QString& keyHex,
+    const QString& meshPeerToken, const QString& meshUdpEndpoint, Channel channel)
 {
     close();
     manualClose_ = false;
@@ -99,11 +94,34 @@ void ControlClient::connectToHost(
             QStringLiteral("TCP control session, key, token, or endpoint is invalid"),
             TransportFailure::InvalidConfiguration,
             true);
-        return;
+        return false;
     }
     handshakeState_ = HandshakeState::WaitingForChallenge;
     receiveSequence_ = 1;
     sendSequence_ = 1;
+    return true;
+}
+
+void ControlClient::connectViaTransport(
+    const ControlConnection::Pointer& connection,
+    const QString& sessionHex, const QString& keyHex,
+    const QString& meshPeerToken, const QString& meshUdpEndpoint, Channel channel)
+{
+    if (!prepareConnection(sessionHex, keyHex, meshPeerToken, meshUdpEndpoint, channel)) return;
+    ++stats_.connectionAttempts;
+    installConnection(connection, ++connectionGeneration_);
+}
+
+void ControlClient::connectToHost(
+    const QString& host,
+    quint16 port,
+    const QString& sessionHex,
+    const QString& keyHex,
+    const QString& meshPeerToken,
+    const QString& meshUdpEndpoint,
+    Channel channel)
+{
+    if (!prepareConnection(sessionHex, keyHex, meshPeerToken, meshUdpEndpoint, channel)) return;
     const quint64 generation = ++connectionGeneration_;
     ++stats_.connectionAttempts;
     publishEvent(TransportEvent{
@@ -114,7 +132,7 @@ void ControlClient::connectToHost(
         host,
         port,
         this,
-        [this, generation](const NativeTcpConnection::Pointer& connection) {
+        [this, generation](const ControlConnection::Pointer& connection) {
             installConnection(connection, generation);
         },
         [this, generation](const NativeTcpError& error) {
@@ -161,7 +179,7 @@ void ControlClient::close()
     sendKey_.clear();
     largeJsonReceiver_.reset();
     handshakeState_ = HandshakeState::WaitingForChallenge;
-    const NativeTcpConnection::Pointer connection = std::move(connection_);
+    const ControlConnection::Pointer connection = std::move(connection_);
     if (connection) {
         connection->close();
     }
@@ -225,7 +243,7 @@ bool ControlClient::isConnected() const
 }
 
 void ControlClient::readConnection(
-    const NativeTcpConnection::Pointer& connection,
+    const ControlConnection::Pointer& connection,
     const QByteArray& bytes)
 {
     if (!connection || connection_ != connection) {
@@ -328,7 +346,7 @@ void ControlClient::readConnection(
 
     if (!buffer_.isEmpty() && !readScheduled_) {
         readScheduled_ = true;
-        const std::weak_ptr<NativeTcpConnection> weakConnection = connection;
+        const std::weak_ptr<ControlConnection> weakConnection = connection;
         QTimer::singleShot(0, this, [this, weakConnection] {
             const auto current = weakConnection.lock();
             if (current && connection_ == current && current->isConnected()) {
@@ -339,7 +357,7 @@ void ControlClient::readConnection(
 }
 
 void ControlClient::connectionClosed(
-    const NativeTcpConnection::Pointer& connection,
+    const ControlConnection::Pointer& connection,
     const QString& detail)
 {
     if (!connection || connection_ != connection) {
@@ -480,7 +498,7 @@ void ControlClient::handleHandshake(const QJsonObject& message)
 
 bool ControlClient::writeFrame(const QByteArray& frame)
 {
-    const NativeTcpConnection::Pointer connection = connection_;
+    const ControlConnection::Pointer connection = connection_;
     if (!connection || frame.isEmpty() || !connection->isConnected()) {
         return false;
     }
@@ -516,7 +534,7 @@ void ControlClient::reject(
     bool retryable)
 {
     (void)abort;
-    const NativeTcpConnection::Pointer connection = connection_;
+    const ControlConnection::Pointer connection = connection_;
     failureReportedForAttempt_ = true;
     publishEvent(TransportEvent{
         TransportEventType::Failure,

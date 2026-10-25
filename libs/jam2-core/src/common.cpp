@@ -173,15 +173,35 @@ std::uint64_t monotonic_us()
     return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(now).count());
 }
 
+std::string_view connection_strategy_text(ConnectionStrategy strategy) noexcept
+{
+    switch (strategy) {
+    case ConnectionStrategy::Stun: return "stun";
+    case ConnectionStrategy::Direct: return "direct";
+    case ConnectionStrategy::Jam2Server: return "server";
+    }
+    return "stun";
+}
+
+ConnectionStrategy parse_connection_strategy(std::string_view text)
+{
+    if (text == "stun") return ConnectionStrategy::Stun;
+    if (text == "direct") return ConnectionStrategy::Direct;
+    if (text == "server") return ConnectionStrategy::Jam2Server;
+    throw std::runtime_error("connection strategy must be server, stun, or direct");
+}
+
 std::string make_jam_url(const SessionInfo& info)
 {
     std::array<std::uint8_t, 8> session_bytes{};
     for (std::size_t i = 0; i < session_bytes.size(); ++i) {
         session_bytes[session_bytes.size() - 1 - i] = static_cast<std::uint8_t>((info.session_id >> (i * 8)) & 0xffU);
     }
+    const std::string strategy = info.strategy == ConnectionStrategy::Jam2Server
+        ? "&strategy=server" : "";
     return "jam2://v1?endpoint=" + endpoint_to_string(info.endpoint) + "&session=" +
         hex_encode(session_bytes.data(), session_bytes.size()) + "&key=" +
-        hex_encode(info.key.data(), info.key.size());
+        hex_encode(info.key.data(), info.key.size()) + strategy;
 }
 
 SessionInfo parse_jam_url(std::string_view url)
@@ -198,6 +218,18 @@ SessionInfo parse_jam_url(std::string_view url)
         throw std::runtime_error("jam2 URL key must be 16 bytes encoded as 32 hex characters");
     }
     SessionInfo info;
+    // Legacy invitations have no strategy field and retain their TCP bootstrap.
+    std::size_t offset = 0;
+    while (offset <= query.size()) {
+        const std::size_t end = query.find('&', offset);
+        const auto field = query.substr(offset, end == std::string_view::npos ? query.size() - offset : end - offset);
+        if (field.starts_with("strategy=")) {
+            info.strategy = parse_connection_strategy(field.substr(9));
+            break;
+        }
+        if (end == std::string_view::npos) break;
+        offset = end + 1;
+    }
     info.endpoint = endpoint;
     info.session_id = session;
     std::copy(key_bytes.begin(), key_bytes.end(), info.key.begin());

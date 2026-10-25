@@ -536,6 +536,17 @@ bool jam2::application::validateControlMessage(
             (std::numeric_limits<int>::max)())
             ? true : (reason = QStringLiteral("heartbeat sequence is invalid"), false);
     }
+    if (type == QStringLiteral("session.udp.introduce")) {
+        return jam2::control_protocol::decodeHex(message.value(QStringLiteral("nonce")).toString(), 16).size() == 16 &&
+            jam2::control_protocol::peerIdFromToken(message.value(QStringLiteral("peer")).toString()).has_value()
+            ? true : (reason = QStringLiteral("UDP introduction is invalid"), false);
+    }
+    if (type == QStringLiteral("session.connection.failure")) {
+        return jam2::control_protocol::peerIdFromToken(message.value(QStringLiteral("a")).toString()).has_value() &&
+            jam2::control_protocol::peerIdFromToken(message.value(QStringLiteral("b")).toString()).has_value() &&
+            isBoundedString(message.value(QStringLiteral("detail")), 2048)
+            ? true : (reason = QStringLiteral("connection failure is invalid"), false);
+    }
     if (type == QStringLiteral("session.endpoint.update")) {
         const QString endpoint = message.value(QStringLiteral("udp_endpoint")).toString();
         return !endpoint.isEmpty() && endpoint.size() <= 255 &&
@@ -866,7 +877,9 @@ jam2::application::ControlMessageDecision jam2::application::evaluateControlMess
     }
 
     const QString type = message.value(QStringLiteral("type")).toString();
-    const bool coordinatorOnly = type == QStringLiteral("session.contract") ||
+    const bool coordinatorOnly = type == QStringLiteral("session.udp.introduce") ||
+        type == QStringLiteral("session.connection.failure") ||
+        type == QStringLiteral("session.contract") ||
         type == QStringLiteral("session.membership") ||
         type == QStringLiteral("session.heartbeat") ||
         type == QStringLiteral("session.end") ||

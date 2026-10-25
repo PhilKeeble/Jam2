@@ -159,6 +159,7 @@ struct NetworkSession::Impl {
     };
 
     UdpSocket socket;
+    std::shared_ptr<NetworkDatagramTransport> datagram_transport;
     SessionInfo session;
     const NetworkSessionContract contract;
     const SessionBootstrapRole bootstrap_role;
@@ -380,7 +381,9 @@ struct NetworkSession::Impl {
         std::span<const std::uint8_t> packet)
     {
         ++peer.send.attempts;
-        const UdpSendResult sent = socket.send_to(peer.descriptor.endpoint, packet);
+        const UdpSendResult sent = datagram_transport
+            ? datagram_transport->sendToPeer(peer.descriptor.peer_id.value, peer.descriptor.endpoint, packet)
+            : socket.send_to(peer.descriptor.endpoint, packet);
         peer.send.last_error_code = sent.error_code;
         peer.send.last_outcome = sent.outcome;
         switch (sent.outcome) {
@@ -805,8 +808,9 @@ std::optional<NetworkDatagram> NetworkSession::receiveFor(
     std::uint64_t timeout_us,
     RealtimeWakeSignal* wake_signal)
 {
-    const auto received = impl_->socket.recv_from_for(
-        impl_->receive_packet, timeout_us, wake_signal);
+    const auto received = impl_->datagram_transport
+        ? impl_->datagram_transport->receiveFor(impl_->receive_packet, timeout_us, wake_signal)
+        : impl_->socket.recv_from_for(impl_->receive_packet, timeout_us, wake_signal);
     if (!received) {
         return std::nullopt;
     }
@@ -823,6 +827,11 @@ protocol::ParseResult NetworkSession::parse(std::span<const std::uint8_t> packet
         impl_->session.key,
         impl_->session.session_id,
         impl_->contract.audio_format);
+}
+
+void NetworkSession::setDatagramTransport(std::shared_ptr<NetworkDatagramTransport> transport)
+{
+    impl_->datagram_transport = std::move(transport);
 }
 
 void NetworkSession::close() noexcept

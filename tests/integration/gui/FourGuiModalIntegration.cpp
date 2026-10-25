@@ -3329,7 +3329,7 @@ int main(int argc, char* argv[])
     openModal(creator, QStringLiteral("real-create-open"),
         QStringLiteral("session.start"));
     (void)invokeAndReceive(creator, QStringLiteral("real-create-no-stun"),
-        QStringLiteral("session.dialog.no-stun"), QStringLiteral("set-checked"), true);
+        QStringLiteral("session.dialog.connection-strategy"), QStringLiteral("set-index"), 2);
     (void)invokeAndReceive(creator, QStringLiteral("real-create-bind"),
         QStringLiteral("session.dialog.bind-host"), QStringLiteral("set-text"),
         QStringLiteral("127.0.0.1"));

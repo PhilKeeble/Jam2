@@ -273,6 +273,15 @@ void testValidationAndDialog() {
         !evaluateControlMessage(message, ControlMessageSource::AuthenticatedPeer).accepted &&
         !evaluateControlMessage(message, ControlMessageSource::LocalJoiner).accepted,
         "only the coordinator can assign shared listening state");
+    QJsonObject introduction{{QStringLiteral("type"), QStringLiteral("session.udp.introduce")},
+        {QStringLiteral("nonce"), QString(32, QLatin1Char('a'))},
+        {QStringLiteral("peer"), QString(32, QLatin1Char('b'))}};
+    require(evaluateControlMessage(introduction, ControlMessageSource::Coordinator).accepted &&
+        !evaluateControlMessage(introduction, ControlMessageSource::AuthenticatedPeer).accepted,
+        "mesh introductions retain creator-only authority");
+    introduction[QStringLiteral("nonce")] = QStringLiteral("invalid");
+    require(!evaluateControlMessage(introduction, ControlMessageSource::Coordinator).accepted,
+        "malformed mesh introduction rejected");
     JamSyncDialog dialog({}, false, false);
     QCheckBox* listening = nullptr;
     QCheckBox* playback = nullptr;

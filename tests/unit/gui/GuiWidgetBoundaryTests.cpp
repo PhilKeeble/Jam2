@@ -40,6 +40,7 @@
 #include <QToolTip>
 #include <QHelpEvent>
 #include <QHBoxLayout>
+#include <QFormLayout>
 #include <QUrl>
 #include <QVariantMap>
 #include <QVBoxLayout>
@@ -547,6 +548,28 @@ void testSessionDefaultsAndPriorityControls()
     };
     jam2::gui::StartJamDialogState startInitial;
     jam2::gui::StartJamDialog startDialog(startInitial, {}, {});
+    auto* strategy = qobject_cast<QComboBox*>(findControl(startDialog, QStringLiteral("session.dialog.connection-strategy")));
+    auto* publicHost = qobject_cast<QWidget*>(findControl(startDialog, QStringLiteral("session.dialog.public-host")));
+    auto* stunServer = qobject_cast<QWidget*>(findControl(startDialog, QStringLiteral("session.dialog.stun-server")));
+    auto* maximum = qobject_cast<QWidget*>(findControl(startDialog, QStringLiteral("session.dialog.maximum-peers")));
+    expect(strategy && strategy->count() == 3 && publicHost && stunServer && maximum,
+        "connection strategy controls are present");
+    if (strategy && publicHost && stunServer && maximum) {
+        expect(publicHost->isHidden() && stunServer->isHidden() && !maximum->isHidden(),
+            "Server strategy hides public/STUN rows while retaining peer limit");
+        strategy->setCurrentIndex(strategy->findData(static_cast<int>(jam2::ConnectionStrategy::Stun)));
+        expect(publicHost->isHidden() && !stunServer->isHidden() &&
+            startDialog.state().create.strategy == jam2::ConnectionStrategy::Stun,
+            "STUN strategy shows only its discovery fields");
+        strategy->setCurrentIndex(strategy->findData(static_cast<int>(jam2::ConnectionStrategy::Direct)));
+        expect(!publicHost->isHidden() && stunServer->isHidden() && startDialog.state().create.noStun,
+            "Direct strategy shows only the public IPv4 field");
+        for (auto* form : startDialog.findChildren<QFormLayout*>()) {
+            if (auto* label = form->labelForField(stunServer)) expect(label->isHidden(), "hidden STUN field also hides its label");
+            if (auto* label = form->labelForField(publicHost)) expect(!label->isHidden(), "Direct public field label is visible");
+        }
+        strategy->setCurrentIndex(strategy->findData(static_cast<int>(jam2::ConnectionStrategy::Jam2Server)));
+    }
     auto* startProfile = qobject_cast<QComboBox*>(findControl(
         startDialog, QStringLiteral("session.dialog.create-profile")));
     auto* startPriority = qobject_cast<QComboBox*>(findControl(

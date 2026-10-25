@@ -1,5 +1,7 @@
 #pragma once
 
+#include "ControlConnection.hpp"
+
 #include <QByteArray>
 #include <QObject>
 #include <QString>
@@ -29,13 +31,13 @@ struct NativeTcpError {
     QString message;
 };
 
-class NativeTcpConnection final {
+class NativeTcpConnection final : public ControlConnection {
 public:
     using Pointer = std::shared_ptr<NativeTcpConnection>;
     using DataHandler = std::function<void(const QByteArray&)>;
     using DisconnectHandler = std::function<void(const QString&)>;
 
-    ~NativeTcpConnection();
+    ~NativeTcpConnection() override;
     NativeTcpConnection(const NativeTcpConnection&) = delete;
     NativeTcpConnection& operator=(const NativeTcpConnection&) = delete;
 

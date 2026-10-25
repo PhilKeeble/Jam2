@@ -14,10 +14,20 @@ struct Endpoint {
     std::uint16_t port{};
 };
 
+enum class ConnectionStrategy : std::uint8_t {
+    Stun,
+    Direct,
+    Jam2Server,
+};
+
+std::string_view connection_strategy_text(ConnectionStrategy strategy) noexcept;
+ConnectionStrategy parse_connection_strategy(std::string_view text);
+
 struct SessionInfo {
     Endpoint endpoint;
     std::uint64_t session_id{};
     std::array<std::uint8_t, 16> key{};
+    ConnectionStrategy strategy = ConnectionStrategy::Stun;
 };
 
 std::string endpoint_to_string(const Endpoint& endpoint);

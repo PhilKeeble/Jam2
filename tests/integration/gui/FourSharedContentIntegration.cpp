@@ -14,6 +14,8 @@
 #include <QJsonObject>
 #include <QSet>
 #include <QThread>
+#include <QProcess>
+#include <QUdpSocket>
 #include <QTemporaryDir>
 
 #include <algorithm>
@@ -29,6 +31,29 @@ namespace {
 using namespace std::chrono_literals;
 
 int failures = 0;
+bool largeUdpFixtures = false;
+class TestSignaler {
+public:
+    QProcess process;
+    QString endpoint;
+    bool started = false;
+    bool start(const QString& executable) {
+        QUdpSocket reserve;
+        if (!reserve.bind(QHostAddress::LocalHost, 0)) return false;
+        endpoint = QStringLiteral("127.0.0.1:%1").arg(reserve.localPort()); reserve.close();
+        process.setProcessChannelMode(QProcess::MergedChannels);
+        process.start(executable, {"--jam2-server", "--listen", endpoint});
+        started = process.waitForStarted(5000); return started;
+    }
+    ~TestSignaler() {
+        if (!started) return;
+        if (process.state() != QProcess::NotRunning) { process.kill(); process.waitForFinished(5000); }
+        const auto root = qEnvironmentVariable("JAM2_TEST_ARTIFACT_ROOT", QDir::tempPath());
+        QFile file(QDir(root).filePath(QStringLiteral("rendezvous.log")));
+        if (file.open(QIODevice::WriteOnly)) file.write(process.readAll());
+    }
+};
+
 
 void fail(const QString& message)
 {
@@ -52,8 +77,8 @@ void appendU32(QByteArray& bytes, quint32 value)
 QByteArray pcm16Wav(int variant)
 {
     constexpr quint32 sampleRate = 48000;
-    constexpr quint32 frames = 1024;
-    constexpr quint32 dataBytes = frames * 2;
+    const quint32 frames = largeUdpFixtures ? 48000 : 1024;
+    const quint32 dataBytes = frames * 2;
     QByteArray bytes;
     bytes.reserve(static_cast<qsizetype>(44 + dataBytes));
     bytes.append("RIFF", 4);
@@ -741,9 +766,15 @@ bool shutDown(FourPeerCoordinator& coordinator)
 int main(int argc, char* argv[])
 {
     QCoreApplication application(argc, argv);
-    if (argc != 2) {
-        std::cerr << "usage: jam2_four_shared_content_integration <release-jam2>\n";
+    if (argc != 2 && argc != 3) {
+        std::cerr << "usage: jam2_four_shared_content_integration <release-jam2> [Go-server]\n";
         return 2;
+    }
+    TestSignaler signaler;
+    const bool serverMode = argc == 3;
+    largeUdpFixtures = serverMode;
+    if (serverMode && !signaler.start(QString::fromLocal8Bit(argv[2]))) {
+        fail(QStringLiteral("could not start real Go signaler")); return 1;
     }
     QTemporaryDir fixtureFolder;
     QString automaticWavPath;
@@ -817,12 +848,17 @@ int main(int argc, char* argv[])
     if (!send(coordinator.peer(0), {
             {QStringLiteral("type"), QStringLiteral("jam.create")},
             {QStringLiteral("id"), QStringLiteral("create")},
+            {QStringLiteral("strategy"), serverMode ? QStringLiteral("server") : QStringLiteral("direct")},
+            {QStringLiteral("rendezvous"), serverMode ? signaler.endpoint : QStringLiteral("jam2gether.com:40404")},
             {QStringLiteral("port"), ports[0]},
             {QStringLiteral("test_input"), QStringLiteral("tone-440")},
         })) return 1;
     const auto created = receive(coordinator.peer(0), QStringLiteral("command_applied"));
     if (!created) return 1;
     const QString invite = created->value(QStringLiteral("invite_url")).toString();
+    if (serverMode && !invite.contains(QStringLiteral("strategy=server"))) {
+        fail(QStringLiteral("GUI did not generate server-mode invitation")); return 1;
+    }
     if (invite.isEmpty()) {
         fail(QStringLiteral("creator did not return its invite URL"));
         return 1;
@@ -839,6 +875,12 @@ int main(int argc, char* argv[])
     std::array<QJsonObject, FourPeerCoordinator::kPeerCount> states;
     if (!waitForAll(coordinator, QStringLiteral("initial song/view reconciliation"),
             meshReady, states)) return 1;
+    if (serverMode) for (const auto& state : states) {
+        const auto multiplex = state.value(QStringLiteral("jam")).toObject().value(QStringLiteral("udp_multiplex")).toObject();
+        if (!multiplex.value(QStringLiteral("enabled")).toBool() || multiplex.value(QStringLiteral("links")).toArray().size() != 3) {
+            fail(QStringLiteral("shared WAV workflow did not use exactly three physical UDP peer links")); return 1;
+        }
+    }
 
     if (!apply(coordinator, 0, {
             {QStringLiteral("type"), QStringLiteral("invoke")},

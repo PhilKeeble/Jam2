@@ -182,7 +182,7 @@ number for both protocols, then prints a jam2:// invitation. STUN discovers
 only the public UDP candidate; audio remains direct UDP.
 
 Create/bootstrap options:
-  --stun <host:port>                  STUN server endpoint
+  --connection-strategy <server|stun|direct>  Connection strategy (default STUN)\n  --rendezvous <host:port>            Server-mode signaler (default jam2gether.com:40404)\n  --stun <host:port>                  STUN server endpoint
   --public-endpoint <host:port>       Explicit advertised UDP candidate
   --no-stun                           Skip STUN discovery
   --stun-timeout-ms <ms>              Timeout for each STUN attempt
@@ -513,6 +513,11 @@ Options parse_options(
             (void)require_value(argc, argv, i, arg);
         } else if (arg == "--bind") {
             options.bind = jam2::parse_bind_endpoint(require_value(argc, argv, i, arg));
+        } else if (arg == "--connection-strategy") {
+            options.connection_strategy = jam2::parse_connection_strategy(require_value(argc, argv, i, arg));
+            options.no_stun = options.connection_strategy != jam2::ConnectionStrategy::Stun;
+        } else if (arg == "--rendezvous") {
+            options.rendezvous_server = jam2::parse_endpoint(require_value(argc, argv, i, arg));
         } else if (arg == "--stun") {
             options.stun_server = jam2::parse_endpoint(require_value(argc, argv, i, arg));
             options.no_stun = false;

@@ -12,6 +12,7 @@
 #include <QHostAddress>
 #include <QJsonArray>
 #include <QNetworkInterface>
+#include <QUuid>
 
 #include <algorithm>
 #include <cmath>
@@ -315,6 +316,143 @@ void SharedSessionController::bindRuntime(
     networkOptionsFactory_ = std::move(networkOptionsFactory);
 }
 
+
+bool SharedSessionController::startMultiplex(bool creator)
+{
+    using namespace jam2::application;
+    multiplex_ = std::make_shared<UdpMultiplexTransport>();
+    multiplex_->onJoinRequest = [this](const QString& peer) {
+        if (closing_ || role_ != Role::Creator) return;
+        const int remote = peers_.size() - (peers_.contains(creator_.localToken) ? 1 : 0);
+        if (creator_.sessionPeerLimit > 0 && remote >= creator_.sessionPeerLimit) {
+            multiplex_->rejectPeer(peer); return;
+        }
+        multiplex_->introduce(creator_.localToken, peer, QString::fromLatin1(QUuid::createUuid().toRfc4122().toHex()));
+    };
+    multiplex_->onLinkReady = [this](const QString& peer) {
+        if (closing_ || !multiplex_) return;
+        if (role_ == Role::Creator && peers_.size() == 1) {
+            if (const auto endpoint = multiplex_->observedEndpoint(peer)) {
+                creator_.localEndpoint = QString::fromStdString(jam2::endpoint_to_string(*endpoint));
+                auto local = peers_.find(creator_.localToken);
+                if (local != peers_.end()) local->endpoint = creator_.localEndpoint;
+            }
+        }
+        if (role_ == Role::Joiner && peer == multiplex_->coordinatorToken()) {
+            coordinatorToken_ = peer;
+            if (const auto endpoint = multiplex_->observedEndpoint(peer))
+                joiner_.localEndpoint = QString::fromStdString(jam2::endpoint_to_string(*endpoint));
+            connectJoiner();
+        }
+        publishSnapshot();
+    };
+    multiplex_->onStreamReady = [this](const QString& peer, UdpMuxChannel channel,
+            std::shared_ptr<ControlConnection> connection, bool incoming) {
+        if (closing_) { connection->close(); return; }
+        if (incoming && role_ == Role::Creator) {
+            server_.acceptTransport(connection);
+        } else if (!incoming && role_ == Role::Joiner && peer == coordinatorToken_) {
+            if (channel == UdpMuxChannel::Asset) {
+                if (!assetChannelRequired_) { connection->close(); return; }
+                assetClient_.connectViaTransport(connection, joiner_.sessionHex, joiner_.keyHex,
+                    joiner_.localToken, {}, ControlClient::Channel::Asset);
+            } else {
+                client_.connectViaTransport(connection, joiner_.sessionHex, joiner_.keyHex,
+                    joiner_.localToken, joiner_.localEndpoint);
+            }
+        } else connection->close();
+    };
+    multiplex_->onSignalerStatus = [this](const QString& detail) { if (!closing_ && onSignalerStatus) onSignalerStatus(detail); };
+    multiplex_->onPairFailure = [this](const QString& a, const QString& b, const QString& detail) {
+        if (!closing_) connectionWarning(a, b, detail, role_ == Role::Creator);
+    };
+    UdpMultiplexTransport::Config config;
+    config.creator = creator;
+    config.sessionHex = creator ? creator_.sessionHex : joiner_.sessionHex;
+    config.keyHex = creator ? creator_.keyHex : joiner_.keyHex;
+    config.localToken = creator ? creator_.localToken : joiner_.localToken;
+    config.server = creator ? creator_.rendezvousServer
+        : jam2::Endpoint{joiner_.host.toStdString(), joiner_.port};
+    config.maximumPeers = creator ? creator_.sessionPeerLimit : 0;
+    QString error;
+    if (multiplex_->start(config, error)) return true;
+    multiplex_.reset();
+    fail(TransportFailure::TransportError, error, false);
+    publishTransportEvent(TransportEvent{TransportEventType::Failure,
+        TransportFailure::TransportError, error}, creator);
+    return false;
+}
+
+void SharedSessionController::introduceMeshPeer(const QString& token)
+{
+    for (auto it = peers_.cbegin(); it != peers_.cend(); ++it) {
+        if (it.key() == creator_.localToken || it.key() == token) continue;
+        const auto nonce = QString::fromLatin1(QUuid::createUuid().toRfc4122().toHex());
+        const auto notify = [&](const QString& target, const QString& partner) {
+            return server_.sendTo(target, QJsonObject{
+                {QStringLiteral("type"), QStringLiteral("session.udp.introduce")},
+                {QStringLiteral("nonce"), nonce}, {QStringLiteral("peer"), partner}});
+        };
+        if (notify(it.key(), token) && notify(token, it.key()))
+            multiplex_->introduce(it.key(), token, nonce);
+        else connectionWarning(it.key(), token, QStringLiteral("Mesh introduction could not be queued"), true);
+    }
+}
+
+void SharedSessionController::connectionWarning(
+    const QString& a, const QString& b, const QString& detail, bool broadcast)
+{
+    const QString first = a < b ? a : b, second = a < b ? b : a;
+    const auto id = first + QLatin1Char('/') + second;
+    if (introductionWarnings_.contains(id)) return;
+    introductionWarnings_.insert(id);
+    const auto message = detail + QStringLiteral(
+        "\nThe connection between %1 and %2 could not be established. The current jam remains running. "
+        "To try another strategy, leave and restart using STUN after forwarding TCP and UDP port %3 "
+        "(49000 by default) on the routers.").arg(a.left(8), b.left(8))
+        .arg(role_ == Role::Creator ? creator_.port : 49000);
+    if (broadcast && validToken(a) && validToken(b))
+        server_.send(QJsonObject{{QStringLiteral("type"), QStringLiteral("session.connection.failure")},
+            {QStringLiteral("a"), a}, {QStringLiteral("b"), b},
+            {QStringLiteral("detail"), detail.left(2048)}});
+    if (onConnectionWarning) onConnectionWarning(message);
+}
+
+jam2::application::UdpMultiplexTransport::Snapshot SharedSessionController::multiplexSnapshot() const
+{
+    return multiplex_ ? multiplex_->snapshot() : jam2::application::UdpMultiplexTransport::Snapshot{};
+}
+
+QJsonObject SharedSessionController::multiplexDiagnostics() const
+{
+    const auto stats = multiplexSnapshot();
+    QJsonArray links;
+    const auto endpoint = [](const jam2::Endpoint& value) { return value.port ? QString::fromStdString(jam2::endpoint_to_string(value)) : QString{}; };
+    for (const auto& link : stats.links) links.append(QJsonObject{
+        {QStringLiteral("peer"), link.peer}, {QStringLiteral("phase"), static_cast<int>(link.phase)},
+        {QStringLiteral("attempt"), link.attempt}, {QStringLiteral("hello_sent"), link.helloSent},
+        {QStringLiteral("local"), endpoint(link.local)}, {QStringLiteral("remote"), endpoint(link.remote)},
+        {QStringLiteral("observed"), endpoint(link.observed)},
+        {QStringLiteral("received_hello"), link.receivedHello}, {QStringLiteral("received_ack"), link.receivedAck},
+        {QStringLiteral("control_queued_bytes"), static_cast<qint64>(link.controlQueued)},
+        {QStringLiteral("asset_queued_bytes"), static_cast<qint64>(link.assetQueued)},
+        {QStringLiteral("retransmissions"), static_cast<qint64>(link.retransmissions)}});
+    return {{QStringLiteral("enabled"), multiplex_ != nullptr}, {QStringLiteral("running"), stats.running},
+        {QStringLiteral("registered"), stats.registered}, {QStringLiteral("admission_paused"), stats.admissionPaused},
+        {QStringLiteral("pause_confirmed"), stats.pauseConfirmed},
+        {QStringLiteral("signal_packets_sent"), static_cast<qint64>(stats.signalPacketsSent)},
+        {QStringLiteral("signal_packets_received"), static_cast<qint64>(stats.signalPacketsReceived)},
+        {QStringLiteral("audio_packets_sent"), static_cast<qint64>(stats.audioPacketsSent)},
+        {QStringLiteral("audio_packets_received"), static_cast<qint64>(stats.audioPacketsReceived)},
+        {QStringLiteral("audio_queue_drops"), static_cast<qint64>(stats.audioQueueDrops)},
+        {QStringLiteral("control_bytes_per_second"), static_cast<qint64>(stats.controlBytesPerSecond)},
+        {QStringLiteral("asset_bytes_per_second"), static_cast<qint64>(stats.assetBytesPerSecond)},
+        {QStringLiteral("control_bytes_sent"), static_cast<qint64>(stats.controlBytesSent)},
+        {QStringLiteral("asset_bytes_sent"), static_cast<qint64>(stats.assetBytesSent)},
+        {QStringLiteral("invalid_mux_packets"), static_cast<qint64>(stats.invalidMuxPackets)},
+        {QStringLiteral("links"), links}};
+}
+
 bool SharedSessionController::startLocal(const Jam2RuntimeOptions& options)
 {
     close();
@@ -392,13 +530,16 @@ bool SharedSessionController::startCreator(const CreatorConfig& config)
     local.streamState = QStringLiteral("local");
     peers_.insert(config.localToken, local);
     reconnectEnabled_ = true;
-    if (!server_.listen(config.port, config.sessionHex, config.keyHex)) {
+    const bool serverMode = config.strategy == jam2::ConnectionStrategy::Jam2Server;
+    if (!(serverMode ? server_.listenViaTransport(config.sessionHex, config.keyHex)
+                     : server_.listen(config.port, config.sessionHex, config.keyHex))) {
         fail(
             failure_ == TransportFailure::None ? TransportFailure::TransportError : failure_,
             server_.errorString(),
             false);
         return false;
     }
+    if (serverMode && !startMultiplex(true)) return false;
     runtimeAttachmentEnabled_ = true;
     heartbeatTimer_.start();
     setLifecycle(Lifecycle::Listening);
@@ -435,6 +576,7 @@ bool SharedSessionController::startJoiner(const JoinerConfig& config)
         return false;
     }
     setLifecycle(Lifecycle::Connecting);
+    if (config.strategy == jam2::ConnectionStrategy::Jam2Server) return startMultiplex(false);
     connectJoiner();
     return true;
 }
@@ -483,6 +625,8 @@ void SharedSessionController::reset(bool stopRuntime)
     if (stopRuntime && runtime_ != nullptr && runtime_->isNetworkRunning()) {
         runtime_->stopNetwork();
     }
+    if (multiplex_) { multiplex_->stop(); multiplex_.reset(); }
+    introductionWarnings_.clear();
     role_ = Role::Inactive;
     lifecycle_ = Lifecycle::Inactive;
     creator_ = {};
@@ -944,6 +1088,7 @@ void SharedSessionController::handleAuthenticatedPeer(
     const int remotePeers = peers_.size() - (peers_.contains(creator_.localToken) ? 1 : 0);
     if (creator_.sessionPeerLimit > 0 && !peers_.contains(token) &&
         remotePeers >= creator_.sessionPeerLimit) {
+        if (multiplex_) multiplex_->rejectPeer(token);
         server_.rejectAuthenticatedPeer(token, QStringLiteral("Session peer limit reached"));
         return;
     }
@@ -985,7 +1130,12 @@ void SharedSessionController::handleAuthenticatedPeer(
     peer.proofState = QStringLiteral("authenticated");
     peer.streamState = QStringLiteral("candidate");
     peer.sameMachine = isSameMachine(tcpHost);
+    const bool newPeer = !peers_.contains(token);
     peers_[token] = peer;
+    if (multiplex_) {
+        if (newPeer) introduceMeshPeer(token);
+        multiplex_->admitPeer(token);
+    }
     if (contractReady_) {
         server_.sendTo(token, contractMessage());
     }
@@ -1005,6 +1155,7 @@ void SharedSessionController::handleAuthenticatedPeer(
 void SharedSessionController::handleDisconnectedPeer(const QString& token)
 {
     if (role_ == Role::Creator && peers_.remove(token) > 0) {
+        if (multiplex_) multiplex_->removePeer(token);
         if (editorAuthorityToken_ == token) {
             editorAuthorityToken_.clear();
             editorState_ = {};
@@ -1044,6 +1195,16 @@ void SharedSessionController::handleClientMessage(const QJsonObject& message)
             TransportFailure::AuthenticatedFrameRejected,
             QStringLiteral("Control message WAV sample rate does not match the session contract")}, false);
         publishSnapshot();
+        return;
+    }
+    if (type == QStringLiteral("session.udp.introduce")) {
+        if (multiplex_) multiplex_->prepareIntroduction(message.value(QStringLiteral("nonce")).toString());
+        return;
+    }
+    if (type == QStringLiteral("session.connection.failure")) {
+        connectionWarning(message.value(QStringLiteral("a")).toString(),
+            message.value(QStringLiteral("b")).toString(),
+            message.value(QStringLiteral("detail")).toString(), false);
         return;
     }
     if (type == QStringLiteral("session.heartbeat")) {
@@ -1292,7 +1453,7 @@ bool SharedSessionController::acceptMembershipPage(const QJsonObject& message)
                 return false;
             }
             const bool coordinatorViaLanInvite = token == coordinator &&
-                isPrivateOrLocalIpv4(joiner_.host);
+                isPrivateOrLocalIpv4(joiner_.host) && !multiplex_;
             if (coordinatorViaLanInvite) {
                 // The TCP invite is the strongest route evidence for a private
                 // LAN join. A creator may also publish a STUN candidate, but
@@ -1325,6 +1486,10 @@ bool SharedSessionController::acceptMembershipPage(const QJsonObject& message)
          arrangementAuthorityToken_ != arrangementAuthority)) {
         membershipAssembly_ = {};
         return false;
+    }
+    if (multiplex_) {
+        for (auto it = peers_.cbegin(); it != peers_.cend(); ++it)
+            if (!next.contains(it.key()) && it.key() != joiner_.localToken) multiplex_->removePeer(it.key());
     }
     peers_ = std::move(next);
     coordinatorToken_ = coordinator;
@@ -1441,6 +1606,10 @@ void SharedSessionController::connectJoiner()
     if (role_ != Role::Joiner || closing_) {
         return;
     }
+    if (multiplex_) {
+        multiplex_->openStream(multiplex_->coordinatorToken(), jam2::application::UdpMuxChannel::Control);
+        return;
+    }
     client_.connectToHost(
         joiner_.host,
         joiner_.port,
@@ -1455,6 +1624,10 @@ void SharedSessionController::connectAssetJoiner()
     if (!assetChannelRequired_ || role_ != Role::Joiner || closing_ ||
         !client_.isConnected() ||
         assetClient_.isConnected()) {
+        return;
+    }
+    if (multiplex_) {
+        multiplex_->openStream(multiplex_->coordinatorToken(), jam2::application::UdpMuxChannel::Asset);
         return;
     }
     assetClient_.connectToHost(
@@ -1563,6 +1736,7 @@ void SharedSessionController::publishTransportEvent(
     TransportEvent event,
     bool serverSide)
 {
+    if (multiplex_) event.detail.replace(QStringLiteral("TCP"), QStringLiteral("UDP multiplex"));
     if (onTransportEvent) {
         onTransportEvent(event, serverSide);
     }
@@ -1586,6 +1760,12 @@ void SharedSessionController::reconcileRuntime(const Snapshot& snapshot)
         }
     }
 
+    if (multiplex_) {
+        for (PeerSnapshot& peer : runtimeSnapshot.peers) {
+            if (const auto endpoint = multiplex_->peerEndpoint(peer.peerId))
+                peer.endpoint = QString::fromStdString(jam2::endpoint_to_string(*endpoint));
+        }
+    }
     std::vector<Jam2RuntimePeer> peers;
     peers.reserve(static_cast<std::size_t>(runtimeSnapshot.remotePeerCount));
     for (const PeerSnapshot& peer : runtimeSnapshot.peers) {
@@ -1607,6 +1787,12 @@ void SharedSessionController::reconcileRuntime(const Snapshot& snapshot)
             }
         } else if (!runtimeAttachedForSession_) {
             Jam2RuntimeOptions options = networkOptionsFactory_(runtimeSnapshot);
+            if (multiplex_) {
+                options.connection_strategy = jam2::ConnectionStrategy::Jam2Server;
+                options.datagram_transport = multiplex_;
+                options.no_stun = true;
+                options.bind.port = 0;
+            }
             if (!runtime_->startNetwork(options)) {
                 throw std::runtime_error("network audio runtime failed to start");
             }

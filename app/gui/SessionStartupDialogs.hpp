@@ -10,6 +10,7 @@
 
 class QCheckBox;
 class QComboBox;
+class QFormLayout;
 class QDoubleSpinBox;
 class QLineEdit;
 class QPushButton;
@@ -116,7 +117,7 @@ public:
 private:
     void applyCreateProfile(const QString& name);
     void setDeviceList(SessionAudioDeviceList devices);
-    void updateStunAvailability(bool noStun);
+    void updateConnectionStrategy();
 
     StartJamDialogCallbacks callbacks_;
     CreatePreference createTemplate_;
@@ -127,7 +128,8 @@ private:
     QLineEdit* stunServer_ = nullptr;
     QSpinBox* stunTimeout_ = nullptr;
     QSpinBox* stunRetries_ = nullptr;
-    QCheckBox* noStun_ = nullptr;
+    QComboBox* strategy_ = nullptr;
+    QFormLayout* connectionForm_ = nullptr;
     QSpinBox* maximumPeers_ = nullptr;
     QComboBox* profile_ = nullptr;
     QComboBox* device_ = nullptr;

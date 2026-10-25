@@ -315,19 +315,23 @@ StartJamDialog::StartJamDialog(
     stunServer_ = new QLineEdit(initial.create.stunServer, content);
     stunTimeout_ = spin(content, 1, 60000, initial.create.stunTimeoutMs);
     stunRetries_ = spin(content, 1, 100, initial.create.stunRetries);
-    noStun_ = new QCheckBox(QStringLiteral("No STUN"), content);
-    noStun_->setChecked(initial.create.noStun);
+    strategy_ = new QComboBox(content);
+    strategy_->addItem(QStringLiteral("Jam2 Server"), static_cast<int>(jam2::ConnectionStrategy::Jam2Server));
+    strategy_->addItem(QStringLiteral("STUN"), static_cast<int>(jam2::ConnectionStrategy::Stun));
+    strategy_->addItem(QStringLiteral("Direct"), static_cast<int>(jam2::ConnectionStrategy::Direct));
+    strategy_->setCurrentIndex(strategy_->findData(static_cast<int>(initial.create.strategy)));
     maximumPeers_ = spin(content, 0, 1000000, initial.create.maxPeers);
 
     auto* connectionForm = new QFormLayout();
+    connectionForm_ = connectionForm;
+    connectionForm->addRow(QStringLiteral("Connection strategy"), strategy_);
     connectionForm->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
     connectionForm->addRow(QStringLiteral("Bind"), bindHost_);
     connectionForm->addRow(QStringLiteral("Port"), port_);
-    connectionForm->addRow(QStringLiteral("Public endpoint host"), publicHost_);
+    connectionForm->addRow(QStringLiteral("Your Public IPv4 Address"), publicHost_);
     connectionForm->addRow(QStringLiteral("STUN server"), stunServer_);
     connectionForm->addRow(QStringLiteral("STUN timeout ms"), stunTimeout_);
     connectionForm->addRow(QStringLiteral("STUN retries"), stunRetries_);
-    connectionForm->addRow(QString(), noStun_);
     connectionForm->addRow(
         QStringLiteral("Maximum peers (0 = unlimited)"), maximumPeers_);
     auto* connectionBox = new QGroupBox(QStringLiteral("Connection"), content);
@@ -476,7 +480,7 @@ StartJamDialog::StartJamDialog(
     registerDialogField(*stunServer_, "stun-server", "session.connection-settings");
     registerDialogField(*stunTimeout_, "stun-timeout", "session.connection-settings");
     registerDialogField(*stunRetries_, "stun-retries", "session.connection-settings");
-    registerDialogField(*noStun_, "no-stun", "session.connection-settings");
+    registerDialogField(*strategy_, "connection-strategy", "session.connection-settings");
     registerDialogField(*maximumPeers_, "maximum-peers", "session.connection-settings");
     registerDialogField(*profile_, "create-profile", "session.audio-settings");
     registerDialogField(
@@ -549,8 +553,8 @@ StartJamDialog::StartJamDialog(
 
     connect(profile_, qOverload<int>(&QComboBox::currentIndexChanged), this,
         [this] { applyCreateProfile(profile_->currentData().toString()); });
-    connect(noStun_, &QCheckBox::toggled, this,
-        [this](bool checked) { updateStunAvailability(checked); });
+    connect(strategy_, qOverload<int>(&QComboBox::currentIndexChanged), this,
+        [this] { updateConnectionStrategy(); });
     connect(refresh, &QPushButton::clicked, this, [this] {
         if (callbacks_.refreshDevices) {
             setDeviceList(callbacks_.refreshDevices(
@@ -573,7 +577,7 @@ StartJamDialog::StartJamDialog(
     outer->addWidget(scroll, 1);
     outer->addWidget(buttons);
     start->setDefault(true);
-    updateStunAvailability(noStun_->isChecked());
+    updateConnectionStrategy();
 }
 
 StartJamDialogState StartJamDialog::state() const
@@ -586,7 +590,8 @@ StartJamDialogState StartJamDialog::state() const
     result.create.stunServer = stunServer_->text().trimmed();
     result.create.stunTimeoutMs = stunTimeout_->value();
     result.create.stunRetries = stunRetries_->value();
-    result.create.noStun = noStun_->isChecked();
+    result.create.strategy = static_cast<jam2::ConnectionStrategy>(strategy_->currentData().toInt());
+    result.create.noStun = result.create.strategy != jam2::ConnectionStrategy::Stun;
     result.create.maxPeers = maximumPeers_->value();
     result.create.sampleRate = sampleRate_->currentData().toInt();
     result.create.audioFormat = audioFormat_->currentData().toString();
@@ -656,12 +661,15 @@ void StartJamDialog::setDeviceList(SessionAudioDeviceList devices)
     if (device_->count() > 0) device_->setCurrentIndex(selected >= 0 ? selected : 0);
 }
 
-void StartJamDialog::updateStunAvailability(bool noStun)
+void StartJamDialog::updateConnectionStrategy()
 {
-    publicHost_->setEnabled(noStun);
-    stunServer_->setEnabled(!noStun);
-    stunTimeout_->setEnabled(!noStun);
-    stunRetries_->setEnabled(!noStun);
+    const auto strategy = static_cast<jam2::ConnectionStrategy>(strategy_->currentData().toInt());
+    connectionForm_->setRowVisible(publicHost_, strategy == jam2::ConnectionStrategy::Direct);
+    connectionForm_->setRowVisible(stunServer_, strategy == jam2::ConnectionStrategy::Stun);
+    connectionForm_->setRowVisible(stunTimeout_, strategy == jam2::ConnectionStrategy::Stun);
+    connectionForm_->setRowVisible(stunRetries_, strategy == jam2::ConnectionStrategy::Stun);
+    connectionForm_->setRowVisible(bindHost_, strategy != jam2::ConnectionStrategy::Jam2Server);
+    connectionForm_->setRowVisible(port_, strategy != jam2::ConnectionStrategy::Jam2Server);
 }
 
 JoinJamDialog::JoinJamDialog(

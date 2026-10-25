@@ -739,7 +739,7 @@ void GuiTestAgent::handle(const QJsonObject& command)
     if (type == QStringLiteral("jam.create") || type == QStringLiteral("jam.join")) {
         const bool create = type == QStringLiteral("jam.create");
         const bool fieldsOk = create
-            ? onlyFields(command, {"format", "type", "id", "port", "test_input"})
+            ? onlyFields(command, {"format", "type", "id", "port", "test_input", "strategy", "rendezvous"})
             : onlyFields(command, {
                 "format", "type", "id", "port", "invite_url", "test_input"});
         int port = 0;
@@ -769,12 +769,20 @@ void GuiTestAgent::handle(const QJsonObject& command)
             return;
         }
         QString error;
+        jam2::ConnectionStrategy strategy = jam2::ConnectionStrategy::Direct;
+        jam2::Endpoint rendezvous{"jam2gether.com", 40404};
+        try {
+            if (command.contains(QStringLiteral("strategy")))
+                strategy = jam2::parse_connection_strategy(command.value(QStringLiteral("strategy")).toString().toStdString());
+            if (command.contains(QStringLiteral("rendezvous")))
+                rendezvous = jam2::parse_endpoint(command.value(QStringLiteral("rendezvous")).toString().toStdString());
+        } catch (const std::exception&) { reject(command, QStringLiteral("invalid connection strategy or rendezvous")); return; }
         if (!window_.startAutomationJam(
                 create,
                 port,
                 command.value(QStringLiteral("invite_url")).toString(),
                 testInputMode,
-                error)) {
+                error, strategy, rendezvous)) {
             reject(command, error);
             return;
         }

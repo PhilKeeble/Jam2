@@ -47,6 +47,9 @@ enum class Jam2ProfileApplication {
 // native GUI runtime, and explicit debug adapter. It is never read directly
 // by the real-time callback.
 struct Jam2RuntimeOptions {
+    jam2::ConnectionStrategy connection_strategy = jam2::ConnectionStrategy::Stun;
+    jam2::Endpoint rendezvous_server{"jam2gether.com", 40404};
+    std::shared_ptr<jam2::NetworkDatagramTransport> datagram_transport;
     jam2::Endpoint bind{"0.0.0.0", 49000};
     jam2::Endpoint stun_server{"stun.l.google.com", jam2::stun::kDefaultPort};
     std::optional<jam2::Endpoint> public_endpoint;

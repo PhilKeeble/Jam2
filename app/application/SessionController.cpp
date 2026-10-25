@@ -105,6 +105,8 @@ public:
         }
         parseBootstrapOptions();
         runtimeOptions_ = parseRuntimeOptions(runnerOptions_ + bootstrapRunnerOptions_);
+        if (!creator_) runtimeOptions_.connection_strategy = session_.strategy;
+        runtimeOptions_.no_stun = runtimeOptions_.no_stun || runtimeOptions_.connection_strategy != jam2::ConnectionStrategy::Stun;
         determineRequestedContract();
 
         if (creator_) {
@@ -227,11 +229,13 @@ public:
             }
             handleCoordinatorMessage(message);
         };
+        sessionController_.onSignalerStatus = [this](const QString& detail) { writeConsoleLine(detail); };
+        sessionController_.onConnectionWarning = [this](const QString& detail) { writeConsoleLine(detail, true); };
         sessionController_.onTransportEvent = [this](
             const jam2::control_protocol::TransportEvent& event,
             bool serverSide) {
             if (serverSide) {
-                writeConsoleLine(QStringLiteral("TCP control: ") + event.detail);
+                writeConsoleLine((runtimeOptions_.connection_strategy == jam2::ConnectionStrategy::Jam2Server ? QStringLiteral("UDP control: ") : QStringLiteral("TCP control: ")) + event.detail);
             } else {
                 handleClientEvent(event);
             }
@@ -264,10 +268,15 @@ public:
         if (creator_) {
             writeConsoleLine(QStringLiteral("Mode: create"));
             coordinatorToken_ = localToken_;
-            startRunner(reserveCreatorEndpoint());
+            if (runtimeOptions_.connection_strategy == jam2::ConnectionStrategy::Jam2Server) {
+                localEndpointText_ = bindText_.isEmpty() ? QStringLiteral("0.0.0.0:49000") : bindText_;
+                runtimeStarted_ = true;
+                completeCreatorBootstrap();
+            } else startRunner(reserveCreatorEndpoint());
         } else {
             writeConsoleLine(QStringLiteral("Mode: join"));
-            reserveJoinEndpoint();
+            if (runtimeOptions_.connection_strategy == jam2::ConnectionStrategy::Jam2Server) localEndpointText_ = bindText_.isEmpty() ? QStringLiteral("0.0.0.0:49000") : bindText_;
+            else reserveJoinEndpoint();
             emitStartup(QStringLiteral("connecting"));
             connectCoordinator();
         }
@@ -1234,7 +1243,7 @@ private:
                 jam2::endpoint_to_string(*startup.public_candidate));
         }
         runtimeStarted_ = true;
-        if (creator_) {
+        if (creator_ && runtimeOptions_.connection_strategy != jam2::ConnectionStrategy::Jam2Server) {
             completeCreatorBootstrap();
         } else if (sessionController_.snapshot().networkAttachmentReady &&
                    udpMeshActive_) {
@@ -1249,6 +1258,8 @@ private:
         }
         const jam2::Endpoint local = jam2::parse_endpoint(localEndpointText_.toStdString());
         QString advertisedText = !publicCandidateText_.isEmpty() ? publicCandidateText_ : publicEndpointText_;
+        if (runtimeOptions_.connection_strategy == jam2::ConnectionStrategy::Jam2Server)
+            advertisedText = QString::fromStdString(jam2::endpoint_to_string(runtimeOptions_.rendezvous_server));
         if (advertisedText.isEmpty()) {
             QString host = QString::fromStdString(local.host);
             if (host == QStringLiteral("0.0.0.0") || host == QStringLiteral("::")) {
@@ -1276,6 +1287,8 @@ private:
         controlConfig.heartbeatMissLimit = debugNetwork_
             .value(QStringLiteral("heartbeat_miss_limit"))
             .toInt(SharedSessionController::kDefaultHeartbeatMissLimit);
+        controlConfig.strategy = runtimeOptions_.connection_strategy;
+        controlConfig.rendezvousServer = runtimeOptions_.rendezvous_server;
         if (!sessionController_.startCreator(controlConfig)) {
             writeConsoleLine(QStringLiteral("TCP coordinator listen failed: ") + sessionController_.errorString(), true);
             finish(2);
@@ -1284,8 +1297,11 @@ private:
         controlStarted_ = true;
         const jam2::Endpoint advertised = jam2::parse_endpoint(advertisedText.toStdString());
         session_.endpoint = advertised;
+        session_.strategy = runtimeOptions_.connection_strategy;
         connectionUrl_ = QString::fromStdString(jam2::make_jam_url(session_));
-        writeConsoleLine(QStringLiteral("TCP coordinator: 0.0.0.0:%1").arg(local.port));
+        writeConsoleLine(runtimeOptions_.connection_strategy == jam2::ConnectionStrategy::Jam2Server
+            ? QStringLiteral("UDP rendezvous: %1").arg(advertisedText)
+            : QStringLiteral("TCP coordinator: 0.0.0.0:%1").arg(local.port));
         writeConsoleLine(QStringLiteral("Connection string:"));
         writeConsoleLine(connectionUrl_);
         writeConsoleLine(QStringLiteral("Waiting for peers..."));
@@ -1319,7 +1335,7 @@ private:
     void handleClientEvent(const jam2::control_protocol::TransportEvent& event)
     {
         using jam2::control_protocol::TransportEventType;
-        writeConsoleLine(QStringLiteral("TCP control: ") + event.detail);
+        writeConsoleLine((runtimeOptions_.connection_strategy == jam2::ConnectionStrategy::Jam2Server ? QStringLiteral("UDP control: ") : QStringLiteral("TCP control: ")) + event.detail);
         if (event.type == TransportEventType::SessionEnded) {
             controlEndReason_ = event.detail;
             controlEndFailure_ = event.failure;
@@ -1361,6 +1377,7 @@ private:
         controlConfig.heartbeatMissLimit = debugNetwork_
             .value(QStringLiteral("heartbeat_miss_limit"))
             .toInt(SharedSessionController::kDefaultHeartbeatMissLimit);
+        controlConfig.strategy = session_.strategy;
         (void)sessionController_.startJoiner(controlConfig);
     }
 
@@ -1370,7 +1387,9 @@ private:
             return;
         }
         joinedStartupEmitted_ = true;
-        writeConsoleLine(QStringLiteral("TCP bootstrap complete; direct UDP mesh active."));
+        writeConsoleLine(runtimeOptions_.connection_strategy == jam2::ConnectionStrategy::Jam2Server
+            ? QStringLiteral("UDP multiplex bootstrap complete; direct UDP mesh active.")
+            : QStringLiteral("TCP bootstrap complete; direct UDP mesh active."));
         emitStartup(QStringLiteral("connected"));
     }
 
@@ -1427,6 +1446,7 @@ private:
         finishing_ = true;
         exitOverride_ = code;
         finalControlSnapshot_ = sessionController_.snapshot();
+        finalMultiplexDiagnostics_ = sessionController_.multiplexDiagnostics();
         hasFinalControlSnapshot_ = true;
         sessionController_.close();
         if (runtime_.isNetworkRunning()) {
@@ -1443,6 +1463,7 @@ private:
     {
         if (!hasFinalControlSnapshot_) {
             finalControlSnapshot_ = sessionController_.snapshot();
+            finalMultiplexDiagnostics_ = sessionController_.multiplexDiagnostics();
             hasFinalControlSnapshot_ = true;
         }
         sessionController_.close();
@@ -1495,6 +1516,7 @@ private:
                 : QJsonValue(QString::number(controlSnapshot.localPeerId))},
             {QStringLiteral("events"), automationTrace_},
             {QStringLiteral("event_trace_drops"), static_cast<qint64>(automationTraceDrops_)},
+            {QStringLiteral("udp_multiplex"), finalMultiplexDiagnostics_},
             {QStringLiteral("heartbeat_interval_ms"), controlSnapshot.heartbeatIntervalMs},
             {QStringLiteral("heartbeat_miss_limit"), controlSnapshot.heartbeatMissLimit},
             {QStringLiteral("heartbeat_missed"), controlSnapshot.heartbeatMissed},
@@ -1575,6 +1597,7 @@ private:
     jam2::control_protocol::TransportFailure controlEndFailure_ =
         jam2::control_protocol::TransportFailure::None;
     SharedSessionController::Snapshot finalControlSnapshot_;
+    QJsonObject finalMultiplexDiagnostics_;
     bool hasFinalControlSnapshot_ = false;
     int waitMs_ = 0;
     int sessionPeerLimit_ = 0;

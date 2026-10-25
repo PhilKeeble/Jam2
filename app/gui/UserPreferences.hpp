@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QString>
+#include "common.hpp"
 #include "RecordingCalibrationProfile.hpp"
 
 struct AudioDevicePreference {
@@ -49,6 +50,8 @@ struct RuntimePreference {
 };
 
 struct CreatePreference {
+    jam2::ConnectionStrategy strategy = jam2::ConnectionStrategy::Jam2Server;
+    jam2::Endpoint rendezvousServer{"jam2gether.com", 40404}; // In-memory test/CLI override; the GUI uses the default.
     QString bindHost = QStringLiteral("0.0.0.0");
     int port = 49000;
     QString publicHost;

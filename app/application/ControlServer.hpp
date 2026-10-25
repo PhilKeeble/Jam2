@@ -46,6 +46,8 @@ public:
     ~ControlServer() override;
 
     bool listen(quint16 port, const QString& sessionHex, const QString& keyHex);
+    bool listenViaTransport(const QString& sessionHex, const QString& keyHex);
+    void acceptTransport(const jam2::application::ControlConnection::Pointer& connection);
     void close();
     void send(const QJsonObject& message);
     bool sendTo(const QString& token, const QJsonObject& message, bool closeAfterWrite = false);
@@ -70,7 +72,7 @@ public:
 
 private:
     struct Peer {
-        jam2::application::NativeTcpConnection::Pointer connection;
+        jam2::application::ControlConnection::Pointer connection;
         std::unique_ptr<QTimer> authenticationTimer;
         std::unique_ptr<QTimer> frameTimer;
         QByteArray buffer;
@@ -90,7 +92,8 @@ private:
 
     using PeerHandle = std::shared_ptr<Peer>;
 
-    void acceptPeer(const jam2::application::NativeTcpConnection::Pointer& connection);
+    bool prepareSession(const QString& sessionHex, const QString& keyHex);
+    void acceptPeer(const jam2::application::ControlConnection::Pointer& connection);
     void disconnectPeer(const PeerHandle& peer, const QString& detail = QString());
     void readPeer(const PeerHandle& peer);
     void handleHandshake(const PeerHandle& peer, const QJsonObject& message);
@@ -105,7 +108,7 @@ private:
         bool abort = false);
     void publishEvent(jam2::control_protocol::TransportEvent event);
     PeerHandle findPeer(
-        const jam2::application::NativeTcpConnection::Pointer& connection) const;
+        const jam2::application::ControlConnection::Pointer& connection) const;
     int authenticatedPeerCount() const;
     PeerHandle findAuthenticatedPeer(const QString& token, bool assetChannel) const;
     int pendingPeerCount() const;
@@ -115,6 +118,7 @@ private:
     jam2::application::NativeTcpListener server_;
     QList<PeerHandle> peers_;
     quint64 listenGeneration_ = 0;
+    bool transportListening_ = false;
     QString sessionHex_;
     QByteArray masterKey_;
     QElapsedTimer authenticationFailureWindow_;

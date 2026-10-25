@@ -290,6 +290,7 @@ public:
         std::uint64_t timeout_us,
         RealtimeWakeSignal* wake_signal = nullptr);
     protocol::ParseResult parse(std::span<const std::uint8_t> packet) const noexcept;
+    void setDatagramTransport(std::shared_ptr<NetworkDatagramTransport> transport);
     void close() noexcept;
 
 private:

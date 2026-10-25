@@ -46,6 +46,11 @@ public:
         const QString& meshPeerToken = QString(),
         const QString& meshUdpEndpoint = QString(),
         Channel channel = Channel::Control);
+    void connectViaTransport(
+        const jam2::application::ControlConnection::Pointer& connection,
+        const QString& sessionHex, const QString& keyHex,
+        const QString& meshPeerToken, const QString& meshUdpEndpoint,
+        Channel channel = Channel::Control);
     void close();
     bool send(const QJsonObject& message);
     bool sendBinary(const QByteArray& payload);
@@ -64,14 +69,16 @@ private:
         Authenticated,
     };
 
+    bool prepareConnection(const QString& sessionHex, const QString& keyHex,
+        const QString& meshPeerToken, const QString& meshUdpEndpoint, Channel channel);
     void installConnection(
-        const jam2::application::NativeTcpConnection::Pointer& connection,
+        const jam2::application::ControlConnection::Pointer& connection,
         quint64 generation);
     void readConnection(
-        const jam2::application::NativeTcpConnection::Pointer& connection,
+        const jam2::application::ControlConnection::Pointer& connection,
         const QByteArray& bytes);
     void connectionClosed(
-        const jam2::application::NativeTcpConnection::Pointer& connection,
+        const jam2::application::ControlConnection::Pointer& connection,
         const QString& detail);
     void handleHandshake(const QJsonObject& message);
     bool writeFrame(const QByteArray& frame);
@@ -82,7 +89,7 @@ private:
         bool retryable = false);
     void publishEvent(jam2::control_protocol::TransportEvent event);
 
-    jam2::application::NativeTcpConnection::Pointer connection_;
+    jam2::application::ControlConnection::Pointer connection_;
     jam2::application::NativeTcpConnector connector_;
     quint64 connectionGeneration_ = 0;
     QTimer authenticationTimer_;
