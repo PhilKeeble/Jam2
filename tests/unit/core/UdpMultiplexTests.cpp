@@ -133,6 +133,10 @@ void boundedTransportWake()
     jam2::NetworkRuntime native;
     jam2::RealtimeWakeSignal queued, capture;
     queued.requestWake(); capture.requestWake();
+    queued.waitFor(1);
+    queued.waitFor(1, &capture);
+    require(queued.consumptionCount() == 0 && capture.consumptionCount() == 0,
+        "microsecond wait timeout consumed an unsignalled wake");
     capture.signal(123);
     queued.waitFor(1000000, &capture);
     require(capture.consumptionCount() == 1 && capture.signalCount() == 1,

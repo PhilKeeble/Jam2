@@ -492,7 +492,9 @@ void RealtimeWakeSignal::waitFor(std::uint64_t timeout_us, RealtimeWakeSignal* a
     FD_SET(read_handle_, &reads);
     int maximum = read_handle_;
     if (additional) { FD_SET(additional->read_handle_, &reads); maximum = (std::max)(maximum, additional->read_handle_); }
-    timeval timeout{static_cast<long>(timeout_us / 1000000), static_cast<long>(timeout_us % 1000000)};
+    timeval timeout{};
+    timeout.tv_sec = static_cast<decltype(timeout.tv_sec)>(timeout_us / 1000000ULL);
+    timeout.tv_usec = static_cast<decltype(timeout.tv_usec)>(timeout_us % 1000000ULL);
     const int result = select(maximum + 1, &reads, nullptr, nullptr, &timeout);
     if (result < 0 && errno != EINTR) throw std::runtime_error("transport wake wait failed: " + socket_error_text());
     if (result > 0) {
