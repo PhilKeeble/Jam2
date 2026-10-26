@@ -2,9 +2,12 @@
 
 #include <QJsonObject>
 
-// An Idea edit can cross intervening track-only edits without overwriting a
-// concurrent Idea or section/timing change.
-bool canRebaseIdeaOverTrackEdits(const QJsonObject& baseSong, const QJsonObject& currentSong);
+enum class LooperConflictPolicy { KeepCurrent, LatestReceived };
+
+// Legacy rebasing permits intervening track-only edits. Server generated-Idea
+// operations replace their declared scope atomically in later receive order.
+bool canRebaseIdeaOverTrackEdits(const QJsonObject& baseSong, const QJsonObject& currentSong,
+    LooperConflictPolicy policy = LooperConflictPolicy::KeepCurrent);
 
 // Three-way reconciliation for concurrent Track-lane metadata proposals. The
 // base is the authoritative model both edits started from, current is the
@@ -14,4 +17,5 @@ QJsonObject mergeConcurrentLooperMetadata(
     const QJsonObject& currentSong,
     const QJsonObject& proposedSong,
     int* mergedChanges = nullptr,
-    int* conflicts = nullptr);
+    int* conflicts = nullptr,
+    LooperConflictPolicy policy = LooperConflictPolicy::KeepCurrent);

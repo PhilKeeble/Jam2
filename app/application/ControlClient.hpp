@@ -2,6 +2,7 @@
 
 #include "ControlProtocol.hpp"
 #include "NativeTcpTransport.hpp"
+#include "ServerControlWire.hpp"
 
 #include <QJsonObject>
 #include <QElapsedTimer>
@@ -34,6 +35,7 @@ public:
         quint64 largeJsonMessagesReceived = 0;
         quint64 largeJsonRawBytesSent = 0;
         quint64 largeJsonCompressedBytesSent = 0;
+        jam2::application::server_wire::Stats serverWire;
     };
 
     explicit ControlClient(QObject* parent = nullptr);
@@ -57,9 +59,10 @@ public:
     bool sendBinary(const QByteArray& payload);
     bool canQueue(qint64 additionalBytes) const;
     bool isConnected() const;
-    Stats stats() const { return stats_; }
+    Stats stats() const;
 
     std::function<void(const QJsonObject&)> onMessage;
+    std::function<jam2::application::server_wire::DispatchDecision(const QJsonObject&)> validateServerMessage;
     std::function<void(const QByteArray&)> onBinaryMessage;
     std::function<void(const jam2::control_protocol::TransportEvent&)> onEvent;
 
@@ -82,6 +85,7 @@ private:
         const jam2::application::ControlConnection::Pointer& connection,
         const QString& detail);
     void handleHandshake(const QJsonObject& message);
+    void retireServerWire();
     bool writeFrame(const QByteArray& frame);
     void reject(
         const QString& reason,
@@ -91,6 +95,7 @@ private:
     void publishEvent(jam2::control_protocol::TransportEvent event);
 
     jam2::application::ControlConnection::Pointer connection_;
+    std::shared_ptr<jam2::application::server_wire::Channel> serverWire_;
     jam2::application::NativeTcpConnector connector_;
     quint64 connectionGeneration_ = 0;
     QTimer authenticationTimer_;

@@ -52,6 +52,8 @@ void testFourPeerBarrierSnapshot()
     require(!coordinator.markHostReady(0) && coordinator.markHostReady(1) &&
             !coordinator.readyToCommit(),
         "host readiness must match the prepared bank and still wait for peers");
+    require(coordinator.readyToCommit(jam2::gui::BankReadinessPolicy::LocalReady),
+        "Server bank preparation cannot be vetoed by three missing readiness replies");
     require(coordinator.markPeerReady(
                 1, QStringLiteral("stale"), QStringLiteral("peer-2"),
                 QStringLiteral("creator")) == SharedBankReadyResult::Stale &&

@@ -21,6 +21,36 @@
 #include <stdexcept>
 #include <vector>
 
+QJsonObject ServerSongProposalStaging::base(const QJsonObject& applied,
+    quint64 authorityRevision, quint64 validationGeneration) const
+{
+    return !song_.isEmpty() && authorityRevision == authorityRevision_ &&
+        validationGeneration == validationGeneration_ ? song_ : applied;
+}
+
+void ServerSongProposalStaging::stage(const QJsonObject& composed,
+    quint64 authorityRevision, quint64 validationGeneration, SharedSongScope scope)
+{
+    if (song_.isEmpty() || authorityRevision != authorityRevision_ ||
+        validationGeneration == 0 || validationGeneration - 1 != validationGeneration_) scopes_.clear();
+    if (!scopes_.contains(scope)) scopes_.append(scope);
+    song_ = composed;
+    authorityRevision_ = authorityRevision;
+    validationGeneration_ = validationGeneration;
+}
+
+QVector<SharedSongScope> ServerSongProposalStaging::scopes(quint64 authorityRevision,
+    quint64 validationGeneration) const
+{
+    return !song_.isEmpty() && authorityRevision == authorityRevision_ &&
+        validationGeneration == validationGeneration_ ? scopes_ : QVector<SharedSongScope>{};
+}
+
+void ServerSongProposalStaging::reject(quint64 validationGeneration)
+{
+    if (validationGeneration == validationGeneration_) song_ = {};
+}
+
 TrackReferenceMetadata TrackReferenceMetadata::fromJson(const QJsonObject& object)
 {
     return {object.value(QStringLiteral("reference_kind")).toString(),

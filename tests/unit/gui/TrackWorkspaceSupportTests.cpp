@@ -783,6 +783,27 @@ int main(int argc, char** argv)
     try {
         QTemporaryDir root = makeRoot();
         testSharedReferenceClassification();
+        ServerSongProposalStaging proposals;
+        const QJsonObject applied{{"idea", "old"}, {"tracks", "old"}};
+        auto idea = applied; idea["idea"] = "cleared";
+        proposals.stage(idea, 12, 41, SharedSongScope::IdeaFull);
+        auto tracks = proposals.base(applied, 12, 41); tracks["tracks"] = "removed-reference";
+        proposals.stage(tracks, 12, 42);
+        proposals.reject(41);
+        require(proposals.scopes(12, 42) == QVector<SharedSongScope>{SharedSongScope::IdeaFull, SharedSongScope::Tracks},
+            "superseding validation lost an earlier scope's required publication");
+        require(proposals.base(applied, 12, 42).value("idea") == "cleared" &&
+            proposals.base(applied, 12, 42).value("tracks") == "removed-reference",
+            "a later track scope or stale completion discarded the pending Idea edit");
+        require(proposals.base(applied, 13, 42) == applied &&
+            proposals.base(applied, 12, 43) == applied,
+            "committed or cancelled proposal leaked into a different authority/generation");
+        proposals.reject(42);
+        require(proposals.base(applied, 12, 42) == applied,
+            "failed asset validation retained its staged proposal");
+        proposals.stage(applied, 13, 43);
+        require(proposals.scopes(13, 43) == QVector<SharedSongScope>{SharedSongScope::Tracks},
+            "a committed or rejected scope leaked into a new proposal");
         testPendingWavPresentation();
         testMetadataAndRejection(root.path());
         testTrackSidecarJson(root.path());

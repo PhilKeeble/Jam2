@@ -135,11 +135,12 @@ bool SharedBankLaunchCoordinator::removeExpectedPeer(const QString& peerToken)
     return state_.expectedPeerTokens.remove(peerToken);
 }
 
-bool SharedBankLaunchCoordinator::readyToCommit() const noexcept
+bool SharedBankLaunchCoordinator::readyToCommit(BankReadinessPolicy policy) const noexcept
 {
     if (!state_.active() || !state_.hostReady) {
         return false;
     }
+    if (policy == BankReadinessPolicy::LocalReady) return true;
     return std::all_of(
         state_.expectedPeerTokens.cbegin(),
         state_.expectedPeerTokens.cend(),

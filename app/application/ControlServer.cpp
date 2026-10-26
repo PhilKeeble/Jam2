@@ -50,7 +50,17 @@ ControlServer::Stats ControlServer::stats() const
 {
     Stats snapshot = stats_;
     snapshot.pendingCapRejects += server_.pendingDeliveryRejects();
+    for (const auto& peer : peers_) if (peer && peer->serverWire)
+        jam2::application::server_wire::accumulate(snapshot.serverWire, peer->serverWire->stats());
     return snapshot;
+}
+QJsonArray ControlServer::serverWireDiagnostics() const
+{
+    QJsonArray result;
+    for (const auto& peer : peers_) if (peer && peer->serverWire) result.append(QJsonObject{
+        {QStringLiteral("peer"), peer->token}, {QStringLiteral("asset_channel"), peer->assetChannel},
+        {QStringLiteral("stats"), jam2::application::server_wire::diagnostics(peer->serverWire->stats())}});
+    return result;
 }
 
 bool ControlServer::prepareSession(const QString& sessionHex, const QString& keyHex)
@@ -140,6 +150,13 @@ void ControlServer::close()
         if (peer->frameTimer) {
             peer->frameTimer->stop();
         }
+        if (peer->serverWire) {
+            auto value = peer->serverWire->stats();
+            value.unresolvedReceipts += value.pendingReceipts;
+            value.pendingReceipts = 0; value.queuedBytes = 0;
+            jam2::application::server_wire::accumulate(stats_.serverWire, value);
+            peer->serverWire.reset();
+        }
         if (peer->connection) {
             peer->connection->close();
         }
@@ -152,6 +169,16 @@ void ControlServer::send(const QJsonObject& message)
     const QList<PeerHandle> peers = peers_;
     for (const PeerHandle& peer : peers) {
         if (peer && peer->connection && peer->authenticated && !peer->assetChannel) {
+            if (const auto wire = peer->serverWire) {
+                const auto before = wire->stats().queueRejects;
+                if (!wire->send(message) && wire->stats().queueRejects > before) {
+                    // A bounded slow peer cannot silently miss the final
+                    // authoritative update. Repair its logical stream so the
+                    // existing authentication path publishes a fresh checkpoint.
+                    peer->connection->close();
+                }
+                continue;
+            }
             const AuthenticatedJsonFrames encoded =
                 encodeAuthenticatedJsonFrames(message, peer->sendKey, peer->sendSequence);
             qint64 wireBytes = 0;
@@ -182,6 +209,17 @@ bool ControlServer::sendTo(const QString& token, const QJsonObject& message, boo
     for (const PeerHandle& peer : peers_) {
         if (!peer || !peer->authenticated || peer->assetChannel || peer->token != token) {
             continue;
+        }
+        if (const auto wire = peer->serverWire) {
+            if (message.value(QStringLiteral("type")) == QStringLiteral("debug.lifecycle.disconnect")) {
+                peer->connection->close(); return true;
+            }
+            const bool sent = wire->send(message);
+            if (sent && closeAfterWrite) {
+                const auto connection = peer->connection;
+                wire->closeAfterDrain([connection] { connection->write({}, true); });
+            }
+            return sent;
         }
         const AuthenticatedJsonFrames encoded =
             encodeAuthenticatedJsonFrames(message, peer->sendKey, peer->sendSequence);
@@ -216,6 +254,7 @@ bool ControlServer::sendBinaryTo(const QString& token, const QByteArray& payload
         if (!peer || !peer->authenticated || peer->assetChannel || peer->token != token) {
             continue;
         }
+        if (peer->serverWire) return peer->serverWire->sendBinary(payload);
         const QByteArray frame = encodeAuthenticatedBinary(payload, peer->sendKey, peer->sendSequence);
         if (frame.isEmpty() || !writeFrame(peer, frame)) {
             return false;
@@ -232,6 +271,7 @@ bool ControlServer::sendAssetTo(const QString& token, const QJsonObject& message
     if (!peer) {
         return false;
     }
+    if (peer->serverWire) return peer->serverWire->send(message);
     const AuthenticatedJsonFrames encoded =
         encodeAuthenticatedJsonFrames(message, peer->sendKey, peer->sendSequence);
     qint64 wireBytes = 0;
@@ -255,6 +295,7 @@ bool ControlServer::sendAssetBinaryTo(const QString& token, const QByteArray& pa
     if (!peer) {
         return false;
     }
+    if (peer->serverWire) return peer->serverWire->sendAsset(payload);
     const QByteArray frame = encodeAuthenticatedBinary(payload, peer->sendKey, peer->sendSequence);
     if (frame.isEmpty() || !canQueueAssetTo(token, frame.size()) || !writeFrame(peer, frame)) {
         return false;
@@ -435,12 +476,15 @@ void ControlServer::acceptPeer(const ControlConnection::Pointer& connection)
                 true);
         }
     });
-    const QByteArray challenge = encodeHandshake(QJsonObject{
+    QJsonObject challengeMessage{
         {QStringLiteral("type"), QStringLiteral("hello.challenge")},
         {QStringLiteral("version"), kControlProtocolVersion},
         {QStringLiteral("session"), sessionHex_},
         {QStringLiteral("server_nonce"), encodeHex(peer->serverNonce)},
-    });
+    };
+    if (connection->transport() == jam2::application::ControlTransport::ReliableUdp)
+        challengeMessage.insert(QStringLiteral("server_wire"), jam2::application::server_wire::kVersion);
+    const QByteArray challenge = encodeHandshake(challengeMessage);
     if (!writeFrame(peer, challenge)) {
         return;
     }
@@ -487,6 +531,13 @@ void ControlServer::disconnectPeer(const PeerHandle& peer, const QString& detail
         const QString token = peer->token;
         const bool wasAuthenticated = peer->authenticated;
         const bool wasAssetChannel = peer->assetChannel;
+        if (peer->serverWire) {
+            auto value = peer->serverWire->stats();
+            value.unresolvedReceipts += value.pendingReceipts;
+            value.pendingReceipts = 0; value.queuedBytes = 0;
+            jam2::application::server_wire::accumulate(stats_.serverWire, value);
+            peer->serverWire.reset();
+        }
         const bool disconnectedBeforeAuthenticationInput =
             !wasAuthenticated && !peer->receivedAnyInput;
         if (peer->authenticationTimer) {
@@ -609,6 +660,14 @@ void ControlServer::readPeer(const PeerHandle& peer)
             if (!connection || !findPeer(connection) || !connection->isConnected()) {
                 return;
             }
+        } else if (const auto wire = peer->serverWire) {
+            if (!wire->receive(body, error)) {
+                ++stats_.sequenceOrTagRejects;
+                rejectPeer(peer, QStringLiteral("Server binary control rejected: ") + error,
+                    TransportFailure::AuthenticatedFrameRejected, true);
+                return;
+            }
+            if (!peer->connection || !findPeer(peer->connection)) return;
         } else {
             AuthenticatedPayload payload;
             if (!decodeAuthenticated(body, peer->receiveKey, peer->receiveSequence, payload, error)) {
@@ -693,6 +752,7 @@ void ControlServer::readPeer(const PeerHandle& peer)
 
 void ControlServer::handleHandshake(const PeerHandle& peer, const QJsonObject& message)
 {
+    const bool binary = peer->connection && peer->connection->transport() == jam2::application::ControlTransport::ReliableUdp;
     const QString type = message.value(QStringLiteral("type")).toString();
     const QString session = message.value(QStringLiteral("session")).toString().toLower();
     const QByteArray clientNonce = decodeHex(message.value(QStringLiteral("client_nonce")).toString(), 16);
@@ -708,7 +768,8 @@ void ControlServer::handleHandshake(const PeerHandle& peer, const QJsonObject& m
         session != sessionHex_ || clientNonce.size() != 16 || clientProof.size() != 16 ||
         !tokenValid || !validUdpEndpointText(udpEndpoint) ||
         (channel != QStringLiteral("control") && !assetChannel) ||
-        (assetChannel && udpEndpoint.size() > 255)) {
+        (assetChannel && udpEndpoint.size() > 255) ||
+        (binary && message.value(QStringLiteral("server_wire")).toInt() != jam2::application::server_wire::kVersion)) {
         noteAuthenticationReject();
         rejectPeer(
             peer,
@@ -749,6 +810,7 @@ void ControlServer::handleHandshake(const PeerHandle& peer, const QJsonObject& m
     }
     peer->transcript = makeTranscript(
         sessionHex_, peer->serverNonce, clientNonce, token, udpEndpoint, channel);
+    if (binary) peer->transcript += QByteArrayLiteral("jam2-server-wire-1");
     const QByteArray clientProofDomain = assetChannel
         ? QByteArrayLiteral("jam2-asset-client-proof")
         : QByteArrayLiteral("jam2-control-client-proof");
@@ -793,6 +855,31 @@ void ControlServer::handleHandshake(const PeerHandle& peer, const QJsonObject& m
                      : QByteArrayLiteral("jam2-control-s2c"),
         peer->transcript);
     peer->authenticated = true;
+    if (binary) {
+        const std::weak_ptr<Peer> weak = peer;
+        peer->serverWire = std::make_shared<jam2::application::server_wire::Channel>(peer->sendKey, peer->receiveKey,
+            [weak](const QByteArray& bytes) { const auto p = weak.lock(); return p && p->connection && p->connection->isConnected() && p->connection->write(bytes); },
+            [weak] { const auto p = weak.lock(); return p && p->connection ? p->connection->bytesToWrite() : qint64{256 * 1024}; });
+        peer->serverWire->onMessage = [this, weak](const QJsonObject& value) {
+            if (const auto p = weak.lock()) {
+                if (p->assetChannel) { if (onAssetMessage) onAssetMessage(p->token, value); }
+                else if (onMessage) onMessage(p->token, value);
+            }
+        };
+        peer->serverWire->validateMessage = [this, weak](const QJsonObject& value) {
+            const auto p = weak.lock();
+            return p && !p->assetChannel && validateServerMessage ? validateServerMessage(value) : jam2::application::server_wire::DispatchDecision{};
+        };
+        peer->serverWire->onAsset = [this, weak](const QByteArray& value) {
+            if (const auto p = weak.lock()) {
+                if (p->assetChannel) { if (onAssetBinaryMessage) onAssetBinaryMessage(p->token, value); }
+                else if (onBinaryMessage) onBinaryMessage(p->token, value);
+            }
+        };
+        peer->serverWire->onFailure = [this, weak](const QString& error) {
+            if (const auto p = weak.lock()) rejectPeer(p, error, TransportFailure::AuthenticatedFrameRejected, true);
+        };
+    }
     peer->authenticationTimer->stop();
     if (replacedAssetPeer && replacedAssetPeer->connection &&
         findPeer(replacedAssetPeer->connection)) {

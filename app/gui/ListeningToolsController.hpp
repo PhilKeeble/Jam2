@@ -13,6 +13,7 @@
 
 #include <functional>
 #include <optional>
+#include <map>
 
 namespace jam2::gui {
 
@@ -31,7 +32,7 @@ struct ListeningToolsSettings {
 
 QJsonObject listeningSettingsJson(const ListeningToolsSettings& settings);
 bool parseListeningSettings(const QJsonObject& object, ListeningToolsSettings& settings, QString& error);
-bool validateListeningMessage(const QJsonObject& message, QString& error);
+bool validateListeningMessage(const QJsonObject& message, QString& error, bool serverBinary = false);
 
 // GUI/control-thread owner. Preparation runs through the existing file worker;
 // only fixed-shape staged swaps and tempo commands enter the audio engine.
@@ -42,6 +43,7 @@ public:
         bool sync = true;
         bool network = false;
         bool creator = true;
+        bool serverBinary = false;
         bool engineRunning = false;
         bool protectedRecording = false;
         bool transportChanging = false;
@@ -95,6 +97,25 @@ public:
     bool pendingForBank(int bank) const noexcept { return pending() && bank_ == bank; }
     QJsonObject stats() const;
 private:
+    struct ServerSelection {
+        ListeningToolsSettings settings;
+        int revision = 0, bank = 0;
+        jam2::PlaybackTempo tempo;
+        std::uint64_t target = 0, epoch = 0;
+        double epochPosition = 0.0, sourceSeconds = 0.0;
+        bool playing = false;
+    };
+    bool publishServerSelection(quint8 changedGroups, const ListeningToolsSettings& proposed);
+    void adoptServerSelection(const ServerSelection& selection);
+    QJsonObject serverSelectionMessage(const ServerSelection& selection) const;
+    std::optional<ServerSelection> serverSelection_, deferredServerSelection_;
+    quint64 serverLateReschedules_ = 0;
+    quint8 serverEditGroups_ = 0;
+    quint64 serverPeerFailures_ = 0;
+    struct ServerApplication { int revision = 0; std::uint64_t frame = 0; };
+    std::optional<ServerApplication> pendingServerApplication_;
+    std::optional<ServerApplication> lastServerApplication_;
+    std::map<QString, ServerApplication> serverApplications_;
     void request();
     void begin(int revision, ListeningToolsSettings settings, int bank, bool shared);
     void ready();

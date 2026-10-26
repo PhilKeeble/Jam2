@@ -484,7 +484,7 @@ bool jam2::application::isArrangementControlMessageType(const QString& type) noe
 
 bool jam2::application::validateControlMessage(
     const QJsonObject& message,
-    QString& reason)
+    QString& reason, bool serverBinary)
 {
     const QString type = message.value(QStringLiteral("type")).toString();
     if (type.isEmpty() || type.size() > 64) {
@@ -579,7 +579,7 @@ bool jam2::application::validateControlMessage(
             ? true : (reason = QStringLiteral("session error text is invalid"), false);
     }
     if (type.startsWith(QStringLiteral("jam.listening."))) {
-        return jam2::gui::validateListeningMessage(message, reason);
+        return jam2::gui::validateListeningMessage(message, reason, serverBinary);
     }
     if (type == QStringLiteral("jam.sync.set") ||
         type == QStringLiteral("jam.sync.request")) {
@@ -890,10 +890,10 @@ bool jam2::application::validateControlMessage(
 
 jam2::application::ControlMessageDecision jam2::application::evaluateControlMessage(
     const QJsonObject& message,
-    ControlMessageSource source)
+    ControlMessageSource source, bool serverBinary)
 {
     ControlMessageDecision decision;
-    if (!validateControlMessage(message, decision.reason)) {
+    if (!validateControlMessage(message, decision.reason, serverBinary)) {
         return decision;
     }
 
@@ -919,7 +919,8 @@ jam2::application::ControlMessageDecision jam2::application::evaluateControlMess
         type == QStringLiteral("looper.recording.group.recover") ||
         type == QStringLiteral("looper.recording.resync.state");
 
-    const bool peerOnly = type == QStringLiteral("session.udp.recover") ||
+    const bool peerOnly = (serverBinary && type == QStringLiteral("jam.listening.applied")) ||
+        type == QStringLiteral("session.udp.recover") ||
         type == QStringLiteral("session.heartbeat.ack") ||
         type == QStringLiteral("session.endpoint.update") ||
         type == QStringLiteral("jam.sync.request") ||

@@ -897,6 +897,22 @@ int main(int argc, char** argv)
 {
     try {
         QCoreApplication application(argc, argv);
+        using namespace jam2::gui;
+        require(recording_group_can_start(true, false, 3, RecordingReadinessPolicy::ReadyPeers) &&
+            !recording_group_can_start(true, false, 3, RecordingReadinessPolicy::AllArmedPeers) &&
+            !recording_group_can_start(true, true, 0, RecordingReadinessPolicy::ReadyPeers),
+            "Server recording permits three ready peers while one is unresponsive; legacy barrier stays intact");
+        PlaybackGrid::Position serverPosition;
+        serverPosition.engineAnchored = true; serverPosition.running = true;
+        serverPosition.sampleRate = 48000; serverPosition.secondsPerBeat = 0.5;
+        serverPosition.absoluteBeat = 20; serverPosition.currentFrame = serverPosition.rawCurrentFrame = 480000;
+        const auto lateSchedule = server_recording_schedule(serverPosition, 4, 8, 4);
+        require(lateSchedule && lateSchedule->rescheduled && lateSchedule->countdownBeat > 20 &&
+            lateSchedule->targetBeat - lateSchedule->countdownBeat == 4,
+            "late Server recording moves to a future bar and preserves count-in length");
+        const auto futureSchedule = server_recording_schedule(serverPosition, 24, 28, 4);
+        require(futureSchedule && !futureSchedule->rescheduled && futureSchedule->countdownBeat == 24 && futureSchedule->targetBeat == 28,
+            "on-time Server recording schedule remains unchanged");
         testPureTimingBoundaries();
         testRecordingLatencyLogFields();
         testListeningTempoTransportPosition();

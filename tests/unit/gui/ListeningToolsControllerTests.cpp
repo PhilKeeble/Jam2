@@ -548,10 +548,80 @@ void testStoppedEngineAndDeferredJoin() {
         "late join applies authoritative listening tools after content is ready");
 }
 }
+void testServerLatestMergePartialAndRecordingCatchup()
+{
+    std::array<Harness, 4> peers;
+    for (std::size_t i = 0; i < peers.size(); ++i) {
+        peers[i].state.network = true; peers[i].state.serverBinary = true;
+        peers[i].state.creator = i == 0;
+        peers[i].state.localToken = QStringLiteral("p%1").arg(i);
+        for (int j = 0; j < 4; ++j) if (j != static_cast<int>(i)) peers[i].state.peers.insert(QStringLiteral("p%1").arg(j));
+    }
+    auto& creator = peers[0];
+    creator.state.protectedRecording = true;
+    const auto request = [](int speed, int pitch, int groups) {
+        ListeningToolsSettings settings; settings.speedPpm = speed; settings.pitchCents = pitch;
+        return QJsonObject{{"type", "jam.listening.request"}, {"settings", listeningSettingsJson(settings)}, {"changed_groups", groups}};
+    };
+    QString error;
+    require(validateListeningMessage(request(300000, 0, 1), error, true) &&
+        !validateListeningMessage(request(300000, 0, 1), error),
+        "changed-group requests belong exclusively to Server mode");
+    creator.controller.receive(request(300000, 0, 1), "p1");
+    creator.controller.receive(request(1500000, 0, 1), "p2");
+    creator.controller.receive(request(1000000, 300, 2), "p1");
+    require(creator.commands.empty() && creator.sent.size() == 3 && creator.controller.stats().value("server_deferred_state").toBool(),
+        "a recording creator continues accepting and publishing state without changing its local take");
+    auto latest = creator.sent.back();
+    require(latest.value("settings").toObject().value("speed_ppm").toInt() == 1500000 &&
+        latest.value("settings").toObject().value("pitch_cents").toInt() == 300,
+        "latest received speed wins and independent pitch merges");
+    peers[3].state.protectedRecording = true;
+    for (std::size_t i = 1; i < peers.size(); ++i) peers[i].controller.receive(latest, "p0");
+    peers[1].finish(); peers[2].finish();
+    require(peers[1].controller.appliedSettings().speedPpm == 1500000 && peers[2].applications == 1 && peers[3].commands.empty(),
+        "two peers apply without readiness from either recording peer");
+    peers[3].state.engine.engine_frame = peers[3].state.position.currentFrame = peers[3].state.position.rawCurrentFrame = 480000;
+    peers[3].state.position.absoluteBeat = 20;
+    peers[3].state.protectedRecording = false; peers[3].controller.tick();
+    require(!peers[3].commands.empty() && peers[3].commands.back().frame > 480000 &&
+        peers[3].controller.stats().value("server_late_reschedules").toInteger() == 1,
+        "recording peer catches up at a future beat rather than executing a stale deadline immediately");
+    peers[3].finish(); const auto commands = peers[3].commands.size();
+    peers[3].controller.receive(latest, "p0");
+    require(peers[3].commands.size() == commands, "duplicate authoritative state cannot execute twice");
+    peers[3].controller.tick();
+    require(peers[3].sent.back().value("type").toString() == "jam.listening.applied" &&
+        peers[3].sent.back().value("revision").toInt() == latest.value("revision").toInt(),
+        "recovery of an already applied operation must return its application result without replaying it");
+    creator.state.protectedRecording = false; creator.controller.tick(); creator.finish();
+    require(creator.controller.appliedSettings() == peers[3].controller.appliedSettings(), "recording authority catches up to its committed state");
+    // Explicit group intent handles moving a slider back to its old applied
+    // value even while another value is in flight.
+    creator.controller.receive(request(1000000, 0, 1), "p2");
+    require(creator.sent.back().value("settings").toObject().value("speed_ppm").toInt() == 1000000 &&
+        creator.sent.back().value("settings").toObject().value("pitch_cents").toInt() == 300,
+        "explicit speed reset cannot erase independently committed pitch");
+    Harness policy;
+    policy.state.serverBinary = true; policy.state.network = true; policy.state.peers = {"p1", "p2", "p3"};
+    ListeningToolsSettings half; half.speedPpm = 500000;
+    policy.controller.edit(half, true); policy.finish();
+    policy.state.sync = false; policy.controller.policyChanged(true); policy.finish();
+    policy.state.sync = true; policy.controller.policyChanged(false);
+    policy.sent.push_back(QJsonObject{{"type", "jam.sync.set"}});
+    QCoreApplication::processEvents();
+    require(policy.sent.back().value("settings").toObject().value("speed_ppm").toInt() == 500000 &&
+        policy.sent.back().value("tempo").toObject().value("rate_ppm").toInt() == 500000,
+        "Server sync re-enable commits current creator settings even without a new slider edit");
+    require(policy.sent[policy.sent.size() - 2].value("type").toString() == "jam.sync.set",
+        "Server policy must be published before the listening state it enables");
+}
+
 int main(int argc, char** argv) {
     try {
         QApplication application(argc, argv);
         testStableNumericEdit();
+        testServerLatestMergePartialAndRecordingCatchup();
         testReadinessAndContinuity(); testLocalOnlyAndDisable(); testPreparationErrorsAndStaleResults();
         testResetRetryJoinAndPendingClock();
         testStagedLoadAndRollback(); testValidationAndDialog();

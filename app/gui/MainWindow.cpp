@@ -863,6 +863,7 @@ MainWindow::MainWindow(
         const QString type = message.value(QStringLiteral("type")).toString();
         if (type.startsWith(QStringLiteral("jam.listening."))) {
             if (type != QStringLiteral("jam.listening.cancel") && type != QStringLiteral("jam.listening.reset") &&
+                sessionRuntimeDraft_.configuration.strategy != jam2::ConnectionStrategy::Jam2Server &&
                 deferIncomingControlForLaneRecording(message, sourcePeerToken)) return;
             if (jamSyncAllowsControlMessage(message)) trackWorkspace_.listeningTools.receive(message, sourcePeerToken);
             return;
@@ -6731,7 +6732,9 @@ void MainWindow::handleSharedBankReady(
 
 void MainWindow::maybeCommitSharedBankLaunch()
 {
-    if (!sessionController_.isServer() || !sharedBankLaunch_.readyToCommit()) return;
+    const auto policy = sessionRuntimeDraft_.configuration.strategy == jam2::ConnectionStrategy::Jam2Server
+        ? jam2::gui::BankReadinessPolicy::LocalReady : jam2::gui::BankReadinessPolicy::AllPeers;
+    if (!sessionController_.isServer() || !sharedBankLaunch_.readyToCommit(policy)) return;
 
     const jam2::gui::SharedBankLaunchSnapshot launch = sharedBankLaunch_.take();
     const int bankIndex = launch.bankIndex;
@@ -9455,7 +9458,10 @@ void MainWindow::maybeStartReadyRecordingGroup()
             everyoneReady = false;
         }
     }
-    if (!hasArmedParticipant || !everyoneReady || participants.isEmpty()) return;
+    const auto readinessPolicy = sessionRuntimeDraft_.configuration.strategy == jam2::ConnectionStrategy::Jam2Server
+        ? jam2::gui::RecordingReadinessPolicy::ReadyPeers : jam2::gui::RecordingReadinessPolicy::AllArmedPeers;
+    if (!jam2::gui::recording_group_can_start(hasArmedParticipant, everyoneReady,
+            static_cast<std::size_t>(participants.size()), readinessPolicy)) return;
 
     const PlaybackGrid::Position position = metronomeTransport_.grid().position();
     const int beatsPerBar = qMax(1, currentMetronomePattern().beats_per_bar);
@@ -9532,11 +9538,20 @@ void MainWindow::handleRecordingGroupStart(const QJsonObject& message)
     recordingGroupFinishSent_ = false;
     bool countdownOk = false;
     bool targetOk = false;
-    const quint64 countdownBeat = message.value(
+    quint64 countdownBeat = message.value(
         QStringLiteral("countdown_abs_beat")).toString().toULongLong(&countdownOk);
-    const quint64 targetBeat = message.value(
+    quint64 targetBeat = message.value(
         QStringLiteral("target_abs_beat")).toString().toULongLong(&targetOk);
     const PlaybackGrid::Position position = metronomeTransport_.grid().position();
+    if (countdownOk && targetOk && sessionRuntimeDraft_.configuration.strategy == jam2::ConnectionStrategy::Jam2Server) {
+        const auto recovered = jam2::gui::server_recording_schedule(position, countdownBeat, targetBeat,
+            qMax(1, currentMetronomePattern().beats_per_bar));
+        if (recovered) {
+            countdownBeat = recovered->countdownBeat; targetBeat = recovered->targetBeat;
+            if (recovered->rescheduled) appendLog(QStringLiteral("late Server recording start rescheduled: group=%1 countdown_abs_beat=%2 target_abs_beat=%3")
+                .arg(groupId).arg(countdownBeat).arg(targetBeat));
+        }
+    }
     const std::uint64_t beatFrames = position.sampleRate > 0 &&
             position.secondsPerBeat > 0.0
         ? static_cast<std::uint64_t>(std::llround(
@@ -13479,10 +13494,15 @@ void MainWindow::handleSongSet(
     if (fromPeerProposal) {
         const quint64 currentRevision = sessionController_.snapshot().arrangementRevision;
         if (proposalBaseRevision != currentRevision) {
-            const auto currentSong = songToJson(true);
+            const auto appliedSong = songToJson(true);
+            const auto currentSong = sessionRuntimeDraft_.configuration.strategy == jam2::ConnectionStrategy::Jam2Server
+                ? trackWorkspace_.serverSongProposals.base(appliedSong, currentRevision, songAssetCheckRevision_)
+                : appliedSong;
             if (trackWorkspace_.authoritativeTrackHistory.contains(proposalBaseRevision) &&
                 (songScope == SongSyncScope::Tracks || canRebaseIdeaOverTrackEdits(
-                    trackWorkspace_.authoritativeTrackHistory.value(proposalBaseRevision), currentSong))) {
+                    trackWorkspace_.authoritativeTrackHistory.value(proposalBaseRevision), currentSong,
+                    sessionRuntimeDraft_.configuration.strategy == jam2::ConnectionStrategy::Jam2Server
+                        ? LooperConflictPolicy::LatestReceived : LooperConflictPolicy::KeepCurrent))) {
                 int mergedChanges = 0;
                 int mergeConflicts = 0;
                 QJsonObject rebased = message;
@@ -13492,7 +13512,10 @@ void MainWindow::handleSongSet(
                     currentSong,
                     message.value(QStringLiteral("song")).toObject(),
                     &mergedChanges,
-                    &mergeConflicts) : message.value(QStringLiteral("song")).toObject());
+                    &mergeConflicts,
+                    sessionRuntimeDraft_.configuration.strategy == jam2::ConnectionStrategy::Jam2Server
+                        ? LooperConflictPolicy::LatestReceived : LooperConflictPolicy::KeepCurrent)
+                    : message.value(QStringLiteral("song")).toObject());
                 rebased.insert(QStringLiteral("base_arrangement_revision"),
                     static_cast<qint64>(currentRevision));
                 appendLog(QStringLiteral(
@@ -13656,6 +13679,18 @@ void MainWindow::handleSongSet(
     QJsonObject normalizedSong = hostAuthoritative &&
         trackWorkspace_.stagedHostSongRevision > lastAppliedHostArrangementRevision_
         ? trackWorkspace_.stagedHostSong : songToJson(true);
+    const bool stageServerProposal = fromPeerProposal &&
+        sessionRuntimeDraft_.configuration.strategy == jam2::ConnectionStrategy::Jam2Server;
+    if (stageServerProposal) {
+        const auto appliedSong = normalizedSong;
+        normalizedSong = trackWorkspace_.serverSongProposals.base(appliedSong,
+            sessionController_.snapshot().arrangementRevision, songAssetCheckRevision_);
+        if (songScope == SongSyncScope::Tracks && normalizedSong != appliedSong) {
+            normalizedIncomingSong = mergeConcurrentLooperMetadata(appliedSong,
+                normalizedSong, normalizedIncomingSong, nullptr, nullptr,
+                LooperConflictPolicy::LatestReceived);
+        }
+    }
     if (!reconcileSynchronizedSongStructure(normalizedSong, normalizedIncomingSong)) {
         appendLog(QStringLiteral("rejected shared song with inconsistent section/bank identities"));
         return;
@@ -13778,6 +13813,10 @@ void MainWindow::handleSongSet(
     }
     const QJsonObject song = preserveLocalOnlyLanes(normalizedSong);
     const std::uint64_t checkRevision = ++songAssetCheckRevision_;
+    if (stageServerProposal) {
+        trackWorkspace_.serverSongProposals.stage(song,
+            sessionController_.snapshot().arrangementRevision, checkRevision, songScope);
+    }
     if (hostAuthoritative) {
         trackWorkspace_.stagedHostSong = song;
         trackWorkspace_.stagedHostSongRevision = revision;
@@ -13857,6 +13896,7 @@ void MainWindow::handleSongSet(
                 return;
             }
             if (!assetFailure->isEmpty()) {
+                trackWorkspace_.serverSongProposals.reject(checkRevision);
                 appendLog(QStringLiteral("rejected arrangement asset: ") + *assetFailure);
                 return;
             }
@@ -13993,6 +14033,11 @@ void MainWindow::handleSongSet(
                 if (fromPeerProposal) {
                     appendLog(QStringLiteral("accepted collaborative arrangement edit from peer %1")
                         .arg(sourcePeerToken.left(8)));
+                    const auto scopes = trackWorkspace_.serverSongProposals.scopes(
+                        proposalBaseRevision, checkRevision);
+                    for (const auto scope : scopes) {
+                        if (scope != songScope) sendSongSnapshot(restartTrack, scope);
+                    }
                     sendSongSnapshot(restartTrack, songScope);
                 }
                 // Arrangement validation may have made every asset in an
@@ -14064,6 +14109,11 @@ void MainWindow::applyPendingSongIfAssetsReady()
         if (publishAuthoritative) {
             appendLog(QStringLiteral("accepted collaborative arrangement edit from peer %1 after asset sync")
                 .arg(sourcePeerToken.left(8)));
+            const auto scopes = trackWorkspace_.serverSongProposals.scopes(
+                baseRevision, songAssetCheckRevision_);
+            for (const auto scope : scopes) {
+                if (scope != SongSyncScope::Tracks) sendSongSnapshot(restartTrack, scope);
+            }
             sendSongSnapshot(restartTrack);
         }
         appendLog(QStringLiteral("applied pending looper arrangement after asset sync"));

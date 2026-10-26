@@ -201,10 +201,31 @@ SharedSessionController::SharedSessionController(QObject* parent)
     });
 
     server_.onEvent = [this](const TransportEvent& event) { handleServerEvent(event); };
+    const auto wireDecision = [this](const QJsonObject& message, jam2::application::ControlMessageSource source) {
+        using namespace jam2::application;
+        const auto decision = evaluateControlMessage(message, source, true);
+        if (!decision.accepted) {
+            if (decision.rejection == ControlMessageRejection::Authorization) ++authorizationRejections_;
+            else ++validationRejections_;
+            return server_wire::DispatchDecision{decision.rejection == ControlMessageRejection::Authorization
+                ? server_wire::Rejection::Unauthorized : server_wire::Rejection::InvalidValue, decision.reason};
+        }
+        if (!matchesContractSampleRate(message, contract_.sampleRate)) {
+            ++validationRejections_;
+            return server_wire::DispatchDecision{server_wire::Rejection::InvalidValue, QStringLiteral("WAV sample rate does not match session contract")};
+        }
+        return server_wire::DispatchDecision{};
+    };
+    server_.validateServerMessage = [wireDecision](const QJsonObject& value) {
+        return wireDecision(value, jam2::application::ControlMessageSource::AuthenticatedPeer);
+    };
+    client_.validateServerMessage = [wireDecision](const QJsonObject& value) {
+        return wireDecision(value, jam2::application::ControlMessageSource::Coordinator);
+    };
     server_.onMessage = [this](const QString& token, const QJsonObject& message) {
         const QString type = message.value(QStringLiteral("type")).toString();
         const auto decision = jam2::application::evaluateControlMessage(
-            message, jam2::application::ControlMessageSource::AuthenticatedPeer);
+            message, jam2::application::ControlMessageSource::AuthenticatedPeer, multiplex_ != nullptr);
         if (!decision.accepted) {
             if (decision.rejection == jam2::application::ControlMessageRejection::Authorization) {
                 ++authorizationRejections_;
@@ -516,7 +537,7 @@ QJsonObject SharedSessionController::multiplexDiagnostics() const
         {QStringLiteral("input_deferrals"), static_cast<qint64>(link.inputDeferrals)},
         {QStringLiteral("last_receive_age_ms"), static_cast<qint64>(link.lastReceiveAgeMs)},
         {QStringLiteral("retained_audio_local"), endpoint(link.retainedAudioLocal)}});
-    return {{QStringLiteral("enabled"), multiplex_ != nullptr}, {QStringLiteral("running"), stats.running},
+    QJsonObject result{{QStringLiteral("enabled"), multiplex_ != nullptr}, {QStringLiteral("running"), stats.running},
         {QStringLiteral("registered"), stats.registered}, {QStringLiteral("admission_paused"), stats.admissionPaused},
         {QStringLiteral("pause_confirmed"), stats.pauseConfirmed},
         {QStringLiteral("signal_packets_sent"), static_cast<qint64>(stats.signalPacketsSent)},
@@ -540,6 +561,12 @@ QJsonObject SharedSessionController::multiplexDiagnostics() const
         {QStringLiteral("frame_idle_timeout_ms"), 10000},
         {QStringLiteral("same_socket_recovery_attempts"), 2},
         {QStringLiteral("links"), links}};
+    if (multiplex_) result.insert(QStringLiteral("binary_control"), QJsonObject{
+        {QStringLiteral("server"), jam2::application::server_wire::diagnostics(server_.stats().serverWire)},
+        {QStringLiteral("peer_channels"), server_.serverWireDiagnostics()},
+        {QStringLiteral("client"), jam2::application::server_wire::diagnostics(client_.stats().serverWire)},
+        {QStringLiteral("asset_client"), jam2::application::server_wire::diagnostics(assetClient_.stats().serverWire)}});
+    return result;
 }
 
 bool SharedSessionController::startLocal(const Jam2RuntimeOptions& options)
@@ -868,7 +895,7 @@ bool SharedSessionController::send(const QJsonObject& message)
     const auto source = role_ == Role::Creator
         ? jam2::application::ControlMessageSource::LocalCreator
         : jam2::application::ControlMessageSource::LocalJoiner;
-    const auto decision = jam2::application::evaluateControlMessage(message, source);
+    const auto decision = jam2::application::evaluateControlMessage(message, source, multiplex_ != nullptr);
     if (!decision.accepted) {
         if (decision.rejection == jam2::application::ControlMessageRejection::Authorization) {
             ++authorizationRejections_;
@@ -924,7 +951,7 @@ bool SharedSessionController::sendTo(
                 QStringLiteral("debug.lifecycle.disconnect")
             ? jam2::application::ControlMessageSource::Internal
             : jam2::application::ControlMessageSource::LocalCreator;
-        const auto decision = jam2::application::evaluateControlMessage(message, source);
+        const auto decision = jam2::application::evaluateControlMessage(message, source, multiplex_ != nullptr);
         if (!decision.accepted) {
             if (decision.rejection == jam2::application::ControlMessageRejection::Authorization) {
                 ++authorizationRejections_;
@@ -1303,7 +1330,7 @@ void SharedSessionController::handleClientMessage(const QJsonObject& message)
 {
     const QString type = message.value(QStringLiteral("type")).toString();
     const auto decision = jam2::application::evaluateControlMessage(
-        message, jam2::application::ControlMessageSource::Coordinator);
+        message, jam2::application::ControlMessageSource::Coordinator, multiplex_ != nullptr);
     if (!decision.accepted) {
         if (decision.rejection == jam2::application::ControlMessageRejection::Authorization) {
             ++authorizationRejections_;

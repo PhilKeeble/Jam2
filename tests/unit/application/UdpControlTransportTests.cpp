@@ -133,7 +133,7 @@ void framingProgressDeadline()
     QJsonObject fromClient, fromServer;
     server.onMessage = [&](const QString&, const QJsonObject& message) { fromClient = message; };
     client.onMessage = [&](const QJsonObject& message) { fromServer = message; };
-    const QJsonObject message{{"type", "debug.test"}, {"payload", QString(4000, 'x')}};
+    const QJsonObject message{{"type", "session.error"}, {"message", QString(4000, 'x')}};
     require(client.send(message) && server.sendTo(QString(32, '2'), message), "queue delayed frames");
     auto release = [](const std::shared_ptr<Bytes>& bytes, bool all) {
         do {
@@ -157,6 +157,10 @@ void framingProgressDeadline()
         "progressing frames were disconnected after five seconds");
     release(toServer, true); release(toClient, true);
     until([&] { return fromClient == message && fromServer == message; });
+    // Drain the new application dispatch receipts before deliberately releasing
+    // only the prefix of the next frame. A complete receipt is not a stalled
+    // application record and must not start its incomplete-frame deadline.
+    release(toServer, true); release(toClient, true);
     require(client.send(message), "queue intentionally stalled frame");
     release(toServer, false);
     wait(9300);
@@ -230,6 +234,7 @@ void authenticatedUdpStreamsUnderLoss()
     server.acceptTransport(incoming);
     client.connectViaTransport(outgoing, session, keyText, token, QStringLiteral("127.0.0.1:52000"));
     wait([&] { return client.isConnected() && server.hasPeer(); });
+    require(server.serverWireDiagnostics().size() == 1, "Server wire diagnostics did not expose its authenticated peer channel");
     QByteArray content(64000, 'x'), received;
     for (qsizetype i = 0; i < content.size(); ++i) content[i] = static_cast<char>(i % 251);
     server.onBinaryMessage = [&](const QString&, const QByteArray& bytes) { received += bytes; };
@@ -271,6 +276,7 @@ void authenticatedControlAndAssets()
     server.acceptTransport(serverBytes);
     client.connectViaTransport(clientBytes, session, key, token, QStringLiteral("127.0.0.1:50000"));
     until([&] { return authenticated && client.isConnected(); });
+    require(server.serverWireDiagnostics().isEmpty(), "legacy TCP transport unexpectedly enabled the Server codec");
 
     QJsonObject received;
     server.onMessage = [&](const QString&, const QJsonObject& value) { received = value; };

@@ -468,6 +468,15 @@ int main(int argc, char* argv[])
     const QJsonObject proposedSame = laneObject(
         QStringLiteral("proposed-import"), sameHash, QStringLiteral("Same B"));
     const QJsonObject baseSong = songWithLanes({emptyLane});
+    auto renamedEmpty = emptyLane; renamedEmpty.insert("name", "Renamed empty track");
+    for (const bool deletionFirst : {false, true}) {
+        const auto emptyMerged = mergeConcurrentLooperMetadata(baseSong,
+            deletionFirst ? songWithLanes({}) : songWithLanes({renamedEmpty}),
+            deletionFirst ? songWithLanes({renamedEmpty}) : songWithLanes({}),
+            nullptr, nullptr, LooperConflictPolicy::LatestReceived);
+        expect(firstBankLanes(emptyMerged.value("looper").toObject()).isEmpty(),
+            "Server deletion also defeats metadata-only edits of an empty track in either order");
+    }
     const QJsonObject concurrentSame = mergeConcurrentLooperMetadata(
         baseSong,
         songWithLanes({emptyLane, currentSame}),
@@ -490,6 +499,31 @@ int main(int argc, char* argv[])
 
     auto renamed = currentSame;
     renamed.insert("name", "Practice Drums");
+    auto laterRename = currentSame;
+    laterRename.insert("name", "Latest received name");
+    laterRename.insert("gain_db", -9.0);
+    auto firstRename = renamed;
+    firstRename.insert("muted", true);
+    const auto latestMerged = mergeConcurrentLooperMetadata(baseWithSame,
+        songWithLanes({emptyLane, firstRename}), songWithLanes({emptyLane, laterRename}),
+        nullptr, nullptr, LooperConflictPolicy::LatestReceived);
+    const auto latestLane = firstBankLanes(latestMerged.value("looper").toObject())[1].toObject();
+    expect(latestLane.value("name") == laterRename.value("name") && latestLane.value("muted").toBool() &&
+        latestLane.value("gain_db").toDouble() == -9.0,
+        "Server conflicts choose later received values while merging independent fields");
+    const auto legacyMerged = mergeConcurrentLooperMetadata(baseWithSame,
+        songWithLanes({emptyLane, firstRename}), songWithLanes({emptyLane, laterRename}));
+    expect(firstBankLanes(legacyMerged.value("looper").toObject())[1].toObject().value("name") == firstRename.value("name"),
+        "legacy reconciliation keeps its existing conflict policy");
+    auto regionBase = currentSame; regionBase.insert("loop_start_frame", "0"); regionBase.insert("loop_end_frame", "100");
+    auto regionFirst = regionBase; regionFirst.insert("loop_start_frame", "80");
+    auto regionLast = regionBase; regionLast.insert("loop_end_frame", "20");
+    const auto regionMerged = mergeConcurrentLooperMetadata(songWithLanes({regionBase}),
+        songWithLanes({regionFirst}), songWithLanes({regionLast}), nullptr, nullptr, LooperConflictPolicy::LatestReceived);
+    const auto regionLane = firstBankLanes(regionMerged.value("looper").toObject())[0].toObject();
+    expect(regionLane.value("loop_start_frame") == regionLast.value("loop_start_frame") &&
+        regionLane.value("loop_end_frame") == regionLast.value("loop_end_frame"),
+        "Server region reconciliation never combines valid edits into an inverted loop");
     const auto deleteAfterRename = mergeConcurrentLooperMetadata(baseWithSame,
         songWithLanes({emptyLane, renamed}), baseSong);
     expect(firstBankLanes(deleteAfterRename.value("looper").toObject()).size() == 1,
@@ -507,6 +541,18 @@ int main(int argc, char* argv[])
     expect(firstBankLanes(replaceAfterDelete.value("looper").toObject()).size() == 2 &&
         firstBankLanes(deleteAfterReplace.value("looper").toObject()).size() == 2,
         "deleting old WAV bytes preserves a concurrent replacement with different bytes");
+    const auto staleMetadata = mergeConcurrentLooperMetadata(baseWithSame,
+        songWithLanes({emptyLane, replacement}), songWithLanes({emptyLane, laterRename}),
+        nullptr, nullptr, LooperConflictPolicy::LatestReceived);
+    expect(firstBankLanes(staleMetadata.value("looper").toObject())[1].toObject() == replacement,
+        "Server stale metadata cannot mutate replacement WAV content");
+    for (const auto policy : {LooperConflictPolicy::KeepCurrent, LooperConflictPolicy::LatestReceived}) {
+        expect(firstBankLanes(mergeConcurrentLooperMetadata(baseWithSame, songWithLanes({emptyLane, renamed}),
+            baseSong, nullptr, nullptr, policy).value("looper").toObject()).size() == 1 &&
+            firstBankLanes(mergeConcurrentLooperMetadata(baseWithSame, baseSong,
+            songWithLanes({emptyLane, renamed}), nullptr, nullptr, policy).value("looper").toObject()).size() == 1,
+            "deletion wins over metadata in either arrival order in both policies");
+    }
     auto ideaBase = baseWithSame;
     ideaBase.insert("sections", QJsonArray{QJsonObject{{"id", "section-a"}, {"chords", QJsonArray{"C"}}}});
     auto trackRenamed = songWithLanes({emptyLane, renamed});
@@ -525,6 +571,10 @@ int main(int argc, char* argv[])
     timingBanks[0] = timingBank; timingLooper.insert("banks", timingBanks); otherTiming.insert("looper", timingLooper);
     expect(!canRebaseIdeaOverTrackEdits(ideaBase, otherTiming),
         "a concurrent timing change still rejects the stale Idea");
+    expect(canRebaseIdeaOverTrackEdits(ideaBase, otherIdea, LooperConflictPolicy::LatestReceived) &&
+        canRebaseIdeaOverTrackEdits(ideaBase, otherTiming, LooperConflictPolicy::LatestReceived) &&
+        !canRebaseIdeaOverTrackEdits({}, {}, LooperConflictPolicy::LatestReceived),
+        "Server generated-Idea scopes use later authority order while rejecting missing structure");
 
     const QJsonObject different = laneObject(
         QStringLiteral("different-import"), QString(64, QLatin1Char('c')),

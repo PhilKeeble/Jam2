@@ -1,6 +1,7 @@
 #include "FourPeerCoordinator.hpp"
 #include "LoopbackPortReservations.hpp"
 #include "TestTiming.hpp"
+#include "UdpCandidateNetwork.hpp"
 
 #include <QCoreApplication>
 #include <QFile>
@@ -8,6 +9,7 @@
 #include <QJsonDocument>
 #include <QTemporaryDir>
 #include <QThread>
+#include <QProcess>
 
 #include <array>
 #include <chrono>
@@ -18,6 +20,21 @@
 namespace {
 using namespace std::chrono_literals;
 void require(bool ok, const QString& error) { if (!ok) throw std::runtime_error(error.toStdString()); }
+struct ServerFixture {
+    QProcess process;
+    std::unique_ptr<ThreadedCandidateNetwork> network;
+    QString endpoint;
+    explicit ServerFixture(const QString& executable) {
+        QUdpSocket reserve; require(reserve.bind(QHostAddress::LocalHost, 0), "reserve signaller port");
+        const auto port = reserve.localPort(); reserve.close();
+        process.setProcessChannelMode(QProcess::MergedChannels);
+        process.start(executable, {"--jam2-server", "--listen", QStringLiteral("127.0.0.1:%1").arg(port)});
+        require(process.waitForStarted(5000), "start real Go signaller: " + process.errorString());
+        network = std::make_unique<ThreadedCandidateNetwork>(port);
+        endpoint = QStringLiteral("127.0.0.1:%1").arg(network->port());
+    }
+    ~ServerFixture() { if (process.state() != QProcess::NotRunning) { process.kill(); process.waitForFinished(5000); } }
+};
 QJsonObject command(AutomationProcess& peer, QJsonObject message, const char* expected = "command_applied") {
     QString error;
     require(peer.send(std::move(message), error), error);
@@ -107,7 +124,9 @@ QString fixture(const QString& directory) {
 int main(int argc, char** argv) {
     QCoreApplication app(argc, argv);
     try {
-        require(argc == 2, QStringLiteral("expected release/jam2 executable"));
+        require(argc == 2 || argc == 3, QStringLiteral("expected release/jam2 executable and optional Go signaller"));
+        const bool serverMode = argc == 3;
+        const auto server = serverMode ? std::make_unique<ServerFixture>(QString::fromLocal8Bit(argv[2])) : nullptr;
         QTemporaryDir directory;
         require(directory.isValid(), QStringLiteral("fixture directory unavailable"));
         const QString wav = fixture(directory.path());
@@ -128,9 +147,12 @@ int main(int argc, char** argv) {
             require(peers.peer(i).readEvent(hello, 60s, error) && hello.value(QStringLiteral("event")) == QStringLiteral("hello"), error);
         }
         reservations.release();
-        const auto created = command(peers.peer(0), {{QStringLiteral("type"), QStringLiteral("jam.create")},
+        QJsonObject create{{QStringLiteral("type"), QStringLiteral("jam.create")},
             {QStringLiteral("id"), QStringLiteral("create")}, {QStringLiteral("port"), ports[0]},
-            {QStringLiteral("test_input"), QStringLiteral("tone-440")}});
+            {QStringLiteral("test_input"), QStringLiteral("tone-440")}};
+        if (serverMode) { create.insert("strategy", "server"); create.insert("rendezvous", server->endpoint); }
+        const auto created = command(peers.peer(0), create);
+        if (serverMode) require(created.value("invite_url").toString().contains("strategy=server"), "creator did not select Server-only protocol");
         for (std::size_t i = 1; i < 4; ++i)
             command(peers.peer(i), {{QStringLiteral("type"), QStringLiteral("jam.join")},
                 {QStringLiteral("id"), QStringLiteral("join")}, {QStringLiteral("port"), ports[i]},
@@ -168,6 +190,15 @@ int main(int argc, char** argv) {
         auto slow = waitAll(peers, [](std::size_t, const QJsonObject& state) { return applied(state, 500000, 500000, 300, 640, true); },
             QStringLiteral("peer-originated speed, pitch and focus commit"));
         for (std::size_t i = 0; i < 4; ++i) requireSummary(peers.peer(i), QStringLiteral("0.50"), 3, 640, i == 2);
+        if (serverMode) waitAll(peers, [](std::size_t index, const QJsonObject& state) {
+            if (index != 0) return true;
+            const auto tools = listening(state);
+            const auto reports = tools.value(QStringLiteral("server_peer_applications")).toArray();
+            if (reports.size() != 3) return false;
+            for (const auto& report : reports)
+                if (report.toObject().value(QStringLiteral("revision")).toInt() != tools.value(QStringLiteral("server_authoritative_revision")).toInt()) return false;
+            return true;
+        }, QStringLiteral("all three receivers acknowledge actual application of the Server listening state"));
         invoke(peers.peer(2), QStringLiteral("looper.listening-tools"), QStringLiteral("click"));
         requireSummary(peers.peer(2), QStringLiteral("0.50"), 3, 640, false);
         invoke(peers.peer(2), QStringLiteral("looper.listening-tools"), QStringLiteral("click"));

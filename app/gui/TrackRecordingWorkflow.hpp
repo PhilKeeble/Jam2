@@ -15,6 +15,18 @@
 
 namespace jam2::gui {
 
+enum class RecordingReadinessPolicy { AllArmedPeers, ReadyPeers };
+bool recording_group_can_start(bool hasArmedPeer, bool allArmedReady,
+    std::size_t readyPeers, RecordingReadinessPolicy policy) noexcept;
+
+struct RecordingBeatSchedule {
+    std::uint64_t countdownBeat = 0, targetBeat = 0;
+    bool rescheduled = false;
+};
+std::optional<RecordingBeatSchedule> server_recording_schedule(
+    const PlaybackGrid::Position& position, std::uint64_t countdownBeat,
+    std::uint64_t targetBeat, int beatsPerBar) noexcept;
+
 std::uint64_t recording_count_in_start_beat(
     std::uint64_t absoluteBeat,
     std::uint64_t rawCurrentFrame,

@@ -65,6 +65,27 @@ bool positiveBeatFrames(
 
 }
 
+bool jam2::gui::recording_group_can_start(bool hasArmedPeer, bool allArmedReady,
+    std::size_t readyPeers, RecordingReadinessPolicy policy) noexcept
+{
+    return hasArmedPeer && readyPeers > 0 &&
+        (policy == RecordingReadinessPolicy::ReadyPeers || allArmedReady);
+}
+
+std::optional<jam2::gui::RecordingBeatSchedule> jam2::gui::server_recording_schedule(
+    const PlaybackGrid::Position& position, std::uint64_t countdownBeat,
+    std::uint64_t targetBeat, int beatsPerBar) noexcept
+{
+    if (!position.engineAnchored || position.sampleRate <= 0 || targetBeat < countdownBeat ||
+        !std::isfinite(position.secondsPerBeat) || position.secondsPerBeat <= 0 || beatsPerBar <= 0) return std::nullopt;
+    const auto rawCountdown = jam2::transport_raw_frame_from_musical(position.frameAtBeat(countdownBeat), position.renderOffsetFrames);
+    if (rawCountdown > position.rawCurrentFrame) return RecordingBeatSchedule{countdownBeat, targetBeat, false};
+    const auto next = synced_recording_countdown_beat(position, beatsPerBar);
+    const auto countIn = targetBeat - countdownBeat;
+    if (!next || next > UINT64_MAX - countIn) return std::nullopt;
+    return RecordingBeatSchedule{next, next + countIn, true};
+}
+
 std::uint64_t jam2::gui::recording_count_in_start_beat(
     std::uint64_t absoluteBeat,
     std::uint64_t rawCurrentFrame,

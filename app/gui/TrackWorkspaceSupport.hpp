@@ -6,6 +6,7 @@
 #include <QJsonObject>
 #include <QString>
 #include <QSet>
+#include <QVector>
 
 // Classification belongs to the track even when its WAV arrives through a
 // generic share batch rather than an authoritative song snapshot.
@@ -90,3 +91,23 @@ int mergeLocalOnlyLooperLanes(
 bool reconcileSynchronizedSongStructure(
     QJsonObject& localSong,
     const QJsonObject& incomingSong);
+
+// One composed Server proposal survives superseding asynchronous validation.
+// The authority revision and validation generation prevent reuse after commit,
+// cancellation, session reset, or unrelated local changes.
+enum class SharedSongScope { Tracks, IdeaFull, IdeaChords, IdeaBeats };
+
+class ServerSongProposalStaging {
+public:
+    QJsonObject base(const QJsonObject& applied, quint64 authorityRevision,
+        quint64 validationGeneration) const;
+    void stage(const QJsonObject& composed, quint64 authorityRevision,
+        quint64 validationGeneration, SharedSongScope scope = SharedSongScope::Tracks);
+    QVector<SharedSongScope> scopes(quint64 authorityRevision, quint64 validationGeneration) const;
+    void reject(quint64 validationGeneration);
+private:
+    QJsonObject song_;
+    quint64 authorityRevision_ = 0;
+    quint64 validationGeneration_ = 0;
+    QVector<SharedSongScope> scopes_;
+};

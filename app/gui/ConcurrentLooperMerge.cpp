@@ -42,8 +42,13 @@ QJsonObject mergeLaneObject(
     const QJsonObject& current,
     const QJsonObject& proposed,
     int& mergedChanges,
-    int& conflicts)
+    int& conflicts,
+    LooperConflictPolicy policy)
 {
+    // A metadata operation based on an old WAV must not mutate its replacement.
+    if (policy == LooperConflictPolicy::LatestReceived &&
+        base.value("asset_hash") != current.value("asset_hash") &&
+        base.value("asset_hash") == proposed.value("asset_hash")) return current;
     QJsonObject merged = current;
     QSet<QString> keys;
     for (auto it = base.begin(); it != base.end(); ++it) keys.insert(it.key());
@@ -54,12 +59,31 @@ QJsonObject mergeLaneObject(
         const QJsonValue currentValue = current.value(key);
         const QJsonValue proposedValue = proposed.value(key);
         if (proposedValue == baseValue || proposedValue == currentValue) continue;
-        if (currentValue == baseValue) {
+        if (currentValue == baseValue || policy == LooperConflictPolicy::LatestReceived) {
+            if (currentValue != baseValue) ++conflicts;
             if (proposedValue.isUndefined()) merged.remove(key);
             else merged.insert(key, proposedValue);
             ++mergedChanges;
         } else {
             ++conflicts;
+        }
+    }
+    if (policy == LooperConflictPolicy::LatestReceived) {
+        // Region and content fields are atomic groups. Copying only the fields
+        // that differ from base could combine two valid regions into an invalid
+        // one (for example one edit to start and another edit to end).
+        static const QList<QStringList> groups{
+            {"start_frame", "stop_frame", "loop_start_frame", "loop_end_frame", "loop_enabled"},
+            {"asset_hash", "asset_path", "source_frames", "sample_rate", "reference_kind",
+             "reference_source_signature", "reference_bpm", "reference_stale"}};
+        for (const auto& group : groups) {
+            bool changed = false;
+            for (const auto& key : group) changed = changed || proposed.value(key) != base.value(key);
+            const auto& source = changed ? proposed : current;
+            for (const auto& key : group) {
+                if (source.contains(key)) merged.insert(key, source.value(key));
+                else merged.remove(key);
+            }
         }
     }
     return merged;
@@ -69,6 +93,13 @@ bool sameWavIdentity(const QJsonObject& first, const QJsonObject& second)
 {
     const QString hash = first.value(QStringLiteral("asset_hash")).toString().toLower();
     return !hash.isEmpty() && hash == second.value(QStringLiteral("asset_hash")).toString().toLower();
+}
+bool sameContent(const QJsonObject& first, const QJsonObject& second, LooperConflictPolicy policy)
+{
+    return sameWavIdentity(first, second) ||
+        (policy == LooperConflictPolicy::LatestReceived &&
+         first.value(QStringLiteral("asset_hash")).toString().isEmpty() &&
+         second.value(QStringLiteral("asset_hash")).toString().isEmpty());
 }
 
 QSet<QString> newAssetHashes(
@@ -87,10 +118,15 @@ QSet<QString> newAssetHashes(
 
 } // namespace
 
-bool canRebaseIdeaOverTrackEdits(const QJsonObject& baseSong, const QJsonObject& currentSong)
+bool canRebaseIdeaOverTrackEdits(const QJsonObject& baseSong, const QJsonObject& currentSong,
+    LooperConflictPolicy policy)
 {
     if (!baseSong.value(QStringLiteral("sections")).isArray() ||
         !currentSong.value(QStringLiteral("sections")).isArray()) return false;
+    // Generated Idea snapshots replace their declared scope atomically. Server
+    // authority accepts the later scope even when that scope changed meanwhile;
+    // the existing scope compositor retains unrelated track/chord/beat fields.
+    if (policy == LooperConflictPolicy::LatestReceived) return true;
     QJsonObject baseIdea = baseSong, currentIdea = currentSong;
     baseIdea.remove(QStringLiteral("looper"));
     currentIdea.remove(QStringLiteral("looper"));
@@ -113,7 +149,8 @@ QJsonObject mergeConcurrentLooperMetadata(
     const QJsonObject& currentSong,
     const QJsonObject& proposedSong,
     int* mergedChanges,
-    int* conflicts)
+    int* conflicts,
+    LooperConflictPolicy policy)
 {
     int changes = 0;
     int collisions = 0;
@@ -164,13 +201,15 @@ QJsonObject mergeConcurrentLooperMetadata(
                 } else if (inProposed && inCurrent &&
                            proposedMap.value(key) != currentMap.value(key)) {
                     ++collisions;
+                    if (policy == LooperConflictPolicy::LatestReceived)
+                        mergedMap.insert(key, mergeLaneObject({}, currentMap.value(key), proposedMap.value(key), changes, collisions, policy));
                 }
                 continue;
             }
             if (!inCurrent && !inProposed) continue;
             if (!inCurrent) {
                 if (proposedMap.value(key) != baseMap.value(key) &&
-                    !sameWavIdentity(baseMap.value(key), proposedMap.value(key))) {
+                    !sameContent(baseMap.value(key), proposedMap.value(key), policy)) {
                     mergedMap.insert(key, proposedMap.value(key));
                     ++changes;
                     ++collisions;
@@ -184,7 +223,7 @@ QJsonObject mergeConcurrentLooperMetadata(
                 // rename/placement edit must not restore the deleted content;
                 // a concurrent replacement with different bytes is retained.
                 if (currentMap.value(key) != baseMap.value(key) &&
-                    !sameWavIdentity(baseMap.value(key), currentMap.value(key))) {
+                    !sameContent(baseMap.value(key), currentMap.value(key), policy)) {
                     mergedMap.insert(key, currentMap.value(key));
                     ++collisions;
                 } else {
@@ -194,9 +233,10 @@ QJsonObject mergeConcurrentLooperMetadata(
             }
             mergedMap.insert(key, mergeLaneObject(
                 baseMap.value(key), currentMap.value(key), proposedMap.value(key),
-                changes, collisions));
+                changes, collisions, policy));
         }
-        QStringList order = laneOrder(currentLanes) == laneOrder(baseLanes)
+        QStringList order = laneOrder(currentLanes) == laneOrder(baseLanes) ||
+            (policy == LooperConflictPolicy::LatestReceived && laneOrder(proposedLanes) != laneOrder(baseLanes))
             ? laneOrder(proposedLanes) : laneOrder(currentLanes);
         for (auto it = mergedMap.cbegin(); it != mergedMap.cend(); ++it) {
             if (!order.contains(it.key())) order.append(it.key());
@@ -211,7 +251,8 @@ QJsonObject mergeConcurrentLooperMetadata(
             const QJsonValue currentValue = currentBank.value(key);
             const QJsonValue proposedValue = proposedBank.value(key);
             if (proposedValue != baseValue && proposedValue != currentValue) {
-                if (currentValue == baseValue) {
+                if (currentValue == baseValue || policy == LooperConflictPolicy::LatestReceived) {
+                    if (currentValue != baseValue) ++collisions;
                     currentBank.insert(key, proposedValue);
                     ++changes;
                 } else {
@@ -227,7 +268,8 @@ QJsonObject mergeConcurrentLooperMetadata(
         const QJsonValue currentValue = currentLooper.value(key);
         const QJsonValue proposedValue = proposedLooper.value(key);
         if (proposedValue != baseValue && proposedValue != currentValue) {
-            if (currentValue == baseValue) {
+            if (currentValue == baseValue || policy == LooperConflictPolicy::LatestReceived) {
+                if (currentValue != baseValue) ++collisions;
                 currentLooper.insert(key, proposedValue);
                 ++changes;
             } else {

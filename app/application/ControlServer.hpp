@@ -2,8 +2,10 @@
 
 #include "ControlProtocol.hpp"
 #include "NativeTcpTransport.hpp"
+#include "ServerControlWire.hpp"
 
 #include <QJsonObject>
+#include <QJsonArray>
 #include <QElapsedTimer>
 #include <QList>
 #include <QTimer>
@@ -40,6 +42,7 @@ public:
         quint64 assetActiveConnections = 0;
         quint64 assetConnectionHighWater = 0;
         quint64 assetDisconnectedConnections = 0;
+        jam2::application::server_wire::Stats serverWire;
     };
 
     explicit ControlServer(QObject* parent = nullptr);
@@ -60,8 +63,10 @@ public:
     bool hasPeer() const;
     QString errorString() const;
     Stats stats() const;
+    QJsonArray serverWireDiagnostics() const;
 
     std::function<void(const QString&, const QJsonObject&)> onMessage;
+    std::function<jam2::application::server_wire::DispatchDecision(const QJsonObject&)> validateServerMessage;
     std::function<void(const QString&, const QByteArray&)> onBinaryMessage;
     std::function<void(const QString&, const QJsonObject&)> onAssetMessage;
     std::function<void(const QString&, const QByteArray&)> onAssetBinaryMessage;
@@ -73,6 +78,7 @@ public:
 private:
     struct Peer {
         jam2::application::ControlConnection::Pointer connection;
+        std::shared_ptr<jam2::application::server_wire::Channel> serverWire;
         std::unique_ptr<QTimer> authenticationTimer;
         std::unique_ptr<QTimer> frameTimer;
         QElapsedTimer frameClock;

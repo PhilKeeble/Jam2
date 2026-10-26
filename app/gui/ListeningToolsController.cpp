@@ -91,7 +91,7 @@ bool parseListeningSettings(const QJsonObject& object, ListeningToolsSettings& s
         object.value(QStringLiteral("focus_q")).toDouble()};
     return true;
 }
-bool validateListeningMessage(const QJsonObject& message, QString& error) {
+bool validateListeningMessage(const QJsonObject& message, QString& error, bool serverBinary) {
     error.clear();
     const QString messageType = message.value(QStringLiteral("type")).toString();
     QStringList allowed{QStringLiteral("type"), QStringLiteral("revision")};
@@ -100,14 +100,17 @@ bool validateListeningMessage(const QJsonObject& message, QString& error) {
     const bool commitMessage = messageType == type("commit");
     const bool stateMessage = messageType == type("state");
     const bool resetMessage = messageType == type("reset");
+    const bool appliedMessage = serverBinary && messageType == type("applied");
     const bool settingsMessage = requestMessage || prepareMessage || stateMessage;
     const bool timingMessage = commitMessage || stateMessage || resetMessage;
     if (settingsMessage) allowed << QStringLiteral("settings");
+    if (serverBinary && requestMessage) allowed << QStringLiteral("changed_groups");
+    if (appliedMessage) allowed << QStringLiteral("actual_frame");
     if (prepareMessage || commitMessage || stateMessage) allowed << QStringLiteral("bank");
     if (timingMessage) allowed << QStringLiteral("tempo") << QStringLiteral("target_frame") << QStringLiteral("epoch_frame") << QStringLiteral("epoch_position");
     if (commitMessage || stateMessage) allowed << QStringLiteral("source_seconds") << QStringLiteral("playing");
     if (messageType == type("cancel") || messageType == type("failed")) allowed << QStringLiteral("reason");
-    if ((!requestMessage && !prepareMessage && !commitMessage && !stateMessage && !resetMessage &&
+    if ((!requestMessage && !prepareMessage && !commitMessage && !stateMessage && !resetMessage && !appliedMessage &&
             messageType != type("ready") && messageType != type("cancel") && messageType != type("failed")) ||
         !fields(message, allowed) || (!requestMessage && !integer(message.value(QStringLiteral("revision")), 1, (std::numeric_limits<int>::max)())) ||
         (requestMessage && message.contains(QStringLiteral("revision")))) {
@@ -116,6 +119,16 @@ bool validateListeningMessage(const QJsonObject& message, QString& error) {
     ListeningToolsSettings settings;
     if (settingsMessage && (!message.value(QStringLiteral("settings")).isObject() ||
             !parseListeningSettings(message.value(QStringLiteral("settings")).toObject(), settings, error))) return false;
+    if (message.contains(QStringLiteral("changed_groups")) &&
+        !integer(message.value(QStringLiteral("changed_groups")), 1, 7)) {
+        error = QStringLiteral("listening changed-group mask is invalid"); return false;
+    }
+    if (appliedMessage) {
+        std::uint64_t actualFrame = 0;
+        if (!frame(message.value(QStringLiteral("actual_frame")), actualFrame)) {
+            error = QStringLiteral("listening application frame is invalid"); return false;
+        }
+    }
     if (prepareMessage || commitMessage || stateMessage) {
         if (!integer(message.value(QStringLiteral("bank")), 0, 11)) { error = QStringLiteral("listening bank is invalid"); return false; }
     }
@@ -164,6 +177,12 @@ void ListeningToolsController::edit(ListeningToolsSettings settings, bool commit
         if (callbacks_.rejected) callbacks_.rejected(applied_, error_);
         return;
     }
+    if (state.serverBinary) {
+        if (settings.speedPpm != draft_.speedPpm) serverEditGroups_ |= 1;
+        if (settings.pitchCents != draft_.pitchCents) serverEditGroups_ |= 2;
+        if (settings.focusEnabled != draft_.focusEnabled || settings.focusPreset != draft_.focusPreset ||
+            settings.focusHz != draft_.focusHz || settings.focusGainDb != draft_.focusGainDb || settings.focusQ != draft_.focusQ) serverEditGroups_ |= 4;
+    }
     draft_ = std::move(settings);
     if (callbacks_.selected) callbacks_.selected(draft_);
     if (commitNow) { debounce_.stop(); request(); } else debounce_.start();
@@ -171,8 +190,92 @@ void ListeningToolsController::edit(ListeningToolsSettings settings, bool commit
 void ListeningToolsController::flushEdits() {
     if (debounce_.isActive()) { debounce_.stop(); request(); }
 }
+QJsonObject ListeningToolsController::serverSelectionMessage(const ServerSelection& s) const
+{
+    return {{QStringLiteral("type"), type("state")}, {QStringLiteral("revision"), s.revision},
+        {QStringLiteral("bank"), s.bank}, {QStringLiteral("settings"), listeningSettingsJson(s.settings)},
+        {QStringLiteral("tempo"), tempoJson(s.tempo)}, {QStringLiteral("target_frame"), QString::number(s.target)},
+        {QStringLiteral("epoch_frame"), QString::number(s.epoch)}, {QStringLiteral("epoch_position"), s.epochPosition},
+        {QStringLiteral("source_seconds"), s.sourceSeconds}, {QStringLiteral("playing"), s.playing}};
+}
+bool ListeningToolsController::publishServerSelection(quint8 changedGroups, const ListeningToolsSettings& proposed)
+{
+    const auto state = context();
+    if (!state.serverBinary || !state.creator || !state.sync) return false;
+    const int previousRevision = serverSelection_ ? serverSelection_->revision : std::max(revision_, appliedRevision_);
+    if (previousRevision == INT_MAX) {
+        error_ = QStringLiteral("Server listening revision exhausted");
+        if (callbacks_.log) callbacks_.log(error_);
+        return false;
+    }
+    ServerSelection selected;
+    selected.settings = serverSelection_ ? serverSelection_->settings : applied_;
+    if (changedGroups & 1) selected.settings.speedPpm = proposed.speedPpm;
+    if (changedGroups & 2) selected.settings.pitchCents = proposed.pitchCents;
+    if (changedGroups & 4) {
+        selected.settings.focusEnabled = proposed.focusEnabled; selected.settings.focusPreset = proposed.focusPreset;
+        selected.settings.focusHz = proposed.focusHz; selected.settings.focusGainDb = proposed.focusGainDb; selected.settings.focusQ = proposed.focusQ;
+    }
+    selected.revision = previousRevision + 1; selected.bank = state.bank;
+    const auto sampleRate = static_cast<quint64>(std::max(1, state.position.sampleRate));
+    const auto lead = sampleRate * kCommitLeadMs / 1000;
+    if (state.position.currentFrame > UINT64_MAX - lead) return false;
+    selected.target = state.position.currentFrame + lead;
+    const bool waitingForLocalApplication = serverSelection_ &&
+        (state.protectedRecording || appliedSharedRevision_ < serverSelection_->revision);
+    const auto previousTempo = waitingForLocalApplication ? serverSelection_->tempo : tempoAtTarget(state, selected.target);
+    selected.tempo = {selected.settings.speedPpm, selected.target, previousTempo.position(selected.target)};
+    selected.epoch = state.position.epochFrame; selected.epochPosition = state.position.epochSourcePosition;
+    selected.playing = state.playing;
+    selected.sourceSeconds = state.sourceSeconds;
+    if (serverSelection_ && selected.target >= serverSelection_->target) {
+        selected.sourceSeconds = serverSelection_->sourceSeconds + (serverSelection_->playing ?
+            static_cast<double>(selected.target - serverSelection_->target) / sampleRate * serverSelection_->settings.speedPpm / 1000000.0 : 0.0);
+    } else if (state.playing) selected.sourceSeconds += static_cast<double>(lead) / sampleRate * applied_.speedPpm / 1000000.0;
+    selected.sourceSeconds = std::clamp(selected.sourceSeconds, 0.0, 3600.0);
+    // Authority advances independently of each peer's file worker or recording
+    // protection. This commits desired state, not a guarantee of execution.
+    if (!state.peers.isEmpty() && !send(serverSelectionMessage(selected))) {
+        error_ = QStringLiteral("Server listening state could not be published");
+        if (callbacks_.log) callbacks_.log(error_);
+        return false;
+    }
+    highestAuthoritativeRevision_ = selected.revision;
+    adoptServerSelection(selected);
+    return true;
+}
+void ListeningToolsController::adoptServerSelection(const ServerSelection& selection)
+{
+    const auto state = context();
+    serverSelection_ = selection;
+    if (state.protectedRecording || state.transportChanging || !state.contentReady ||
+        selection.bank != state.bank || phase_ == Phase::Scheduled) {
+        deferredServerSelection_ = selection;
+        if (state.protectedRecording && pending() &&
+            (phase_ != Phase::Scheduled || state.engine.engine_frame < commitRawFrame_)) cancel({}, false, false);
+        return;
+    }
+    if (pending()) cancel({}, false, false);
+    deferredServerSelection_.reset();
+    deferredState_ = serverSelectionMessage(selection);
+    draft_ = selection.settings; queuedEdit_ = false;
+    begin(selection.revision, selection.settings, selection.bank, true);
+}
 void ListeningToolsController::request() {
     const Context state = context();
+    if (state.serverBinary && state.network && state.sync) {
+        if (!serverEditGroups_) return;
+        if (state.creator) {
+            if (publishServerSelection(serverEditGroups_, draft_)) serverEditGroups_ = 0;
+        }
+        else if (!send({{QStringLiteral("type"), type("request")},
+                {QStringLiteral("settings"), listeningSettingsJson(draft_)},
+                {QStringLiteral("changed_groups"), serverEditGroups_}})) {
+            error_ = QStringLiteral("Server listening request could not be queued");
+            if (callbacks_.rejected) callbacks_.rejected(applied_, error_);
+        } else serverEditGroups_ = 0;
+        return;
+    }
     if (!pending() && !queuedEdit_ && draft_ == applied_ &&
         (!state.sync || applied_.speedPpm == state.engine.playback_tempo.rate_ppm)) return;
     if (state.protectedRecording || state.transportChanging) { queuedEdit_ = true; return; }
@@ -206,7 +309,7 @@ void ListeningToolsController::begin(int revision, ListeningToolsSettings settin
     error_.clear();
     preparationTime_.start();
     phase_ = Phase::Preparing;
-    if (shared && state.creator && !send({{QStringLiteral("type"), type("prepare")},
+    if (shared && state.creator && !state.serverBinary && !send({{QStringLiteral("type"), type("prepare")},
             {QStringLiteral("revision"), revision_}, {QStringLiteral("bank"), bank_},
             {QStringLiteral("settings"), listeningSettingsJson(preparing_)}})) {
         cancel(QStringLiteral("listening preparation could not be published"), true); return;
@@ -248,6 +351,11 @@ bool ListeningToolsController::engineEvent(const jam2::EngineEvent& event) {
 void ListeningToolsController::ready() {
     phase_ = Phase::Ready;
     const Context state = context();
+    if (state.serverBinary && deferredState_) {
+        const auto saved = *deferredState_; deferredState_.reset();
+        if (!schedule(saved)) cancel(QStringLiteral("Server listening state could not be scheduled"), false);
+        return;
+    }
     if (shared_ && !state.creator) {
         if (deferredState_) {
             const auto saved = *deferredState_;
@@ -302,7 +410,21 @@ bool ListeningToolsController::schedule(const QJsonObject& message) {
     std::uint64_t target = 0;
     if (!parseTempo(message.value(QStringLiteral("tempo")), tempo) || !frame(message.value(QStringLiteral("target_frame")), target)) return false;
     const bool joining = message.value(QStringLiteral("type")).toString() == type("state");
+    const auto originalTarget = target;
     if (joining) target = state.position.currentFrame + static_cast<std::uint64_t>(std::max(1, state.position.sampleRate)) * kCommitLeadMs / 1000ULL;
+    const bool serverLate = state.serverBinary && originalTarget <= state.position.currentFrame;
+    if (state.serverBinary && (joining || serverLate)) {
+        const auto minimum = state.position.currentFrame + static_cast<std::uint64_t>(std::max(1, state.position.sampleRate)) / 5;
+        target = std::max(target, minimum);
+        if (state.position.engineAnchored && state.position.secondsPerBeat > 0) {
+            auto beat = state.position.absoluteBeat;
+            do {
+                if (beat == UINT64_MAX) return false;
+                target = state.position.frameAtBeat(++beat);
+            } while (target < minimum);
+        }
+        if (serverLate) ++serverLateReschedules_;
+    }
     const std::uint64_t rawTarget = jam2::transport_raw_frame_from_musical(target, state.position.renderOffsetFrames);
     if (state.engineRunning && (rawTarget <= state.engine.engine_frame ||
         rawTarget - state.engine.engine_frame > static_cast<std::uint64_t>(std::max(1, state.position.sampleRate)) * 10ULL)) return false;
@@ -320,7 +442,7 @@ bool ListeningToolsController::schedule(const QJsonObject& message) {
     if (prepared_) {
         command.signed_value = static_cast<std::int64_t>(stageCookie_);
         double sourceSeconds = message.value(QStringLiteral("source_seconds")).toDouble();
-        if (joining && state.playing) {
+        if ((joining || serverLate) && (state.serverBinary ? message.value(QStringLiteral("playing")).toBool() : state.playing)) {
             std::uint64_t sentFrame = 0;
             frame(message.value(QStringLiteral("target_frame")), sentFrame);
             if (target >= sentFrame) sourceSeconds += static_cast<double>(target - sentFrame) /
@@ -387,6 +509,9 @@ void ListeningToolsController::applyReset(const QJsonObject& message) {
     std::uint64_t target = 0;
     if (!parseTempo(message.value(QStringLiteral("tempo")), tempo) || !frame(message.value(QStringLiteral("target_frame")), target)) return;
     const Context state = context();
+    if (state.serverBinary) {
+        serverSelection_.reset(); deferredServerSelection_.reset(); serverEditGroups_ = 0;
+    }
     jam2::EngineCommand command;
     command.type = jam2::EngineCommandType::CommitListeningTools;
     command.playback_tempo = tempo;
@@ -406,6 +531,25 @@ void ListeningToolsController::applyReset(const QJsonObject& message) {
 }
 void ListeningToolsController::policyChanged(bool previouslySynced) {
     const Context state = context();
+    if (state.serverBinary && !previouslySynced && state.sync) {
+        // Re-enabling the shared domain explicitly republishes the creator's
+        // current selection; private edits from the disabled period stay local
+        // until replaced by this new authoritative state.
+        serverEditGroups_ = 0;
+        if (state.creator) {
+            const int selectedRevision = serverSelection_ ? serverSelection_->revision : 0;
+            QTimer::singleShot(0, this, [this, selectedRevision] {
+                const auto current = context();
+                // The caller queues jam.sync.set after applying its policy.
+                // Publish only after that frame; otherwise receivers still
+                // correctly suppress listening state under the old policy.
+                if (current.serverBinary && current.sync && current.creator &&
+                    (serverSelection_ ? serverSelection_->revision : 0) == selectedRevision)
+                    publishServerSelection(7, applied_);
+            });
+        }
+        return;
+    }
     if (previouslySynced && !state.sync && (!state.network || state.creator)) {
         const auto message = resetMessage(state);
         if (state.network) send(message);
@@ -414,11 +558,54 @@ void ListeningToolsController::policyChanged(bool previouslySynced) {
     else if (!state.sync && pending()) cancel({}, false);
 }
 void ListeningToolsController::receive(const QJsonObject& message, const QString& source) {
-    QString error;
-    if (!validateListeningMessage(message, error)) { error_ = error; return; }
     const Context state = context();
+    QString error;
+    if (!validateListeningMessage(message, error, state.serverBinary)) { error_ = error; return; }
     const QString messageType = message.value(QStringLiteral("type")).toString();
     const int revision = message.value(QStringLiteral("revision")).toInt();
+    if (state.serverBinary && state.sync) {
+        if (messageType == type("applied") && state.creator && state.peers.contains(source)) {
+            if (serverSelection_ && revision <= serverSelection_->revision && revision >= serverApplications_[source].revision) {
+                std::uint64_t actual = 0; frame(message.value(QStringLiteral("actual_frame")), actual);
+                serverApplications_[source] = {revision, actual};
+            }
+            return;
+        }
+        if (state.creator && (messageType == type("failed") || messageType == type("ready"))) {
+            if (messageType == type("failed") && state.peers.contains(source)) ++serverPeerFailures_;
+            return; // A peer's local preparation cannot veto desired state.
+        }
+        if (messageType == type("request") && state.creator && state.peers.contains(source)) {
+            ListeningToolsSettings proposed;
+            parseListeningSettings(message.value(QStringLiteral("settings")).toObject(), proposed, error);
+            publishServerSelection(static_cast<quint8>(message.value(QStringLiteral("changed_groups")).toInt(7)), proposed);
+            return;
+        }
+        if (messageType == type("state") && !state.creator) {
+            if (revision < highestAuthoritativeRevision_) return;
+            ServerSelection selection;
+            parseListeningSettings(message.value(QStringLiteral("settings")).toObject(), selection.settings, error);
+            parseTempo(message.value(QStringLiteral("tempo")), selection.tempo);
+            selection.revision = revision; selection.bank = message.value(QStringLiteral("bank")).toInt();
+            frame(message.value(QStringLiteral("target_frame")), selection.target);
+            frame(message.value(QStringLiteral("epoch_frame")), selection.epoch);
+            selection.epochPosition = message.value(QStringLiteral("epoch_position")).toDouble();
+            selection.sourceSeconds = message.value(QStringLiteral("source_seconds")).toDouble();
+            selection.playing = message.value(QStringLiteral("playing")).toBool();
+            if (revision == highestAuthoritativeRevision_) {
+                if (lastServerApplication_ && lastServerApplication_->revision == revision)
+                    pendingServerApplication_ = lastServerApplication_;
+                else if (deferredServerSelection_ && selection.target >= deferredServerSelection_->target)
+                    deferredServerSelection_ = selection;
+                else if (pending() && phase_ != Phase::Scheduled)
+                    deferredState_ = serverSelectionMessage(selection);
+                return; // Recover the result or refresh deferred state, never execute twice.
+            }
+            highestAuthoritativeRevision_ = revision;
+            adoptServerSelection(selection);
+            return;
+        }
+    }
     if (messageType == type("reset")) {
         if (!state.creator && revision >= highestAuthoritativeRevision_) {
             highestAuthoritativeRevision_ = revision;
@@ -463,6 +650,16 @@ void ListeningToolsController::sendCurrent(const QString& peer) {
     tick();
     const Context state = context();
     if (!state.creator) return;
+    if (state.serverBinary && state.sync && serverSelection_) {
+        auto selection = *serverSelection_;
+        if (appliedSharedRevision_ == selection.revision && !state.protectedRecording) {
+            selection.bank = state.bank; selection.tempo = tempoAtTarget(state, state.position.currentFrame);
+            selection.target = state.position.currentFrame; selection.epoch = state.position.epochFrame;
+            selection.epochPosition = state.position.epochSourcePosition;
+            selection.sourceSeconds = state.sourceSeconds; selection.playing = state.playing;
+        }
+        send(serverSelectionMessage(selection), peer); return;
+    }
     if (!state.sync) {
         // A unity-rate clock can still have an offset from earlier slowing.
         // Share its phase without publishing anybody's local listening tools.
@@ -483,6 +680,20 @@ void ListeningToolsController::sendCurrent(const QString& peer) {
 void ListeningToolsController::tick() {
     if (!callbacks_.context) return;
     const Context state = context();
+    if (state.serverBinary && pendingServerApplication_) {
+        if (send({{QStringLiteral("type"), type("applied")}, {QStringLiteral("revision"), pendingServerApplication_->revision},
+                {QStringLiteral("actual_frame"), QString::number(pendingServerApplication_->frame)}}))
+            pendingServerApplication_.reset();
+    }
+    for (auto it = serverApplications_.begin(); it != serverApplications_.end();) {
+        if (!state.peers.contains(it->first)) it = serverApplications_.erase(it); else ++it;
+    }
+    if (state.serverBinary && deferredServerSelection_ && phase_ != Phase::Scheduled &&
+        !state.protectedRecording && !state.transportChanging && state.contentReady &&
+        deferredServerSelection_->bank == state.bank) {
+        const auto selection = *deferredServerSelection_;
+        deferredServerSelection_.reset(); adoptServerSelection(selection); return;
+    }
     if (pendingReset_ && state.engineRunning && callbacks_.submit) {
         pendingReset_->frame = std::max(pendingReset_->frame, state.engine.engine_frame + 1);
         if (callbacks_.submit(*pendingReset_)) {
@@ -520,6 +731,10 @@ void ListeningToolsController::tick() {
         applied_ = preparing_;
         appliedRevision_ = revision_;
         if (shared_) appliedSharedRevision_ = revision_;
+        if (state.serverBinary && shared_ && !state.creator) {
+            lastServerApplication_ = ServerApplication{revision_, state.engine.engine_frame};
+            pendingServerApplication_ = lastServerApplication_;
+        }
         if (!queuedEdit_) draft_ = applied_;
         phase_ = Phase::Idle;
         if (callbacks_.applied) callbacks_.applied(applied_, prepared_);
@@ -560,10 +775,17 @@ void ListeningToolsController::reset() {
     appliedSharedRevision_ = 0;
     highestAuthoritativeRevision_ = 0;
     committedTempo_ = {};
+    serverSelection_.reset(); deferredServerSelection_.reset(); serverLateReschedules_ = 0;
+    serverEditGroups_ = 0;
+    serverPeerFailures_ = 0;
+    pendingServerApplication_.reset(); lastServerApplication_.reset(); serverApplications_.clear();
 }
 QJsonObject ListeningToolsController::stats() const {
     const Context state = context();
-    return {{QStringLiteral("sync"), state.sync}, {QStringLiteral("phase"), static_cast<int>(phase_)},
+    QJsonArray applications;
+    for (const auto& [peer, applied] : serverApplications_) applications.append(QJsonObject{
+        {QStringLiteral("peer"), peer}, {QStringLiteral("revision"), applied.revision}, {QStringLiteral("actual_frame"), QString::number(applied.frame)}});
+    QJsonObject result{{QStringLiteral("sync"), state.sync}, {QStringLiteral("phase"), static_cast<int>(phase_)},
         {QStringLiteral("reset_pending"), pendingReset_.has_value()},
         {QStringLiteral("playback_ready"), playbackReady()},
         {QStringLiteral("audio_commit_cookie"), QString::number(state.engine.listening_source_cookie)},
@@ -583,5 +805,16 @@ QJsonObject ListeningToolsController::stats() const {
         {QStringLiteral("render_ms"), renderMs_}, {QStringLiteral("debounce_ms"), kDebounceMs},
         {QStringLiteral("commit_lead_ms"), kCommitLeadMs}, {QStringLiteral("preparation_timeout_ms"), kPreparationTimeoutMs},
         {QStringLiteral("settings"), listeningSettingsJson(applied_)}, {QStringLiteral("error"), error_}};
+    if (state.serverBinary) {
+        result.insert(QStringLiteral("server_binary"), true);
+        result.insert(QStringLiteral("server_authoritative_revision"), serverSelection_ ? serverSelection_->revision : 0);
+        result.insert(QStringLiteral("server_authoritative_speed_ppm"), serverSelection_ ? serverSelection_->settings.speedPpm : applied_.speedPpm);
+        result.insert(QStringLiteral("server_deferred_state"), deferredServerSelection_.has_value());
+        result.insert(QStringLiteral("server_late_reschedules"), static_cast<qint64>(serverLateReschedules_));
+        result.insert(QStringLiteral("server_peer_preparation_failures"), static_cast<qint64>(serverPeerFailures_));
+        result.insert(QStringLiteral("server_peer_applications"), applications);
+        result.insert(QStringLiteral("server_application_report_pending"), pendingServerApplication_.has_value());
+    }
+    return result;
 }
 } // namespace jam2::gui

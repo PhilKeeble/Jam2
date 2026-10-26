@@ -1,5 +1,6 @@
 #include "../../support/UdpCandidateNetwork.hpp"
 #include "UdpMultiplexTransport.hpp"
+#include "AssetChunkProtocol.hpp"
 #include "ControlClient.hpp"
 #include "ControlServer.hpp"
 #include "ControlProtocol.hpp"
@@ -118,7 +119,11 @@ int main(int argc, char** argv) {
             }
             peers[0]->admitPeer(token);
         };
-        coordinator.onAssetBinaryMessage = [&](const QString&, const QByteArray& value) { receivedAsset += value; };
+        coordinator.onAssetBinaryMessage = [&](const QString&, const QByteArray& value) {
+            jam2::application::asset_chunk::Chunk chunk; QString error;
+            require(jam2::application::asset_chunk::decode(value, chunk, error), "compact WAV did not reconstruct a valid application chunk");
+            receivedAsset += chunk.data;
+        };
         for (int index = 0; index < 4; ++index) {
             peers[index] = std::make_unique<UdpMultiplexTransport>();
             control[index] = std::make_unique<ControlClient>();
@@ -191,7 +196,17 @@ int main(int argc, char** argv) {
         require(assetOpens[1] == 1, "repeated ensure-open requests replaced an opening stream");
         QByteArray content(64000, '\0');
         for (int i = 0; i < content.size(); ++i) content[i] = static_cast<char>((i * 37) % 251);
-        require(asset[1]->sendBinary(content), "queue actual authenticated binary asset");
+        const auto sendContent = [&] {
+            const QString hash(64, QLatin1Char('a'));
+            require(asset[1]->send({{"type", "looper.asset.start"}, {"sha256", hash},
+                {"file_bytes", content.size()}, {"chunk_size", 24576}}), "queue typed WAV transfer start");
+            for (qsizetype offset = 0; offset < content.size(); offset += 24576) {
+                const auto payload = jam2::application::asset_chunk::encode({hash,
+                    static_cast<quint32>(offset / 24576), static_cast<quint64>(offset), content.mid(offset, 24576)});
+                require(!payload.isEmpty() && asset[1]->sendBinary(payload), "queue actual authenticated WAV chunk");
+            }
+        };
+        sendContent();
         start(3);
         until([&] {
             audio();
@@ -230,7 +245,7 @@ int main(int argc, char** argv) {
         for (int round = 0; round < 3; ++round) {
             for (int repeat = 0; repeat < 8; ++repeat) peers[1]->openStream(peer(0), UdpMuxChannel::Asset);
             const auto expected = content.repeated(round + 2);
-            require(asset[1]->sendBinary(content), "queue repeated asset content");
+            sendContent();
             until([&] { audio(); return receivedAsset == expected; }, "repeated asset byte integrity");
             require(assetOpens[1] == 1 && control[1]->isConnected(), "repeat sharing closed logical control or asset stream");
         }

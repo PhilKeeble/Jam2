@@ -107,12 +107,7 @@ public:
 private:
     friend class MainWindowPages;
     friend class GuiTestAgent;
-    enum class SongSyncScope {
-        Tracks,
-        IdeaFull,
-        IdeaChords,
-        IdeaBeats,
-    };
+    using SongSyncScope = SharedSongScope;
     bool eventFilter(QObject* watched, QEvent* event) override;
     void closeEvent(QCloseEvent* event) override;
 

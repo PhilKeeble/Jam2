@@ -185,12 +185,26 @@ add_executable(jam2_udp_control_transport_tests EXCLUDE_FROM_ALL
     "${CMAKE_SOURCE_DIR}/app/application/NativeTcpTransport.cpp")
 jam2_configure_test_target(jam2_udp_control_transport_tests)
 target_include_directories(jam2_udp_control_transport_tests PRIVATE "${CMAKE_SOURCE_DIR}/app/application")
-target_link_libraries(jam2_udp_control_transport_tests PRIVATE jam2_core Qt6::Core Qt6::Network)
+target_link_libraries(jam2_udp_control_transport_tests PRIVATE jam2_core jam2_server_wire Qt6::Core Qt6::Network)
 add_test(NAME jam2_udp_control_transport_units COMMAND $<TARGET_FILE:jam2_udp_control_transport_tests>)
 set_tests_properties(jam2_udp_control_transport_units PROPERTIES
     LABELS "unit;application;network;udp-multiplex;shared-content" TIMEOUT 30)
 if(WIN32)
     set_tests_properties(jam2_udp_control_transport_units PROPERTIES
+        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
+endif()
+
+add_executable(jam2_server_wire_tests EXCLUDE_FROM_ALL
+    unit/application/ServerControlWireTests.cpp
+    "${CMAKE_SOURCE_DIR}/app/application/ControlProtocol.cpp")
+jam2_configure_test_target(jam2_server_wire_tests)
+target_link_libraries(jam2_server_wire_tests PRIVATE jam2_server_wire Qt6::Core)
+add_test(NAME jam2_server_wire_units COMMAND $<TARGET_FILE:jam2_server_wire_tests>)
+add_test(NAME jam2_server_wire_performance COMMAND $<TARGET_FILE:jam2_server_wire_tests> --performance)
+set_tests_properties(jam2_server_wire_units PROPERTIES LABELS "unit;application;network;udp-multiplex;shared-content" TIMEOUT 30)
+set_tests_properties(jam2_server_wire_performance PROPERTIES LABELS "performance;network;udp-multiplex" TIMEOUT 60)
+if(WIN32)
+    set_tests_properties(jam2_server_wire_units jam2_server_wire_performance PROPERTIES
         ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
 endif()
 
@@ -873,6 +887,7 @@ jam2_configure_test_target(jam2_asset_channel_lifecycle_tests)
 target_include_directories(jam2_asset_channel_lifecycle_tests PRIVATE
     "${CMAKE_SOURCE_DIR}/app/application")
 target_link_libraries(jam2_asset_channel_lifecycle_tests PRIVATE
+    jam2_server_wire
     jam2_core Qt6::Core Qt6::Network)
 add_test(NAME jam2_asset_channel_lifecycle_integration
     COMMAND $<TARGET_FILE:jam2_asset_channel_lifecycle_tests>)
@@ -1795,6 +1810,10 @@ endif()
 # build scripts remove the complete root after the requested gate succeeds and
 # retain it after failure.
 add_dependencies(jam2_tests_unit jam2_udp_multiplex_tests jam2_udp_control_transport_tests)
+add_dependencies(jam2_tests_unit jam2_server_wire_tests)
+add_dependencies(jam2_tests_network jam2_server_wire_tests)
+add_dependencies(jam2_tests_performance jam2_server_wire_tests)
+add_dependencies(jam2_tests_all jam2_server_wire_tests)
 add_dependencies(jam2_tests_network jam2_udp_multiplex_tests jam2_udp_control_transport_tests)
 add_dependencies(jam2_tests_all jam2_udp_multiplex_tests jam2_udp_control_transport_tests)
 
@@ -1804,6 +1823,15 @@ if(NOT JAM2_RENDEZVOUS_TEST_SERVER AND WIN32 AND EXISTS "${CMAKE_SOURCE_DIR}/../
     set(JAM2_RENDEZVOUS_TEST_SERVER "${CMAKE_SOURCE_DIR}/../Jam2-Server/logs/jam2-rendezvous-native-test.exe")
 endif()
 if(JAM2_RENDEZVOUS_TEST_SERVER)
+    add_test(NAME jam2_udp_four_listening_tools_integration
+        COMMAND $<TARGET_FILE:jam2_four_listening_tools_integration> "${JAM2_TEST_PUBLIC_EXECUTABLE}" "${JAM2_RENDEZVOUS_TEST_SERVER}")
+    set_tests_properties(jam2_udp_four_listening_tools_integration PROPERTIES
+        LABELS "integration;gui;network;four-peer;udp-multiplex;listening-tools;fake-audio" TIMEOUT 300)
+    if(WIN32)
+        set_tests_properties(jam2_udp_four_listening_tools_integration PROPERTIES
+            ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
+    endif()
+    add_dependencies(jam2_tests_network jam2_four_listening_tools_integration)
     add_test(NAME jam2_udp_four_shared_content_integration
         COMMAND $<TARGET_FILE:jam2_four_shared_content_integration> "${JAM2_TEST_PUBLIC_EXECUTABLE}" "${JAM2_RENDEZVOUS_TEST_SERVER}")
     set_tests_properties(jam2_udp_four_shared_content_integration PROPERTIES LABELS "integration;gui;network;four-peer;shared-content;udp-multiplex" TIMEOUT 240)
@@ -1852,7 +1880,7 @@ if(JAM2_RENDEZVOUS_TEST_SERVER)
         "${CMAKE_SOURCE_DIR}/app/application/NativeTcpTransport.cpp")
     jam2_configure_test_target(jam2_udp_four_peer_tests)
     target_include_directories(jam2_udp_four_peer_tests PRIVATE "${CMAKE_SOURCE_DIR}/app/application")
-    target_link_libraries(jam2_udp_four_peer_tests PRIVATE jam2_core Qt6::Core Qt6::Network)
+    target_link_libraries(jam2_udp_four_peer_tests PRIVATE jam2_core jam2_server_wire jam2_asset_transfer Qt6::Core Qt6::Network)
     add_test(NAME jam2_udp_four_peer_integration
         COMMAND $<TARGET_FILE:jam2_udp_four_peer_tests> "${JAM2_RENDEZVOUS_TEST_SERVER}")
     add_test(NAME jam2_udp_reused_invitation_integration

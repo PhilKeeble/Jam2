@@ -168,6 +168,7 @@ public:
     bool automaticTrackSharePending = false;
     bool sharingPolicyReceived = false;
     QJsonObject stagedHostSong;
+    ServerSongProposalStaging serverSongProposals;
     int stagedHostSongRevision = 0;
     QMap<quint64, QJsonObject> authoritativeTrackHistory;
 
