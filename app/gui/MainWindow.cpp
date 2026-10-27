@@ -2395,7 +2395,9 @@ bool MainWindow::startAutomationJam(
     Jam2TestInputMode testInput,
     QString& error,
     jam2::ConnectionStrategy strategy,
-    jam2::Endpoint rendezvousServer)
+    jam2::Endpoint rendezvousServer,
+    bool diagnostics,
+    jam2::application::UdpMultiplexTransport::ReceiveModel receiveModel)
 {
     error.clear();
     if (localPort < 1024 || localPort > 65535) {
@@ -2413,6 +2415,9 @@ bool MainWindow::startAutomationJam(
         return false;
     }
 
+    if (!sessionController_.configureServerReceiveModel(receiveModel)) {
+        error = QStringLiteral("receive model cannot change during an active jam"); return false;
+    }
     automationHeadlessAudio_ = true;
     automationTestInput_ = testInput;
     automationSuppressDialogs_ = true;
@@ -2424,7 +2429,7 @@ bool MainWindow::startAutomationJam(
     configuration.strategy = strategy;
     configuration.rendezvousServer = std::move(rendezvousServer);
     configuration.maxPeers = 4;
-    configuration.runtime.diagnostics = false;
+    configuration.runtime.diagnostics = diagnostics;
     configuration.runtime.waitMs = 15000;
     configuration.runtime.streamMs = 0;
     if (!createSession) sessionRuntimeDraft_.inviteUrl = inviteUrl.trimmed();
@@ -16162,6 +16167,8 @@ void MainWindow::discardPreparedMix(bool replacementExpected)
     preparedMixLifecycle_.setPlayWhenReady(resumePlayback);
     trackRecordingWorkflow_.cancelPreparedAttach();
     if (jam2_.isRunning()) {
+        if (sessionRuntimeDraft_.configuration.strategy == jam2::ConnectionStrategy::Jam2Server)
+            trackWorkspace_.listeningTools.sourceWillChange();
         jam2::EngineCommand unload;
         unload.type = jam2::EngineCommandType::UnloadPreparedTrack;
         if (!submitEngineCommand(unload, QStringLiteral("unload prepared track"))) {
@@ -16636,6 +16643,8 @@ void MainWindow::stopCuratedIdeaPreview()
         preparedMixLifecycle_.active().error.isEmpty()) {
         loadPreparedMixIntoEngine();
     } else {
+        if (sessionRuntimeDraft_.configuration.strategy == jam2::ConnectionStrategy::Jam2Server)
+            trackWorkspace_.listeningTools.sourceWillChange();
         jam2::EngineCommand unload;
         unload.type = jam2::EngineCommandType::UnloadPreparedTrack;
         (void)submitEngineCommand(unload, QStringLiteral("unload curated idea preview"));

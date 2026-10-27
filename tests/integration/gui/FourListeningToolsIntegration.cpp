@@ -173,6 +173,14 @@ int main(int argc, char** argv) {
                 content.value(QStringLiteral("prepared_mix_frames")).toInteger() > 0 &&
                 !content.value(QStringLiteral("prepared_mix_worker_running")).toBool();
         }, QStringLiteral("real prepared WAV on four peers"));
+        if (serverMode) waitAll(peers, [](std::size_t index, const QJsonObject& state) {
+            if (index == 0) return true;
+            const auto tools = listening(state);
+            const int authoritative = tools.value(QStringLiteral("server_authoritative_revision")).toInt();
+            return authoritative > 0 && tools.value(QStringLiteral("phase")).toInt(-1) == 0 &&
+                tools.value(QStringLiteral("server_applied_revision")).toInt() == authoritative &&
+                !tools.value(QStringLiteral("server_deferred_state")).toBool();
+        }, QStringLiteral("initial Server listening state survives startup song/WAV changes without another edit"));
         for (std::size_t i = 0; i < 4; ++i) requireSummary(peers.peer(i), QStringLiteral("1.00"), 0, 0, false);
         invoke(peers.peer(2), QStringLiteral("looper.listening-tools"), QStringLiteral("click"));
         requireSummary(peers.peer(2), QStringLiteral("1.00"), 0, 0, true);

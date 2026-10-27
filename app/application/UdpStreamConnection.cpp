@@ -49,7 +49,8 @@ std::optional<UdpMuxFrame> decodeUdpMux(const QByteArray& bytes, quint64 session
     const auto kind = static_cast<UdpMuxKind>(static_cast<quint8>(bytes[5]));
     const auto channel = static_cast<UdpMuxChannel>(static_cast<quint8>(bytes[6]));
     if (kind < UdpMuxKind::Open || kind > UdpMuxKind::PeerLeave ||
-        (channel != UdpMuxChannel::Control && channel != UdpMuxChannel::Asset)) return {};
+        (channel != UdpMuxChannel::Control && channel != UdpMuxChannel::Asset && channel != UdpMuxChannel::IndependentControl)) return {};
+    if (channel == UdpMuxChannel::IndependentControl && kind != UdpMuxKind::Data && kind != UdpMuxKind::Ack) return {};
     const auto tag = QMessageAuthenticationCode::hash(
         bytes.first(bytes.size() - kTagBytes), key, QCryptographicHash::Sha256).left(kTagBytes);
     if (!control_protocol::constantTimeEqual(tag, bytes.last(kTagBytes))) return {};
@@ -71,14 +72,15 @@ UdpStreamConnection::UdpStreamConnection(
 }
 UdpStreamConnection::~UdpStreamConnection() = default;
 
-QByteArray UdpStreamConnection::packet(UdpMuxKind kind, quint64 sequence, QByteArray payload) const
+QByteArray UdpStreamConnection::packet(UdpMuxKind kind, quint64 sequence, QByteArray payload, bool independent) const
 {
-    return encodeUdpMux({kind, channel_, session_, introduction_, stream_, sequence, std::move(payload)}, key_);
+    return encodeUdpMux({kind, independent ? UdpMuxChannel::IndependentControl : channel_, session_, introduction_, stream_, sequence, std::move(payload)}, key_);
 }
 
 void UdpStreamConnection::scheduleDelivery()
 {
-    if (deliveryScheduled_ || !context_ || !onData_ || input_.empty() || closed_) return;
+    if (deliveryScheduled_ || !context_ || closed_ ||
+        ((!onData_ || input_.empty()) && (!onIndependent_ || independentInput_.empty()))) return;
     deliveryScheduled_ = true;
     const auto weak = weak_from_this();
     QMetaObject::invokeMethod(context_, [weak] {
@@ -86,6 +88,8 @@ void UdpStreamConnection::scheduleDelivery()
         if (!self) return;
         std::deque<QByteArray> pending;
         DataHandler callback;
+        std::deque<QByteArray> independent;
+        DataHandler independentCallback;
         {
             std::lock_guard lock(self->mutex_);
             self->deliveryScheduled_ = false;
@@ -93,10 +97,33 @@ void UdpStreamConnection::scheduleDelivery()
             pending.swap(self->input_);
             self->buffered_ = 0;
             callback = self->onData_;
+            if (self->onIndependent_) {
+                independent.swap(self->independentInput_); self->independentBuffered_ = 0;
+                independentCallback = self->onIndependent_;
+            }
         }
         // No transport mutex is held while the existing control parser runs.
         for (const auto& bytes : pending) if (callback) callback(bytes);
+        for (const auto& bytes : independent) if (independentCallback) independentCallback(bytes);
     }, Qt::QueuedConnection);
+}
+void UdpStreamConnection::startIndependent(QObject* owner, DataHandler onData)
+{
+    std::lock_guard lock(mutex_);
+    if (owner != context_ || !hasIndependentControl()) return;
+    onIndependent_ = std::move(onData); scheduleDelivery();
+}
+bool UdpStreamConnection::writeIndependent(const QByteArray& bytes)
+{
+    std::lock_guard lock(mutex_);
+    if (!hasIndependentControl() || !connected_ || closing_ || closed_ || draining_ ||
+        independentSender_.queuedBytes() + bytes.size() > 16 * 1024) return false;
+    if (!independentSender_.enqueue({reinterpret_cast<const std::uint8_t*>(bytes.constData()), static_cast<std::size_t>(bytes.size())})) return false;
+    if (wake_) wake_(); return true;
+}
+qint64 UdpStreamConnection::independentBytesToWrite() const
+{
+    std::lock_guard lock(mutex_); return independentSender_.queuedBytes();
 }
 
 void UdpStreamConnection::start(QObject* owner, DataHandler onData, DisconnectHandler onDisconnected)
@@ -136,7 +163,7 @@ bool UdpStreamConnection::isConnected() const
 }
 qint64 UdpStreamConnection::bytesToWrite() const
 {
-    std::lock_guard lock(mutex_); return static_cast<qint64>(sender_.queuedBytes());
+    std::lock_guard lock(mutex_); return static_cast<qint64>(sender_.queuedBytes() + independentSender_.queuedBytes());
 }
 qint64 UdpStreamConnection::maxPendingReadBytes() const
 {
@@ -169,6 +196,10 @@ ReliableUdpStream::Stats UdpStreamConnection::stats() const
     snapshot.reordered = receiver_.stats().reordered;
     snapshot.rejected += receiver_.stats().rejected;
     snapshot.reorder_high_water_bytes = receiver_.stats().reorder_high_water_bytes;
+    const auto& tx = independentSender_.stats(); const auto& rx = independentReceiver_.stats();
+    snapshot.sent += tx.sent; snapshot.retransmitted += tx.retransmitted; snapshot.acknowledged += tx.acknowledged;
+    snapshot.received += rx.received; snapshot.duplicates += rx.duplicates; snapshot.reordered += rx.reordered;
+    snapshot.rejected += tx.rejected + rx.rejected; snapshot.timeouts += tx.timeouts;
     return snapshot;
 }
 
@@ -184,7 +215,7 @@ void UdpStreamConnection::setWakeHandler(std::function<void()> wake)
 bool UdpStreamConnection::needsPolling() const
 {
     std::lock_guard lock(mutex_);
-    return !closed_ && (!connected_ || closing_ || !sender_.empty());
+    return !closed_ && (!connected_ || closing_ || !sender_.empty() || !independentSender_.empty());
 }
 
 void UdpStreamConnection::finish(const QString& detail)
@@ -193,6 +224,7 @@ void UdpStreamConnection::finish(const QString& detail)
     closed_ = true;
     connected_ = false;
     input_.clear(); buffered_ = 0;
+    independentInput_.clear(); independentBuffered_ = 0;
     const auto callback = onDisconnected_;
     const auto context = context_;
     if (context && callback) {
@@ -205,7 +237,7 @@ std::size_t UdpStreamConnection::poll(quint64 nowUs, std::size_t packetBudget, c
     std::lock_guard lock(mutex_);
     if (closed_ || packetBudget == 0) return 0;
     if (startedUs_ == 0) startedUs_ = nowUs;
-    if (draining_ && sender_.empty()) requestClose();
+    if (draining_ && sender_.empty() && independentSender_.empty()) requestClose();
     if (closing_) {
         if (closeStartedUs_ == 0) closeStartedUs_ = nowUs;
         if (nowUs - closeStartedUs_ >= 2000000) { finish(QStringLiteral("UDP logical stream closed")); return 0; }
@@ -223,21 +255,27 @@ std::size_t UdpStreamConnection::poll(quint64 nowUs, std::size_t packetBudget, c
         }
         return 0;
     }
-    const auto count = sender_.poll(nowUs, packetBudget, [&](auto sequence, auto bytes, bool) {
+    const auto urgentBudget = packetBudget > 1 && !sender_.empty() ? std::size_t{1} : std::min<std::size_t>(packetBudget, 2);
+    const auto urgent = independentSender_.poll(nowUs, urgentBudget, [&](auto sequence, auto bytes, bool) {
+        return transmit(packet(UdpMuxKind::Data, sequence, QByteArray(reinterpret_cast<const char*>(bytes.data()), bytes.size()), true));
+    });
+    const auto count = sender_.poll(nowUs, packetBudget - urgent, [&](auto sequence, auto bytes, bool) {
         return transmit(packet(UdpMuxKind::Data, sequence,
             QByteArray(reinterpret_cast<const char*>(bytes.data()), static_cast<qsizetype>(bytes.size()))));
     });
-    if (sender_.failed()) {
+    if (sender_.failed() || independentSender_.failed()) {
         failure_ = QStringLiteral("UDP logical stream acknowledgement timeout"); finish(failure_);
     }
-    return count;
+    return count + urgent;
 }
 
 void UdpStreamConnection::receive(const UdpMuxFrame& frame, quint64 nowUs, const Emit& transmit)
 {
     std::lock_guard lock(mutex_);
     if (frame.session != session_ || frame.introduction != introduction_ ||
-        frame.stream != stream_ || frame.channel != channel_) return;
+        frame.stream != stream_ || (frame.channel != channel_ && !(hasIndependentControl() && frame.channel == UdpMuxChannel::IndependentControl))) return;
+    const bool independent = frame.channel == UdpMuxChannel::IndependentControl;
+    if (independent && frame.kind != UdpMuxKind::Data && frame.kind != UdpMuxKind::Ack) return;
     if (frame.kind == UdpMuxKind::Close) {
         transmit(packet(UdpMuxKind::CloseAck)); finish(QStringLiteral("Peer closed UDP logical stream")); return;
     }
@@ -248,23 +286,27 @@ void UdpStreamConnection::receive(const UdpMuxFrame& frame, quint64 nowUs, const
         return;
     }
     if (frame.kind == UdpMuxKind::OpenAck) { if (!incoming_) connected_ = true; return; }
-    if (frame.kind == UdpMuxKind::Ack) { sender_.acknowledge(frame.sequence, nowUs); return; }
+    auto& sender = independent ? independentSender_ : sender_;
+    auto& receiver = independent ? independentReceiver_ : receiver_;
+    auto& buffered = independent ? independentBuffered_ : buffered_;
+    auto& input = independent ? independentInput_ : input_;
+    if (frame.kind == UdpMuxKind::Ack) { sender.acknowledge(frame.sequence, nowUs); return; }
     if (frame.kind != UdpMuxKind::Data) return;
     // Valid data can overtake a lost OpenAck on the already identified stream.
     connected_ = true;
-    if (buffered_ + static_cast<qint64>(receiver_.reorderedBytes()) + frame.payload.size() >
-        static_cast<qint64>(ReliableUdpStream::kQueueBytes)) {
+    if (buffered + static_cast<qint64>(receiver.reorderedBytes()) + frame.payload.size() >
+        (independent ? 16 * 1024 : static_cast<qint64>(ReliableUdpStream::kQueueBytes))) {
         ++inputDeferrals_; // Withhold the ACK until the bounded reader has capacity.
         return;
     }
-    receiver_.receive(frame.sequence,
+    receiver.receive(frame.sequence,
         {reinterpret_cast<const std::uint8_t*>(frame.payload.constData()), static_cast<std::size_t>(frame.payload.size())},
         [&](auto bytes) {
-            input_.emplace_back(reinterpret_cast<const char*>(bytes.data()), static_cast<qsizetype>(bytes.size()));
-            buffered_ += static_cast<qint64>(bytes.size());
-            highWater_ = (std::max)(highWater_, buffered_);
+            input.emplace_back(reinterpret_cast<const char*>(bytes.data()), static_cast<qsizetype>(bytes.size()));
+            buffered += static_cast<qint64>(bytes.size());
+            highWater_ = (std::max)(highWater_, buffered_ + independentBuffered_);
         },
-        [&](auto sequence) { transmit(packet(UdpMuxKind::Ack, sequence)); });
+        [&](auto sequence) { transmit(packet(UdpMuxKind::Ack, sequence, {}, independent)); });
     scheduleDelivery();
 }
 

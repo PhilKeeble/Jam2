@@ -755,9 +755,9 @@ void GuiTestAgent::handle(const QJsonObject& command)
     if (type == QStringLiteral("jam.create") || type == QStringLiteral("jam.join")) {
         const bool create = type == QStringLiteral("jam.create");
         const bool fieldsOk = create
-            ? onlyFields(command, {"format", "type", "id", "port", "test_input", "strategy", "rendezvous"})
+            ? onlyFields(command, {"format", "type", "id", "port", "test_input", "strategy", "rendezvous", "diagnostics", "queued_server_receive"})
             : onlyFields(command, {
-                "format", "type", "id", "port", "invite_url", "test_input"});
+                "format", "type", "id", "port", "invite_url", "test_input", "diagnostics", "queued_server_receive"});
         int port = 0;
         const QString testInput = command.value(QStringLiteral("test_input"))
             .toString(QStringLiteral("silence"));
@@ -776,6 +776,8 @@ void GuiTestAgent::handle(const QJsonObject& command)
             testInput == QStringLiteral("pulse-1s") ||
             testInput == QStringLiteral("metro-pulse");
         if (!fieldsOk ||
+            (command.contains(QStringLiteral("diagnostics")) && !command.value(QStringLiteral("diagnostics")).isBool()) ||
+            (command.contains(QStringLiteral("queued_server_receive")) && !command.value(QStringLiteral("queued_server_receive")).isBool()) ||
             !exactInteger(command.value(QStringLiteral("port")), 1024, 65535, port) ||
             !validTestInput ||
             (!create && (!command.value(QStringLiteral("invite_url")).isString() ||
@@ -798,7 +800,9 @@ void GuiTestAgent::handle(const QJsonObject& command)
                 port,
                 command.value(QStringLiteral("invite_url")).toString(),
                 testInputMode,
-                error, strategy, rendezvous)) {
+                error, strategy, rendezvous, command.value(QStringLiteral("diagnostics")).toBool(false),
+                command.value(QStringLiteral("queued_server_receive")).toBool(false)
+                    ? jam2::application::UdpMultiplexTransport::ReceiveModel::QueuedWorker : jam2::application::UdpMultiplexTransport::ReceiveModel::Runtime)) {
             reject(command, error);
             return;
         }

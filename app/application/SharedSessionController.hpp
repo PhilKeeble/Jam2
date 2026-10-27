@@ -155,6 +155,8 @@ public:
     void refresh();
     bool reconnectControlStream();
     void setReconnectEnabled(bool enabled);
+    // Select the measured Server receive experiment before starting a jam.
+    bool configureServerReceiveModel(jam2::application::UdpMultiplexTransport::ReceiveModel model);
 
     void updateLocalEndpoint(const QString& endpoint);
     void updatePeerEdgeState(
@@ -199,6 +201,7 @@ public:
     std::function<QString(const QString&, const QString&)> endpointOverride;
 
 private:
+    jam2::application::UdpMultiplexTransport::ReceiveModel serverReceiveModel_ = jam2::application::UdpMultiplexTransport::ReceiveModel::Runtime;
     struct Peer {
         QString endpoint;
         quint64 peerId = 0;

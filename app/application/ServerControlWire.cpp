@@ -3,16 +3,20 @@
 
 #include <QCborValue>
 #include <QCborStreamReader>
+#include <QCborMap>
+#include <QCborArray>
 #include <QCryptographicHash>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QMessageAuthenticationCode>
 #include <QSet>
+#include <QHash>
 #include <QStringDecoder>
 #include <QUuid>
 #include <QtEndian>
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cmath>
 #include <limits>
@@ -25,11 +29,11 @@ namespace {
 constexpr qsizetype kChunkBytes = 24 * 1024, kMaximumAssetBytes = 512 * 1024 * 1024;
 constexpr qsizetype kPartBytes = 32 * 1024;
 static_assert(sizeof(double) == 8 && std::numeric_limits<double>::is_iec559);
-enum class Type { Bool, U8, U16, U32, I64, F64, Text, Hex16, Hash, TransferHash, Document, FrameText, Settings, Tempo, Hashes, Peers, Participants };
+enum class Type { Bool, U8, U16, U32, I64, F64, Text, Hex16, Hash, TransferHash, Document, FrameText, Settings, Tempo, Hashes, Peers, Participants, Lane, Phase, Scope, Format, Profile, Ideas };
 struct Field { const char* name; Type type; };
-struct Schema { Operation operation; const char* name; std::vector<Field> fields; };
+struct Schema { Operation operation; const char* name; std::vector<Field> fields; QSet<QString> allowed; };
 
-// Positional fields, selected by a fixed u32 presence bitmap. No field names or
+// Positional fields, selected by a schema-sized u8/u16 presence bitmap. No field names or
 // dynamic schema travel on the wire. Common authority fields are explicit slots.
 const std::vector<Schema>& schemas()
 {
@@ -37,7 +41,7 @@ const std::vector<Schema>& schemas()
     using enum Operation;
     static const std::vector<Schema> values = [] {
         std::vector<Schema> s{
-            {Contract,"session.contract",{{"protocol_version",U8},{"audio_format",Text},{"profile",Text},{"sample_rate",U32},{"frame_size",U16},{"coordinator_token",Hex16}}},
+            {Contract,"session.contract",{{"protocol_version",U8},{"audio_format",Format},{"profile",Profile},{"sample_rate",U32},{"frame_size",U16},{"coordinator_token",Hex16}}},
             {Membership,"session.membership",{{"page_index",U32},{"page_count",U32},{"coordinator_token",Hex16},{"editor_authority_token",Hex16},{"arrangement_authority_token",Hex16},{"editor_revision",I64},{"arrangement_revision",I64},{"peers",Peers}}},
             {Heartbeat,"session.heartbeat",{{"sequence",U32}}}, {HeartbeatReply,"session.heartbeat.ack",{{"sequence",U32}}},
             {Introduce,"session.udp.introduce",{{"peer",Hex16},{"nonce",Hex16}}}, {Repair,"session.udp.recover",{{"peer",Hex16}}},
@@ -50,13 +54,13 @@ const std::vector<Schema>& schemas()
             {ListeningCommit,"jam.listening.commit",{}}, {ListeningCancel,"jam.listening.cancel",{}},
             {ListeningState,"jam.listening.state",{}}, {ListeningReset,"jam.listening.reset",{}},
             {ListeningApplied,"jam.listening.applied",{{"actual_frame",FrameText}}},
-            {Cell,"beat.set",{{"section",U8},{"lane",Text},{"beat",U16},{"text",Text}}},
+            {Cell,"beat.set",{{"section",U8},{"lane",Lane},{"beat",U16},{"text",Text}}},
             {Hit,"beat.hit",{{"section",U8},{"beat",U16},{"lane",U8},{"text",Text}}},
             {BeatDivision,"beat.division",{{"section",U8},{"beat",U16},{"division",U8}}},
             {MusicDivision,"music.division",{{"section",U8},{"beat",U16},{"division",U8}}},
-            {MusicStep,"music.step",{{"section",U8},{"beat",U16},{"step",U8},{"lane",Text},{"text",Text}}},
-            {Resize,"grid.resize",{{"section",U8},{"lane",Text},{"beats",U16}}},
-            {Song,"song.set",{{"song",Document},{"sync_scope",Text},{"arrangement_revision",I64},{"base_arrangement_revision",I64},{"host_authoritative",Bool},{"track_playing",Bool}}},
+            {MusicStep,"music.step",{{"section",U8},{"beat",U16},{"step",U8},{"lane",Lane},{"text",Text}}},
+            {Resize,"grid.resize",{{"section",U8},{"lane",Lane},{"beats",U16}}},
+            {Song,"song.set",{{"song",Document},{"sync_scope",Scope},{"arrangement_revision",I64},{"base_arrangement_revision",I64},{"host_authoritative",Bool},{"track_playing",Bool}}},
             {Render,"practice.references.render",{{"request_id",Hex16},{"render_signature",Hash},{"render_chords",Bool},{"render_drums",Bool},{"render_melody",Bool},{"render_bass",Bool},{"render_support",Bool},{"chord_voicing",U32},{"drum_kit",U32}}},
             {BankRequest,"bank.request",{{"bank",U8},{"target_abs_beat",FrameText}}},
             {BankPrepare,"bank.prepare",{{"bank",U8},{"switch_id",Hex16},{"target_abs_beat",FrameText}}},
@@ -65,7 +69,7 @@ const std::vector<Schema>& schemas()
             {ShareRequest,"looper.track.share.request",{{"batch_id",Hex16}}},
             {ShareOffer,"looper.track.batch.offer",{{"batch_id",Hex16},{"tracks",Document}}},
             {ShareComplete,"looper.track.batch.complete",{{"batch_id",Hex16},{"tracks",U32},{"applied",Bool},{"reason",Text}}},
-            {RecordingState,"looper.recording.state",{{"phase",Text},{"state_revision",U32},{"bank",U8},{"lane_id",Text},{"lane_name",Text},{"count_in_remaining",U16},{"count_in_bars",U8},{"group_id",Hex16},{"source_peer_token",Hex16}}},
+            {RecordingState,"looper.recording.state",{{"phase",Phase},{"state_revision",U32},{"bank",U8},{"lane_id",Text},{"lane_name",Text},{"count_in_remaining",U16},{"count_in_bars",U8},{"group_id",Hex16},{"source_peer_token",Hex16}}},
             {GroupStart,"looper.recording.group.start",{{"group_id",Hex16},{"participants",Participants},{"count_in_bars",U8},{"countdown_abs_beat",FrameText},{"target_abs_beat",FrameText}}},
             {GroupFinish,"looper.recording.group.finish",{{"group_id",Hex16}}},
             {GroupRecoverRequest,"looper.recording.group.recover.request",{{"group_id",Hex16}}},
@@ -80,13 +84,15 @@ const std::vector<Schema>& schemas()
         };
         for (auto& schema : s) {
             if (schema.operation == SyncSet || schema.operation == SyncRequest) {
-                schema.fields = {{"track_lanes",Bool},{"auto_share_wavs",Bool},{"global_playback",Bool},{"listening_tools",Bool},{"generated_ideas",Text},{"metronome_state",Bool},{"recordings",Bool}};
+                schema.fields = {{"track_lanes",Bool},{"auto_share_wavs",Bool},{"global_playback",Bool},{"listening_tools",Bool},{"generated_ideas",Ideas},{"metronome_state",Bool},{"recordings",Bool}};
             }
             if (schema.operation >= ListeningRequest && schema.operation <= ListeningReset) {
                 schema.fields = {{"settings",Settings},{"bank",U8},{"tempo",Tempo},{"target_frame",FrameText},{"epoch_frame",FrameText},{"epoch_position",F64},{"source_seconds",F64},{"playing",Bool},{"reason",Text},{"changed_groups",U8}};
             }
             schema.fields.push_back({"revision",I64});
             schema.fields.push_back({"authority_token",Hex16});
+            schema.allowed.insert(QStringLiteral("type"));
+            for (const auto& field : schema.fields) schema.allowed.insert(QLatin1String(field.name));
         }
         return s;
     }();
@@ -140,6 +146,111 @@ struct Reader {
     QByteArray block() { const auto count = number<quint32>(); return take(count); }
     bool done() const { return okay && at == bytes.size(); }
 };
+std::span<const char* const> enumValues(Type type)
+{
+    static constexpr const char* lanes[]{"chord", "target", "beat", "lyric", "melody", "bass", "support"};
+    static constexpr const char* phases[]{"idle", "armed", "ready", "waiting", "count-in", "recording", "complete", "finalizing"};
+    static constexpr const char* scopes[]{"tracks", "idea.full", "idea.chords", "idea.beats"};
+    static constexpr const char* formats[]{"pcm16-mono", "pcm24-mono"};
+    static constexpr const char* profiles[]{"fast", "moderate", "safe"};
+    static constexpr const char* ideas[]{"off", "chords", "beats", "full"};
+    switch (type) {
+    case Type::Lane: return lanes; case Type::Phase: return phases; case Type::Scope: return scopes;
+    case Type::Format: return formats; case Type::Profile: return profiles; case Type::Ideas: return ideas;
+    default: return {};
+    }
+}
+// Versioned global property IDs. Unknown application-defined recipe properties
+// retain a text escape; unknown numeric IDs fail instead of aliasing a field.
+const auto& documentKeys()
+{
+    static constexpr auto keys = std::to_array<const char*>({
+        "id", "name", "title", "looper", "banks", "lanes", "sections", "timing", "active_bank", "arrangement",
+        "asset_hash", "asset_path", "source_frames", "sample_rate", "start_frame", "stop_frame", "loop_start_frame",
+        "loop_end_frame", "loop_enabled", "gain_db", "muted", "solo", "origin_kind", "reference_kind",
+        "reference_source_signature", "reference_bpm", "reference_stale", "grid_lock_enabled", "track_sync_enabled",
+        "bpm", "beats_per_bar", "beat_unit", "tempo_pulse_units", "division", "play_mask_low", "play_mask_high",
+        "accent_mask_low", "accent_mask_high", "inherits_bank_a", "enabled", "loop", "steps", "bank", "repeats",
+        "label", "beats", "chords", "targets", "beat_notes", "lyrics", "beat_patterns", "musical_patterns", "drum_kit",
+        "generated_kind", "generated_recipe", "state", "value", "velocity", "articulation", "voicing", "melody",
+        "bass", "support", "recording_id", "bank_index", "bank_id", "lane_id", "sha256", "file_bytes", "recorded_bpm",
+        "bars", "complexity", "style_id", "profile_id", "key", "mode", "meter_id", "harmonic_rhythm", "automation",
+        "chord_voicing", "render_signature", "source_signature", "version", "format", "notes", "octave", "duration",
+        "length", "probability", "swing", "gate", "accent", "instrument", "role", "phrase", "seed", "pattern"});
+    return keys;
+}
+quint8 documentKeyId(const QString& key)
+{
+    static const auto ids = [] {
+        QHash<QString, quint8> result; quint8 id = 1;
+        for (const auto* name : documentKeys()) result.insert(QLatin1String(name), id++);
+        return result;
+    }();
+    return ids.value(key);
+}
+bool writeDocumentKey(Writer& w, const QString& key, bool numeric)
+{
+    const auto id = numeric ? documentKeyId(key) : quint8{0};
+    w.number<quint8>(id); return id || w.text(key);
+}
+QString readDocumentKey(Reader& r)
+{
+    const auto id = r.number<quint8>();
+    if (!id) return r.text();
+    if (id > documentKeys().size()) { r.okay = false; return {}; }
+    return QLatin1String(documentKeys()[id - 1]);
+}
+bool snapshotFrameKey(const QString& key)
+{
+    return key == QLatin1String("source_frames") || key == QLatin1String("start_frame") || key == QLatin1String("stop_frame") ||
+        key == QLatin1String("loop_start_frame") || key == QLatin1String("loop_end_frame");
+}
+QCborValue numericDocument(const QJsonValue& value)
+{
+    if (value.isObject()) {
+        QCborMap map; const auto object = value.toObject();
+        for (auto it = object.begin(); it != object.end(); ++it) {
+            auto id = documentKeyId(it.key());
+            auto content = numericDocument(it.value());
+            if (snapshotFrameKey(it.key())) {
+                bool okay = false; const auto frame = it.value().toString().toLongLong(&okay);
+                if (it.value().isString() && okay && QString::number(frame) == it.value().toString()) content = QCborValue(frame);
+                else id = 0; // Text-key escape preserves noncanonical/numeric application values.
+            }
+            map.insert(id ? QCborValue(static_cast<qint64>(id)) : QCborValue(it.key()), content);
+        }
+        return map;
+    }
+    if (value.isArray()) { QCborArray array; for (const auto& item : value.toArray()) array.append(numericDocument(item)); return array; }
+    return QCborValue::fromJsonValue(value);
+}
+bool jsonDocument(const QCborValue& wire, QJsonValue& value)
+{
+    if (wire.isMap()) {
+        QJsonObject object; const auto map = wire.toMap();
+        for (auto it = map.begin(); it != map.end(); ++it) {
+            QString key;
+            if (it.key().isInteger()) {
+                const auto id = it.key().toInteger();
+                if (id <= 0 || id > static_cast<qint64>(documentKeys().size())) return false;
+                key = QLatin1String(documentKeys()[static_cast<std::size_t>(id - 1)]);
+            } else if (it.key().isString()) key = it.key().toString();
+            else return false;
+            QJsonValue item;
+            if (object.contains(key)) return false;
+            if (it.key().isInteger() && snapshotFrameKey(key) && it.value().isInteger()) item = QString::number(it.value().toInteger());
+            else if (!jsonDocument(it.value(), item)) return false;
+            object.insert(key, item);
+        }
+        value = object; return true;
+    }
+    if (wire.isArray()) {
+        QJsonArray array; for (const auto& item : wire.toArray()) { QJsonValue decoded; if (!jsonDocument(item, decoded)) return false; array.append(decoded); }
+        value = array; return true;
+    }
+    if (wire.isByteArray() || wire.isTag() || wire.isUndefined()) return false;
+    value = wire.toJsonValue(); return !value.isUndefined();
+}
 bool fixedHex(const QString& text, int size, QByteArray& out)
 {
     if (text.size() != size * 2) return false;
@@ -154,8 +265,9 @@ bool encodeStructured(Type type, const QJsonValue& value, Writer& writer)
         const auto speed = object.value("speed_ppm").toInteger(-1), pitch = object.value("pitch_cents").toInteger(-99999);
         if (speed < 100000 || speed > 2000000 || pitch < -1200 || pitch > 1200) return false;
         writer.number<qint32>(static_cast<qint32>(speed)); writer.number<qint32>(static_cast<qint32>(pitch));
-        writer.number<quint8>(object.value("focus_enabled").toBool());
-        if (!writer.text(object.value("focus_preset").toString())) return false;
+        const auto preset = object.value("focus_preset").toString();
+        writer.number<quint8>((object.value("focus_enabled").toBool() ? 0x80 : 0) | (preset == QStringLiteral("custom") ? 1 : 0));
+        if (preset != QStringLiteral("custom") && !writer.text(preset)) return false;
         for (const auto* name : {"focus_hz", "focus_gain_db", "focus_q"}) {
             const auto n = object.value(name);
             if (!n.isDouble() || !std::isfinite(n.toDouble())) return false;
@@ -189,9 +301,12 @@ bool encodeStructured(Type type, const QJsonValue& value, Writer& writer)
 bool decodeStructured(Type type, Reader& r, QJsonValue& value)
 {
     if (type == Type::Settings) {
-        const auto speed = r.number<qint32>(), pitch = r.number<qint32>(); const auto enabled = r.number<quint8>(); const auto preset = r.text();
+        const auto speed = r.number<qint32>(), pitch = r.number<qint32>(); const auto flags = r.number<quint8>();
+        const bool enabled = flags & 0x80;
+        const auto preset = (flags & 0x7f) == 1 ? QStringLiteral("custom") : r.text();
+        if ((flags & 0x7f) > 1) r.okay = false;
         const auto hz = std::bit_cast<double>(r.number<quint64>()), gain = std::bit_cast<double>(r.number<quint64>()), q = std::bit_cast<double>(r.number<quint64>());
-        if (!r.okay || speed < 100000 || speed > 2000000 || pitch < -1200 || pitch > 1200 || enabled > 1 || !std::isfinite(hz) || !std::isfinite(gain) || !std::isfinite(q)) return false;
+        if (!r.okay || speed < 100000 || speed > 2000000 || pitch < -1200 || pitch > 1200 || !std::isfinite(hz) || !std::isfinite(gain) || !std::isfinite(q)) return false;
         value = QJsonObject{{"speed_ppm", speed}, {"pitch_cents", pitch}, {"focus_enabled", bool(enabled)}, {"focus_preset", preset}, {"focus_hz", hz}, {"focus_gain_db", gain}, {"focus_q", q}}; return true;
     }
     if (type == Type::Tempo) {
@@ -240,21 +355,57 @@ bool readDocument(const QByteArray& bytes, QJsonValue& out)
     QCborParserError error;
     const auto value = QCborValue::fromCbor(bytes, &error);
     if (error.error != QCborError::NoError) return false;
-    out = value.toJsonValue();
-    return !out.isUndefined();
+    return jsonDocument(value, out);
 }
-QByteArray documentBytes(const QJsonValue& value) { return QCborValue::fromJsonValue(value).toCbor(); }
+QByteArray documentBytes(const QJsonValue& value, bool numeric = true) { return (numeric ? numericDocument(value) : QCborValue::fromJsonValue(value)).toCbor(); }
+
+// A typed rename within an already bound snapshot. Indices are safe only inside
+// the checked base serial; this never resolves a stale proposal by array index.
+bool applyRename(const QJsonValue& base, quint16 bankIndex, quint16 laneIndex, const QString& name, QJsonValue& out)
+{
+    auto song = base.toObject(); auto looper = song.value("looper").toObject();
+    auto banks = looper.value("banks").toArray();
+    if (bankIndex >= banks.size()) return false;
+    auto bank = banks[bankIndex].toObject(); auto lanes = bank.value("lanes").toArray();
+    if (laneIndex >= lanes.size() || !lanes[laneIndex].isObject()) return false;
+    auto lane = lanes[laneIndex].toObject(); lane["name"] = name; lanes[laneIndex] = lane;
+    bank["lanes"] = lanes; banks[bankIndex] = bank; looper["banks"] = banks; song["looper"] = looper; out = song;
+    return true;
+}
+QByteArray typedRename(const QJsonValue& base, const QJsonValue& value)
+{
+    if (!base.isObject() || !value.isObject()) return {};
+    const auto banks = value.toObject().value("looper").toObject().value("banks").toArray();
+    const auto oldBanks = base.toObject().value("looper").toObject().value("banks").toArray();
+    if (banks.size() != oldBanks.size() || banks.size() > UINT16_MAX) return {};
+    for (qsizetype b = 0; b < banks.size(); ++b) {
+        if (banks[b] == oldBanks[b]) continue;
+        const auto lanes = banks[b].toObject().value("lanes").toArray();
+        const auto oldLanes = oldBanks[b].toObject().value("lanes").toArray();
+        if (lanes.size() != oldLanes.size() || lanes.size() > UINT16_MAX) return {};
+        for (qsizetype l = 0; l < lanes.size(); ++l) {
+            if (lanes[l] == oldLanes[l]) continue;
+            const auto name = lanes[l].toObject().value("name"); QJsonValue reconstructed;
+            if (!name.isString() || !applyRename(base, b, l, name.toString(), reconstructed) || reconstructed != value) return {};
+            Writer w; w.number<quint8>(4); w.number<quint16>(b); w.number<quint16>(l);
+            if (!w.text(name.toString())) return {};
+            return w.bytes;
+        }
+        return {};
+    }
+    return {};
+}
 
 // Explicit recursive patch tree: unchanged=0, replace=1, object edits=2,
 // same-length array edits=3. Array insert/removal uses a replacement so indices
 // cannot accidentally refer to a different object. A stream-local base serial
 // guards every patch. This is a serialization delta, not authority reconciliation.
-QByteArray delta(const QJsonValue& base, const QJsonValue& value, int depth = 0)
+QByteArray delta(const QJsonValue& base, const QJsonValue& value, int depth = 0, bool numeric = true)
 {
     Writer w;
     if (base == value) { w.number<quint8>(0); return w.bytes; }
-    w.number<quint8>(1); w.block(documentBytes(value));
-    if (depth >= 24) return w.bytes;
+    const auto replacement = [&] { Writer full; full.number<quint8>(1); full.block(documentBytes(value, numeric)); return full.bytes; };
+    if (depth >= 24) return replacement();
     Writer changes;
     if (base.isObject() && value.isObject()) {
         const auto a = base.toObject(), b = value.toObject();
@@ -265,24 +416,26 @@ QByteArray delta(const QJsonValue& base, const QJsonValue& value, int depth = 0)
         quint32 count = 0;
         for (const auto& key : ordered) {
             if (a.value(key) == b.value(key)) continue;
-            if (!changes.text(key)) return w.bytes;
+            if (!writeDocumentKey(changes, key, numeric)) return replacement();
             changes.number<quint8>(b.contains(key) ? 1 : 0);
-            if (b.contains(key)) changes.block(delta(a.value(key), b.value(key), depth + 1));
+            if (b.contains(key)) changes.block(delta(a.value(key), b.value(key), depth + 1, numeric));
             ++count;
         }
         Writer candidate; candidate.number<quint8>(2); candidate.number<quint32>(count); candidate.bytes += changes.bytes;
-        if (candidate.bytes.size() < w.bytes.size()) return candidate.bytes;
+        if (count <= 2 && candidate.bytes.size() <= 256) return candidate.bytes;
+        const auto full = replacement(); return candidate.bytes.size() < full.size() ? candidate.bytes : full;
     } else if (base.isArray() && value.isArray() && base.toArray().size() == value.toArray().size()) {
         const auto a = base.toArray(), b = value.toArray();
         quint32 count = 0;
         for (qsizetype i = 0; i < a.size(); ++i) {
             if (a[i] == b[i]) continue;
-            changes.number<quint32>(static_cast<quint32>(i)); changes.block(delta(a[i], b[i], depth + 1)); ++count;
+            changes.number<quint32>(static_cast<quint32>(i)); changes.block(delta(a[i], b[i], depth + 1, numeric)); ++count;
         }
         Writer candidate; candidate.number<quint8>(3); candidate.number<quint32>(count); candidate.bytes += changes.bytes;
-        if (candidate.bytes.size() < w.bytes.size()) return candidate.bytes;
+        if (count <= 2 && candidate.bytes.size() <= 256) return candidate.bytes;
+        const auto full = replacement(); return candidate.bytes.size() < full.size() ? candidate.bytes : full;
     }
-    return w.bytes;
+    return replacement();
 }
 bool applyDelta(const QJsonValue& base, const QByteArray& bytes, QJsonValue& out, int depth = 0)
 {
@@ -290,12 +443,16 @@ bool applyDelta(const QJsonValue& base, const QByteArray& bytes, QJsonValue& out
     Reader r{bytes}; const auto kind = r.number<quint8>();
     if (kind == 0) { out = base; return r.done(); }
     if (kind == 1) { const auto content = r.block(); return r.done() && readDocument(content, out); }
+    if (kind == 4) {
+        const auto bank = r.number<quint16>(), lane = r.number<quint16>(); const auto name = r.text();
+        return r.done() && applyRename(base, bank, lane, name, out);
+    }
     const auto count = r.number<quint32>();
     if (!r.okay || count > 65536) return false;
     if (kind == 2 && base.isObject()) {
         auto object = base.toObject(); QSet<QString> seen;
         for (quint32 i = 0; i < count && r.okay; ++i) {
-            const auto key = r.text(); const auto present = r.number<quint8>();
+            const auto key = readDocumentKey(r); const auto present = r.number<quint8>();
             if (!r.okay || seen.contains(key) || present > 1) return false;
             seen.insert(key);
             if (!present) object.remove(key);
@@ -330,17 +487,31 @@ bool requiresReceipt(Operation operation)
     default: return true;
     }
 }
+bool independentOperation(Operation operation)
+{
+    // Replies reference explicit transaction IDs/revisions and are checked by
+    // their existing owner. Commands and model/policy edits cannot overtake.
+    using enum Operation;
+    switch (operation) {
+    case Heartbeat: case HeartbeatReply: case ListeningReady: case ListeningFailed:
+    case ListeningApplied: case BankReady: case RecordingState: return true;
+    default: return false;
+    }
+}
 }
 
 struct Codec::State {
+    Options options;
     QJsonValue sentSong, receivedSong;
     quint64 sentSongSerial = 0, receivedSongSerial = 0;
+    quint64 sentSongUpperBound = 0, receivedSongUpperBound = 0, checkpointBytes = 0;
     quint32 nextTransfer = 1;
     struct Transfer { quint32 handle = 0; QByteArray hash; quint64 bytes = 0; quint32 chunk = 0; };
     Transfer outgoing, incoming;
     Stats stats;
 };
-Codec::Codec() : state_(std::make_unique<State>()) {}
+Codec::Codec() : Codec(Options{}) {}
+Codec::Codec(Options options) : state_(std::make_unique<State>()) { state_->options = options; }
 Codec::~Codec() = default;
 const Stats& Codec::stats() const noexcept { return state_->stats; }
 
@@ -349,19 +520,20 @@ bool Codec::encode(const QJsonObject& message, Encoded& out, QString& error, qsi
     out = {};
     const auto* schema = schemaFor(message.value("type").toString());
     if (!schema) { error = QStringLiteral("unsupported Server control operation"); return false; }
-    QSet<QString> allowed{QStringLiteral("type")};
-    Writer fields; quint32 mask = 0;
+    Writer fields; quint32 mask = 0, booleans = 0; int booleanCount = 0;
     QJsonValue nextSong(QJsonValue::Undefined); quint64 nextSongSerial = state_->sentSongSerial;
+    quint64 nextSongUpperBound = state_->sentSongUpperBound, nextCheckpointBytes = state_->checkpointBytes;
     auto nextTransfer = state_->outgoing;
     for (std::size_t index = 0; index < schema->fields.size(); ++index) {
-        const auto& field = schema->fields[index]; allowed.insert(QLatin1String(field.name));
+        const auto& field = schema->fields[index];
         const auto value = message.value(QLatin1String(field.name));
         if (value.isUndefined()) continue;
         mask |= quint32{1} << index;
         switch (field.type) {
         case Type::Bool:
             if (!value.isBool()) { error = QStringLiteral("Server boolean field is invalid"); return false; }
-            fields.number<quint8>(value.toBool()); break;
+            if (value.toBool()) booleans |= quint32{1} << booleanCount;
+            ++booleanCount; break;
         case Type::U8: case Type::U16: case Type::U32: {
             const auto n = value.toDouble(-1);
             const auto maximum = field.type == Type::U8 ? UINT8_MAX : field.type == Type::U16 ? UINT16_MAX : UINT32_MAX;
@@ -381,6 +553,13 @@ bool Codec::encode(const QJsonObject& message, Encoded& out, QString& error, qsi
         case Type::Text:
             if (!value.isString() || !fields.text(value.toString())) { error = QStringLiteral("Server text field exceeds its UTF-8 bound"); return false; }
             break;
+        case Type::Lane: case Type::Phase: case Type::Scope: case Type::Format: case Type::Profile: case Type::Ideas: {
+            const auto values = enumValues(field.type); quint8 id = 1;
+            if (!value.isString()) { error = QStringLiteral("Server enum is not text at the application boundary"); return false; }
+            for (const auto* text : values) { if (value.toString() == QLatin1String(text)) break; ++id; }
+            if (id > values.size()) { error = QStringLiteral("Server enum value is unknown"); return false; }
+            fields.number<quint8>(id); break;
+        }
         case Type::Hex16:
         case Type::Hash: {
             const auto text = value.toString(); const auto size = field.type == Type::Hash ? 32 : 16;
@@ -415,12 +594,22 @@ bool Codec::encode(const QJsonObject& message, Encoded& out, QString& error, qsi
                 if (!value.isObject() || state_->sentSongSerial == UINT64_MAX) { error = QStringLiteral("Server song identity exhausted or invalid"); return false; }
                 Writer doc; nextSongSerial = state_->sentSongSerial + 1;
                 doc.number<quint64>(state_->sentSongSerial); doc.number<quint64>(nextSongSerial);
-                const auto patch = delta(state_->sentSong, value);
+                auto patch = state_->options.typedRenames ? typedRename(state_->sentSong, value) : QByteArray{};
+                if (patch.isEmpty()) patch = delta(state_->sentSong, value, 0, state_->options.numericDocuments);
+                nextSongUpperBound = state_->sentSongUpperBound + static_cast<quint64>(patch.size());
+                if (!patch.isEmpty() && patch[0] == 1) {
+                    nextCheckpointBytes = qFromBigEndian<quint32>(reinterpret_cast<const uchar*>(patch.constData() + 1));
+                    nextSongUpperBound = nextCheckpointBytes;
+                }
+                if (nextSongUpperBound > kMaximumDocumentBytes) nextSongUpperBound = documentBytes(value, state_->options.numericDocuments).size();
+                if (nextSongUpperBound > kMaximumDocumentBytes) { error = QStringLiteral("Server expanded song exceeds 4 MiB"); return false; }
                 doc.bytes += patch; bytes = doc.bytes; nextSong = value;
-            } else bytes = documentBytes(value);
+            } else bytes = documentBytes(value, state_->options.numericDocuments);
             if (bytes.size() > kMaximumDocumentBytes) { error = QStringLiteral("Server document exceeds 4 MiB"); return false; }
-            const auto compressed = qCompress(bytes, 1);
-            const bool pack = compressed.size() + 1 < bytes.size();
+            QByteArray compressed;
+            if (bytes.size() >= state_->options.compressionMinimumBytes) { compressed = qCompress(bytes, 1); ++state_->stats.compressionAttempts; }
+            else ++state_->stats.compressionSkipped;
+            const bool pack = !compressed.isEmpty() && compressed.size() + 1 < bytes.size();
             fields.number<quint8>(pack ? 1 : 0); fields.block(pack ? compressed : bytes); break;
         }
         case Type::Settings: case Type::Tempo: case Type::Hashes: case Type::Peers: case Type::Participants:
@@ -429,7 +618,7 @@ bool Codec::encode(const QJsonObject& message, Encoded& out, QString& error, qsi
         }
     }
     for (auto it = message.begin(); it != message.end(); ++it) {
-        if (!allowed.contains(it.key())) { error = QStringLiteral("unsupported field for Server operation: ") + it.key(); return false; }
+        if (!schema->allowed.contains(it.key())) { error = QStringLiteral("unsupported field for Server operation: ") + it.key(); return false; }
     }
     if (schema->operation == Operation::AssetStart) {
         if (state_->nextTransfer == 0 || message.value("chunk_size").toInt() != kChunkBytes || message.value("file_bytes").toInteger() < 44 || message.value("file_bytes").toInteger() > kMaximumAssetBytes) { error = QStringLiteral("Server asset start is invalid"); return false; }
@@ -437,7 +626,11 @@ bool Codec::encode(const QJsonObject& message, Encoded& out, QString& error, qsi
         if (nextTransfer.hash.size() != 32) return false;
         fields.number<quint32>(nextTransfer.handle);
     }
-    Writer payload; payload.number<quint32>(mask); payload.bytes += fields.bytes;
+    Writer payload;
+    if (schema->fields.size() <= 8) payload.number<quint8>(static_cast<quint8>(mask));
+    else payload.number<quint16>(static_cast<quint16>(mask));
+    for (int offset = 0; offset < booleanCount; offset += 8) payload.number<quint8>(static_cast<quint8>(booleans >> offset));
+    payload.bytes += fields.bytes;
     if (payload.bytes.size() > kMaximumDocumentBytes) { error = QStringLiteral("Server operation exceeds its bound"); return false; }
     out = {schema->operation, payload.bytes};
     const auto parts = std::max<qsizetype>(1, (out.payload.size() + kPartBytes - 1) / kPartBytes);
@@ -448,9 +641,9 @@ bool Codec::encode(const QJsonObject& message, Encoded& out, QString& error, qsi
     if (!nextSong.isUndefined()) {
         if (state_->sentSongSerial == 0) ++state_->stats.checkpointsSent;
         else ++state_->stats.deltasSent;
-        const auto fullBytes = documentBytes(nextSong).size();
-        if (fullBytes > payload.bytes.size()) state_->stats.savedSnapshotBytes += fullBytes - payload.bytes.size();
+        if (nextCheckpointBytes > static_cast<quint64>(payload.bytes.size())) state_->stats.savedSnapshotBytes += nextCheckpointBytes - payload.bytes.size();
         state_->sentSong = nextSong; state_->sentSongSerial = nextSongSerial;
+        state_->sentSongUpperBound = nextSongUpperBound; state_->checkpointBytes = nextCheckpointBytes;
     }
     if (schema->operation == Operation::AssetStart) { state_->outgoing = nextTransfer; ++state_->nextTransfer; }
     if (schema->operation == Operation::AssetProgress || schema->operation == Operation::AssetDone) state_->stats.assetMetadataBytesSaved += 30;
@@ -495,21 +688,35 @@ bool Codec::decode(Operation operation, const QByteArray& bytes, Decoded& out, Q
     }
     const auto* schema = schemaFor(operation);
     if (!schema || bytes.size() > kMaximumDocumentBytes) { error = QStringLiteral("Server operation or size is unsupported"); return false; }
-    const auto mask = r.number<quint32>();
+    const quint32 mask = schema->fields.size() <= 8 ? r.number<quint8>() : r.number<quint16>();
     if (!r.okay || (mask >> schema->fields.size()) != 0) { error = QStringLiteral("Server presence mask is invalid"); return false; }
+    int booleanCount = 0;
+    for (std::size_t index = 0; index < schema->fields.size(); ++index)
+        if ((mask & (quint32{1} << index)) && schema->fields[index].type == Type::Bool) ++booleanCount;
+    quint32 booleans = 0;
+    for (int offset = 0; offset < booleanCount; offset += 8) booleans |= quint32{r.number<quint8>()} << offset;
+    if (booleanCount && (booleans >> booleanCount)) { error = QStringLiteral("Server boolean bitmap has reserved bits"); return false; }
+    int booleanIndex = 0;
     QJsonObject message{{"type", QLatin1String(schema->name)}};
     QJsonValue nextSong(QJsonValue::Undefined); quint64 nextSerial = state_->receivedSongSerial;
+    quint64 nextSongUpperBound = state_->receivedSongUpperBound;
     for (std::size_t index = 0; index < schema->fields.size() && r.okay; ++index) {
         if (!(mask & (quint32{1} << index))) continue;
         const auto& f = schema->fields[index]; QJsonValue value;
         switch (f.type) {
-        case Type::Bool: { const auto b = r.number<quint8>(); if (b > 1) r.okay = false; value = bool(b); break; }
+        case Type::Bool: value = bool(booleans & (quint32{1} << booleanIndex++)); break;
         case Type::U8: value = static_cast<qint64>(r.number<quint8>()); break;
         case Type::U16: value = static_cast<qint64>(r.number<quint16>()); break;
         case Type::U32: value = static_cast<qint64>(r.number<quint32>()); break;
         case Type::I64: value = r.number<qint64>(); break;
         case Type::F64: { const auto n = std::bit_cast<double>(r.number<quint64>()); if (!std::isfinite(n)) r.okay = false; value = n; break; }
         case Type::Text: value = r.text(); break;
+        case Type::Lane: case Type::Phase: case Type::Scope: case Type::Format: case Type::Profile: case Type::Ideas: {
+            const auto values = enumValues(f.type); const auto id = r.number<quint8>();
+            if (!id || id > values.size()) r.okay = false;
+            else value = QLatin1String(values[id - 1]);
+            break;
+        }
         case Type::Hex16:
         case Type::Hash: {
             const auto present = f.type == Type::Hash ? quint8{1} : r.number<quint8>();
@@ -552,7 +759,11 @@ bool Codec::decode(Operation operation, const QByteArray& bytes, Decoded& out, Q
             if (operation == Operation::Song && QByteArrayView(f.name) == "song") {
                 Reader doc{content}; const auto base = doc.number<quint64>(); nextSerial = doc.number<quint64>();
                 if (!doc.okay || base != state_->receivedSongSerial || nextSerial != base + 1 || nextSerial == 0 || !applyDelta(state_->receivedSong, content.sliced(doc.at), value) || !value.isObject()) { r.okay = false; break; }
-                if (documentBytes(value).size() > kMaximumDocumentBytes) { r.okay = false; break; }
+                const auto patch = content.sliced(doc.at);
+                nextSongUpperBound = state_->receivedSongUpperBound + static_cast<quint64>(patch.size());
+                if (!patch.isEmpty() && patch[0] == 1) nextSongUpperBound = qFromBigEndian<quint32>(reinterpret_cast<const uchar*>(patch.constData() + 1));
+                if (nextSongUpperBound > kMaximumDocumentBytes) nextSongUpperBound = documentBytes(value).size();
+                if (nextSongUpperBound > kMaximumDocumentBytes) { r.okay = false; break; }
                 nextSong = value;
             } else if (!readDocument(content, value)) r.okay = false;
             break;
@@ -570,7 +781,7 @@ bool Codec::decode(Operation operation, const QByteArray& bytes, Decoded& out, Q
         if (!handle || handle <= state_->incoming.handle || transfer.hash.size() != 32 || transfer.bytes < 44 || transfer.bytes > kMaximumAssetBytes || transfer.chunk != kChunkBytes) r.okay = false;
     }
     if (!r.done()) { error = QStringLiteral("Server typed payload is malformed, stale or truncated"); return false; }
-    if (!nextSong.isUndefined()) { state_->receivedSong = nextSong; state_->receivedSongSerial = nextSerial; }
+    if (!nextSong.isUndefined()) { state_->receivedSong = nextSong; state_->receivedSongSerial = nextSerial; state_->receivedSongUpperBound = nextSongUpperBound; }
     if (operation == Operation::AssetStart) state_->incoming = transfer;
     out.message = message;
     return true;
@@ -599,8 +810,22 @@ bool verify(const QByteArray& body, quint64 sequence, const QByteArray& key, Ope
 }
 
 Channel::Channel(QByteArray sendKey, QByteArray receiveKey, Write write, Capacity pending, QObject* parent)
+    : Channel(std::move(sendKey), std::move(receiveKey), std::move(write), std::move(pending), Options{}, parent) {}
+Channel::Channel(QByteArray sendKey, QByteArray receiveKey, Write write, Capacity pending, Options options, QObject* parent)
     : QObject(parent), sendKey_(std::move(sendKey)), receiveKey_(std::move(receiveKey)), write_(std::move(write)), pending_(std::move(pending))
 {
+    options_ = options;
+    independentFrameTimer_.setSingleShot(true);
+    QObject::connect(&independentFrameTimer_, &QTimer::timeout, this, [this] {
+        failed_ = true;
+        if (onFailure) onFailure(QStringLiteral("Independent control frame stalled for ten seconds"));
+    });
+    turnTimer_.setSingleShot(true);
+    QObject::connect(&turnTimer_, &QTimer::timeout, this, [this] {
+        drainIntents();
+        if (pendingSuccess_) { const auto id = std::exchange(pendingSuccess_, 0); sendReceipt(id, {}); }
+        flush();
+    });
     receiptClock_.start();
     flushTimer_.setInterval(5);
     QObject::connect(&flushTimer_, &QTimer::timeout, this, [this] { flush(); });
@@ -613,22 +838,58 @@ Channel::Channel(QByteArray sendKey, QByteArray receiveKey, Write write, Capacit
 }
 bool Channel::canQueue(qint64 bytes) const noexcept
 {
-    return !failed_ && bytes >= 0 && bytes <= kMaximumQueuedBytes && stats_.queuedBytes <= static_cast<quint64>(kMaximumQueuedBytes - bytes);
+    const auto limit = independentOnly_ ? qsizetype{16 * 1024} : kMaximumQueuedBytes;
+    return !failed_ && bytes >= 0 && bytes <= limit && stats_.queuedBytes + intentBytes_ <= static_cast<quint64>(limit - bytes);
 }
 bool Channel::send(const QJsonObject& message)
 {
     if (closeAfterDrain_) return false;
     const auto* schema = schemaFor(message.value("type").toString());
-    if (!canQueue(0) || (schema && requiresReceipt(schema->operation) && awaitingReceipt_.size() >= 128)) { ++stats_.queueRejects; return false; }
+    if (schema && independent_ && independentOperation(schema->operation)) return independent_->send(message);
+    if (!canQueue(0) || (schema && requiresReceipt(schema->operation) && awaitingReceipt_.size() + intents_.size() >= 128)) { ++stats_.queueRejects; return false; }
+    // Only complete scalar assignments may supersede an unsent assignment.
+    // Transactions, relative actions, snapshots and policy changes are barriers.
+    QString key;
+    if (schema && (schema->operation == Operation::Cell || schema->operation == Operation::MusicStep ||
+        schema->operation == Operation::BeatDivision || schema->operation == Operation::MusicDivision)) {
+        key = message.value("type").toString() + '/' + QString::number(message.value("section").toInt()) + '/' +
+            message.value("lane").toString() + '/' + QString::number(message.value("beat").toInt()) + '/' + QString::number(message.value("step").toInt());
+    }
+    if (key.isEmpty()) drainIntents();
     Codec::Encoded encoded; QString error;
-    if (!codec_.encode(message, encoded, error, kMaximumQueuedBytes - static_cast<qsizetype>(stats_.queuedBytes))) {
+    const auto limit = independentOnly_ ? qsizetype{4096} : kMaximumQueuedBytes;
+    if (!codec_.encode(message, encoded, error, std::min(limit, (independentOnly_ ? 16 * 1024 : kMaximumQueuedBytes) - static_cast<qsizetype>(stats_.queuedBytes) - intentBytes_))) {
         if (encoded.capacityExceeded) ++stats_.queueRejects; else ++stats_.encodingRejects;
         stats_.lastRejection = error; return false;
     }
-    return enqueue(encoded);
+    if (key.isEmpty()) return enqueue(encoded);
+    if (options_.coalesce) {
+        for (auto it = intents_.begin(); it != intents_.end(); ++it) if (it->key == key) {
+            intentBytes_ -= it->encoded.payload.size() + kRecordHeaderBytes;
+            // Keep surviving assignments in receive/revision order. Replacing
+            // in place could send revision3 before another cell's revision2.
+            intents_.erase(it); ++stats_.coalescedUpdates; break;
+        }
+    }
+    intentBytes_ += encoded.payload.size() + kRecordHeaderBytes;
+    intents_.push_back({std::move(encoded), std::move(key), receiptClock_.nsecsElapsed()});
+    stats_.queuedHighWaterBytes = std::max(stats_.queuedHighWaterBytes, stats_.queuedBytes + intentBytes_);
+    turnTimer_.start(0); return true;
+}
+void Channel::drainIntents()
+{
+    while (!intents_.empty()) {
+        auto intent = std::move(intents_.front()); intents_.pop_front();
+        intentBytes_ -= intent.encoded.payload.size() + kRecordHeaderBytes;
+        const auto delay = static_cast<quint64>(std::max<qint64>(0, receiptClock_.nsecsElapsed() - intent.queuedNs) / 1000);
+        ++stats_.assignmentDelaySamples; stats_.assignmentDelaySumUs += delay;
+        stats_.assignmentDelayMaxUs = std::max(stats_.assignmentDelayMaxUs, delay);
+        enqueue(intent.encoded);
+    }
 }
 bool Channel::sendAsset(const QByteArray& payload)
 {
+    drainIntents();
     if (closeAfterDrain_) return false;
     if (!canQueue(kChunkBytes + 128)) { ++stats_.queueRejects; return false; }
     Codec::Encoded encoded; QString error;
@@ -637,6 +898,7 @@ bool Channel::sendAsset(const QByteArray& payload)
 }
 bool Channel::sendBinary(const QByteArray& payload)
 {
+    drainIntents();
     const auto required = payload.size() + 128;
     if (closeAfterDrain_ || payload.isEmpty() || payload.size() > 65536 ||
         !canQueue(required) || pending_() + static_cast<qint64>(stats_.queuedBytes) > kStreamQueueBytes - required) {
@@ -662,24 +924,39 @@ bool Channel::enqueue(const Codec::Encoded& encoded)
     }
     stats_.queuedHighWaterBytes = std::max(stats_.queuedHighWaterBytes, stats_.queuedBytes);
     stats_.pendingReceipts = awaitingReceipt_.size();
-    flush(); return true;
+    // Batching has no timer delay for transactions or checkpoints. Scalar edit
+    // bursts and successful receipts share one event-loop turn instead.
+    if (options_.batch && (encoded.operation == Operation::Cell || encoded.operation == Operation::MusicStep ||
+        encoded.operation == Operation::BeatDivision || encoded.operation == Operation::MusicDivision)) turnTimer_.start(0);
+    else flush();
+    return true;
 }
 void Channel::flush()
 {
     if (failed_) return;
     for (int turn = 0; turn < 16 && !output_.empty(); ++turn) {
-        if (pending_() > kStreamQueueBytes - output_.front().size()) break;
-        if (!write_(output_.front())) break;
-        stats_.wireBytesSent += output_.front().size(); ++stats_.recordsSent;
-        stats_.queuedBytes -= output_.front().size(); output_.pop_front();
+        QByteArray bytes = output_.front(); std::size_t count = 1;
+        // Fit small records in one existing 1024-byte reliable fragment.
+        if (options_.batch) for (auto it = std::next(output_.begin()); it != output_.end() && bytes.size() + it->size() <= 1024; ++it) { bytes += *it; ++count; }
+        if (pending_() > kStreamQueueBytes - bytes.size()) break;
+        if (!write_(bytes)) break;
+        stats_.wireBytesSent += bytes.size(); stats_.recordsSent += count; ++stats_.transportWrites;
+        stats_.batchedRecords += count - 1;
+        stats_.queuedBytes -= bytes.size();
+        while (count--) output_.pop_front();
     }
     if (output_.empty()) {
         flushTimer_.stop();
-        if (closeAfterDrain_) { auto close = std::move(closeAfterDrain_); failed_ = true; close(); }
+        if (closeAfterDrain_) {
+            if (independent_ && independent_->stats().queuedBytes) flushTimer_.start();
+            else { auto close = std::move(closeAfterDrain_); failed_ = true; close(); }
+        }
     } else if (!flushTimer_.isActive()) flushTimer_.start();
 }
 void Channel::closeAfterDrain(std::function<void()> close)
 {
+    drainIntents();
+    if (pendingSuccess_) sendReceipt(std::exchange(pendingSuccess_, 0), {});
     closeAfterDrain_ = std::move(close); flush();
 }
 bool Channel::receive(const QByteArray& body, QString& error)
@@ -687,6 +964,9 @@ bool Channel::receive(const QByteArray& body, QString& error)
     if (failed_) { error = QStringLiteral("Server channel failed"); return false; }
     Operation operation{}; quint8 flags = 0; QByteArray payload;
     if (!verify(body, receiveSequence_, receiveKey_, operation, flags, payload, error)) return false;
+    if (independentOnly_ && !independentOperation(operation) && operation != Operation::Receipt) {
+        error = QStringLiteral("Snapshot-dependent operation on independent control ordering"); return false;
+    }
     if (receiveSequence_ == UINT64_MAX) { error = QStringLiteral("Server receive counter exhausted"); return false; }
     const auto recordSequence = receiveSequence_++;
     ++stats_.recordsReceived;
@@ -734,14 +1014,26 @@ bool Channel::receive(const QByteArray& body, QString& error)
     if (!requiresReceipt(operation) && decision.rejection == Rejection::None) return true;
     // Cumulative dispatch confirmation. The existing stream still supplies loss
     // recovery. Domain commit/readiness/asset validation are separate messages.
+    if (decision.rejection == Rejection::None && options_.cumulativeReceipts) {
+        if (pendingSuccess_) ++stats_.cumulativeReceipts;
+        pendingSuccess_ = id; turnTimer_.start(0); return true;
+    }
+    // A rejection explicitly reports every failed action. It cumulatively
+    // confirms earlier successes too, so a later success cannot conceal it.
+    pendingSuccess_ = 0;
+    if (!sendReceipt(id, decision)) { error = QStringLiteral("Server receipt queue is full"); return false; }
+    return true;
+}
+bool Channel::sendReceipt(quint64 id, const DispatchDecision& decision)
+{
     Writer receipt; receipt.number<quint64>(id);
     receipt.number<quint8>(static_cast<quint8>(decision.rejection == Rejection::None ? ReceiptStage::Dispatched : ReceiptStage::Rejected));
     if (decision.rejection != Rejection::None) {
         receipt.number<quint8>(static_cast<quint8>(decision.rejection)); receipt.text(decision.reason.left(256));
     }
-    if (sendSequence_ == UINT64_MAX) { error = QStringLiteral("Server receipt counter exhausted"); failed_ = true; return false; }
+    if (sendSequence_ == UINT64_MAX) { failed_ = true; return false; }
     auto frame = authenticate(Operation::Receipt, sendSequence_, receipt.bytes, sendKey_);
-    if (!canQueue(frame.size())) { error = QStringLiteral("Server receipt queue is full"); failed_ = true; return false; }
+    if (!canQueue(frame.size())) { failed_ = true; if (onFailure) onFailure(QStringLiteral("Server receipt queue is full")); return false; }
     ++sendSequence_;
     stats_.queuedBytes += frame.size(); output_.push_back(std::move(frame)); ++stats_.receiptsSent;
     flush(); return true;
@@ -749,10 +1041,47 @@ bool Channel::receive(const QByteArray& body, QString& error)
 Stats Channel::stats() const
 {
     auto result = stats_; const auto& encoding = codec_.stats();
+    result.queuedBytes += intentBytes_;
     result.checkpointsSent = encoding.checkpointsSent; result.deltasSent = encoding.deltasSent;
     result.savedSnapshotBytes = encoding.savedSnapshotBytes; result.assetHeaderBytesSaved = encoding.assetHeaderBytesSaved;
     result.assetMetadataBytesSaved = encoding.assetMetadataBytesSaved;
+    result.compressionAttempts = encoding.compressionAttempts; result.compressionSkipped = encoding.compressionSkipped;
+    if (independent_) {
+        const auto extra = independent_->stats(); accumulate(result, extra);
+        result.independentRecordsSent = extra.recordsSent; result.independentRecordsReceived = extra.recordsReceived;
+        result.independentQueuedBytes = extra.queuedBytes;
+    }
     return result;
+}
+void Channel::enableIndependent(Write write, Capacity pending)
+{
+    if (independent_) return;
+    // Separate replay domains without changing the 32-byte header or tag scheme.
+    const auto derive = [](const QByteArray& key) {
+        return QMessageAuthenticationCode::hash(QByteArrayLiteral("jam2-independent-control-v2"), key, QCryptographicHash::Sha256);
+    };
+    independent_ = std::make_unique<Channel>(derive(sendKey_), derive(receiveKey_), std::move(write), std::move(pending), options_);
+    independent_->independentOnly_ = true;
+    independent_->onMessage = [this](const QJsonObject& message) { if (onMessage) onMessage(message); };
+    independent_->validateMessage = [this](const QJsonObject& message) { return validateMessage ? validateMessage(message) : DispatchDecision{}; };
+    independent_->onFailure = [this](const QString& error) { failed_ = true; if (onFailure) onFailure(error); };
+}
+bool Channel::receiveIndependent(const QByteArray& bytes, QString& error)
+{
+    if (!independent_ || bytes.size() + independentBuffer_.size() > 16 * 1024) {
+        error = QStringLiteral("Independent control input exceeds its 16 KiB bound"); return false;
+    }
+    independentBuffer_ += bytes;
+    if (!bytes.isEmpty()) independentFrameTimer_.start(10000);
+    while (independentBuffer_.size() >= 4) {
+        const auto size = qFromBigEndian<quint32>(reinterpret_cast<const uchar*>(independentBuffer_.constData()));
+        if (size < 28 || size > 4096 - 4) { error = QStringLiteral("Independent control record length is invalid"); return false; }
+        if (independentBuffer_.size() < size + 4) return true;
+        const auto body = independentBuffer_.mid(4, size); independentBuffer_.remove(0, size + 4);
+        if (!independent_->receive(body, error)) return false;
+    }
+    if (independentBuffer_.isEmpty()) independentFrameTimer_.stop();
+    return true;
 }
 void accumulate(Stats& t, const Stats& v) noexcept
 {
@@ -762,6 +1091,13 @@ void accumulate(Stats& t, const Stats& v) noexcept
     t.checkpointsSent += v.checkpointsSent; t.deltasSent += v.deltasSent; t.savedSnapshotBytes += v.savedSnapshotBytes;
     t.assetHeaderBytesSaved += v.assetHeaderBytesSaved; t.queueRejects += v.queueRejects;
     t.assetMetadataBytesSaved += v.assetMetadataBytesSaved;
+    t.compressionAttempts += v.compressionAttempts; t.compressionSkipped += v.compressionSkipped;
+    t.transportWrites += v.transportWrites; t.batchedRecords += v.batchedRecords;
+    t.coalescedUpdates += v.coalescedUpdates; t.cumulativeReceipts += v.cumulativeReceipts;
+    t.independentRecordsSent += v.independentRecordsSent; t.independentRecordsReceived += v.independentRecordsReceived;
+    t.independentQueuedBytes += v.independentQueuedBytes;
+    t.assignmentDelaySamples += v.assignmentDelaySamples; t.assignmentDelaySumUs += v.assignmentDelaySumUs;
+    t.assignmentDelayMaxUs = std::max(t.assignmentDelayMaxUs, v.assignmentDelayMaxUs);
     t.pendingReceipts += v.pendingReceipts; t.queuedBytes += v.queuedBytes;
     t.queuedHighWaterBytes = std::max(t.queuedHighWaterBytes, v.queuedHighWaterBytes);
     t.encodingRejects += v.encodingRejects; t.unresolvedReceipts += v.unresolvedReceipts;
@@ -776,8 +1112,14 @@ QJsonObject diagnostics(const Stats& s)
         {"authenticated_bytes_sent", static_cast<qint64>(s.wireBytesSent)}, {"dispatch_receipts_sent", static_cast<qint64>(s.receiptsSent)},
         {"dispatch_receipts_received", static_cast<qint64>(s.receiptsReceived)}, {"last_dispatch_receipt", static_cast<qint64>(s.lastDispatched)},
         {"pending_dispatch_receipts", static_cast<qint64>(s.pendingReceipts)}, {"checkpoints_sent", static_cast<qint64>(s.checkpointsSent)},
-        {"snapshot_deltas_sent", static_cast<qint64>(s.deltasSent)}, {"snapshot_bytes_saved", static_cast<qint64>(s.savedSnapshotBytes)},
+        {"snapshot_deltas_sent", static_cast<qint64>(s.deltasSent)}, {"bytes_avoided_vs_last_checkpoint", static_cast<qint64>(s.savedSnapshotBytes)},
         {"wav_payload_header_bytes_saved", static_cast<qint64>(s.assetHeaderBytesSaved)}, {"wav_metadata_bytes_saved", static_cast<qint64>(s.assetMetadataBytesSaved)},
+        {"compression_attempts", static_cast<qint64>(s.compressionAttempts)}, {"compression_skipped_small", static_cast<qint64>(s.compressionSkipped)}, {"compression_minimum_bytes", 128},
+        {"transport_writes", static_cast<qint64>(s.transportWrites)}, {"records_sharing_writes", static_cast<qint64>(s.batchedRecords)},
+        {"unsent_updates_coalesced", static_cast<qint64>(s.coalescedUpdates)}, {"success_receipts_coalesced", static_cast<qint64>(s.cumulativeReceipts)},
+        {"unsent_assignment_delay_samples", static_cast<qint64>(s.assignmentDelaySamples)}, {"unsent_assignment_delay_sum_us", static_cast<qint64>(s.assignmentDelaySumUs)}, {"unsent_assignment_delay_max_us", static_cast<qint64>(s.assignmentDelayMaxUs)},
+        {"independent_records_sent", static_cast<qint64>(s.independentRecordsSent)}, {"independent_records_received", static_cast<qint64>(s.independentRecordsReceived)},
+        {"independent_queued_bytes", static_cast<qint64>(s.independentQueuedBytes)}, {"independent_queue_limit_bytes", 16384}, {"independent_record_limit_bytes", 4096}, {"independent_packet_budget_per_poll", 2},
         {"queue_rejects", static_cast<qint64>(s.queueRejects)},
         {"queued_bytes", static_cast<qint64>(s.queuedBytes)}, {"queue_high_water_bytes", static_cast<qint64>(s.queuedHighWaterBytes)},
         {"queue_limit_bytes_per_channel", kMaximumQueuedBytes}, {"stream_queue_limit_bytes_per_channel", kStreamQueueBytes}, {"document_limit_bytes", kMaximumDocumentBytes},

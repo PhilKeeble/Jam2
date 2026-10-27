@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 
 class AutomationProcess final {
 public:
@@ -25,6 +26,7 @@ public:
     bool readEvent(QJsonObject& event, std::chrono::milliseconds timeout, QString& error);
     bool waitForExit(std::chrono::milliseconds timeout, int& exitCode, QString& error);
     bool isRunning() const noexcept;
+    std::optional<std::uint64_t> cpuTimeNs() const noexcept;
 
 private:
     AutomationProcess() = default;

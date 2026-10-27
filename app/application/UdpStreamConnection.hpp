@@ -11,7 +11,7 @@
 namespace jam2::application {
 
 enum class UdpStreamRetirement { Replaced, PeerLeft };
-enum class UdpMuxChannel : quint8 { Control = 1, Asset = 2 };
+enum class UdpMuxChannel : quint8 { Control = 1, Asset = 2, IndependentControl = 3 };
 enum class UdpMuxKind : quint8 { Open = 1, OpenAck, Data, Ack, Close, CloseAck, PeerLeave };
 struct UdpMuxFrame {
     UdpMuxKind kind = UdpMuxKind::Data;
@@ -45,6 +45,10 @@ public:
     bool reusable() const;
     void retire(UdpStreamRetirement reason = UdpStreamRetirement::Replaced);
     ControlTransport transport() const override { return ControlTransport::ReliableUdp; }
+    bool hasIndependentControl() const override { return channel_ == UdpMuxChannel::Control; }
+    bool writeIndependent(const QByteArray& bytes) override;
+    qint64 independentBytesToWrite() const override;
+    void startIndependent(QObject* context, DataHandler onData) override;
     QString failure() const;
     jam2::ReliableUdpStream::Stats stats() const;
     quint64 inputDeferrals() const;
@@ -54,7 +58,7 @@ public:
     void receive(const UdpMuxFrame& frame, quint64 nowUs, const Emit& transmit);
 
 private:
-    QByteArray packet(UdpMuxKind kind, quint64 sequence = 0, QByteArray payload = {}) const;
+    QByteArray packet(UdpMuxKind kind, quint64 sequence = 0, QByteArray payload = {}, bool independent = false) const;
     void scheduleDelivery();
     void finish(const QString& detail);
     void requestClose();
@@ -64,10 +68,14 @@ private:
     QString peerHost_;
     mutable std::mutex mutex_;
     jam2::ReliableUdpStream sender_, receiver_;
+    jam2::ReliableUdpStream independentSender_, independentReceiver_;
     QPointer<QObject> context_;
     DataHandler onData_;
+    DataHandler onIndependent_;
     DisconnectHandler onDisconnected_;
     std::deque<QByteArray> input_;
+    std::deque<QByteArray> independentInput_;
+    qint64 independentBuffered_ = 0;
     qint64 buffered_ = 0, highWater_ = 0;
     quint64 startedUs_ = 0, nextOpenUs_ = 0, closeStartedUs_ = 0;
     quint64 inputDeferrals_ = 0;

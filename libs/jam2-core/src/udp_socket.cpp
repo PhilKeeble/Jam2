@@ -268,12 +268,12 @@ void UdpSocket::waitForAny(std::span<const UdpSocket* const> sockets,
     const int timeout_ms = static_cast<int>((std::min<std::uint64_t>)(timeout_us, 60000000ULL) + 999) / 1000;
 #if defined(_WIN32)
     if (sockets.size() + (command_wake ? 1U : 0U) <= WSA_MAXIMUM_WAIT_EVENTS) {
-        std::vector<WSAEVENT> events;
-        events.reserve(sockets.size() + 1);
-        for (const auto* socket : sockets) events.push_back(socket->receive_event_);
-        if (command_wake) events.push_back(command_wake->event_);
-        if (events.empty()) return;
-        const DWORD result = WSAWaitForMultipleEvents(static_cast<DWORD>(events.size()),
+        std::array<WSAEVENT, WSA_MAXIMUM_WAIT_EVENTS> events{};
+        std::size_t count = 0;
+        for (const auto* socket : sockets) events[count++] = socket->receive_event_;
+        if (command_wake) events[count++] = command_wake->event_;
+        if (!count) return;
+        const DWORD result = WSAWaitForMultipleEvents(static_cast<DWORD>(count),
             events.data(), FALSE, static_cast<DWORD>(timeout_ms), FALSE);
         if (result == WSA_WAIT_FAILED) throw std::runtime_error("UDP link wait failed: " + socket_error_text());
         if (result == WSA_WAIT_TIMEOUT) return;
@@ -303,6 +303,44 @@ void UdpSocket::waitForAny(std::span<const UdpSocket* const> sockets,
     const int result = poll(reads.data(), reads.size(), timeout_ms);
     if (result < 0 && errno != EINTR) throw std::runtime_error("UDP link poll failed: " + socket_error_text());
     if (result > 0 && command_wake && (reads.back().revents & POLLIN) != 0) command_wake->consume();
+#endif
+}
+
+void UdpSocket::waitForDatagrams(std::span<const UdpSocket* const> sockets,
+                                std::uint64_t timeout_us, RealtimeWakeSignal* capture_wake)
+{
+    if (sockets.empty() || timeout_us == 0) return;
+#if defined(_WIN32)
+    if (capture_wake || sockets.size() > FD_SETSIZE) {
+        waitForAny(sockets, timeout_us, capture_wake); return;
+    }
+#else
+    if (std::any_of(sockets.begin(), sockets.end(), [](const auto* socket) { return socket->handle_ >= FD_SETSIZE; }) ||
+        (capture_wake && capture_wake->read_handle_ >= FD_SETSIZE)) {
+        waitForAny(sockets, timeout_us, capture_wake); return;
+    }
+#endif
+    fd_set reads; FD_ZERO(&reads);
+    int maximum = 0;
+    for (const auto* socket : sockets) { FD_SET(socket->handle_, &reads); maximum = (std::max)(maximum, static_cast<int>(socket->handle_)); }
+#if !defined(_WIN32)
+    if (capture_wake) { FD_SET(capture_wake->read_handle_, &reads); maximum = (std::max)(maximum, capture_wake->read_handle_); }
+#endif
+    const auto bounded = (std::min<std::uint64_t>)(timeout_us, 60000000ULL);
+    timeval timeout{};
+    timeout.tv_sec = static_cast<decltype(timeout.tv_sec)>(bounded / 1000000ULL);
+    timeout.tv_usec = static_cast<decltype(timeout.tv_usec)>(bounded % 1000000ULL);
+    const auto result = select(maximum + 1, &reads, nullptr, nullptr, &timeout);
+    if (result < 0) {
+#if defined(_WIN32)
+        if (WSAGetLastError() == WSAEINTR) return;
+#else
+        if (errno == EINTR) return;
+#endif
+        throw std::runtime_error("UDP runtime receive wait failed: " + socket_error_text());
+    }
+#if !defined(_WIN32)
+    if (result > 0 && capture_wake && FD_ISSET(capture_wake->read_handle_, &reads)) capture_wake->consume();
 #endif
 }
 

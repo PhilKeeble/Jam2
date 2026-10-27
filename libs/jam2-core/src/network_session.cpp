@@ -160,6 +160,7 @@ struct NetworkSession::Impl {
 
     UdpSocket socket;
     std::shared_ptr<NetworkDatagramTransport> datagram_transport;
+    ~Impl() { if (datagram_transport) datagram_transport->receiverDetached(); }
     SessionInfo session;
     const NetworkSessionContract contract;
     const SessionBootstrapRole bootstrap_role;
@@ -172,6 +173,8 @@ struct NetworkSession::Impl {
     std::vector<std::unique_ptr<PeerEntry>> peers;
     std::array<std::uint8_t, protocol::kMaxDatagramSize> transmit_packet{};
     std::array<std::uint8_t, protocol::kMaxDatagramSize> receive_packet{};
+    using RoutedReceivePacket = std::array<std::uint8_t, NetworkDatagramTransport::kReceiveBufferBytes>;
+    std::unique_ptr<RoutedReceivePacket> routed_receive_packet;
 
     Impl(
         UdpSocket&& owned_socket,
@@ -808,15 +811,18 @@ std::optional<NetworkDatagram> NetworkSession::receiveFor(
     std::uint64_t timeout_us,
     RealtimeWakeSignal* wake_signal)
 {
+    const auto buffer = impl_->datagram_transport
+        ? std::span<std::uint8_t>(*impl_->routed_receive_packet)
+        : std::span<std::uint8_t>(impl_->receive_packet);
     const auto received = impl_->datagram_transport
-        ? impl_->datagram_transport->receiveFor(impl_->receive_packet, timeout_us, wake_signal)
-        : impl_->socket.recv_from_for(impl_->receive_packet, timeout_us, wake_signal);
-    if (!received) {
+        ? impl_->datagram_transport->receiveFor(buffer, timeout_us, wake_signal)
+        : impl_->socket.recv_from_for(buffer, timeout_us, wake_signal);
+    if (!received || received->size > buffer.size()) {
         return std::nullopt;
     }
     return NetworkDatagram{
         received->endpoint,
-        std::span<const std::uint8_t>(impl_->receive_packet.data(), received->size),
+        std::span<const std::uint8_t>(buffer.data(), received->size),
     };
 }
 
@@ -831,11 +837,21 @@ protocol::ParseResult NetworkSession::parse(std::span<const std::uint8_t> packet
 
 void NetworkSession::setDatagramTransport(std::shared_ptr<NetworkDatagramTransport> transport)
 {
+    if (transport == impl_->datagram_transport) return;
+    auto receive_packet = transport ? std::make_unique<Impl::RoutedReceivePacket>() : nullptr;
+    if (transport) transport->receiverAttached();
+    if (impl_->datagram_transport) impl_->datagram_transport->receiverDetached();
     impl_->datagram_transport = std::move(transport);
+    impl_->routed_receive_packet = std::move(receive_packet);
 }
 
 void NetworkSession::close() noexcept
 {
+    if (impl_->datagram_transport) {
+        impl_->datagram_transport->receiverDetached();
+        impl_->datagram_transport.reset();
+        impl_->routed_receive_packet.reset();
+    }
     impl_->bootstrap_state = SessionBootstrapState::Closed;
     for (const auto& peer : impl_->peers) {
         impl_->mixer.setPeerActive(peer->descriptor.peer_id.value, false);

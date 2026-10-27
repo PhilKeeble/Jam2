@@ -956,9 +956,12 @@ int main(int argc, char* argv[])
                 fail("bulk regression still has a fixed WAV rate cap"); return 1;
             }
         }
-        std::array<qint64, 4> receivedBefore{};
-        for (int i = 0; i < 4; ++i) receivedBefore[i] = states[i].value("jam").toObject()
-            .value("udp_multiplex").toObject().value("audio_packets_received").toInteger();
+        std::array<qint64, 4> receivedBefore{}, deliveredBefore{};
+        for (int i = 0; i < 4; ++i) {
+            const auto mux = states[i].value("jam").toObject().value("udp_multiplex").toObject();
+            receivedBefore[i] = mux.value("audio_packets_received").toInteger();
+            deliveredBefore[i] = mux.value("runtime_native_delivered").toInteger();
+        }
         QElapsedTimer transferTime; transferTime.start();
         if (!apply(coordinator, 0, {{"type", "looper.import"}, {"id", "unthrottled-wav"},
                 {"lane", -1}, {"source_path", automaticWavPath}})) return 1;
@@ -971,9 +974,22 @@ int main(int argc, char* argv[])
         for (int i = 0; i < 4; ++i) {
             const auto mux = states[i].value("jam").toObject().value("udp_multiplex").toObject();
             if (mux.value("audio_packets_received").toInteger() <= receivedBefore[i] + 100 ||
-                mux.value("audio_queue_drops").toInteger() != 0) {
+                mux.value("audio_queue_drops").toInteger() != 0 ||
+                !mux.value("runtime_receive_enabled").toBool() || !mux.value("runtime_receive_owner").toBool() ||
+                mux.value("runtime_native_delivered").toInteger() <= deliveredBefore[i] + 100 ||
+                (i != 0 && mux.value("runtime_asset_queued").toInteger() == 0)) {
                 fail("audio did not continue cleanly during unthrottled WAV fan-out"); return 1;
             }
+            std::cout << "wav_receive peer=" << i + 1
+                << " native_delivered=" << mux.value("runtime_native_delivered").toInteger()
+                << " control_queued=" << mux.value("runtime_control_queued").toInteger()
+                << " asset_queued=" << mux.value("runtime_asset_queued").toInteger()
+                << " ingress_drops=" << mux.value("ingress_queue_drops").toInteger()
+                << " ingress_high_water=" << mux.value("ingress_high_water_packets").toInteger()
+                << " ingress_wait_max_us=" << mux.value("ingress_wait_max_us").toInteger()
+                << " classification_mean_ns=" << mux.value("classification_sum_ns").toInteger() /
+                    qMax<qint64>(1,mux.value("classification_samples").toInteger())
+                << " classification_max_ns=" << mux.value("classification_max_ns").toInteger() << '\n';
         }
         std::cout << "unthrottled_wav raw_bytes=" << bytes << " recipients=3 elapsed_ms=" << elapsedMs
             << " aggregate_bytes_per_second=" << bytes * 3 * 1000 / elapsedMs

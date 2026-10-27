@@ -21,6 +21,7 @@
 #include <limits>
 #include <stdexcept>
 
+using jam2::application::UdpMultiplexTransport;
 using namespace jam2::control_protocol;
 
 namespace {
@@ -224,8 +225,11 @@ SharedSessionController::SharedSessionController(QObject* parent)
     };
     server_.onMessage = [this](const QString& token, const QJsonObject& message) {
         const QString type = message.value(QStringLiteral("type")).toString();
-        const auto decision = jam2::application::evaluateControlMessage(
-            message, jam2::application::ControlMessageSource::AuthenticatedPeer, multiplex_ != nullptr);
+        // Server wire dispatch has just run wireDecision synchronously, including
+        // source and contract checks. Legacy TCP still validates at this boundary.
+        const auto decision = multiplex_ ? jam2::application::ControlMessageDecision{
+            true, jam2::application::ControlMessageRejection::None, {}}
+            : jam2::application::evaluateControlMessage(message, jam2::application::ControlMessageSource::AuthenticatedPeer);
         if (!decision.accepted) {
             if (decision.rejection == jam2::application::ControlMessageRejection::Authorization) {
                 ++authorizationRejections_;
@@ -234,7 +238,7 @@ SharedSessionController::SharedSessionController(QObject* parent)
             }
             return;
         }
-        if (!matchesContractSampleRate(message, contract_.sampleRate)) {
+        if (!multiplex_ && !matchesContractSampleRate(message, contract_.sampleRate)) {
             ++validationRejections_;
             return;
         }
@@ -430,6 +434,7 @@ bool SharedSessionController::startMultiplex(bool creator)
     config.server = creator ? creator_.rendezvousServer
         : jam2::Endpoint{joiner_.host.toStdString(), joiner_.port};
     config.maximumPeers = creator ? creator_.sessionPeerLimit : 0;
+    config.receiveModel = serverReceiveModel_;
     QString error;
     if (multiplex_->start(config, error)) {
         multiplexDiagnosticsTimer_.setInterval(2000);
@@ -545,6 +550,32 @@ QJsonObject SharedSessionController::multiplexDiagnostics() const
         {QStringLiteral("audio_packets_sent"), static_cast<qint64>(stats.audioPacketsSent)},
         {QStringLiteral("audio_packets_received"), static_cast<qint64>(stats.audioPacketsReceived)},
         {QStringLiteral("audio_queue_drops"), static_cast<qint64>(stats.audioQueueDrops)},
+        {QStringLiteral("runtime_receive_enabled"), stats.runtimeReceiveEnabled},
+        {QStringLiteral("runtime_receive_owner"), stats.runtimeReceiverAttached},
+        {QStringLiteral("receiver_handovers"), static_cast<qint64>(stats.receiverHandovers)},
+        {QStringLiteral("receiver_detachments"), static_cast<qint64>(stats.receiverDetachments)},
+        {QStringLiteral("runtime_native_delivered"), static_cast<qint64>(stats.runtimeNativeDelivered)},
+        {QStringLiteral("bootstrap_native_discarded"), static_cast<qint64>(stats.bootstrapNativeDiscarded)},
+        {QStringLiteral("runtime_control_queued"), static_cast<qint64>(stats.runtimeControlQueued)},
+        {QStringLiteral("runtime_asset_queued"), static_cast<qint64>(stats.runtimeAssetQueued)},
+        {QStringLiteral("runtime_invalid_packets"), static_cast<qint64>(stats.runtimeInvalidPackets)},
+        {QStringLiteral("runtime_classification_budget_yields"), static_cast<qint64>(stats.runtimeBudgetYields)},
+        {QStringLiteral("ingress_queue_drops"), static_cast<qint64>(stats.ingressQueueDrops)},
+        {QStringLiteral("control_ingress_depth_packets"), static_cast<qint64>(stats.controlIngressDepth)},
+        {QStringLiteral("asset_ingress_depth_packets"), static_cast<qint64>(stats.assetIngressDepth)},
+        {QStringLiteral("ingress_high_water_packets"), static_cast<qint64>(stats.ingressHighWater)},
+        {QStringLiteral("ingress_capacity_per_queue_packets"), static_cast<qint64>(UdpMultiplexTransport::kIngressPacketsPerQueue)},
+        {QStringLiteral("classification_packets_per_call"), static_cast<qint64>(UdpMultiplexTransport::kClassificationPacketsPerCall)},
+        {QStringLiteral("classification_timing_stride"), static_cast<qint64>(UdpMultiplexTransport::kClassificationTimingStride)},
+        {QStringLiteral("runtime_wait_maximum_us"), static_cast<qint64>(UdpMultiplexTransport::kRuntimeWaitMaximumUs)},
+        {QStringLiteral("runtime_receive_buffer_bytes"), static_cast<qint64>(jam2::NetworkDatagramTransport::kReceiveBufferBytes)},
+        {QStringLiteral("receiver_handover_timeout_ms"), static_cast<qint64>(UdpMultiplexTransport::kReceiverHandoverTimeoutMs)},
+        {QStringLiteral("ingress_wait_samples"), static_cast<qint64>(stats.ingressWaitSamples)},
+        {QStringLiteral("ingress_wait_sum_us"), static_cast<qint64>(stats.ingressWaitSumUs)},
+        {QStringLiteral("ingress_wait_max_us"), static_cast<qint64>(stats.ingressWaitMaxUs)},
+        {QStringLiteral("classification_samples"), static_cast<qint64>(stats.classificationSamples)},
+        {QStringLiteral("classification_sum_ns"), static_cast<qint64>(stats.classificationSumNs)},
+        {QStringLiteral("classification_max_ns"), static_cast<qint64>(stats.classificationMaxNs)},
         {QStringLiteral("worker_loop_gap_max_us"), static_cast<qint64>(stats.workerLoopGapMaxUs)},
         {QStringLiteral("worker_service_max_us"), static_cast<qint64>(stats.workerServiceMaxUs)},
         {QStringLiteral("worker_lock_wait_max_us"), static_cast<qint64>(stats.workerLockWaitMaxUs)},
@@ -567,6 +598,11 @@ QJsonObject SharedSessionController::multiplexDiagnostics() const
         {QStringLiteral("client"), jam2::application::server_wire::diagnostics(client_.stats().serverWire)},
         {QStringLiteral("asset_client"), jam2::application::server_wire::diagnostics(assetClient_.stats().serverWire)}});
     return result;
+}
+bool SharedSessionController::configureServerReceiveModel(UdpMultiplexTransport::ReceiveModel model)
+{
+    if (role_ == Role::Creator || role_ == Role::Joiner) return false;
+    serverReceiveModel_ = model; return true;
 }
 
 bool SharedSessionController::startLocal(const Jam2RuntimeOptions& options)
@@ -1329,8 +1365,9 @@ void SharedSessionController::handleDisconnectedPeer(const QString& token)
 void SharedSessionController::handleClientMessage(const QJsonObject& message)
 {
     const QString type = message.value(QStringLiteral("type")).toString();
-    const auto decision = jam2::application::evaluateControlMessage(
-        message, jam2::application::ControlMessageSource::Coordinator, multiplex_ != nullptr);
+    const auto decision = multiplex_ ? jam2::application::ControlMessageDecision{
+        true, jam2::application::ControlMessageRejection::None, {}}
+        : jam2::application::evaluateControlMessage(message, jam2::application::ControlMessageSource::Coordinator);
     if (!decision.accepted) {
         if (decision.rejection == jam2::application::ControlMessageRejection::Authorization) {
             ++authorizationRejections_;
@@ -1344,7 +1381,7 @@ void SharedSessionController::handleClientMessage(const QJsonObject& message)
         publishSnapshot();
         return;
     }
-    if (!matchesContractSampleRate(message, contract_.sampleRate)) {
+    if (!multiplex_ && !matchesContractSampleRate(message, contract_.sampleRate)) {
         ++validationRejections_;
         publishTransportEvent(TransportEvent{
             TransportEventType::Failure,

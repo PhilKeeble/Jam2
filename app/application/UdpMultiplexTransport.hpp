@@ -11,6 +11,12 @@ namespace jam2::application {
 class UdpMultiplexTransport final : public QObject, public jam2::NetworkDatagramTransport {
 public:
     enum class LinkPhase { Preparing, Offered, Probing, Reporting, Active, Failed };
+    enum class ReceiveModel { Runtime, QueuedWorker };
+    static constexpr std::size_t kIngressPacketsPerQueue = 128;
+    static constexpr std::size_t kClassificationPacketsPerCall = 64;
+    static constexpr quint64 kRuntimeWaitMaximumUs = 1000;
+    static constexpr quint64 kClassificationTimingStride = 64;
+    static constexpr quint64 kReceiverHandoverTimeoutMs = 2000;
     struct Config {
         bool creator = false;
         QString sessionHex, keyHex, localToken;
@@ -20,6 +26,7 @@ public:
         // Zero removes the fixed asset rate cap; reliable-stream congestion control still applies.
         quint64 controlBytesPerSecond = 65536, assetBytesPerSecond = 0;
         quint64 linkRepairSilenceMs = 10000;
+        ReceiveModel receiveModel = ReceiveModel::Runtime;
     };
     struct LinkSnapshot {
         QString peer, request;
@@ -44,6 +51,13 @@ public:
         quint64 workerLoopGapMaxUs = 0, workerServiceMaxUs = 0, workerLockWaitMaxUs = 0;
         quint64 linkRepairSilenceMs = 0;
         quint64 controlBytesPerSecond = 0, assetBytesPerSecond = 0;
+        bool runtimeReceiveEnabled = false, runtimeReceiverAttached = false;
+        quint64 receiverHandovers = 0, receiverDetachments = 0;
+        quint64 runtimeNativeDelivered = 0, bootstrapNativeDiscarded = 0, runtimeInvalidPackets = 0;
+        quint64 runtimeControlQueued = 0, runtimeAssetQueued = 0, runtimeBudgetYields = 0;
+        quint64 ingressQueueDrops = 0, controlIngressDepth = 0, assetIngressDepth = 0, ingressHighWater = 0;
+        quint64 ingressWaitSamples = 0, ingressWaitSumUs = 0, ingressWaitMaxUs = 0;
+        quint64 classificationSamples = 0, classificationSumNs = 0, classificationMaxNs = 0;
         std::vector<LinkSnapshot> links;
     };
     explicit UdpMultiplexTransport(QObject* parent = nullptr);
@@ -62,6 +76,8 @@ public:
     std::optional<jam2::Endpoint> observedEndpoint(const QString& peer) const;
     QString coordinatorToken() const;
     Snapshot snapshot() const;
+    void receiverAttached() override;
+    void receiverDetached() noexcept override;
     jam2::UdpSendResult sendToPeer(std::uint64_t id, const jam2::ResolvedUdpEndpoint& endpoint,
         std::span<const std::uint8_t> packet) noexcept override;
     std::optional<jam2::UdpSocket::ReceivedDatagram> receiveFor(std::span<std::uint8_t> buffer,

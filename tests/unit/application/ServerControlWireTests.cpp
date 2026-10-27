@@ -6,6 +6,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QCborValue>
+#include <QMessageAuthenticationCode>
 #include <QtEndian>
 
 #include <deque>
@@ -39,9 +40,9 @@ void recordsAndDeltas()
     wire::Codec sender, receiver;
     wire::Codec::Encoded encoded; wire::Codec::Decoded decoded; QString error;
     require(sender.encode({{"type", "session.heartbeat"}, {"sequence", 0x01020304}}, encoded, error) &&
-        encoded.payload.toHex() == "0000000101020304", "golden positional heartbeat bytes changed");
+        encoded.payload.toHex() == "0101020304", "golden positional heartbeat bytes changed");
     const auto golden = wire::authenticate(encoded.operation, 0x0102030405060708ULL, encoded.payload, QByteArray(32, '\0'));
-    require(golden.toHex() == "00000024000301000102030405060708388ccb3044aabb9d5ff46a9f427d24bf0000000101020304",
+    require(golden.toHex() == "00000021000302000102030405060708f97e1cd6bea05d2856b5a780cfba1fa50101020304",
         "golden big-endian/HMAC record changed");
     auto message = song();
     require(sender.encode(message, encoded, error), "encode checkpoint");
@@ -81,7 +82,7 @@ void recordsAndDeltas()
     wide = narrow; wide["beat"] = 65536;
     require(!sender.encode(wide, encoded, error), "u16 overflow was truncated");
     wire::Codec booleanSender, booleanReceiver;
-    require(booleanSender.encode(badBool, encoded, error), "encode boolean"); encoded.payload[4] = 2;
+    require(booleanSender.encode(badBool, encoded, error), "encode boolean"); encoded.payload[1] = 2;
     require(!booleanReceiver.decode(encoded.operation, encoded.payload, decoded, error), "invalid boolean accepted");
     const QJsonObject listening{{"type", "jam.listening.request"}, {"changed_groups", 1},
         {"settings", QJsonObject{{"speed_ppm", 300000}, {"pitch_cents", -100}, {"focus_enabled", true},
@@ -99,13 +100,28 @@ void recordsAndDeltas()
         "invalid hexadecimal hash was silently changed while encoding");
     auto compressed = qCompress(QCborValue::fromJsonValue(QJsonArray{QString(10000, 'x')}).toCbor(), 1);
     qToBigEndian(quint32{1}, reinterpret_cast<uchar*>(compressed.data()));
-    QByteArray bomb(9, '\0');
-    qToBigEndian(quint32{2}, reinterpret_cast<uchar*>(bomb.data()));
-    bomb[4] = 1;
-    qToBigEndian(static_cast<quint32>(compressed.size()), reinterpret_cast<uchar*>(bomb.data() + 5));
+    QByteArray bomb(6, '\0');
+    bomb[0] = 2;
+    bomb[1] = 1;
+    qToBigEndian(static_cast<quint32>(compressed.size()), reinterpret_cast<uchar*>(bomb.data() + 2));
     bomb += compressed;
     require(!booleanReceiver.decode(wire::Operation::ShareOffer, bomb, decoded, error),
         "compressed payload expanded beyond its declared output bound");
+    auto structured = song();
+    structured["song"] = QJsonObject{{"source_frames", QStringLiteral("9223372036854775807")},
+        {"start_frame", QStringLiteral("-1")}, {"stop_frame", 12}, {"loop_start_frame", QStringLiteral("0001")},
+        {"custom_recipe_field", QJsonArray{1, "kept", QJsonObject{{"arbitrary", true}}}}};
+    wire::Codec framesEncoder, framesDecoder;
+    require(framesEncoder.encode(structured, encoded, error) && framesDecoder.decode(encoded.operation, encoded.payload, decoded, error) && decoded.message == structured,
+        "numeric snapshot fields changed application types, i64 precision or unknown recipe keys");
+    require(!framesEncoder.encode({{"type","looper.recording.state"},{"phase","unknown-phase"}}, encoded, error), "unknown enum accepted");
+    // Rename optimization must fall back when deletion/replacement or any other
+    // field changes alongside a name, and remain bound to its exact base.
+    auto multi = rename(message, "renamed-after-replace"); auto content = multi.value("song").toObject();
+    content["title"] = "other simultaneous edit"; multi["song"] = content;
+    require(sender.encode(multi, encoded, error) && receiver.decode(encoded.operation, encoded.payload, decoded, error) && decoded.message == multi, "typed rename swallowed another edit");
+    auto removed = multi; content.remove("looper"); removed["song"] = content;
+    require(sender.encode(removed, encoded, error) && receiver.decode(encoded.operation, encoded.payload, decoded, error) && decoded.message == removed, "deletion did not supersede rename baseline");
 }
 QByteArray legacyChunk(const QByteArray& hash, quint32 index, const QByteArray& data)
 {
@@ -127,14 +143,14 @@ void assets()
     const auto oldChunk = encoded;
     require(receiver.decode(encoded.operation, encoded.payload, decoded, error) && decoded.asset == chunk, "compact chunk reconstruction differs");
     const QJsonObject progress{{"type", "looper.asset.ack"}, {"sha256", QString::fromLatin1(hash.toHex())}, {"chunks", 1}};
-    require(receiver.encode(progress, encoded, error) && encoded.payload.size() == 10 &&
+    require(receiver.encode(progress, encoded, error) && encoded.payload.size() == 7 &&
         sender.decode(encoded.operation, encoded.payload, decoded, error) && decoded.message == progress,
         "WAV progress repeated the full hash or lost its transfer binding");
     const auto final = legacyChunk(hash, 1, QByteArray(14, 'z'));
     require(sender.encodeAsset(final, encoded, error) && receiver.decode(encoded.operation, encoded.payload, decoded, error) && decoded.asset == final, "final short chunk round trip");
     require(!sender.encodeAsset(legacyChunk(hash, 1, QByteArray(15, 'z')), encoded, error), "oversized final chunk accepted");
     const QJsonObject done{{"type", "looper.asset.done"}, {"sha256", QString::fromLatin1(hash.toHex())}, {"chunks", 2}};
-    require(sender.encode(done, encoded, error) && encoded.payload.size() == 10 &&
+    require(sender.encode(done, encoded, error) && encoded.payload.size() == 7 &&
         receiver.decode(encoded.operation, encoded.payload, decoded, error) && decoded.message == done,
         "WAV completion metadata did not use its transfer handle");
     require(sender.encode(start, encoded, error) && receiver.decode(encoded.operation, encoded.payload, decoded, error), "replacement transfer start");
@@ -144,8 +160,9 @@ void channels()
 {
     std::deque<QByteArray> toA, toB; qint64 stalled = 0;
     const QByteArray keyAB(32, 'a'), keyBA(32, 'b');
-    wire::Channel a(keyAB, keyBA, [&](const QByteArray& f) { toB.push_back(f); return true; }, [&] { return stalled; });
-    wire::Channel b(keyBA, keyAB, [&](const QByteArray& f) { toA.push_back(f); return true; }, [] { return qint64{0}; });
+    const wire::Channel::Options immediate{false, false, false};
+    wire::Channel a(keyAB, keyBA, [&](const QByteArray& f) { toB.push_back(f); return true; }, [&] { return stalled; }, immediate);
+    wire::Channel b(keyBA, keyAB, [&](const QByteArray& f) { toA.push_back(f); return true; }, [] { return qint64{0}; }, immediate);
     QJsonObject received; int deliveries = 0;
     b.onMessage = [&](const QJsonObject& m) { received = m; ++deliveries; };
     QString error;
@@ -173,17 +190,142 @@ void channels()
     while (!closed && wait.elapsed() < 1000) QCoreApplication::processEvents();
     require(closed, "queued output did not resume after backpressure");
 }
+void deliver(std::deque<QByteArray>& queue, wire::Channel& receiver)
+{
+    QString error;
+    while (!queue.empty()) {
+        auto bytes = std::move(queue.front()); queue.pop_front();
+        while (!bytes.isEmpty()) {
+            require(bytes.size() >= 4, "batch split length");
+            const auto size = qFromBigEndian<quint32>(reinterpret_cast<const uchar*>(bytes.constData()));
+            require(bytes.size() >= size + 4 && receiver.receive(bytes.mid(4, size), error), "batched channel receive");
+            bytes.remove(0, size + 4);
+        }
+    }
+}
+void editBursts(bool benchmark)
+{
+    for (int mode = 0; mode < 4; ++mode) {
+        wire::Channel::Options options{mode != 0, mode >= 3, mode >= 2};
+        std::deque<QByteArray> toA, toB;
+        wire::Channel a(QByteArray(32, 'a'), QByteArray(32, 'b'), [&](const QByteArray& f) { toB.push_back(f); return true; }, [] { return qint64{0}; }, options);
+        wire::Channel b(QByteArray(32, 'b'), QByteArray(32, 'a'), [&](const QByteArray& f) { toA.push_back(f); return true; }, [] { return qint64{0}; }, options);
+        int deliveries = 0; QString latest;
+        b.onMessage = [&](const QJsonObject& m) { ++deliveries; latest = m.value("text").toString(); };
+        QElapsedTimer timer; timer.start();
+        constexpr int turns = 32, burst = 32;
+        for (int turn = 0; turn < turns; ++turn) {
+            for (int i = 0; i < burst; ++i) require(a.send({{"type", "beat.set"}, {"section", 0}, {"lane", "chord"}, {"beat", 1}, {"text", QString::number(i)}}), "queue edit burst");
+            QCoreApplication::processEvents(); deliver(toB, b);
+            QCoreApplication::processEvents(); deliver(toA, a);
+            require(latest == "31" && a.stats().pendingReceipts == 0, "burst final state/result did not converge");
+        }
+        const auto elapsed = timer.nsecsElapsed(); const auto sa = a.stats(), sb = b.stats();
+        require(deliveries == turns * (mode >= 3 ? 1 : burst), "coalescing lost a non-superseded assignment");
+        const auto writes = sa.transportWrites + sb.transportWrites;
+        // Each small write is exactly one reliable data datagram. Include the
+        // unchanged 58-byte mux header/tag + IPv4/UDP28, and one 86-byte ACK.
+        if (benchmark) std::cout << "mode=burst-" << mode << " operations=" << turns * burst << " dispatched=" << deliveries
+            << " authenticated_bytes=" << sa.wireBytesSent + sb.wireBytesSent << " data_and_ack_datagrams=" << writes * 2
+            << " ipv4_bytes_with_acks=" << sa.wireBytesSent + sb.wireBytesSent + writes * 172 << " cpu_ns=" << elapsed
+            << " assignment_delay_mean_us=" << sa.assignmentDelaySumUs / std::max<quint64>(1,sa.assignmentDelaySamples)
+            << " assignment_delay_max_us=" << sa.assignmentDelayMaxUs << '\n';
+        if (mode == 3) require(sa.coalescedUpdates == turns * (burst - 1) && sb.receiptsSent == turns, "coalesced update metrics incorrect");
+    }
+    // A transaction is a barrier: the old assignment must dispatch before it.
+    std::deque<QByteArray> toA, toB;
+    wire::Channel a(QByteArray(32,'a'), QByteArray(32,'b'), [&](const auto& f) { toB.push_back(f); return true; }, [] { return qint64{0}; });
+    wire::Channel b(QByteArray(32,'b'), QByteArray(32,'a'), [&](const auto& f) { toA.push_back(f); return true; }, [] { return qint64{0}; });
+    QStringList seen;
+    b.onMessage = [&](const QJsonObject& m) { seen.push_back(m.value("type").toString() + m.value("text").toString()); };
+    require(a.send({{"type","beat.set"},{"text","old"}}) && a.send({{"type","bank.request"},{"bank",0}}) &&
+        a.send({{"type","beat.set"},{"text","new"}}), "barrier queue");
+    QCoreApplication::processEvents(); deliver(toB,b); QCoreApplication::processEvents(); deliver(toA,a);
+    require(seen == QStringList{"beat.setold","bank.request","beat.setnew"}, "coalescing crossed a transaction barrier");
+    seen.clear();
+    b.onMessage = [&](const QJsonObject& m) { seen.push_back(QString::number(m.value("revision").toInt())); };
+    require(a.send({{"type","beat.set"},{"beat",1},{"text","first"},{"revision",1}}) &&
+        a.send({{"type","beat.set"},{"beat",2},{"text","other cell"},{"revision",2}}) &&
+        a.send({{"type","beat.set"},{"beat",1},{"text","latest"},{"revision",3}}), "interleaved revision burst");
+    QCoreApplication::processEvents(); deliver(toB,b); QCoreApplication::processEvents(); deliver(toA,a);
+    require(seen == QStringList{"2","3"}, "coalescing reordered surviving authority revisions");
+    // A sparse assignment is scheduled once; it never waits for a second edit.
+    seen.clear();
+    require(a.send({{"type","beat.set"},{"revision",4}}) && toB.empty(), "sparse assignment did not use event-loop scheduling");
+    QCoreApplication::processEvents(); deliver(toB,b);
+    require(seen == QStringList{"4"} && a.stats().assignmentDelaySamples > 0, "sparse assignment waited for another edit or lost delay diagnostics");
+    QCoreApplication::processEvents(); deliver(toA,a);
+    // A rejected action between successes must keep its explicit result even
+    // when both neighboring successes would otherwise share one cumulative ACK.
+    b.onMessage = {};
+    b.validateMessage = [](const QJsonObject& m) { return m.value("enabled").toBool() ? wire::DispatchDecision{} :
+        wire::DispatchDecision{wire::Rejection::Unauthorized,QStringLiteral("rejected middle action")}; };
+    const auto receipts = b.stats().receiptsSent, results = a.stats().rejectionResultsReceived;
+    for (const bool value : {true,false,true}) require(a.send({{"type","jam.metronome.state.set"},{"enabled",value}}), "queue mixed dispatch outcomes");
+    deliver(toB,b); QCoreApplication::processEvents(); deliver(toA,a);
+    require(b.stats().receiptsSent == receipts + 2 && a.stats().rejectionResultsReceived == results + 1 && a.stats().pendingReceipts == 0,
+        "cumulative success concealed a rejection or lost dispatch confirmation");
+}
+void independentSafety()
+{
+    const QByteArray ab(32,'a'), ba(32,'b');
+    std::deque<QByteArray> primary, independent;
+    wire::Channel a(ab,ba,[&](const auto& bytes) { primary.push_back(bytes); return true; }, [] { return qint64{0}; });
+    wire::Channel b(ba,ab,[](const auto&) { return true; }, [] { return qint64{0}; });
+    a.enableIndependent([&](const auto& bytes) { independent.push_back(bytes); return true; }, [] { return qint64{0}; });
+    b.enableIndependent([](const auto&) { return true; }, [] { return qint64{0}; });
+    require(a.send(song()) && a.send({{"type","session.heartbeat"},{"sequence",17}}), "independent send");
+    require(primary.size() == 1 && independent.size() == 1, "ordering selected wrong wire");
+    QString error; int delivered = 0;
+    b.onMessage = [&](const auto& message) { require(message.value("sequence") == 17, "unexpected independent operation"); ++delivered; };
+    require(!b.receive(independent.front().sliced(4), error), "independent record replayed on primary ordering");
+    auto tampered = independent.front(); tampered.back() ^= 1;
+    require(!b.receiveIndependent(tampered, error), "independent HMAC tampering accepted");
+    require(b.receiveIndependent(independent.front().first(3),error) && b.receiveIndependent(independent.front().sliced(3),error) && delivered == 1,
+        "independent framing splits failed");
+    require(!b.receiveIndependent(independent.front(),error), "independent sequence replay accepted");
+    wire::Channel restricted(ba,ab,[](const auto&) { return true; }, [] { return qint64{0}; });
+    restricted.enableIndependent([](const auto&) { return true; }, [] { return qint64{0}; });
+    wire::Codec codec; wire::Codec::Encoded encoded;
+    require(codec.encode(song(),encoded,error), "prepare forbidden independent operation");
+    const auto key = QMessageAuthenticationCode::hash("jam2-independent-control-v2", ab, QCryptographicHash::Sha256);
+    require(!restricted.receiveIndependent(wire::authenticate(encoded.operation,1,encoded.payload,key),error), "dependent checkpoint accepted on independent ordering");
+    wire::Channel stalled(ab,ba,[](const auto&) { return true; }, [] { return qint64{0}; });
+    stalled.enableIndependent([](const auto&) { return false; }, [] { return qint64{16*1024}; });
+    bool rejected = false;
+    for (int i=0; i<1000; ++i) if (!stalled.send({{"type","session.heartbeat"},{"sequence",i}})) { rejected = true; break; }
+    require(rejected && stalled.stats().independentQueuedBytes <= 16*1024 && stalled.stats().queueRejects > 0,
+        "independent application queue has no backpressure bound");
+}
 void performance()
 {
     constexpr int count = 1000;
     const QByteArray key(32, 'k');
-    for (const auto& mode : {"direct", "stun", "server"}) {
-        wire::Codec encoder, decoder;
+    for (const bool numeric : {false,true}) for (const bool compress : {false,true}) {
+        quint64 bytes = 0; QElapsedTimer timer; timer.start();
+        for (int checkpoint = 0; checkpoint < 100; ++checkpoint) {
+            wire::Codec::Options options; options.numericDocuments = numeric;
+            if (!compress) options.compressionMinimumBytes = wire::kMaximumDocumentBytes;
+            wire::Codec encoder(options), decoder; wire::Codec::Encoded encoded; wire::Codec::Decoded decoded; QString error;
+            const auto message = rename(song(64), QString::number(checkpoint));
+            require(encoder.encode(message,encoded,error) && decoder.decode(encoded.operation,encoded.payload,decoded,error) && decoded.message == message,
+                "checkpoint numeric/text ablation convergence");
+            bytes += encoded.payload.size() + wire::kRecordHeaderBytes;
+        }
+        std::cout << "workload=100-fresh-checkpoints numeric=" << numeric << " compressed=" << compress
+            << " authenticated_bytes=" << bytes << " encode_decode_ns=" << timer.nsecsElapsed() << '\n';
+    }
+    for (const auto& mode : {"direct", "stun", "server", "server-text-snapshots", "server-compress-small", "server-generic-edits"}) {
+        wire::Codec::Options options;
+        if (QByteArrayView(mode) == "server-text-snapshots") options.numericDocuments = false;
+        if (QByteArrayView(mode) == "server-compress-small") options.compressionMinimumBytes = 0;
+        if (QByteArrayView(mode) == "server-generic-edits") options.typedRenames = false;
+        wire::Codec encoder(options), decoder;
         quint64 bytes = 0; QElapsedTimer timer; timer.start();
         auto message = song(64); QString error;
         for (int i = 0; i < count; ++i) {
             message = rename(message, QStringLiteral("Take-%1").arg(i)); message["arrangement_revision"] = i + 1;
-            if (QByteArrayView(mode) == "server") {
+            if (QByteArrayView(mode).startsWith("server")) {
                 wire::Codec::Encoded encoded; wire::Codec::Decoded decoded;
                 require(encoder.encode(message, encoded, error), "benchmark binary encode");
                 const auto frame = wire::authenticate(encoded.operation, i + 1, encoded.payload, key);
@@ -207,7 +349,8 @@ void performance()
             }
         }
         std::cout << "mode=" << mode << " workload=64-lane-rename operations=" << count
-            << " authenticated_bytes=" << bytes << " encode_decode_ns=" << timer.nsecsElapsed() << '\n';
+            << " authenticated_bytes=" << bytes << " encode_decode_ns=" << timer.nsecsElapsed()
+            << " compression_attempts=" << encoder.stats().compressionAttempts << " compression_skipped=" << encoder.stats().compressionSkipped << '\n';
         if (QByteArrayView(mode) == "server") require(bytes < 200000, "ordinary renames retained full snapshot wire cost");
     }
     quint64 legacyWavBytes = 0;
@@ -269,8 +412,8 @@ int main(int argc, char** argv)
 {
     QCoreApplication app(argc, argv);
     try {
-        if (argc > 1 && QByteArrayView(argv[1]) == "--performance") performance();
-        else { recordsAndDeltas(); assets(); channels(); }
+        if (argc > 1 && QByteArrayView(argv[1]) == "--performance") { performance(); editBursts(true); }
+        else { recordsAndDeltas(); assets(); channels(); editBursts(false); independentSafety(); }
         return 0;
     } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }

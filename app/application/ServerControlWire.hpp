@@ -12,7 +12,7 @@
 
 namespace jam2::application::server_wire {
 
-inline constexpr int kVersion = 1;
+inline constexpr int kVersion = 2;
 inline constexpr qsizetype kRecordHeaderBytes = 32;
 inline constexpr qsizetype kMaximumDocumentBytes = 4 * 1024 * 1024;
 inline constexpr qsizetype kMaximumQueuedBytes = 5 * 1024 * 1024;
@@ -51,6 +51,10 @@ struct Stats {
     quint64 encodingRejects = 0, unresolvedReceipts = 0;
     quint64 operationsRejected = 0, rejectionResultsReceived = 0;
     quint64 resultLatencySamples = 0, resultLatencySumUs = 0, resultLatencyMaxUs = 0;
+    quint64 compressionAttempts = 0, compressionSkipped = 0;
+    quint64 transportWrites = 0, batchedRecords = 0, coalescedUpdates = 0, cumulativeReceipts = 0;
+    quint64 independentRecordsSent = 0, independentRecordsReceived = 0, independentQueuedBytes = 0;
+    quint64 assignmentDelaySamples = 0, assignmentDelaySumUs = 0, assignmentDelayMaxUs = 0;
     QString lastRejection;
 };
 void accumulate(Stats& target, const Stats& value) noexcept;
@@ -61,6 +65,7 @@ QJsonObject diagnostics(const Stats& value);
 // Each authenticated logical stream owns its own delta and transfer bindings.
 class Codec {
 public:
+    struct Options { bool numericDocuments = true; qsizetype compressionMinimumBytes = 128; bool typedRenames = true; };
     struct Encoded {
         Operation operation{};
         QByteArray payload;
@@ -77,6 +82,7 @@ public:
     };
 
     Codec();
+    explicit Codec(Options options);
     ~Codec();
     Codec(const Codec&) = delete;
     Codec& operator=(const Codec&) = delete;
@@ -103,12 +109,17 @@ public:
     using Capacity = std::function<qint64()>;
     Channel(QByteArray sendKey, QByteArray receiveKey, Write write, Capacity pending,
         QObject* parent = nullptr);
+    struct Options { bool batch = true; bool coalesce = true; bool cumulativeReceipts = true; };
+    Channel(QByteArray sendKey, QByteArray receiveKey, Write write, Capacity pending,
+        Options options, QObject* parent = nullptr);
     bool send(const QJsonObject& message);
     bool sendAsset(const QByteArray& payload);
     bool sendBinary(const QByteArray& payload);
     bool receive(const QByteArray& body, QString& error);
     bool canQueue(qint64 bytes) const noexcept;
     void closeAfterDrain(std::function<void()> close);
+    void enableIndependent(Write write, Capacity pending);
+    bool receiveIndependent(const QByteArray& bytes, QString& error);
     Stats stats() const;
     std::function<void(const QJsonObject&)> onMessage;
     std::function<DispatchDecision(const QJsonObject&)> validateMessage;
@@ -116,6 +127,8 @@ public:
     std::function<void(const QString&)> onFailure;
 private:
     bool enqueue(const Codec::Encoded& encoded);
+    void drainIntents();
+    bool sendReceipt(quint64 id, const DispatchDecision& decision);
     void flush();
     Codec codec_;
     QByteArray sendKey_, receiveKey_;
@@ -123,6 +136,12 @@ private:
     Capacity pending_;
     QTimer flushTimer_;
     QTimer assemblyTimer_;
+    QTimer turnTimer_;
+    struct Intent { Codec::Encoded encoded; QString key; qint64 queuedNs; };
+    std::deque<Intent> intents_;
+    qsizetype intentBytes_ = 0;
+    Options options_;
+    quint64 pendingSuccess_ = 0;
     std::deque<QByteArray> output_;
     struct PendingReceipt { quint64 id; qint64 queuedNs; };
     std::deque<PendingReceipt> awaitingReceipt_;
@@ -135,6 +154,10 @@ private:
     quint32 assemblyTotal_ = 0;
     Operation assemblyOperation_{};
     bool failed_ = false;
+    bool independentOnly_ = false;
+    std::unique_ptr<Channel> independent_;
+    QByteArray independentBuffer_;
+    QTimer independentFrameTimer_;
     std::function<void()> closeAfterDrain_;
 };
 

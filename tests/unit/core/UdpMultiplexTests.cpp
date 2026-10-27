@@ -10,7 +10,12 @@
 #include <iostream>
 #include <map>
 #include <stdexcept>
+#include <string_view>
 #include <vector>
+#if defined(_WIN32)
+#include <windows.h>
+#include <mmsystem.h>
+#endif
 
 namespace {
 void require(bool value, const char* message) { if (!value) throw std::runtime_error(message); }
@@ -187,6 +192,137 @@ void boundedTransportWake()
     require(queued.consumptionCount() == 1, "queued UDP input did not wake the network receiver");
 }
 
+void receiverOwnershipLifecycle()
+{
+    class Transport final : public jam2::NetworkDatagramTransport {
+    public:
+        int attachments = 0, detachments = 0;
+        bool reject = false;
+        void receiverAttached() override { ++attachments; if (reject) throw std::runtime_error("attachment rejected"); }
+        void receiverDetached() noexcept override { ++detachments; }
+        jam2::UdpSendResult sendToPeer(std::uint64_t, const jam2::ResolvedUdpEndpoint&,
+            std::span<const std::uint8_t>) noexcept override { return {}; }
+        std::optional<jam2::UdpSocket::ReceivedDatagram> receiveFor(
+            std::span<std::uint8_t>, std::uint64_t, jam2::RealtimeWakeSignal*) override { return {}; }
+    };
+    jam2::NetworkRuntime native;
+    auto makeSession = [] {
+        jam2::UdpSocket socket; socket.bind({"127.0.0.1",0});
+        return jam2::NetworkSession(std::move(socket), jam2::SessionInfo{{"127.0.0.1",0},99,{}}, {},
+            jam2::SessionBootstrapRole::Creator, {1}, std::span<const jam2::NetworkPeerDescriptor>{}, {}, nullptr);
+    };
+    auto first = std::make_shared<Transport>(), second = std::make_shared<Transport>();
+    auto rejected = std::make_shared<Transport>(); rejected->reject = true;
+    {
+        auto session = makeSession();
+        session.setDatagramTransport(first); session.setDatagramTransport(first);
+        require(first->attachments==1 && first->detachments==0,"same receiver attachment was duplicated");
+        bool threw = false;
+        try { session.setDatagramTransport(rejected); } catch (const std::exception&) { threw = true; }
+        require(threw && rejected->attachments==1 && rejected->detachments==0 && first->detachments==0,
+            "failed receiver attachment detached the current receiver");
+        session.setDatagramTransport(second);
+        require(first->detachments==1 && second->attachments==1,"receiver replacement did not transfer ownership");
+        auto moved = std::move(session);
+        auto destination = makeSession(); destination.setDatagramTransport(first);
+        destination = std::move(moved);
+        require(first->detachments==2 && second->detachments==0,"move assignment lost receiver cleanup");
+        destination.close(); destination.close();
+        require(second->detachments==1,"close did not detach receiver exactly once");
+    }
+    require(first->detachments==2 && second->detachments==1,"destruction detached an already closed receiver");
+    { auto session = makeSession(); session.setDatagramTransport(first); }
+    require(first->detachments==3,"session destruction retained receiver ownership");
+}
+
+void routedReceivePreservesMultiplexSizedDatagrams()
+{
+    class SocketRoute final : public jam2::NetworkDatagramTransport {
+    public:
+        jam2::UdpSocket socket;
+        SocketRoute() { socket.bind({"127.0.0.1",0}); }
+        jam2::UdpSendResult sendToPeer(std::uint64_t, const jam2::ResolvedUdpEndpoint&,
+            std::span<const std::uint8_t>) noexcept override { return {}; }
+        std::optional<jam2::UdpSocket::ReceivedDatagram> receiveFor(
+            std::span<std::uint8_t> buffer, std::uint64_t wait, jam2::RealtimeWakeSignal* wake) override {
+            return socket.recv_from_for(buffer,wait,wake);
+        }
+    };
+    jam2::NetworkRuntime native;
+    jam2::UdpSocket placeholder, sender; placeholder.bind({"127.0.0.1",0}); sender.bind({"127.0.0.1",0});
+    jam2::NetworkSession session(std::move(placeholder), jam2::SessionInfo{{"127.0.0.1",0},99,{}}, {},
+        jam2::SessionBootstrapRole::Creator, {1}, std::span<const jam2::NetworkPeerDescriptor>{}, {}, nullptr);
+    auto route = std::make_shared<SocketRoute>(); session.setDatagramTransport(route);
+    for (const std::size_t size : {804,805,1082,1500}) {
+        std::vector<std::uint8_t> bytes(size);
+        for (std::size_t index=0; index<size; ++index) bytes[index]=static_cast<std::uint8_t>(index%251);
+        require(sender.send_to(jam2::resolve_udp_endpoint(route->socket.local_endpoint()),bytes).outcome==jam2::UdpSendOutcome::Sent,
+            "cannot send multiplex-sized receive fixture");
+        const auto packet = session.receiveFor(1000000);
+        require(packet && packet->bytes.size()==bytes.size() && std::equal(bytes.begin(),bytes.end(),packet->bytes.begin()),
+            "routed receive truncated a datagram larger than the native audio maximum");
+    }
+}
+
+void datagramWaitPreservesPacketsAndCaptureWake()
+{
+    jam2::NetworkRuntime native;
+    jam2::UdpSocket first, second, sender;
+    first.bind({"127.0.0.1",0}); second.bind({"127.0.0.1",0}); sender.bind({"127.0.0.1",0});
+    const std::array<const jam2::UdpSocket*,2> sockets{&first,&second};
+    const std::array<std::uint8_t,4> bytes{9,2,7,4};
+    require(sender.send_to(jam2::resolve_udp_endpoint(second.local_endpoint()),bytes).outcome==jam2::UdpSendOutcome::Sent,
+        "cannot send multi-socket wait fixture");
+    jam2::UdpSocket::waitForDatagrams(sockets,1000000);
+    std::array<std::uint8_t,64> buffer{};
+    require(!first.recv_from_for(buffer,0),"multi-socket wait changed the destination");
+    const auto packet = second.recv_from_for(buffer,0);
+    require(packet && packet->size==bytes.size() && std::equal(bytes.begin(),bytes.end(),buffer.begin()),
+        "multi-socket wait consumed or altered a native datagram");
+    jam2::RealtimeWakeSignal capture; capture.requestWake(); capture.signal(123);
+    jam2::UdpSocket::waitForDatagrams(sockets,1000000,&capture);
+    require(capture.consumptionCount()==1,"multi-socket wait missed the capture wake");
+    jam2::UdpSocket::waitForDatagrams(sockets,1,&capture);
+    require(capture.consumptionCount()==1,"empty multi-socket wait consumed an unsignalled wake");
+}
+void receiveWaitPerformance(bool requestOneMsTimer)
+{
+#if defined(_WIN32)
+    struct TimerPeriod {
+        bool active;
+        explicit TimerPeriod(bool requested) : active(requested) {
+            if (active && timeBeginPeriod(1)!=TIMERR_NOERROR) throw std::runtime_error("failed to request diagnostic 1ms timer period");
+        }
+        ~TimerPeriod() { if (active) timeEndPeriod(1); }
+    } timer(requestOneMsTimer);
+#endif
+    jam2::NetworkRuntime native;
+    jam2::UdpSocket socket; socket.bind({"127.0.0.1",0});
+    jam2::RealtimeWakeSignal queued, capture; queued.requestWake(); capture.requestWake();
+    std::array<std::uint8_t,64> buffer{};
+    constexpr std::array<const char*,4> names{"socket-select","mux-event","socket-capture-event","mux-capture-event"};
+    for (const std::uint64_t requested : {1,100,250,500,750,1000,1333}) {
+        std::array<std::vector<std::uint64_t>,4> elapsed;
+        for (int iteration=0; iteration<48; ++iteration) for (int turn=0; turn<4; ++turn) {
+            const auto method=(iteration+turn)%4;
+            const auto began=jam2::monotonic_us();
+            if (method==0 || method==2) require(!socket.recv_from_for(buffer,requested,method==2 ? &capture : nullptr),"empty wait benchmark received unsolicited data");
+            else queued.waitFor(requested,method==3 ? &capture : nullptr);
+            elapsed[method].push_back(jam2::monotonic_us()-began);
+        }
+        for (int method=0; method<4; ++method) {
+            auto& values=elapsed[method]; std::sort(values.begin(),values.end());
+            std::uint64_t sum=0; for (const auto value:values) sum+=value;
+            std::cout << "workload=empty-receive-wait requested_timer_ms=" << (requestOneMsTimer ? 1 : 0)
+                << " method=" << names[method] << " requested_us=" << requested
+                << " samples=" << values.size() << " min_us=" << values.front() << " median_us=" << values[values.size()/2]
+                << " p95_us=" << values[((values.size()-1)*95+99)/100] << " max_us=" << values.back()
+                << " mean_us=" << static_cast<double>(sum)/values.size() << '\n';
+        }
+    }
+    require(queued.consumptionCount()==0 && capture.consumptionCount()==0,"timeout benchmark consumed an unsignalled event");
+}
+
 void boundsBackpressureAndIndependentChannels()
 {
     jam2::ReliableUdpStream bulk, control, remote;
@@ -217,9 +353,16 @@ void boundsBackpressureAndIndependentChannels()
 }
 }
 
-int main()
+int main(int argc, char** argv)
 {
     try {
+        if (argc==2 && std::string_view(argv[1])=="--wait-performance") {
+            receiveWaitPerformance(false);
+#if defined(_WIN32)
+            receiveWaitPerformance(true);
+#endif
+            return 0;
+        }
         initialRtoLearnsHotspotLatencyWithoutInventingLoss();
         localRouteDiscovery();
         invitationCompatibility();
@@ -227,6 +370,9 @@ int main()
         boundsBackpressureAndIndependentChannels();
         audioRoutingRetainsNativePacketBytes();
         boundedTransportWake();
+        receiverOwnershipLifecycle();
+        routedReceivePreservesMultiplexSizedDatagrams();
+        datagramWaitPreservesPacketsAndCaptureWake();
         std::cout << "UDP multiplex strategy and reliable byte-stream checks passed\n";
         return 0;
     } catch (const std::exception& error) {

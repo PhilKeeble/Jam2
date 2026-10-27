@@ -1,6 +1,8 @@
 #pragma once
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QFile>
+#include <QDir>
 #include <QUdpSocket>
 #include <QEventLoop>
 #include <QTimer>
@@ -12,6 +14,7 @@
 #include <set>
 #include <memory>
 #include <stdexcept>
+#include <vector>
 
 class CandidateNetwork {
     static void require(bool okay, const char* message) { if (!okay) throw std::runtime_error(message); }
@@ -26,6 +29,15 @@ class CandidateNetwork {
     quint16 server_;
     std::map<quint16, std::unique_ptr<Route>> routes_;
     quint64 directCount_ = 0;
+    const bool traceMux_ = qEnvironmentVariableIsSet("JAM2_TRACE_CANDIDATE_MUX");
+    std::vector<QJsonObject> muxTrace_;
+    void traceMux(const Route& from, const Route& to, const QByteArray& packet, bool wasDropped) {
+        if (!traceMux_ || muxTrace_.size() >= 1024 || packet.size()<42 || !packet.startsWith("J2MX")) return;
+        const auto u64 = [&](int offset) { return QString::number(qFromBigEndian<quint64>(reinterpret_cast<const uchar*>(packet.constData()+offset))); };
+        muxTrace_.push_back({{"from",from.peer},{"to",to.peer},{"local",to.local},{"from_mapping",from.socket.localPort()},
+            {"kind",static_cast<quint8>(packet[5])},{"channel",static_cast<quint8>(packet[6])},
+            {"stream",u64(24)},{"sequence",u64(32)},{"bytes",packet.size()},{"dropped",wasDropped},{"packet_index",static_cast<qint64>(directCount_)}});
+    }
     int mediaProofDelayMs_ = 0;
     quint64 delayedMediaProofs_ = 0;
     std::chrono::steady_clock::time_point mediaProofUntil_;
@@ -44,6 +56,11 @@ public:
     quint64 dropped = 0, duplicated = 0;
     explicit CandidateNetwork(quint16 server) : server_(server) {
         require(ingress_.bind(QHostAddress::LocalHost, 0), "bind simulated NAT ingress");
+    }
+    ~CandidateNetwork() {
+        if (!traceMux_) return;
+        QFile trace(QDir(qEnvironmentVariable("JAM2_TEST_ARTIFACT_ROOT",QDir::tempPath())).filePath("udp-candidate-mux-trace.jsonl"));
+        if (trace.open(QIODevice::WriteOnly)) for (const auto& row : muxTrace_) trace.write(QJsonDocument(row).toJson(QJsonDocument::Compact)+'\n');
     }
     quint16 port() const { return ingress_.localPort(); }
     void suppressControlOpens(const QString& peer, int count) {
@@ -124,7 +141,8 @@ public:
                     if (now < mediaProofUntil_) { ++delayedMediaProofs_; continue; }
                 }
                 ++directCount_;
-                if (impairMultiplex && packet.startsWith("J2MX") && directCount_ % 19 == 0) { ++dropped; continue; }
+                if (impairMultiplex && packet.startsWith("J2MX") && directCount_ % 19 == 0) { traceMux(*sender,*route,packet,true); ++dropped; continue; }
+                traceMux(*sender,*route,packet,false);
                 sender->socket.writeDatagram(packet, QHostAddress::LocalHost, local);
                 if (impairMultiplex && packet.startsWith("J2MX") && directCount_ % 23 == 0) {
                     sender->socket.writeDatagram(packet, QHostAddress::LocalHost, local); ++duplicated;

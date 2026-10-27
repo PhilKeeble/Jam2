@@ -542,6 +542,17 @@ bool AutomationProcess::isRunning() const noexcept
     return processId_ > 0;
 #endif
 }
+std::optional<std::uint64_t> AutomationProcess::cpuTimeNs() const noexcept
+{
+#if defined(_WIN32)
+    FILETIME created{}, exited{}, kernel{}, user{};
+    if (!processHandle_ || !GetProcessTimes(reinterpret_cast<HANDLE>(processHandle_), &created, &exited, &kernel, &user)) return {};
+    const auto ticks = [](const FILETIME& value) { return (std::uint64_t{value.dwHighDateTime} << 32) | value.dwLowDateTime; };
+    return (ticks(kernel) + ticks(user)) * 100ULL;
+#else
+    return {};
+#endif
+}
 
 void AutomationProcess::stopForCleanup() noexcept
 {

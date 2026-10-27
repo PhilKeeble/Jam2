@@ -810,7 +810,7 @@ void ControlServer::handleHandshake(const PeerHandle& peer, const QJsonObject& m
     }
     peer->transcript = makeTranscript(
         sessionHex_, peer->serverNonce, clientNonce, token, udpEndpoint, channel);
-    if (binary) peer->transcript += QByteArrayLiteral("jam2-server-wire-1");
+    if (binary) peer->transcript += QByteArrayLiteral("jam2-server-wire-") + QByteArray::number(jam2::application::server_wire::kVersion);
     const QByteArray clientProofDomain = assetChannel
         ? QByteArrayLiteral("jam2-asset-client-proof")
         : QByteArrayLiteral("jam2-control-client-proof");
@@ -879,6 +879,17 @@ void ControlServer::handleHandshake(const PeerHandle& peer, const QJsonObject& m
         peer->serverWire->onFailure = [this, weak](const QString& error) {
             if (const auto p = weak.lock()) rejectPeer(p, error, TransportFailure::AuthenticatedFrameRejected, true);
         };
+        if (!assetChannel && peer->connection->hasIndependentControl()) {
+            peer->serverWire->enableIndependent(
+                [weak](const QByteArray& bytes) { const auto p = weak.lock(); return p && p->connection && p->connection->writeIndependent(bytes); },
+                [weak] { const auto p = weak.lock(); return p && p->connection ? p->connection->independentBytesToWrite() : qint64{16 * 1024}; });
+            peer->connection->startIndependent(this, [this, weak](const QByteArray& bytes) {
+                if (const auto p = weak.lock(); p && p->serverWire) { QString error;
+                    const auto wire = p->serverWire;
+                    if (!wire->receiveIndependent(bytes, error)) rejectPeer(p, error, TransportFailure::AuthenticatedFrameRejected, true);
+                }
+            });
+        }
     }
     peer->authenticationTimer->stop();
     if (replacedAssetPeer && replacedAssetPeer->connection &&

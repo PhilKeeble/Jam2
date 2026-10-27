@@ -88,6 +88,9 @@ public:
     void sendCurrent(const QString& peer);
     void reset();
     void tick();
+    // Content owner calls before clearing/replacing the prepared source. A
+    // Server selection survives invalidation even after its planned boundary.
+    void sourceWillChange();
     const ListeningToolsSettings& appliedSettings() const noexcept { return applied_; }
     const ListeningToolsSettings& selectedSettings() const noexcept { return draft_; }
     bool playbackReady() const noexcept {
@@ -107,9 +110,12 @@ private:
     };
     bool publishServerSelection(quint8 changedGroups, const ListeningToolsSettings& proposed);
     void adoptServerSelection(const ServerSelection& selection);
+    bool deferServerSelectionForContentChange();
     QJsonObject serverSelectionMessage(const ServerSelection& selection) const;
     std::optional<ServerSelection> serverSelection_, deferredServerSelection_;
     quint64 serverLateReschedules_ = 0;
+    quint64 serverContentDeferrals_ = 0;
+    quint64 serverSourceInvalidations_ = 0, serverPostBoundaryDeferrals_ = 0;
     quint8 serverEditGroups_ = 0;
     quint64 serverPeerFailures_ = 0;
     struct ServerApplication { int revision = 0; std::uint64_t frame = 0; };

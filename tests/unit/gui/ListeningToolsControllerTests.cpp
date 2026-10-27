@@ -14,6 +14,8 @@
 #include <stdexcept>
 #include <vector>
 #include <array>
+#include <algorithm>
+#include <memory>
 
 namespace {
 using namespace jam2::gui;
@@ -617,10 +619,279 @@ void testServerLatestMergePartialAndRecordingCatchup()
         "Server policy must be published before the listening state it enables");
 }
 
+void testServerContentInvalidationRetry()
+{
+    std::array<Harness, 4> peers;
+    for (std::size_t i = 0; i < peers.size(); ++i) {
+        auto& peer = peers[i];
+        peer.state.serverBinary = peer.state.network = true;
+        peer.state.creator = i == 0;
+        peer.state.localToken = QStringLiteral("p%1").arg(i);
+        for (int j = 0; j < 4; ++j) if (j != static_cast<int>(i))
+            peer.state.peers.insert(QStringLiteral("p%1").arg(j));
+    }
+    ListeningToolsSettings selected;
+    selected.speedPpm = 730000;
+    selected.pitchCents = 200;
+    peers[0].controller.edit(selected, true);
+    const auto selection = peers[0].sent.back();
+    for (std::size_t i = 1; i < peers.size(); ++i)
+        peers[i].controller.receive(selection, "p0");
+    peers[1].finish(); // A healthy peer never waits for the three invalidations.
+    const auto healthyCommands = peers[1].commands.size();
+    for (const int i : {0, 2, 3}) {
+        auto& peer = peers[i];
+        peer.state.sourceSignature = "song arrived after scheduling";
+        peer.state.contentReady = false;
+        peer.state.protectedRecording = i == 3;
+        peer.controller.tick();
+        require(!peer.controller.pending() && peer.applications == 0 &&
+            peer.commands.back().type == jam2::EngineCommandType::CancelListeningTools,
+            "content invalidation must cancel the obsolete scheduled commit before its boundary");
+        require(peer.controller.stats().value("server_deferred_state").toBool(),
+            "Server cancellation stranded the latest authoritative listening selection");
+        require(peer.controller.selectedSettings() == selected && peer.visible == selected,
+            "a retryable content change must retain the authoritative GUI selection");
+        const auto cancelledCommands = peer.commands.size();
+        peer.controller.tick();
+        require(peer.commands.size() == cancelledCommands,
+            "content which is not ready must not cause a retry loop");
+        require(std::none_of(peer.sent.begin(), peer.sent.end(), [](const QJsonObject& message) {
+            const auto type = message.value("type").toString();
+            return type == "jam.listening.cancel" || type == "jam.listening.failed";
+        }), "a local retry must not cancel the creator's selection or report a terminal peer failure");
+    }
+    // A duplicate while waiting cannot discard the pending retry or execute it.
+    peers[2].controller.receive(selection, "p0");
+    for (const int i : {0, 2, 3}) {
+        auto& peer = peers[i];
+        peer.state.position.currentFrame = peer.state.position.rawCurrentFrame = peer.state.engine.engine_frame = 480000;
+        peer.state.position.absoluteBeat = 20;
+        peer.state.contentReady = true;
+        peer.controller.tick();
+        if (i == 3) {
+            require(!peer.controller.pending(), "recording protection must hold a content-retry selection");
+            peer.state.protectedRecording = false;
+            peer.controller.tick();
+        }
+        require(peer.commands.back().type == jam2::EngineCommandType::CommitListeningTools &&
+            peer.commands.back().frame > peer.state.engine.engine_frame &&
+            peer.controller.stats().value("requested_revision").toInt() == selection.value("revision").toInt(),
+            "the same authoritative revision must retry at a fresh future boundary without another edit");
+        peer.finish();
+        require(peer.controller.appliedSettings() == selected && peer.applications == 1,
+            "every interrupted Server peer must converge after its content/recording settles");
+        require(peer.controller.stats().value("server_applied_revision") == selection.value("revision"),
+            "Server applied revision must identify actual application rather than initial GUI defaults");
+        peer.controller.tick();
+        if (i != 0) require(peer.sent.back().value("type") == "jam.listening.applied" &&
+            peer.sent.back().value("revision") == selection.value("revision"),
+            "a recovered listening selection must report actual application of the original revision");
+    }
+    peers[1].controller.receive(selection, "p0");
+    require(peers[1].commands.size() == healthyCommands && peers[1].applications == 1,
+        "retrying other peers must not replay an already applied selection");
+    require(peers[0].sent.size() == 1,
+        "a creator's local content retry must not publish another revision or impose a new peer barrier");
+}
+
+void testServerRetryPreparationOwnershipAndCancellation()
+{
+    // Engine snapshots are large; keep these independent fixtures off the
+    // Windows test thread's stack while exercising their asynchronous lifetimes.
+    const auto creatorStorage = std::make_unique<Harness>();
+    auto& creator = *creatorStorage;
+    creator.state.serverBinary = creator.state.network = true;
+    creator.state.peers = {"p1", "p2", "p3"};
+    ListeningToolsSettings selected; selected.speedPpm = 730000;
+    creator.controller.edit(selected, true);
+    require(!creator.sent.empty(), "the authority fixture must publish to its connected peers");
+    const auto selection = creator.sent.back();
+    QTemporaryDir folder;
+    require(folder.isValid(), "retry fixtures require a temporary directory");
+    const auto render = [&](const QString& name) {
+        PreparedMixResult result;
+        result.path = folder.filePath(name);
+        QFile file(result.path);
+        require(file.open(QIODevice::WriteOnly) && file.write("fixture") == 7, "retry fixture must be written");
+        file.close(); result.frames = 48000; result.sampleRate = 48000;
+        return result;
+    };
+    for (const bool loading : {false, true}) {
+        const auto peerStorage = std::make_unique<Harness>();
+        auto& peer = *peerStorage;
+        peer.state.serverBinary = peer.state.network = peer.state.hasSources = true;
+        peer.state.creator = false;
+        peer.controller.receive(selection, "p0");
+        require(!peer.renders.empty(), "the Server selection must start a real owned render before interruption");
+        const auto oldGeneration = peer.renders.back();
+        auto obsolete = render(loading ? "obsolete-loaded.wav" : "obsolete-render.wav");
+        std::uint64_t oldCookie = 0;
+        if (loading) {
+            peer.controller.prepared(oldGeneration, obsolete);
+            oldCookie = peer.commands.back().cookie;
+        }
+        peer.state.sourceSignature = "new song content";
+        peer.state.contentReady = false;
+        peer.controller.tick();
+        require(peer.controller.stats().value("server_content_deferrals").toInteger() == 1 &&
+            peer.controller.stats().value("server_deferred_state").toBool() && !peer.controller.pending(),
+            "rendering/loading invalidation must retain one observable deferred selection");
+        if (loading) require(!QFile::exists(obsolete.path), "cancelled staged preparation must release its file");
+        peer.state.contentReady = true;
+        peer.controller.tick();
+        require(peer.renders.size() == 2 && peer.renders.back() != oldGeneration,
+            "retry must prepare current content with a fresh worker generation");
+        auto late = render("late-obsolete-render.wav");
+        peer.controller.prepared(oldGeneration, late);
+        require(!QFile::exists(late.path) && peer.controller.pending(),
+            "late obsolete file work must clean up without replacing the retry");
+        if (loading) {
+            jam2::EngineEvent stale; stale.type = jam2::EngineEventType::ListeningTrackStaged; stale.cookie = oldCookie;
+            require(!peer.controller.engineEvent(stale), "an obsolete staged event cannot schedule the fresh retry");
+        }
+        auto fresh = render("fresh-retry.wav");
+        peer.controller.prepared(peer.renders.back(), fresh);
+        jam2::EngineEvent staged; staged.type = jam2::EngineEventType::ListeningTrackStaged;
+        staged.cookie = peer.commands.back().cookie;
+        require(peer.controller.engineEvent(staged), "fresh retry staging must correlate to its new cookie");
+        peer.finish();
+        require(peer.applications == 1 && peer.controller.appliedSettings() == selected,
+            "the fresh prepared retry must apply the retained settings exactly once");
+    }
+
+    const auto newerStorage = std::make_unique<Harness>();
+    auto& newer = *newerStorage;
+    newer.state.serverBinary = newer.state.network = true; newer.state.creator = false;
+    newer.controller.receive(selection, "p0");
+    newer.state.contentReady = false; newer.controller.tick(); // Readiness alone can invalidate the old source.
+    selected.speedPpm = 610000;
+    creator.controller.edit(selected, true);
+    const auto latest = creator.sent.back();
+    newer.controller.receive(latest, "p0"); newer.controller.receive(selection, "p0");
+    newer.state.contentReady = true; newer.controller.tick(); newer.finish();
+    require(newer.controller.appliedSettings() == selected && newer.applications == 1 &&
+        newer.controller.stats().value("requested_revision") == latest.value("revision"),
+        "a new authority revision supersedes the deferred retry and an old duplicate cannot restore it");
+
+    const auto cancelledStorage = std::make_unique<Harness>();
+    auto& cancelled = *cancelledStorage;
+    cancelled.state.serverBinary = cancelled.state.network = true;
+    cancelled.state.creator = false; cancelled.state.contentReady = false;
+    cancelled.controller.receive(latest, "p0");
+    cancelled.state.protectedRecording = true;
+    cancelled.controller.receive({{"type", "jam.listening.cancel"}, {"revision", latest.value("revision")}, {"reason", "explicit authority cancellation"}}, "p0");
+    cancelled.state.protectedRecording = false; cancelled.state.contentReady = true;
+    cancelled.controller.receive(latest, "p0"); cancelled.controller.tick();
+    require(!cancelled.controller.stats().value("server_deferred_state").toBool() &&
+        cancelled.commands.empty() && cancelled.applications == 0 && cancelled.visible == cancelled.controller.appliedSettings(),
+        "explicit cancellation during recording must discard a deferred retry without resurrection by a duplicate");
+
+    const auto disabledStorage = std::make_unique<Harness>();
+    auto& disabled = *disabledStorage;
+    disabled.state.serverBinary = disabled.state.network = true; disabled.state.creator = false;
+    disabled.controller.receive(selection, "p0"); disabled.state.contentReady = false; disabled.controller.tick();
+    const auto beforeDisable = disabled.commands.size();
+    disabled.state.sync = false; disabled.controller.policyChanged(true);
+    disabled.state.contentReady = true; disabled.controller.tick();
+    require(disabled.commands.size() == beforeDisable && disabled.applications == 0,
+        "a deferred retry cannot execute while listening sync is disabled");
+    disabled.controller.reset(); disabled.state.sync = true; disabled.controller.tick();
+    require(!disabled.controller.pending() && !disabled.controller.stats().value("server_deferred_state").toBool() &&
+        disabled.controller.stats().value("server_content_deferrals").toInteger() == 0,
+        "session reset must discard retries and reset their counters");
+
+    const auto failedStorage = std::make_unique<Harness>();
+    auto& failed = *failedStorage;
+    failed.state.serverBinary = failed.state.network = failed.state.hasSources = true; failed.state.creator = false;
+    failed.controller.receive(selection, "p0");
+    require(!failed.renders.empty(), "terminal failure fixture must have a pending Server render");
+    PreparedMixResult failure; failure.error = "fixture render failed";
+    failed.controller.prepared(failed.renders.back(), failure); failed.controller.tick();
+    require(failed.renders.size() == 1 && !failed.controller.pending() &&
+        !failed.controller.stats().value("server_deferred_state").toBool() && !failed.sent.empty() && failed.sent.back().value("type") == "jam.listening.failed",
+        "a genuine render failure remains reported rather than silently retried forever");
+}
+
+void testServerContentInvalidationAfterBoundary()
+{
+    for (const bool explicitInvalidation : {false,true}) {
+    auto creator = std::make_unique<Harness>();
+    creator->state.serverBinary = creator->state.network = true;
+    creator->state.peers = {"p1","p2","p3"};
+    ListeningToolsSettings settings; settings.speedPpm = 930000;
+    creator->controller.edit(settings,true);
+    const auto selection = creator->sent.back();
+    std::array<std::unique_ptr<Harness>,2> healthy;
+    for (auto& member : healthy) {
+        member = std::make_unique<Harness>();
+        member->state.serverBinary = member->state.network = true; member->state.creator = false;
+        member->controller.receive(selection,"p0"); member->finish();
+    }
+    creator->finish();
+    auto peer = std::make_unique<Harness>();
+    peer->state.serverBinary = peer->state.network = peer->state.hasSources = true;
+    peer->state.creator = false;
+    peer->controller.receive(selection,"p0");
+    QTemporaryDir folder;
+    PreparedMixResult rendered; rendered.path = folder.filePath("late-boundary.wav");
+    QFile file(rendered.path); require(file.open(QIODevice::WriteOnly) && file.write("fixture") == 7,"write late boundary fixture"); file.close();
+    rendered.frames = 48000; rendered.sampleRate = 48000;
+    peer->controller.prepared(peer->renders.back(),rendered);
+    jam2::EngineEvent staged; staged.type = jam2::EngineEventType::ListeningTrackStaged; staged.cookie = peer->commands.back().cookie;
+    require(peer->controller.engineEvent(staged),"stage late-boundary fixture");
+    const auto commit = peer->commands.back();
+    peer->state.engine.engine_frame = commit.frame + 48000 * ListeningToolsController::kAudioPublicationGraceMs / 1000 + 1;
+    peer->state.position.currentFrame = peer->state.position.rawCurrentFrame = peer->state.engine.engine_frame;
+    peer->state.engine.playback_tempo = commit.playback_tempo;
+    if (!explicitInvalidation) peer->state.sourceSignature = "content invalidated after target before GUI observed source publication";
+    peer->state.contentReady = false;
+    if (explicitInvalidation) peer->controller.sourceWillChange();
+    peer->controller.tick();
+    require(peer->controller.stats().value("server_deferred_state").toBool() && peer->controller.selectedSettings() == settings &&
+        peer->controller.stats().value("error").toString().isEmpty(),
+        "post-boundary content invalidation stranded the authoritative selection as a terminal audio-swap failure");
+    require(peer->controller.stats().value("server_post_boundary_deferrals").toInteger() == 1 &&
+        peer->controller.stats().value("server_source_invalidations").toInteger() == (explicitInvalidation ? 1 : 0) &&
+        peer->applications == 0 && !QFile::exists(rendered.path), "late invalidation must release old preparation without falsely acknowledging application");
+    const auto renderCount = peer->renders.size();
+    peer->controller.tick(); require(peer->renders.size() == renderCount,"invalidated content caused a busy retry loop");
+    peer->state.contentReady = true; peer->controller.tick();
+    require(peer->renders.size() == renderCount + 1,"late invalidation did not start a fresh owned render when content settled");
+    rendered.path = folder.filePath("fresh-after-boundary.wav"); file.setFileName(rendered.path);
+    require(file.open(QIODevice::WriteOnly) && file.write("fixture") == 7,"write fresh late-boundary fixture"); file.close();
+    peer->controller.prepared(peer->renders.back(),rendered);
+    staged.cookie = peer->commands.back().cookie;
+    require(peer->controller.engineEvent(staged),"fresh late-boundary source did not stage");
+    require(peer->commands.back().type == jam2::EngineCommandType::CommitListeningTools && peer->commands.back().frame > peer->state.engine.engine_frame,
+        "late invalidation must retry at a future sensible boundary");
+    peer->finish(); peer->controller.tick();
+    require(peer->controller.appliedSettings() == settings && peer->applications == 1 &&
+        peer->sent.back().value("type") == "jam.listening.applied" && peer->sent.back().value("revision") == selection.value("revision"),
+        "late retry did not apply and acknowledge the original authoritative revision exactly once");
+    for (const auto& member : healthy) require(member->applications == 1 && member->controller.appliedSettings() == settings,
+        "one peer's late source invalidation changed a healthy peer's application");
+    require(creator->applications == 1 && creator->sent.size() == 1,"late retry created a new authority revision or blocked the other three peers");
+    }
+    for (const bool server : {false,true}) {
+        auto local = std::make_unique<Harness>(); local->state.serverBinary = server; local->state.sync = false;
+        ListeningToolsSettings settings; settings.speedPpm = 820000; local->controller.edit(settings,true);
+        const auto commands = local->commands.size(); local->controller.sourceWillChange();
+        require(local->commands.size() == commands && local->controller.pending(),"source invalidation notification changed TCP/private listening behavior");
+        local->state.sourceSignature = "private post-boundary source";
+        local->finish();
+        require(local->applications == 1 && local->controller.appliedSettings() == settings,
+            "late source-retry gating changed legacy/private commit completion");
+    }
+}
+
 int main(int argc, char** argv) {
     try {
         QApplication application(argc, argv);
         testStableNumericEdit();
+        testServerContentInvalidationRetry();
+        testServerRetryPreparationOwnershipAndCancellation();
+        testServerContentInvalidationAfterBoundary();
         testServerLatestMergePartialAndRecordingCatchup();
         testReadinessAndContinuity(); testLocalOnlyAndDisable(); testPreparationErrorsAndStaleResults();
         testResetRetryJoinAndPendingClock();

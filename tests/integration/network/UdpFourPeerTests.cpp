@@ -86,7 +86,8 @@ int main(int argc, char** argv) {
         require(argc >= 2, "native rendezvous test requires the Go server executable");
         if (argc >= 3 && QString::fromLocal8Bit(argv[2]) == "restart")
             return reusableInvitationRestart(QString::fromLocal8Bit(argv[1]));
-        const bool impaired = argc >= 3;
+        const bool pressure = argc >= 3 && QString::fromLocal8Bit(argv[2]) == "receive-pressure";
+        const bool impaired = argc >= 3 && !pressure;
         const bool partial = argc >= 3 && QString::fromLocal8Bit(argv[2]) == "partial";
         const bool local = argc >= 3 && QString::fromLocal8Bit(argv[2]) == "local";
         const bool localFallback = argc >= 3 && QString::fromLocal8Bit(argv[2]) == "local-fallback";
@@ -180,14 +181,16 @@ int main(int argc, char** argv) {
             }
             for (int to = 0; to < 4; ++to) {
                 if (!started[to]) continue;
-                std::array<std::uint8_t, 1200> data{};
+                std::array<std::uint8_t, jam2::NetworkDatagramTransport::kReceiveBufferBytes> data{};
                 while (auto received = peers[to]->receiveFor(data, 0, nullptr)) {
                     require(received->size == 80 && data[5] == to, "audio payload changed or routed to wrong peer");
                 }
             }
         };
         QElapsedTimer ticker; ticker.start();
+        peers[0]->receiverAttached(); peers[1]->receiverAttached();
         start(2);
+        peers[2]->receiverAttached();
         until([&] { audio(); return control[2]->isConnected() && (partial || peers[1]->peerEndpoint(id(2)).has_value()); },
             "third peer joined full mesh while first edge streams");
         for (int repeat = 0; repeat < 8; ++repeat) peers[1]->openStream(peer(0), UdpMuxChannel::Asset);
@@ -208,6 +211,7 @@ int main(int argc, char** argv) {
         };
         sendContent();
         start(3);
+        peers[3]->receiverAttached();
         until([&] {
             audio();
             if (authenticated.size() != 3 || receivedAsset != content) return false;
@@ -236,6 +240,68 @@ int main(int argc, char** argv) {
             }
         }
         require(peers[0]->snapshot().links.front().local.port == original, "new joins rotated established audio socket");
+        for (int index=0; index<4; ++index) {
+            require(peers[index]->snapshot().runtimeReceiverAttached && peers[index]->snapshot().receiverHandovers == 1,
+                "four-peer runtime socket-reader ownership did not transfer");
+        }
+        bool duplicateAttachRejected = false;
+        try { peers[0]->receiverAttached(); } catch (const std::exception&) { duplicateAttachRejected = true; }
+        require(duplicateAttachRejected, "a second socket reader was allowed to attach");
+        bool smallBufferRejected = false;
+        try { std::array<std::uint8_t,804> buffer{}; (void)peers[0]->receiveFor(buffer,0,nullptr); }
+        catch (const std::invalid_argument&) { smallBufferRejected = true; }
+        require(smallBufferRejected,"audio-sized buffer was allowed to silently discard full multiplex fragments");
+        // Exercise the new control paths through all three authenticated star
+        // edges while the same four-peer mesh carries the existing fake audio.
+        std::array<int, 4> edits{}, readiness{};
+        coordinator.onMessage = [&](const QString& token, const QJsonObject& message) {
+            const auto index = token[0].unicode() - '1';
+            if (message.value("type") == "beat.set") {
+                ++edits[index]; require(message.value("text") == "31", "unsent scalar assignment did not converge to latest");
+                coordinator.send(message);
+            }
+            if (message.value("type") == "bank.ready") ++readiness[index];
+        };
+        for (int index = 1; index < 4; ++index) {
+            for (int change = 0; change < 32; ++change)
+                require(control[index]->send({{"type","beat.set"},{"section",0},{"lane","chord"},{"beat",index},{"text",QString::number(change)}}), "four-peer scalar burst");
+            require(control[index]->send({{"type","bank.ready"},{"bank",0},{"switch_id","12345678-1234-1234-1234-123456789abc"}}), "four-peer independent readiness");
+        }
+        until([&] { audio(); return edits[1] == 1 && edits[2] == 1 && edits[3] == 1 &&
+            readiness[1] == 1 && readiness[2] == 1 && readiness[3] == 1; }, "four-peer coalesced edits and independent replies");
+        require(coordinator.stats().serverWire.independentRecordsReceived >= 3, "independent ordering was not used on four-peer star");
+        if (pressure) {
+            const auto beforeNoise = peers[0]->snapshot();
+            std::array<std::uint8_t,80> invalid{};
+            for (int packet=0; packet<128; ++packet)
+                require(peers[1]->sendToPeer(id(0),{},invalid).outcome==jam2::UdpSendOutcome::Sent,"send bounded classification flood");
+            network.pump();
+            until([&] { std::array<std::uint8_t,jam2::NetworkDatagramTransport::kReceiveBufferBytes> buffer{}; (void)peers[0]->receiveFor(buffer,0,nullptr);
+                return peers[0]->snapshot().runtimeInvalidPackets>=beforeNoise.runtimeInvalidPackets+128; },"invalid prefix flood was not categorized");
+            require(peers[0]->snapshot().runtimeBudgetYields>beforeNoise.runtimeBudgetYields,"classification flood bypassed per-call work limit");
+            std::array<int,4> heartbeats{};
+            coordinator.onMessage = [&](const QString& token, const QJsonObject& message) {
+                if (message.value("type") == "session.heartbeat") ++heartbeats[token[0].unicode()-'1'];
+            };
+            for (int round=0; round<12; ++round) {
+                for (int index=1; index<4; ++index) for (int update=0; update<32; ++update)
+                    require(control[index]->send({{"type","session.heartbeat"},{"sequence",round*32+update}}), "control pressure lost bounded enqueue");
+                sendContent();
+                const auto expected = content.repeated(round+2);
+                until([&] { audio(); return receivedAsset == expected && heartbeats[1] == (round+1)*32 &&
+                    heartbeats[2] == (round+1)*32 && heartbeats[3] == (round+1)*32; }, "native audio/control/WAV categorization under pressure");
+            }
+            const auto stats = peers[0]->snapshot();
+            require(stats.runtimeNativeDelivered > 0 && stats.runtimeControlQueued > 0 && stats.runtimeAssetQueued > 0 &&
+                stats.ingressHighWater <= 2*UdpMultiplexTransport::kIngressPacketsPerQueue && stats.classificationSamples > 0,
+                "pressure test did not exercise bounded native/control/WAV processing");
+            std::cout << "receive_model=runtime native_delivered=" << stats.runtimeNativeDelivered << " control_queued=" << stats.runtimeControlQueued
+                << " asset_queued=" << stats.runtimeAssetQueued << " ingress_drops=" << stats.ingressQueueDrops
+                << " ingress_high_water=" << stats.ingressHighWater << " ingress_wait_max_us=" << stats.ingressWaitMaxUs
+                << " classification_mean_ns=" << stats.classificationSumNs/stats.classificationSamples << " classification_max_ns=" << stats.classificationMaxNs << '\n';
+            receivedAsset = content; // The remaining reuse checks start at one completed file.
+            coordinator.onMessage = {};
+        }
         const auto before = peers[0]->snapshot().signalPacketsSent;
         ticker.restart();
         until([&] { audio(); return ticker.elapsed() > 500; }, "audio while server paused");
@@ -256,6 +322,17 @@ int main(int argc, char** argv) {
         until([&] { audio(); return asset[1]->isConnected(); }, "asset reopen on same socket");
         require(assetOpens[1] == 2, "closed asset stream was not reopened once");
         require(control[1]->isConnected() && peers[1]->peerEndpoint(id(0)), "asset close tore down physical/control link");
+        for (auto& transport : peers) transport->receiverDetached();
+        until([&] { return std::all_of(peers.begin(),peers.end(),[](const auto& transport) { return !transport->snapshot().runtimeReceiverAttached; }); },
+            "socket ownership returned to bootstrap worker");
+        int workerOnly = 0;
+        coordinator.onMessage = [&](const QString&, const QJsonObject& message) { if (message.value("type") == "session.heartbeat") ++workerOnly; };
+        for (int index=1; index<4; ++index) require(control[index]->send({{"type","session.heartbeat"},{"sequence",12345}}),"worker-only heartbeat enqueue");
+        until([&] { return workerOnly == 3; },"control stalled after runtime detached");
+        std::array<quint64,4> deliveredBefore{};
+        for (int index=0; index<4; ++index) { deliveredBefore[index]=peers[index]->snapshot().runtimeNativeDelivered; peers[index]->receiverAttached(); }
+        until([&] { audio(); for (int index=0; index<4; ++index) if (peers[index]->snapshot().runtimeNativeDelivered<=deliveredBefore[index]) return false; return true; },
+            "reattached readers did not resume native media delivery on all four peers");
         // Simulate loss of the old logical stream without its CLOSE reaching
         // the creator. A fresh logical stream must authenticate on the exact
         // same established physical pair, including when the old owner lives.

@@ -120,7 +120,9 @@ private:
         Jam2TestInputMode testInput,
         QString& error,
         jam2::ConnectionStrategy strategy = jam2::ConnectionStrategy::Direct,
-        jam2::Endpoint rendezvousServer = {"jam2gether.com", 40404});
+        jam2::Endpoint rendezvousServer = {"jam2gether.com", 40404},
+        bool diagnostics = false,
+        jam2::application::UdpMultiplexTransport::ReceiveModel receiveModel = jam2::application::UdpMultiplexTransport::ReceiveModel::Runtime);
     bool prepareAutomationDialogJam(
         Jam2TestInputMode testInput,
         QString& error);

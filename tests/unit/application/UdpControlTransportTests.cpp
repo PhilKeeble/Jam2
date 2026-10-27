@@ -170,7 +170,21 @@ void framingProgressDeadline()
     client.close(); server.close();
 }
 
-void authenticatedUdpStreamsUnderLoss()
+class OrderedOnly final : public ControlConnection {
+public:
+    explicit OrderedOnly(std::shared_ptr<jam2::application::UdpStreamConnection> connection) : connection_(std::move(connection)) {}
+    void start(QObject* owner, DataHandler data, DisconnectHandler closed) override { connection_->start(owner,std::move(data),std::move(closed)); }
+    bool write(const QByteArray& bytes, bool closeAfter = false) override { return connection_->write(bytes,closeAfter); }
+    void close() override { connection_->close(); }
+    bool isConnected() const override { return connection_->isConnected(); }
+    qint64 bytesToWrite() const override { return connection_->bytesToWrite(); }
+    qint64 maxPendingReadBytes() const override { return connection_->maxPendingReadBytes(); }
+    QString peerHost() const override { return connection_->peerHost(); }
+    jam2::application::ControlTransport transport() const override { return jam2::application::ControlTransport::ReliableUdp; }
+private:
+    std::shared_ptr<jam2::application::UdpStreamConnection> connection_;
+};
+void authenticatedUdpStreamsUnderLoss(bool independent)
 {
     using namespace jam2::application;
     const QString session = QStringLiteral("0123456789abcdef");
@@ -187,9 +201,14 @@ void authenticatedUdpStreamsUnderLoss()
     std::deque<Datagram> network;
     std::map<std::tuple<bool, int, quint64>, int> seen;
     quint64 now = 1;
+    quint64 blockPrimaryUntil = 0;
+    quint64 primaryDrops = 0;
     auto transmit = [&](bool toServer, const QByteArray& bytes) {
         const auto frame = decodeUdpMux(bytes, sessionId, key);
         require(frame.has_value(), "production UDP stream emitted invalid authentication/framing");
+        if (now < blockPrimaryUntil && toServer && frame->kind == UdpMuxKind::Data && frame->channel == UdpMuxChannel::Control) {
+            ++primaryDrops; return true;
+        }
         const auto identity = std::make_tuple(toServer, static_cast<int>(frame->kind), frame->sequence);
         const int count = ++seen[identity];
         if (count == 1 && ((frame->kind == UdpMuxKind::Data && frame->sequence % 7 == 2) ||
@@ -231,10 +250,30 @@ void authenticatedUdpStreamsUnderLoss()
     ControlServer server;
     ControlClient client;
     require(server.listenViaTransport(session, keyText), "UDP control fixture did not configure");
-    server.acceptTransport(incoming);
-    client.connectViaTransport(outgoing, session, keyText, token, QStringLiteral("127.0.0.1:52000"));
+    const ControlConnection::Pointer incomingControl = independent ? ControlConnection::Pointer(incoming) : std::make_shared<OrderedOnly>(incoming);
+    const ControlConnection::Pointer outgoingControl = independent ? ControlConnection::Pointer(outgoing) : std::make_shared<OrderedOnly>(outgoing);
+    server.acceptTransport(incomingControl);
+    client.connectViaTransport(outgoingControl, session, keyText, token, QStringLiteral("127.0.0.1:52000"));
     wait([&] { return client.isConnected() && server.hasPeer(); });
     require(server.serverWireDiagnostics().size() == 1, "Server wire diagnostics did not expose its authenticated peer channel");
+    // Hold the main ordering for 250 ms of deterministic network time. An
+    // independent readiness reply must bypass it; an edit must remain behind it.
+    bool ready = false, edited = false;
+    server.onMessage = [&](const QString&, const QJsonObject& m) {
+        if (m.value("type") == "bank.ready") ready = true;
+        if (m.value("type") == "beat.set") edited = true;
+    };
+    const auto began = now; blockPrimaryUntil = now + 250000;
+    require(client.send({{"type","song.set"},{"song",QJsonObject{{"title",QString(8000,'x')}}}}) &&
+        client.send({{"type","beat.set"},{"text","after-checkpoint"}}) &&
+        client.send({{"type","bank.ready"},{"bank",0},{"switch_id","12345678-1234-1234-1234-123456789abc"}}), "queue independent ordering experiment");
+    wait([&] { return ready; });
+    const auto replyUs = now - began;
+    require(primaryDrops > 0, "checkpoint loss was not exercised");
+    if (independent) require(now < blockPrimaryUntil && !edited, "independent reply waited for lost checkpoint, or dependent edit overtook it");
+    else require(now >= blockPrimaryUntil && edited, "ordered baseline unexpectedly bypassed lost checkpoint");
+    wait([&] { return edited; });
+    std::cout << "ordering=" << (independent ? "independent" : "single") << " blocked_primary_us=250000 reply_us=" << replyUs << " dependent_edit_us=" << now - began << " dropped_primary_datagrams=" << primaryDrops << '\n';
     QByteArray content(64000, 'x'), received;
     for (qsizetype i = 0; i < content.size(); ++i) content[i] = static_cast<char>(i % 251);
     server.onBinaryMessage = [&](const QString&, const QByteArray& bytes) { received += bytes; };
@@ -330,7 +369,8 @@ int main(int argc, char** argv)
     try {
         framingProgressDeadline();
         authenticatedControlAndAssets();
-        authenticatedUdpStreamsUnderLoss();
+        authenticatedUdpStreamsUnderLoss(false);
+        authenticatedUdpStreamsUnderLoss(true);
         std::cout << "native control/asset transport boundary checks passed\n";
         return 0;
     } catch (const std::exception& error) {

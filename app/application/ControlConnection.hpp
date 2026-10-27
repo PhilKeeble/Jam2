@@ -38,6 +38,12 @@ public:
     virtual qint64 maxPendingReadBytes() const = 0;
     virtual QString peerHost() const = 0;
     virtual ControlTransport transport() const { return ControlTransport::Tcp; }
+    // Optional independent ordering for self-contained Server control replies.
+    // TCP and test byte streams retain their single ordered path by default.
+    virtual bool hasIndependentControl() const { return false; }
+    virtual bool writeIndependent(const QByteArray&) { return false; }
+    virtual qint64 independentBytesToWrite() const { return 0; }
+    virtual void startIndependent(QObject*, DataHandler) {}
     int authenticationDeadlineMs() const { return transport() == ControlTransport::Tcp ? 5000 : 20000; }
 };
 } // namespace jam2::application

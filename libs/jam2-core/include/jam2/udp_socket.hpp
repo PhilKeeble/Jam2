@@ -108,6 +108,10 @@ public:
     Endpoint local_endpoint_for(const ResolvedUdpEndpoint& destination) const;
     static void waitForAny(std::span<const UdpSocket* const> sockets,
         std::uint64_t timeout_us, RealtimeWakeSignal* command_wake = nullptr);
+    // Runtime receive deadline, matching the direct socket's select path when
+    // there is no capture event. Does not read any datagram.
+    static void waitForDatagrams(std::span<const UdpSocket* const> sockets,
+        std::uint64_t timeout_us, RealtimeWakeSignal* capture_wake = nullptr);
     void set_send_buffer_size(int bytes);
     void set_recv_buffer_size(int bytes);
     int send_buffer_size() const;
@@ -133,10 +137,17 @@ private:
 // Server mode supplies a link transport whose selected socket is per peer.
 class NetworkDatagramTransport {
 public:
+    // Multiplex control fragments can exceed the native audio packet maximum.
+    static constexpr std::size_t kReceiveBufferBytes = 1500;
     virtual ~NetworkDatagramTransport() = default;
+    // NetworkSession owns one receiver registration. Failed attachment must
+    // leave this transport detached; replacement preserves the old receiver.
+    virtual void receiverAttached() {}
+    virtual void receiverDetached() noexcept {}
     virtual UdpSendResult sendToPeer(
         std::uint64_t peer_id, const ResolvedUdpEndpoint& endpoint,
         std::span<const std::uint8_t> bytes) noexcept = 0;
+    // The receiving session supplies at least kReceiveBufferBytes bytes.
     virtual std::optional<UdpSocket::ReceivedDatagram> receiveFor(
         std::span<std::uint8_t> buffer, std::uint64_t timeout_us,
         RealtimeWakeSignal* capture_wake) = 0;
