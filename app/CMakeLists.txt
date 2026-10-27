@@ -100,7 +100,7 @@ add_library(jam2_server_wire STATIC
     application/ServerControlWire.cpp application/ServerControlWire.hpp)
 target_compile_features(jam2_server_wire PUBLIC cxx_std_20)
 target_include_directories(jam2_server_wire PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/application")
-target_link_libraries(jam2_server_wire PUBLIC Qt6::Core PRIVATE jam2_miniz)
+target_link_libraries(jam2_server_wire PUBLIC Qt6::Core PRIVATE jam2_miniz jam2_core)
 if(MSVC)
     target_compile_options(jam2_server_wire PRIVATE /W4 /permissive- /EHsc)
 else()

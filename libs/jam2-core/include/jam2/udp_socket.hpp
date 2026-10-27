@@ -144,6 +144,9 @@ public:
     // leave this transport detached; replacement preserves the old receiver.
     virtual void receiverAttached() {}
     virtual void receiverDetached() noexcept {}
+    // Optional Server-only receipt after the control owner accepts/schedules
+    // a native transport intent. This is never an audio callback.
+    virtual void transportIntentAccepted(std::uint64_t, std::span<const std::uint8_t>) noexcept {}
     virtual UdpSendResult sendToPeer(
         std::uint64_t peer_id, const ResolvedUdpEndpoint& endpoint,
         std::span<const std::uint8_t> bytes) noexcept = 0;

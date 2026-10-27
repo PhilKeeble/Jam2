@@ -32,14 +32,31 @@ class CandidateNetwork {
     const bool traceMux_ = qEnvironmentVariableIsSet("JAM2_TRACE_CANDIDATE_MUX");
     std::vector<QJsonObject> muxTrace_;
     void traceMux(const Route& from, const Route& to, const QByteArray& packet, bool wasDropped) {
-        if (!traceMux_ || muxTrace_.size() >= 1024 || packet.size()<42 || !packet.startsWith("J2MX")) return;
+        if (!traceMux_ || muxTrace_.size() >= 1024 || packet.size()<32 || !packet.startsWith("J2MX")) return;
+        const bool compact=static_cast<quint8>(packet[5])&0x80;
+        if (!compact && packet.size()<58) return;
         const auto u64 = [&](int offset) { return QString::number(qFromBigEndian<quint64>(reinterpret_cast<const uchar*>(packet.constData()+offset))); };
         muxTrace_.push_back({{"from",from.peer},{"to",to.peer},{"local",to.local},{"from_mapping",from.socket.localPort()},
-            {"kind",static_cast<quint8>(packet[5])},{"channel",static_cast<quint8>(packet[6])},
-            {"stream",u64(24)},{"sequence",u64(32)},{"bytes",packet.size()},{"dropped",wasDropped},{"packet_index",static_cast<qint64>(directCount_)}});
+            {"kind",compact ? static_cast<quint8>(packet[5])&15 : static_cast<quint8>(packet[5])},
+            {"channel",compact ? (static_cast<quint8>(packet[5])>>4)&3 : static_cast<quint8>(packet[6])},
+            {"stream",compact ? QString::number(qFromBigEndian<quint16>(reinterpret_cast<const uchar*>(packet.constData()+6))) : u64(24)},
+            {"compact",compact},{"sequence",u64(compact ? 8 : 32)},{"bytes",packet.size()},{"dropped",wasDropped},{"packet_index",static_cast<qint64>(directCount_)}});
     }
     int mediaProofDelayMs_ = 0;
     quint64 delayedMediaProofs_ = 0;
+    bool authorityBeaconsEnabled_ = true;
+    quint64 authorityBeaconIntervalMs_ = 0;
+    std::map<std::pair<QString,QString>,std::chrono::steady_clock::time_point> authorityBeaconTimes_;
+    quint64 authorityBeaconsForwarded_ = 0, authorityBeaconsDropped_ = 0;
+    bool assignmentsEnabled_ = true;
+    quint64 assignmentIntervalMs_ = 0, assignmentsForwarded_ = 0, assignmentsDropped_ = 0;
+    struct AssignmentStamp { std::chrono::steady_clock::time_point time; quint64 revision=0; };
+    std::map<std::pair<QString,QString>,AssignmentStamp> assignmentTimes_;
+    bool assignmentAcksEnabled_ = true;
+    quint64 assignmentAcksForwarded_ = 0, assignmentAcksDropped_ = 0;
+    quint64 firstAssignmentsToDrop_ = 0;
+    QString blockedAssignmentPeer_;
+    quint64 recoveryRequestsToDrop_ = 0;
     std::chrono::steady_clock::time_point mediaProofUntil_;
     std::set<quint64> suppressedStreams;
     QString suppressedPeer;
@@ -48,6 +65,18 @@ class CandidateNetwork {
     std::set<quint16> blockedPairPorts;
     std::set<QString> firstMembership;
 public:
+    struct AuthorityBeaconStats { quint64 forwarded=0,dropped=0; };
+    void setAuthorityBeaconsEnabled(bool enabled) { authorityBeaconsEnabled_=enabled; }
+    void setAuthorityBeaconInterval(quint64 milliseconds) { authorityBeaconIntervalMs_=milliseconds; authorityBeaconTimes_.clear(); }
+    AuthorityBeaconStats authorityBeaconStats() const { return {authorityBeaconsForwarded_,authorityBeaconsDropped_}; }
+    void setGridAssignmentsEnabled(bool enabled) { assignmentsEnabled_=enabled; }
+    void setGridAssignmentInterval(quint64 milliseconds) { assignmentIntervalMs_=milliseconds; assignmentTimes_.clear(); }
+    AuthorityBeaconStats gridAssignmentStats() const { return {assignmentsForwarded_,assignmentsDropped_}; }
+    void setGridAssignmentAcksEnabled(bool enabled) { assignmentAcksEnabled_=enabled; }
+    AuthorityBeaconStats gridAssignmentAckStats() const { return {assignmentAcksForwarded_,assignmentAcksDropped_}; }
+    void dropGridAssignments(quint64 count) { firstAssignmentsToDrop_=count; }
+    void blockGridAssignmentsTo(const QString& peer) { blockedAssignmentPeer_=peer; }
+    void dropGridRecoveryRequests(quint64 count) { recoveryRequestsToDrop_=count; }
     void delayMediaProof(int milliseconds) { mediaProofDelayMs_ = milliseconds; }
     quint64 delayedMediaProofs() const { return delayedMediaProofs_; }
     bool blockFirst = true, blockMesh = false, blockLeave = false, invalidLan = false;
@@ -140,6 +169,46 @@ public:
                         mediaProofUntil_ = now + std::chrono::milliseconds(mediaProofDelayMs_);
                     if (now < mediaProofUntil_) { ++delayedMediaProofs_; continue; }
                 }
+                if ((packet.size()==100 && packet.startsWith("JAM2") && packet[5]==9) ||
+                    (packet.size()==92 && packet.startsWith("JAM2") && packet[5]==6 &&
+                     (static_cast<quint8>(packet[56])&0x83)==0x82)) {
+                    if (!assignmentsEnabled_ || route->peer==blockedAssignmentPeer_ || firstAssignmentsToDrop_) {
+                        if (firstAssignmentsToDrop_) --firstAssignmentsToDrop_;
+                        ++assignmentsDropped_; ++dropped; continue;
+                    }
+                    if (assignmentIntervalMs_) {
+                        const auto now=std::chrono::steady_clock::now();
+                        const auto revision=qFromLittleEndian<quint64>(reinterpret_cast<const uchar*>(packet.constData()+40));
+                        auto& last=assignmentTimes_[{sender->peer,route->peer}];
+                        // Preserve the producer's immediate publication of changed revisions.
+                        if (last.time!=std::chrono::steady_clock::time_point{} && revision==last.revision &&
+                            now-last.time<std::chrono::milliseconds(assignmentIntervalMs_)) { ++assignmentsDropped_; ++dropped; continue; }
+                        last={now,revision};
+                    }
+                    ++assignmentsForwarded_;
+                }
+                if (packet.size()==44 && packet.startsWith("JAM2") && packet[5]==10) {
+                    if (!assignmentAcksEnabled_) { ++assignmentAcksDropped_; ++dropped; continue; }
+                    ++assignmentAcksForwarded_;
+                }
+                if (packet.size()==36 && packet.startsWith("JAM2") && packet[5]==11 && recoveryRequestsToDrop_) {
+                    --recoveryRequestsToDrop_; ++dropped; continue;
+                }
+                // Test-only loss injection for native authority beacons. Keep
+                // assignments/proposals, transport intents and audio intact.
+                if (packet.size()==92 && packet.startsWith("JAM2") && packet[5]==6 &&
+                    (static_cast<quint8>(packet[56])&0x83)==0x83) {
+                    if (!authorityBeaconsEnabled_) { ++authorityBeaconsDropped_; ++dropped; continue; }
+                    if (authorityBeaconIntervalMs_) {
+                        const auto now=std::chrono::steady_clock::now();
+                        auto& last=authorityBeaconTimes_[{sender->peer,route->peer}];
+                        if (last!=std::chrono::steady_clock::time_point{} && now-last<std::chrono::milliseconds(authorityBeaconIntervalMs_)) {
+                            ++authorityBeaconsDropped_; ++dropped; continue;
+                        }
+                        last=now;
+                    }
+                    ++authorityBeaconsForwarded_;
+                }
                 ++directCount_;
                 if (impairMultiplex && packet.startsWith("J2MX") && directCount_ % 19 == 0) { traceMux(*sender,*route,packet,true); ++dropped; continue; }
                 traceMux(*sender,*route,packet,false);
@@ -194,6 +263,45 @@ public:
     void setMultiplexImpairment(bool enabled) {
         QMetaObject::invokeMethod(context_, [this, enabled] { network_->impairMultiplex = enabled; },
             Qt::BlockingQueuedConnection);
+    }
+    void setAuthorityBeaconsEnabled(bool enabled) {
+        QMetaObject::invokeMethod(context_, [this,enabled] { network_->setAuthorityBeaconsEnabled(enabled); }, Qt::BlockingQueuedConnection);
+    }
+    void setAuthorityBeaconInterval(quint64 milliseconds) {
+        QMetaObject::invokeMethod(context_, [this,milliseconds] { network_->setAuthorityBeaconInterval(milliseconds); }, Qt::BlockingQueuedConnection);
+    }
+    CandidateNetwork::AuthorityBeaconStats authorityBeaconStats() const {
+        CandidateNetwork::AuthorityBeaconStats result;
+        QMetaObject::invokeMethod(context_, [&] { result=network_->authorityBeaconStats(); }, Qt::BlockingQueuedConnection);
+        return result;
+    }
+    void setGridAssignmentsEnabled(bool enabled) {
+        QMetaObject::invokeMethod(context_, [this,enabled] { network_->setGridAssignmentsEnabled(enabled); }, Qt::BlockingQueuedConnection);
+    }
+    void setGridAssignmentInterval(quint64 milliseconds) {
+        QMetaObject::invokeMethod(context_, [this,milliseconds] { network_->setGridAssignmentInterval(milliseconds); }, Qt::BlockingQueuedConnection);
+    }
+    CandidateNetwork::AuthorityBeaconStats gridAssignmentStats() const {
+        CandidateNetwork::AuthorityBeaconStats result;
+        QMetaObject::invokeMethod(context_, [&] { result=network_->gridAssignmentStats(); }, Qt::BlockingQueuedConnection);
+        return result;
+    }
+    void setGridAssignmentAcksEnabled(bool enabled) {
+        QMetaObject::invokeMethod(context_, [this,enabled] { network_->setGridAssignmentAcksEnabled(enabled); }, Qt::BlockingQueuedConnection);
+    }
+    CandidateNetwork::AuthorityBeaconStats gridAssignmentAckStats() const {
+        CandidateNetwork::AuthorityBeaconStats result;
+        QMetaObject::invokeMethod(context_, [&] { result=network_->gridAssignmentAckStats(); }, Qt::BlockingQueuedConnection);
+        return result;
+    }
+    void dropGridAssignments(quint64 count) {
+        QMetaObject::invokeMethod(context_, [this,count] { network_->dropGridAssignments(count); }, Qt::BlockingQueuedConnection);
+    }
+    void blockGridAssignmentsTo(const QString& peer) {
+        QMetaObject::invokeMethod(context_, [this,peer] { network_->blockGridAssignmentsTo(peer); }, Qt::BlockingQueuedConnection);
+    }
+    void dropGridRecoveryRequests(quint64 count) {
+        QMetaObject::invokeMethod(context_, [this,count] { network_->dropGridRecoveryRequests(count); }, Qt::BlockingQueuedConnection);
     }
     void delayMediaProof(int milliseconds) {
         QMetaObject::invokeMethod(context_, [this, milliseconds] { network_->delayMediaProof(milliseconds); },

@@ -971,6 +971,9 @@ int main(int argc, char* argv[])
             }, states) || !verifyAssetFiles(states, automaticWavHash)) return 1;
         const auto elapsedMs = qMax<qint64>(1, transferTime.elapsed());
         const auto bytes = QFileInfo(automaticWavPath).size();
+        if (states[0].value("jam").toObject().value("udp_multiplex").toObject().value("worker_send_credit_repolls").toInteger()==0) {
+            fail("aggregated ACK workload did not continue bounded sends with available credit"); return 1;
+        }
         for (int i = 0; i < 4; ++i) {
             const auto mux = states[i].value("jam").toObject().value("udp_multiplex").toObject();
             if (mux.value("audio_packets_received").toInteger() <= receivedBefore[i] + 100 ||
@@ -990,6 +993,21 @@ int main(int argc, char* argv[])
                 << " classification_mean_ns=" << mux.value("classification_sum_ns").toInteger() /
                     qMax<qint64>(1,mux.value("classification_samples").toInteger())
                 << " classification_max_ns=" << mux.value("classification_max_ns").toInteger() << '\n';
+            qint64 ackPackets=0,coalesced=0,direct=0,reordered=0,tail=0,avoided=0;
+            for (const auto& value : mux.value("links").toArray()) {
+                const auto link=value.toObject(); ackPackets+=link.value("ack_datagrams_sent").toInteger();
+                coalesced+=link.value("fragment_acks_coalesced").toInteger();
+                direct+=link.value("in_order_direct_fragments").toInteger(); reordered+=link.value("reorder_insertions").toInteger();
+                tail+=link.value("tail_bytes_packed").toInteger(); avoided+=link.value("fragments_avoided").toInteger();
+            }
+            if (i!=0 && (coalesced==0 || direct==0)) { fail("WAV did not exercise aggregated ACKs and direct in-order delivery"); return 1; }
+            std::cout << "wav_handlers peer=" << i+1 << " ack_packets=" << ackPackets << " acks_coalesced=" << coalesced
+                << " in_order_direct=" << direct << " reorder_insertions=" << reordered
+                << " tail_bytes_packed=" << tail << " fragments_avoided=" << avoided
+                << " send_credit_repolls=" << mux.value("worker_send_credit_repolls").toInteger()
+                << " workspace_growth_turns=" << mux.value("worker_workspace_growths").toInteger()
+                << " ingress_copy_bytes_avoided=" << mux.value("ingress_copy_bytes_avoided").toInteger()
+                << " mux_copy_bytes_avoided=" << mux.value("mux_copy_bytes_avoided").toInteger() << '\n';
         }
         std::cout << "unthrottled_wav raw_bytes=" << bytes << " recipients=3 elapsed_ms=" << elapsedMs
             << " aggregate_bytes_per_second=" << bytes * 3 * 1000 / elapsedMs
@@ -1531,6 +1549,51 @@ int main(int argc, char* argv[])
             [&automaticWavHash](std::size_t, const QJsonObject& state) {
                 return assetReady(state, automaticWavHash, true);
             }, states) || !verifyAssetFiles(states, automaticWavHash)) return 1;
+
+    // Exercise the actual painted region control, then verify the complete
+    // atomic region at all four model owners and the selected production codec.
+    const auto fullSong=[&](std::size_t peerIndex) -> QJsonObject {
+        if (!send(coordinator.peer(peerIndex),{{"type","song.snapshot"},{"id","typed-region-evidence"}})) return {};
+        const auto event=receive(coordinator.peer(peerIndex),QStringLiteral("song.snapshot"),5s);
+        if (!event) return {};
+        return QJsonDocument::fromJson(qUncompress(QByteArray::fromBase64(event->value("song_zlib_base64").toString().toLatin1()))).object();
+    };
+    const auto regionBase=fullSong(1);
+    const auto regionBanks=regionBase.value("looper").toObject().value("banks").toArray();
+    if (regionBanks.isEmpty()) { fail("could not inspect Section A before region edit"); return 1; }
+    const auto regionLanes=regionBanks[0].toObject().value("lanes").toArray();
+    int regionLane=-1;
+    for (qsizetype lane=0;lane<regionLanes.size();++lane)
+        if (regionLanes[lane].toObject().value("asset_hash")==automaticWavHash) regionLane=static_cast<int>(lane);
+    if (regionLane<0) { fail("typed region fixture has no source WAV in Section A"); return 1; }
+    if (!apply(coordinator,1,{{"type","invoke"},{"id","typed-region-select"},
+            {"control",QStringLiteral("looper.lane.%1.select").arg(regionLane)},{"operation","click"}})) return 1;
+    for (const int position : {64,128}) {
+        const auto beforeRegion=states[0].value("content").toObject().value("arrangement_revision").toInteger();
+        if (!apply(coordinator,1,{{"type","invoke"},{"id",QStringLiteral("typed-region-commit-%1").arg(position)},
+                {"control",QStringLiteral("looper.lane.%1.region").arg(regionLane)},{"operation","set-region"},
+                {"value",QJsonObject{{"start_frame",position},{"source_start_frame",16},{"source_end_frame",256}}}}) ||
+            !waitForAll(coordinator,QStringLiteral("typed atomic region convergence"),
+                [beforeRegion](std::size_t,const QJsonObject& state) {
+                    return transferIdle(state) && state.value("content").toObject().value("arrangement_revision").toInteger()>beforeRegion;
+                },states)) return 1;
+        for (std::size_t peerIndex=0;peerIndex<4;++peerIndex) {
+            const auto banks=fullSong(peerIndex).value("looper").toObject().value("banks").toArray();
+            if (banks.isEmpty()) { fail("region verification omitted Section A"); return 1; }
+            const auto entries=banks[0].toObject().value("lanes").toArray();
+            if (regionLane>=entries.size()) { fail("region verification lost its target lane"); return 1; }
+            const auto actual=entries[regionLane].toObject();
+            if (actual.value("asset_hash")!=automaticWavHash || actual.value("start_frame")!=QString::number(position) ||
+                actual.value("stop_frame")!=QString::number(position+240) || actual.value("loop_start_frame")!="16" || actual.value("loop_end_frame")!="256") {
+                fail("four-peer typed region lost content identity or atomic frame values"); return 1;
+            }
+        }
+    }
+    const auto binary=states[1].value("jam").toObject().value("udp_multiplex").toObject().value("binary_control").toObject();
+    if (binary.value("client").toObject().value("typed_region_patches").toInteger()==0) {
+        fail("real GUI region edit bypassed the typed patch"); return 1;
+    }
+    std::cout << "four_peer_typed_region atomic_frames=128,368,16,256 source_hash=unchanged\n";
 
     const int beforeManualLaneCount = states[2].value(QStringLiteral("content"))
         .toObject().value(QStringLiteral("lane_count")).toInt();

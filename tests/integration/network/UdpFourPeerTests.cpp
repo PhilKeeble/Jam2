@@ -14,6 +14,7 @@
 #include <QUdpSocket>
 #include <QUuid>
 #include <QTimer>
+#include <QtEndian>
 #include <array>
 #include <iostream>
 #include <set>
@@ -86,7 +87,10 @@ int main(int argc, char** argv) {
         require(argc >= 2, "native rendezvous test requires the Go server executable");
         if (argc >= 3 && QString::fromLocal8Bit(argv[2]) == "restart")
             return reusableInvitationRestart(QString::fromLocal8Bit(argv[1]));
-        const bool pressure = argc >= 3 && QString::fromLocal8Bit(argv[2]) == "receive-pressure";
+        const bool freshBuffers = argc >= 3 && QString::fromLocal8Bit(argv[2]) == "receive-pressure-fresh-buffers";
+        const bool unpacked = argc >= 3 && QString::fromLocal8Bit(argv[2]) == "receive-pressure-unpacked";
+        const bool wireReference = argc >= 3 && QString::fromLocal8Bit(argv[2]) == "receive-pressure-wire-reference";
+        const bool pressure = freshBuffers || unpacked || wireReference || (argc >= 3 && QString::fromLocal8Bit(argv[2]) == "receive-pressure");
         const bool impaired = argc >= 3 && !pressure;
         const bool partial = argc >= 3 && QString::fromLocal8Bit(argv[2]) == "partial";
         const bool local = argc >= 3 && QString::fromLocal8Bit(argv[2]) == "local";
@@ -159,7 +163,14 @@ int main(int argc, char** argv) {
             config.sessionHex = session; config.keyHex = key;
             config.server = {"127.0.0.1", impaired ? network.port() : server.port}; config.bindHost = "127.0.0.1";
             config.maximumPeers = 3;
+            config.reuseWorkerBuffers = !freshBuffers;
+            config.packUnsentFragments = !unpacked;
+            config.compactFrames = config.combineAcks = config.fastRecovery = config.acknowledgeNativeIntents = !wireReference;
             QString error;
+            if (index==0) {
+                auto invalid=config; invalid.fastReorderUs=2000001; UdpMultiplexTransport rejected;
+                require(!rejected.start(invalid,error) && !rejected.snapshot().running,"invalid fast-reorder limit started transport"); error.clear();
+            }
             require(peers[index]->start(config, error), error.toUtf8().constData()); started[index] = true;
         };
         start(0);
@@ -251,6 +262,82 @@ int main(int argc, char** argv) {
         try { std::array<std::uint8_t,804> buffer{}; (void)peers[0]->receiveFor(buffer,0,nullptr); }
         catch (const std::invalid_argument&) { smallBufferRejected = true; }
         require(smallBufferRejected,"audio-sized buffer was allowed to silently discard full multiplex fragments");
+        // Transport receipts must work on all three edges of a leaf, including
+        // leaf-to-leaf edges with no application control stream. The runtime
+        // acceptance boundary is invoked only after observing the native bytes.
+        std::array<std::uint8_t,28> intent{}; intent[0]=2; intent[1]=5; intent[4]=1; // Existing v2 TrackPlay payload.
+        const auto keyBytes=QByteArray::fromHex(key.toLatin1()); std::array<std::uint8_t,16> nativeKey{};
+        std::copy(keyBytes.begin(),keyBytes.end(),nativeKey.begin());
+        quint32 nativeSequence=1; bool acceptIntent=false;
+        auto sendIntent=[&] {
+            const auto packet=jam2::protocol::encode_packet({jam2::protocol::PacketType::TransportState,
+                0x0123456789abcdefULL,nativeSequence++,1000,28,0},intent,nativeKey,jam2::NetworkAudioFormat::Pcm16Mono);
+            for (int target : {0,2,3}) require(peers[1]->sendToPeer(id(target),{},packet).outcome==jam2::UdpSendOutcome::Sent,"native intent send");
+        };
+        auto drainIntent=[&] {
+            for (int target=0;target<4;++target) {
+                std::array<std::uint8_t,jam2::NetworkDatagramTransport::kReceiveBufferBytes> bytes{};
+                while (auto received=peers[target]->receiveFor(bytes,0,nullptr)) {
+                    if (received->size==80) { require(bytes[5]==target,"intent test misrouted audio"); continue; }
+                    require(target!=1 && received->size==64 && bytes[5]==8 && std::equal(intent.begin(),intent.end(),bytes.begin()+36),"intent native payload changed");
+                    if (acceptIntent) peers[target]->transportIntentAccepted(id(1),intent);
+                }
+            }
+        };
+        const auto allIntentReceipted=[&] {
+            const auto value=peers[1]->snapshot();
+            return value.links.size()==3 && std::all_of(value.links.begin(),value.links.end(),[](const auto& link) { return link.nativeIntentSent && link.nativeIntentAcknowledged; });
+        };
+        if (!partial) {
+            for (int repeat=0;repeat<3;++repeat) {
+                sendIntent(); QElapsedTimer wait; wait.start();
+                until([&] { drainIntent(); return wait.elapsed()>=25; },"unaccepted intent drain");
+            }
+            require(peers[1]->snapshot().nativeIntentAcksReceived==0,"arrival was acknowledged before owner acceptance");
+            const auto receiptBytesBefore=peers[1]->snapshot().controlBytesReceived;
+            acceptIntent=true; QElapsedTimer retry; retry.start(); qint64 next=0;
+            until([&] { if (retry.elapsed()>=next) { sendIntent(); next=retry.elapsed()+20; } drainIntent();
+                return wireReference ? retry.elapsed()>=100 : allIntentReceipted(); },"accepted native intents were not receipted on all three edges");
+            const auto before=peers[1]->snapshot();
+            if (!wireReference) require(before.controlBytesReceived>=receiptBytesBefore+3*86,"intent receipts missing from control byte counters");
+            for (int repeat=0;repeat<20;++repeat) sendIntent();
+            const auto after=peers[1]->snapshot();
+            require(wireReference ? after.audioPacketsSent==before.audioPacketsSent+60 :
+                (after.audioPacketsSent==before.audioPacketsSent && after.nativeIntentRepeatsSuppressed==before.nativeIntentRepeatsSuppressed+60),"native repeat suppression/reference mismatch");
+            // Drain the reference repeats before changing the identity.
+            QElapsedTimer wait; wait.start(); until([&] { drainIntent(); return wait.elapsed()>100; },"receipt repeat drain");
+            acceptIntent=false; const auto old=intent; intent[4]=2;
+            const auto changedBefore=peers[1]->snapshot(); sendIntent();
+            require(peers[1]->snapshot().audioPacketsSent==changedBefore.audioPacketsSent+3,"changed intent was suppressed");
+            const auto changedBaseline=peers[1]->snapshot();
+            for (int target : {0,2,3}) peers[target]->transportIntentAccepted(id(1),old);
+            wait.restart(); until([&] { drainIntent(); return wait.elapsed()>100; },"stale receipt drain");
+            if (!wireReference) {
+                const auto observed=peers[1]->snapshot();
+                std::cout << "stale_receipt_probe accepted_delta=" << observed.nativeIntentAcksReceived-changedBaseline.nativeIntentAcksReceived
+                    << " rejected_delta=" << observed.nativeIntentAckInvalid-changedBaseline.nativeIntentAckInvalid << '\n';
+                require(observed.nativeIntentAcksReceived==changedBaseline.nativeIntentAcksReceived,"stale receipt accepted a changed intent");
+                // The impairment drops mux packets, including intentionally
+                // stale receipts. Retransmit the probe until three arrived;
+                // do not confuse a lost probe with accepting its identity.
+                retry.restart(); next=0;
+                until([&] {
+                    if (retry.elapsed()>=next) { for (int target : {0,2,3}) peers[target]->transportIntentAccepted(id(1),old); next=retry.elapsed()+20; }
+                    drainIntent(); return peers[1]->snapshot().nativeIntentAckInvalid>=changedBaseline.nativeIntentAckInvalid+3;
+                },"stale receipt probes did not arrive under loss");
+                require(peers[1]->snapshot().nativeIntentAcksReceived==changedBaseline.nativeIntentAcksReceived,"repeated stale receipt acknowledged changed intent");
+            }
+            acceptIntent=true; retry.restart(); next=0;
+            until([&] { if (retry.elapsed()>=next) { sendIntent(); next=retry.elapsed()+20; } drainIntent();
+                return wireReference ? retry.elapsed()>100 : allIntentReceipted(); },"changed intent receipt");
+            wait.restart(); until([&] { drainIntent(); return wait.elapsed()>100; },"final intent drain");
+            const auto final=peers[1]->snapshot();
+            bool duplicateRejected=false;
+            try { peers[1]->receiverAttached(); } catch (const std::exception&) { duplicateRejected=true; }
+            require(duplicateRejected && peers[1]->snapshot().intentReceiptDisabledLinks==0,"rejected duplicate reader changed the intent epoch");
+            std::cout << "native_intent_receipts=" << !wireReference << " acknowledgements=" << final.nativeIntentAcksReceived
+                << " repeats_suppressed=" << final.nativeIntentRepeatsSuppressed << " invalid_receipts=" << final.nativeIntentAckInvalid << '\n';
+        }
         // Exercise the new control paths through all three authenticated star
         // edges while the same four-peer mesh carries the existing fake audio.
         std::array<int, 4> edits{}, readiness{};
@@ -299,12 +386,40 @@ int main(int argc, char** argv) {
                 << " asset_queued=" << stats.runtimeAssetQueued << " ingress_drops=" << stats.ingressQueueDrops
                 << " ingress_high_water=" << stats.ingressHighWater << " ingress_wait_max_us=" << stats.ingressWaitMaxUs
                 << " classification_mean_ns=" << stats.classificationSumNs/stats.classificationSamples << " classification_max_ns=" << stats.classificationMaxNs << '\n';
+            quint64 acks=0, coalesced=0, direct=0, reordered=0,tail=0,avoided=0;
+            for (const auto& link : stats.links) { acks+=link.ackDatagramsSent; coalesced+=link.acksCoalesced; direct+=link.inOrderDirect; reordered+=link.reorderInsertions; tail+=link.tailBytesPacked; avoided+=link.fragmentsAvoided; }
+            for (int peerIndex=1;peerIndex<4;++peerIndex) for (const auto& link : peers[peerIndex]->snapshot().links) {
+                tail+=link.tailBytesPacked; avoided+=link.fragmentsAvoided;
+            }
+            require(!unpacked || (tail==0 && avoided==0),"packing ablation still modified fragments");
+            require(coalesced>0 && direct>0 && stats.ingressCopyBytesAvoided>0 && stats.muxCopyBytesAvoided>0,
+                "four-peer pressure bypassed handler optimizations");
+            std::cout << "tail_packing=" << !unpacked << " tail_bytes_packed=" << tail << " fragments_avoided=" << avoided << '\n';
+            std::cout << "worker_buffers=" << (freshBuffers ? "fresh" : "reused") << " worker_turns=" << stats.workerTurns
+                << " workspace_growth_turns=" << stats.workerWorkspaceGrowths << " worker_service_sum_us=" << stats.workerServiceSumUs
+                << " ack_datagrams=" << acks << " acks_coalesced=" << coalesced << " in_order_direct=" << direct
+                << " reorder_insertions=" << reordered << " ingress_copy_bytes_avoided=" << stats.ingressCopyBytesAvoided
+                << " mux_copy_bytes_avoided=" << stats.muxCopyBytesAvoided << '\n';
+            quint64 compact=0,saved=0,pairs=0,piggybacks=0,fast=0,controlBytes=0,assetBytes=0;
+            for (const auto& transport : peers) {
+                const auto value=transport->snapshot(); controlBytes+=value.controlBytesSent; assetBytes+=value.assetBytesSent;
+                for (const auto& link : value.links) { compact+=link.compactPackets; saved+=link.compactBytesSaved; pairs+=link.ackPairs; piggybacks+=link.piggybackedAcks; fast+=link.fastRetransmissions; }
+            }
+            require(wireReference ? compact==0 : compact>0,"compact framing ablation not exercised");
+            std::cout << "wire_optimizations=" << !wireReference << " compact_packets=" << compact << " compact_bytes_saved=" << saved
+                << " ack_pairs=" << pairs << " piggybacked_acks=" << piggybacks << " fast_retransmissions=" << fast
+                << " control_bytes_sent=" << controlBytes << " asset_bytes_sent=" << assetBytes << '\n';
             receivedAsset = content; // The remaining reuse checks start at one completed file.
             coordinator.onMessage = {};
         }
         const auto before = peers[0]->snapshot().signalPacketsSent;
         ticker.restart();
         until([&] { audio(); return ticker.elapsed() > 500; }, "audio while server paused");
+        if (pressure) {
+            const auto stable = peers[0]->snapshot();
+            require(freshBuffers ? stable.workerWorkspaceGrowths>stable.workerTurns/2 : stable.workerWorkspaceGrowths<stable.workerTurns/2,
+                "worker workspace reuse did not change allocation-growth behavior");
+        }
         require(peers[0]->snapshot().signalPacketsSent == before, "full jam kept sending to rendezvous");
         // Repeated sharing must reuse a live stream, then reopen a deliberately
         // closed logical stream without rotating the proven media socket.
@@ -333,6 +448,12 @@ int main(int argc, char** argv) {
         for (int index=0; index<4; ++index) { deliveredBefore[index]=peers[index]->snapshot().runtimeNativeDelivered; peers[index]->receiverAttached(); }
         until([&] { audio(); for (int index=0; index<4; ++index) if (peers[index]->snapshot().runtimeNativeDelivered<=deliveredBefore[index]) return false; return true; },
             "reattached readers did not resume native media delivery on all four peers");
+        if (!partial && !wireReference) {
+            require(peers[1]->snapshot().intentReceiptDisabledLinks==3,"restarted runtime retained receipts with reused event counters");
+            const auto sentBeforeReattach=peers[1]->snapshot().audioPacketsSent; sendIntent(); sendIntent();
+            require(peers[1]->snapshot().audioPacketsSent==sentBeforeReattach+6,"reattached runtime suppressed an intent from a reused counter epoch");
+            QElapsedTimer wait; wait.start(); until([&] { drainIntent(); return wait.elapsed()>100; },"reattached intent drain");
+        }
         // Simulate loss of the old logical stream without its CLOSE reaching
         // the creator. A fresh logical stream must authenticate on the exact
         // same established physical pair, including when the old owner lives.

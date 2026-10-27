@@ -178,6 +178,7 @@ endforeach()
 
 add_executable(jam2_udp_control_transport_tests EXCLUDE_FROM_ALL
     unit/application/UdpControlTransportTests.cpp
+    unit/application/UdpEfficiencyTests.cpp
     "${CMAKE_SOURCE_DIR}/app/application/UdpStreamConnection.cpp"
     "${CMAKE_SOURCE_DIR}/app/application/ControlClient.cpp"
     "${CMAKE_SOURCE_DIR}/app/application/ControlServer.cpp"
@@ -187,6 +188,18 @@ jam2_configure_test_target(jam2_udp_control_transport_tests)
 target_include_directories(jam2_udp_control_transport_tests PRIVATE "${CMAKE_SOURCE_DIR}/app/application")
 target_link_libraries(jam2_udp_control_transport_tests PRIVATE jam2_core jam2_server_wire Qt6::Core Qt6::Network)
 add_test(NAME jam2_udp_control_transport_units COMMAND $<TARGET_FILE:jam2_udp_control_transport_tests>)
+add_executable(jam2_udp_handler_performance_tests EXCLUDE_FROM_ALL
+    unit/application/UdpHandlerPerformance.cpp
+    "${CMAKE_SOURCE_DIR}/app/application/UdpStreamConnection.cpp"
+    "${CMAKE_SOURCE_DIR}/app/application/ControlProtocol.cpp")
+jam2_configure_test_target(jam2_udp_handler_performance_tests)
+target_include_directories(jam2_udp_handler_performance_tests PRIVATE "${CMAKE_SOURCE_DIR}/app/application")
+target_link_libraries(jam2_udp_handler_performance_tests PRIVATE jam2_core Qt6::Core Qt6::Network)
+add_test(NAME jam2_udp_handler_performance COMMAND $<TARGET_FILE:jam2_udp_handler_performance_tests>)
+set_tests_properties(jam2_udp_handler_performance PROPERTIES LABELS "performance;application;network;udp-multiplex" TIMEOUT 60)
+if(WIN32)
+    set_tests_properties(jam2_udp_handler_performance PROPERTIES ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
+endif()
 set_tests_properties(jam2_udp_control_transport_units PROPERTIES
     LABELS "unit;application;network;udp-multiplex;shared-content" TIMEOUT 30)
 if(WIN32)
@@ -196,9 +209,17 @@ endif()
 
 add_executable(jam2_server_wire_tests EXCLUDE_FROM_ALL
     unit/application/ServerControlWireTests.cpp
-    "${CMAKE_SOURCE_DIR}/app/application/ControlProtocol.cpp")
+    unit/application/ServerControlWireCoverageTests.cpp
+    unit/application/ServerControlWireRefinements.cpp
+    "${CMAKE_SOURCE_DIR}/app/application/ControlProtocol.cpp"
+    "${CMAKE_SOURCE_DIR}/app/application/ControlMessageValidation.cpp"
+    "${CMAKE_SOURCE_DIR}/app/gui/GenerationRecipe.cpp"
+    "${CMAKE_SOURCE_DIR}/app/gui/ListeningToolsController.cpp"
+    "${CMAKE_SOURCE_DIR}/app/gui/JamSyncDialog.cpp"
+    "${CMAKE_SOURCE_DIR}/app/gui/GuiControlContract.cpp")
 jam2_configure_test_target(jam2_server_wire_tests)
-target_link_libraries(jam2_server_wire_tests PRIVATE jam2_server_wire Qt6::Core)
+target_include_directories(jam2_server_wire_tests PRIVATE "${CMAKE_SOURCE_DIR}/app/gui")
+target_link_libraries(jam2_server_wire_tests PRIVATE jam2_server_wire jam2_core jam2_jam_sync Qt6::Widgets)
 add_test(NAME jam2_server_wire_units COMMAND $<TARGET_FILE:jam2_server_wire_tests>)
 add_test(NAME jam2_server_wire_performance COMMAND $<TARGET_FILE:jam2_server_wire_tests> --performance)
 set_tests_properties(jam2_server_wire_units PROPERTIES LABELS "unit;application;network;udp-multiplex;shared-content" TIMEOUT 30)
@@ -266,6 +287,23 @@ jam2_configure_test_target(jam2_transport_timing_tests)
 target_link_libraries(jam2_transport_timing_tests PRIVATE jam2_core)
 add_test(NAME jam2_transport_timing_units
     COMMAND $<TARGET_FILE:jam2_transport_timing_tests>)
+add_executable(jam2_server_grid_beacon_simulation EXCLUDE_FROM_ALL
+    integration/network/ServerGridBeaconSimulation.cpp "${CMAKE_SOURCE_DIR}/app/application/RuntimeHost.cpp")
+jam2_configure_test_target(jam2_server_grid_beacon_simulation)
+target_include_directories(jam2_server_grid_beacon_simulation PRIVATE "${CMAKE_SOURCE_DIR}/app/application")
+target_link_libraries(jam2_server_grid_beacon_simulation PRIVATE jam2_core)
+add_test(NAME jam2_server_grid_beacon_accelerated COMMAND $<TARGET_FILE:jam2_server_grid_beacon_simulation>)
+add_executable(jam2_server_grid_assignment_simulation EXCLUDE_FROM_ALL integration/network/ServerGridAssignmentSimulation.cpp)
+jam2_configure_test_target(jam2_server_grid_assignment_simulation)
+target_link_libraries(jam2_server_grid_assignment_simulation PRIVATE jam2_core)
+add_test(NAME jam2_server_grid_assignment_accelerated COMMAND $<TARGET_FILE:jam2_server_grid_assignment_simulation>)
+add_executable(jam2_grid_assignment_delivery_tests EXCLUDE_FROM_ALL unit/core/GridAssignmentDeliveryTests.cpp)
+jam2_configure_test_target(jam2_grid_assignment_delivery_tests)
+target_link_libraries(jam2_grid_assignment_delivery_tests PRIVATE jam2_core)
+add_test(NAME jam2_grid_assignment_delivery_units COMMAND $<TARGET_FILE:jam2_grid_assignment_delivery_tests>)
+set_tests_properties(jam2_grid_assignment_delivery_units PROPERTIES LABELS "unit;core;network;four-peer;udp-multiplex;metronome" TIMEOUT 30)
+set_tests_properties(jam2_server_grid_assignment_accelerated PROPERTIES LABELS "integration;network;four-peer;udp-multiplex;metronome;simulation;performance" TIMEOUT 90)
+set_tests_properties(jam2_server_grid_beacon_accelerated PROPERTIES LABELS "integration;network;four-peer;udp-multiplex;metronome;simulation;performance" TIMEOUT 90)
 set_tests_properties(jam2_transport_timing_units PROPERTIES
     LABELS "unit;core;performance;metronome;transport"
     TIMEOUT 30)
@@ -1818,6 +1856,18 @@ add_dependencies(jam2_tests_performance jam2_server_wire_tests)
 add_dependencies(jam2_tests_performance jam2_udp_multiplex_tests)
 add_dependencies(jam2_tests_all jam2_server_wire_tests)
 add_dependencies(jam2_tests_network jam2_udp_multiplex_tests jam2_udp_control_transport_tests)
+add_dependencies(jam2_tests_network jam2_udp_handler_performance_tests)
+add_dependencies(jam2_tests_network jam2_server_grid_beacon_simulation)
+add_dependencies(jam2_tests_network jam2_server_grid_assignment_simulation)
+add_dependencies(jam2_tests_network jam2_grid_assignment_delivery_tests)
+add_dependencies(jam2_tests_unit jam2_grid_assignment_delivery_tests)
+add_dependencies(jam2_tests_all jam2_grid_assignment_delivery_tests)
+add_dependencies(jam2_tests_performance jam2_server_grid_assignment_simulation)
+add_dependencies(jam2_tests_all jam2_server_grid_assignment_simulation)
+add_dependencies(jam2_tests_performance jam2_server_grid_beacon_simulation)
+add_dependencies(jam2_tests_all jam2_server_grid_beacon_simulation)
+add_dependencies(jam2_tests_performance jam2_udp_handler_performance_tests)
+add_dependencies(jam2_tests_all jam2_udp_handler_performance_tests)
 add_dependencies(jam2_tests_all jam2_udp_multiplex_tests jam2_udp_control_transport_tests)
 
 
@@ -1826,6 +1876,27 @@ if(NOT JAM2_RENDEZVOUS_TEST_SERVER AND WIN32 AND EXISTS "${CMAKE_SOURCE_DIR}/../
     set(JAM2_RENDEZVOUS_TEST_SERVER "${CMAKE_SOURCE_DIR}/../Jam2-Server/logs/jam2-rendezvous-native-test.exe")
 endif()
 if(JAM2_RENDEZVOUS_TEST_SERVER)
+    add_executable(jam2_server_grid_beacon_tests EXCLUDE_FROM_ALL integration/network/ServerGridBeaconIntegration.cpp)
+    jam2_configure_test_target(jam2_server_grid_beacon_tests)
+    target_link_libraries(jam2_server_grid_beacon_tests PRIVATE jam2_test_process_support Qt6::Core Qt6::Network)
+    add_test(NAME jam2_udp_four_grid_beacon_integration COMMAND $<TARGET_FILE:jam2_server_grid_beacon_tests>
+        "${JAM2_TEST_PUBLIC_EXECUTABLE}" "${JAM2_RENDEZVOUS_TEST_SERVER}")
+    add_test(NAME jam2_udp_four_grid_assignment_integration COMMAND $<TARGET_FILE:jam2_server_grid_beacon_tests>
+        "${JAM2_TEST_PUBLIC_EXECUTABLE}" "${JAM2_RENDEZVOUS_TEST_SERVER}" assignments)
+    set_tests_properties(jam2_udp_four_grid_assignment_integration PROPERTIES LABELS "integration;network;four-peer;udp-multiplex;metronome;fake-audio;performance" TIMEOUT 180 RUN_SERIAL TRUE)
+    add_test(NAME jam2_udp_four_grid_beacon_1s_integration COMMAND $<TARGET_FILE:jam2_server_grid_beacon_tests>
+        "${JAM2_TEST_PUBLIC_EXECUTABLE}" "${JAM2_RENDEZVOUS_TEST_SERVER}" 1000)
+    add_test(NAME jam2_udp_four_grid_beacon_60s_integration COMMAND $<TARGET_FILE:jam2_server_grid_beacon_tests>
+        "${JAM2_TEST_PUBLIC_EXECUTABLE}" "${JAM2_RENDEZVOUS_TEST_SERVER}" 60000)
+    set_tests_properties(jam2_udp_four_grid_beacon_1s_integration jam2_udp_four_grid_beacon_60s_integration
+        PROPERTIES LABELS "integration;network;four-peer;udp-multiplex;metronome;fake-audio;performance" TIMEOUT 240 RUN_SERIAL TRUE)
+    set_tests_properties(jam2_udp_four_grid_beacon_integration PROPERTIES LABELS "integration;network;four-peer;udp-multiplex;metronome;fake-audio" TIMEOUT 150)
+    if(WIN32)
+        set_tests_properties(jam2_udp_four_grid_assignment_integration jam2_udp_four_grid_beacon_integration jam2_udp_four_grid_beacon_1s_integration jam2_udp_four_grid_beacon_60s_integration
+            PROPERTIES ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
+    endif()
+    add_dependencies(jam2_tests_network jam2_server_grid_beacon_tests)
+    add_dependencies(jam2_tests_all jam2_server_grid_beacon_tests)
     add_executable(jam2_mode_audio_latency_tests EXCLUDE_FROM_ALL integration/network/ModeAudioLatencyIntegration.cpp)
     jam2_configure_test_target(jam2_mode_audio_latency_tests)
     target_link_libraries(jam2_mode_audio_latency_tests PRIVATE jam2_test_process_support Qt6::Core Qt6::Network)
@@ -1908,9 +1979,27 @@ if(JAM2_RENDEZVOUS_TEST_SERVER)
         COMMAND $<TARGET_FILE:jam2_udp_four_peer_tests> "${JAM2_RENDEZVOUS_TEST_SERVER}")
     add_test(NAME jam2_udp_four_receive_pressure_integration
         COMMAND $<TARGET_FILE:jam2_udp_four_peer_tests> "${JAM2_RENDEZVOUS_TEST_SERVER}" receive-pressure)
+    add_test(NAME jam2_udp_four_wire_reference_performance
+        COMMAND $<TARGET_FILE:jam2_udp_four_peer_tests> "${JAM2_RENDEZVOUS_TEST_SERVER}" receive-pressure-wire-reference)
+    set_tests_properties(jam2_udp_four_wire_reference_performance PROPERTIES LABELS "integration;network;four-peer;udp-multiplex;performance" TIMEOUT 60)
+    if(WIN32)
+        set_tests_properties(jam2_udp_four_wire_reference_performance PROPERTIES ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
+    endif()
     set_tests_properties(jam2_udp_four_receive_pressure_integration PROPERTIES LABELS "integration;network;four-peer;udp-multiplex;shared-content;performance" TIMEOUT 60)
     if(WIN32)
         set_tests_properties(jam2_udp_four_receive_pressure_integration PROPERTIES ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
+    endif()
+    add_test(NAME jam2_udp_four_fresh_worker_buffers_performance
+        COMMAND $<TARGET_FILE:jam2_udp_four_peer_tests> "${JAM2_RENDEZVOUS_TEST_SERVER}" receive-pressure-fresh-buffers)
+    set_tests_properties(jam2_udp_four_fresh_worker_buffers_performance PROPERTIES LABELS "integration;network;four-peer;udp-multiplex;performance" TIMEOUT 60)
+    if(WIN32)
+        set_tests_properties(jam2_udp_four_fresh_worker_buffers_performance PROPERTIES ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
+    endif()
+    add_test(NAME jam2_udp_four_unpacked_fragments_performance
+        COMMAND $<TARGET_FILE:jam2_udp_four_peer_tests> "${JAM2_RENDEZVOUS_TEST_SERVER}" receive-pressure-unpacked)
+    set_tests_properties(jam2_udp_four_unpacked_fragments_performance PROPERTIES LABELS "integration;network;four-peer;udp-multiplex;performance" TIMEOUT 60)
+    if(WIN32)
+        set_tests_properties(jam2_udp_four_unpacked_fragments_performance PROPERTIES ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
     endif()
     add_test(NAME jam2_udp_reused_invitation_integration
         COMMAND $<TARGET_FILE:jam2_udp_four_peer_tests> "${JAM2_RENDEZVOUS_TEST_SERVER}" restart)

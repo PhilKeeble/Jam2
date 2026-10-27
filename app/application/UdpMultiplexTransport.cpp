@@ -5,6 +5,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QPointer>
+#include <QtEndian>
 
 #include <algorithm>
 #include <array>
@@ -36,6 +37,10 @@ std::span<const std::uint8_t> view(const QByteArray& value)
 {
     return {reinterpret_cast<const std::uint8_t*>(value.constData()), static_cast<std::size_t>(value.size())};
 }
+UdpMuxKind muxKind(std::span<const std::uint8_t> packet)
+{ return static_cast<UdpMuxKind>(isCompactUdpMux(packet) ? packet[5]&15 : packet[5]); }
+UdpMuxChannel muxChannel(std::span<const std::uint8_t> packet)
+{ return static_cast<UdpMuxChannel>(isCompactUdpMux(packet) ? (packet[5]>>4)&3 : packet[6]); }
 }
 
 struct UdpMultiplexTransport::Impl {
@@ -58,6 +63,14 @@ struct UdpMultiplexTransport::Impl {
         std::atomic<bool> stalledNotified{false}, mediaStarted{false}, readable{false};
         std::set<quint64> challenges;
         std::map<UdpMuxChannel, std::shared_ptr<UdpStreamConnection>> streams;
+        std::map<quint16,std::weak_ptr<UdpStreamConnection>> compactStreams;
+        quint32 nextCompactHandle=1;
+        std::mutex intentMutex;
+        std::array<std::uint8_t,28> lastIntent{};
+        std::array<std::uint8_t,28> pendingIntentAck{};
+        bool hasPendingIntentAck=false;
+        bool intentUsed=false,allowIntentReceipts=true;
+        bool intentSent=false,intentAcknowledged=false;
         std::set<quint64> retiredStreams, notifiedStreams;
         std::set<UdpMuxChannel> wantedStreams;
     };
@@ -91,6 +104,12 @@ struct UdpMultiplexTransport::Impl {
         std::array<IngressPacket, kIngressPacketsPerQueue> packets;
         std::size_t read = 0, write = 0, count = 0;
     };
+    struct WorkerScratch {
+        std::vector<std::shared_ptr<jam2::UdpSocket>> keepAlive;
+        std::vector<const jam2::UdpSocket*> sockets;
+        std::vector<std::shared_ptr<Link>> readLinks, ordered;
+        std::size_t capacity() const noexcept { return keepAlive.capacity()+sockets.capacity()+readLinks.capacity()+ordered.capacity(); }
+    } workerScratch;
 
     jam2::NetworkRuntime network;
     Config config;
@@ -138,14 +157,16 @@ struct UdpMultiplexTransport::Impl {
     quint64 nextRegister = 0, nextJoin = 0, nextMember = 0, memberDeadline = 0, joinDeadline = 0, lastBudget = 0;
     double controlBudget = 4096, assetBudget = 4096;
     Snapshot counters;
+    bool immediateSendWork = false;
     std::atomic<quint64> audioDrops{0};
+    std::atomic<quint64> intentAcksSent{0},intentAcksReceived{0},intentRepeatsSuppressed{0},intentAckDeferrals{0},intentAckInvalid{0};
 
     Impl(UdpMultiplexTransport* parent, const Config& initial) : config(initial), owner(parent)
     {
         key = control_protocol::decodeHex(config.keyHex, 16);
         const QByteArray sid = control_protocol::decodeHex(config.sessionHex, 8);
         if (key.size() != 16 || sid.size() != 8 || !token(config.localToken) || peerId(config.localToken) == 0 ||
-            config.maximumPeers < 0 || config.controlBytesPerSecond < 1024 || (config.assetBytesPerSecond != 0 && config.assetBytesPerSecond < 1024) || config.linkRepairSilenceMs < 1000)
+            config.maximumPeers < 0 || config.controlBytesPerSecond < 1024 || (config.assetBytesPerSecond != 0 && config.assetBytesPerSecond < 1024) || config.linkRepairSilenceMs < 1000 || config.fastReorderUs > 2000000)
             throw std::runtime_error("Invalid UDP multiplex configuration");
         for (char byte : sid) session = (session << 8) | static_cast<unsigned char>(byte);
         std::copy(key.begin(), key.end(), nativeKey.begin());
@@ -237,8 +258,8 @@ struct UdpMultiplexTransport::Impl {
     bool queueIngress(const ReadRoute& route, std::span<const std::uint8_t> packet, bool signal)
     {
         if (packet.size() > jam2::NetworkDatagramTransport::kReceiveBufferBytes) { ++invalidClassified; return false; }
-        const bool asset = !signal && packet.size() >= 8 && packet[6] == static_cast<std::uint8_t>(UdpMuxChannel::Asset) &&
-            packet[5] == static_cast<std::uint8_t>(UdpMuxKind::Data);
+        const bool asset = !signal && packet.size() >= 8 && muxChannel(packet)==UdpMuxChannel::Asset &&
+            (muxKind(packet)==UdpMuxKind::Data || muxKind(packet)==UdpMuxKind::DataAck);
         {
             std::lock_guard lock(ingressMutex);
             auto& queue = asset ? assetIngress : controlIngress;
@@ -252,27 +273,34 @@ struct UdpMultiplexTransport::Impl {
         (asset ? assetQueued : controlQueued).fetch_add(1, std::memory_order_relaxed);
         commandWake->notify(); return true;
     }
-    bool takeIngress(IngressQueue& queue, IngressPacket& packet)
+    void releaseIngress(IngressQueue& queue)
     {
-        std::lock_guard lock(ingressMutex);
-        if (!queue.count) return false;
-        auto& slot = queue.packets[queue.read]; packet.link = std::move(slot.link);
-        packet.size = slot.size; packet.signal = slot.signal; packet.queuedUs = slot.queuedUs;
-        std::copy_n(slot.bytes.begin(), slot.size, packet.bytes.begin());
-        queue.read = (queue.read + 1) % queue.packets.size(); --queue.count; return true;
+        std::shared_ptr<Link> retired;
+        { std::lock_guard lock(ingressMutex);
+            retired = std::move(queue.packets[queue.read].link);
+            queue.read = (queue.read + 1) % queue.packets.size(); --queue.count;
+        }
     }
     void processIngress()
     {
         for (auto* queue : {&controlIngress, &assetIngress}) for (std::size_t work = 0; work < 64; ++work) {
-            IngressPacket packet;
-            if (!takeIngress(*queue, packet)) break;
+            IngressPacket* slot;
+            { std::lock_guard lock(ingressMutex);
+                if (!queue->count) break;
+                slot = &queue->packets[queue->read];
+            }
+            // The sole consumer retains this slot until parsing completes.
+            // Count still includes it, so the producer cannot overwrite it.
+            struct Release { Impl& owner; IngressQueue& queue; ~Release() { owner.releaseIngress(queue); } } release{*this,*queue};
+            const auto& packet = *slot;
+            counters.ingressCopyBytesAvoided += packet.size;
             const auto now = jam2::monotonic_us(), delay = now >= packet.queuedUs ? now - packet.queuedUs : 0;
             ++counters.ingressWaitSamples; counters.ingressWaitSumUs += delay;
             counters.ingressWaitMaxUs = (std::max)(counters.ingressWaitMaxUs, delay);
             if (!packet.link->readable.load(std::memory_order_acquire) || packet.link->phase != Phase::Active) continue;
             const auto contents = std::span(packet.bytes).first(packet.size);
             if (packet.signal) receiveSignal(QJsonDocument::fromJson(bytes(contents)).object(), now);
-            else muxReceive(packet.link, bytes(contents), now);
+            else muxReceive(packet.link, contents, now);
         }
     }
     bool ingressPending() const
@@ -633,8 +661,9 @@ struct UdpMultiplexTransport::Impl {
     bool muxSend(const std::shared_ptr<Link>& link, const QByteArray& packet)
     {
         if (!link->socket || link->phase != Phase::Active || packet.size() < 8) return false;
-        const bool assetChannel = packet[6] == static_cast<char>(UdpMuxChannel::Asset);
-        const bool asset = assetChannel && packet[5] == static_cast<char>(UdpMuxKind::Data);
+        const auto packetView=view(packet);
+        const bool assetChannel = muxChannel(packetView)==UdpMuxChannel::Asset;
+        const bool asset = assetChannel && (muxKind(packetView)==UdpMuxKind::Data || muxKind(packetView)==UdpMuxKind::DataAck);
         auto& budget = asset ? assetBudget : controlBudget;
         const auto charge = static_cast<double>(packet.size() + 28);
         // In uncapped mode, asset ACKs must not consume the GUI control
@@ -646,11 +675,36 @@ struct UdpMultiplexTransport::Impl {
         (asset ? counters.assetBytesSent : counters.controlBytesSent) += static_cast<quint64>(packet.size());
         return true;
     }
-    std::shared_ptr<UdpStreamConnection> stream(const std::shared_ptr<Link>& link, UdpMuxChannel channel,
-                                               quint64 id, bool incoming)
+    jam2::UdpSendResult sendNative(const std::shared_ptr<Link>& link,const std::shared_ptr<jam2::UdpSocket>& socket,
+        const jam2::ResolvedUdpEndpoint& endpoint,std::span<const std::uint8_t> packet) noexcept
     {
+        if (config.acknowledgeNativeIntents && packet.size()==jam2::protocol::kHeaderSize+28 &&
+            packet[5]==static_cast<std::uint8_t>(jam2::protocol::PacketType::TransportState)) {
+            const auto payload=packet.subspan(jam2::protocol::kHeaderSize);
+            std::lock_guard intent(link->intentMutex);
+            link->intentUsed=true;
+            if (!link->allowIntentReceipts) {
+                const auto result=socket->send_to(endpoint,packet); if (result.outcome==jam2::UdpSendOutcome::Sent) ++nativeSent; return result;
+            }
+            const bool same=link->intentSent && std::equal(payload.begin(),payload.end(),link->lastIntent.begin());
+            if (same && link->intentAcknowledged) { ++intentRepeatsSuppressed; return {}; }
+            if (!same) { std::copy(payload.begin(),payload.end(),link->lastIntent.begin()); link->intentSent=true; link->intentAcknowledged=false; }
+        }
+        const auto result=socket->send_to(endpoint,packet);
+        if (result.outcome==jam2::UdpSendOutcome::Sent) ++nativeSent;
+        return result;
+    }
+    std::shared_ptr<UdpStreamConnection> stream(const std::shared_ptr<Link>& link, UdpMuxChannel channel,
+                                               quint64 id, bool incoming,quint16 handle=0)
+    {
+        if (!incoming && config.compactFrames && link->nextCompactHandle<=UINT16_MAX) handle=static_cast<quint16>(link->nextCompactHandle++);
+        if (const auto old=link->streams.find(channel);old!=link->streams.end()) link->compactStreams.erase(old->second->compactHandle());
+        UdpStreamConnection::Options options; options.packUnsent=config.packUnsentFragments; options.fastRecovery=config.fastRecovery;
+        options.fastReorderUs=config.fastReorderUs; options.combineAcks=config.combineAcks; options.compactFrames=config.compactFrames;
         auto connection = std::make_shared<UdpStreamConnection>(session, link->introduction, id, channel,
-            key, QString::fromStdString(jam2::format_udp_endpoint(link->remote).host), incoming);
+            key, QString::fromStdString(jam2::format_udp_endpoint(link->remote).host), incoming,
+            options,handle);
+        if (connection->compactHandle()) link->compactStreams[connection->compactHandle()]=connection;
         const std::weak_ptr<Wake> weak = commandWake;
         connection->setWakeHandler([weak] { if (const auto wake = weak.lock()) wake->notify(); });
         link->streams[channel] = connection;
@@ -664,9 +718,21 @@ struct UdpMultiplexTransport::Impl {
             if (self.onStreamReady) self.onStreamReady(peer, channel, connection, incoming);
         });
     }
-    void muxReceive(const std::shared_ptr<Link>& link, const QByteArray& packet, quint64 now)
+    void muxReceive(const std::shared_ptr<Link>& link, std::span<const std::uint8_t> packet, quint64 now)
     {
-        const auto frame = decodeUdpMux(packet, session, key);
+        counters.muxCopyBytesAvoided += packet.size();
+        if (isCompactUdpMux(packet)) {
+            const auto found=link->compactStreams.find(compactUdpMuxHandle(packet));
+            const auto connection=found==link->compactStreams.end() ? nullptr : found->second.lock();
+            if (!connection || connection->terminal() || !connection->receiveDatagram(packet,now,[&](const QByteArray& outgoing) { return muxSend(link,outgoing); })) {
+                ++counters.invalidMuxPackets; return;
+            }
+            const bool asset=muxChannel(packet)==UdpMuxChannel::Asset && (muxKind(packet)==UdpMuxKind::Data || muxKind(packet)==UdpMuxKind::DataAck);
+            (asset ? counters.assetBytesReceived : counters.controlBytesReceived)+=packet.size();
+            if (!config.creator && connection->isConnected()) notifyStream(link,connection,false);
+            return;
+        }
+        const auto frame = decodeUdpMuxView(packet, session, key);
         if (!frame || frame->introduction != link->introduction ||
             (frame->kind != UdpMuxKind::PeerLeave && link->retiredStreams.contains(frame->stream))) {
             ++counters.invalidMuxPackets; return;
@@ -678,12 +744,27 @@ struct UdpMultiplexTransport::Impl {
             post([peer](auto& self) { if (self.onPeerLeft) self.onPeerLeft(peer); });
             return;
         }
+        if (frame->kind==UdpMuxKind::IntentAck) {
+            counters.controlBytesReceived+=packet.size();
+            std::lock_guard intent(link->intentMutex);
+            if (frame->stream!=1 || !config.acknowledgeNativeIntents || !link->allowIntentReceipts || !link->intentSent || !std::equal(frame->payload.begin(),frame->payload.end(),link->lastIntent.begin())) ++intentAckInvalid;
+            else { link->intentAcknowledged=true; ++intentAcksReceived; }
+            return;
+        }
         if (!(config.creator || link->peer == coordinator)) { ++counters.invalidMuxPackets; return; }
-        const bool assetData = frame->channel == UdpMuxChannel::Asset && frame->kind == UdpMuxKind::Data;
+        counters.muxCopyBytesAvoided += frame->payload.size();
+        const bool assetData = frame->channel == UdpMuxChannel::Asset && (frame->kind == UdpMuxKind::Data || frame->kind == UdpMuxKind::DataAck);
         (assetData ? counters.assetBytesReceived : counters.controlBytesReceived) += static_cast<quint64>(packet.size());
         const auto logicalChannel = frame->channel == UdpMuxChannel::IndependentControl ? UdpMuxChannel::Control : frame->channel;
         auto found = link->streams.find(logicalChannel);
         if (frame->kind == UdpMuxKind::Open && config.creator) {
+            const auto handle=frame->payload.size()==2 ? qFromBigEndian<quint16>(frame->payload.data()) : 0;
+            if (handle) {
+                const auto existing=link->compactStreams.find(handle);
+                if (existing!=link->compactStreams.end()) if (const auto bound=existing->second.lock();bound && bound->streamId()!=frame->stream) {
+                    ++counters.invalidMuxPackets; return;
+                }
+            }
             if (found != link->streams.end() && found->second->streamId() != frame->stream) {
                 // A new authenticated stream ID from the same punched peer
                 // also recovers when the old stream's close was lost.
@@ -694,16 +775,18 @@ struct UdpMultiplexTransport::Impl {
                 found = link->streams.end();
             }
             if (found == link->streams.end()) {
-                auto connection = stream(link, frame->channel, frame->stream, true);
+                auto connection = stream(link, frame->channel, frame->stream, true,handle);
                 notifyStream(link, connection, true);
                 found = link->streams.find(frame->channel);
             }
         }
         if (found == link->streams.end() || found->second->streamId() != frame->stream) return;
-        found->second->receive(*frame, now, [&](const QByteArray& outgoing) { return muxSend(link, outgoing); });
+        const auto proposedHandle=found->second->compactHandle();
+        found->second->receiveView(*frame, now, [&](const QByteArray& outgoing) { return muxSend(link, outgoing); });
+        if (proposedHandle && !found->second->compactHandle()) link->compactStreams.erase(proposedHandle);
         if (!config.creator && found->second->isConnected()) notifyStream(link, found->second, false);
     }
-    void readSockets(quint64 now, bool draining = false)
+    void readSockets(quint64 now, WorkerScratch& scratch, bool draining = false)
     {
         // The runtime and shutdown reader never wait on/read an active socket
         // concurrently. Candidate/directory sockets remain worker-owned.
@@ -723,7 +806,7 @@ struct UdpMultiplexTransport::Impl {
                     link->lastReceive = now; link->stalledNotified = false;
                     if (link->phase != Phase::Active) directProof(link, packet, received->endpoint);
                     else if (packet.size() >= 4 && std::equal(packet.begin(), packet.begin()+4, "J2MX"))
-                        muxReceive(link, bytes(packet), now);
+                        muxReceive(link, packet, now);
                     else if (packet.size() >= 4 && std::equal(packet.begin(), packet.begin()+4, "JAM2"))
                         queueAudio(link, packet);
                 }
@@ -733,7 +816,7 @@ struct UdpMultiplexTransport::Impl {
         read(signalSocket, {});
         // receiveSignal can replace a candidate in links: retain the old shared
         // socket through this receive batch and never iterate an invalidated map.
-        std::vector<std::shared_ptr<Link>> current;
+        auto& current = scratch.readLinks; current.clear();
         for (const auto& [peer, link] : links) { (void)peer; current.push_back(link); }
         for (const auto& [peer, link] : retainedLinks) { (void)peer; current.push_back(link); }
         for (const auto& link : current) if (link->socket) { const auto socket = link->socket; read(socket, link); }
@@ -747,8 +830,9 @@ struct UdpMultiplexTransport::Impl {
         }
         return false;
     }
-    void timers(quint64 now)
+    void timers(quint64 now, WorkerScratch& scratch)
     {
+        immediateSendWork = false;
         if (lastBudget) {
             const auto seconds = static_cast<double>(now - lastBudget) / 1000000.0;
             controlBudget = (std::min)(4096.0, controlBudget + seconds * config.controlBytesPerSecond);
@@ -813,13 +897,24 @@ struct UdpMultiplexTransport::Impl {
             }
             ++it;
         }
-        std::vector<std::shared_ptr<Link>> ordered;
+        auto& ordered = scratch.ordered; ordered.clear();
         for (const auto& [peer, link] : links) { (void)peer; ordered.push_back(link); }
         for (const auto& [peer, link] : retainedLinks) { (void)peer; ordered.push_back(link); }
         if (!ordered.empty()) cursor = (cursor + 1) % ordered.size();
         for (std::size_t index = 0; index < ordered.size(); ++index) {
             const auto link = ordered[(index + cursor) % ordered.size()];
             if (link->phase == Phase::Active) {
+                if (config.acknowledgeNativeIntents) {
+                    std::array<std::uint8_t,28> intent{}; bool pending=false;
+                    { std::lock_guard lock(link->intentMutex); pending=link->hasPendingIntentAck; if (pending) intent=link->pendingIntentAck; }
+                    if (pending) {
+                        if (muxSend(link,encodeUdpMuxView({UdpMuxKind::IntentAck,UdpMuxChannel::Control,session,link->introduction,1,0,intent},key))) {
+                            ++intentAcksSent;
+                            std::lock_guard lock(link->intentMutex);
+                            if (intent==link->pendingIntentAck) link->hasPendingIntentAck=false;
+                        } else ++intentAckDeferrals;
+                    }
+                }
                 // The audio runtime already reprobes the proven socket after
                 // silence. Escalate a persistent outage to its coordinator.
                 const auto lastReceived = link->lastReceive.load(std::memory_order_relaxed);
@@ -846,7 +941,10 @@ struct UdpMultiplexTransport::Impl {
                 }
                 for (const auto& [channel, connection] : link->streams) {
                     (void)channel;
-                    connection->poll(now, 2, [&](const QByteArray& packet) { return muxSend(link, packet); });
+                    const auto sent = connection->poll(now, 2, [&](const QByteArray& packet) { return muxSend(link, packet); });
+                    // Aggregated ACKs must not become an artificial send clock.
+                    // Continue existing credit in another bounded worker turn.
+                    if (sent==2 && connection->hasSendCredit()) immediateSendWork = true;
                     if (!config.creator && connection->isConnected()) notifyStream(link, connection, false);
                     else if (!config.creator && connection->terminal() &&
                         !connection->failure().isEmpty() && link->notifiedStreams.insert(connection->streamId()).second) {
@@ -894,8 +992,11 @@ struct UdpMultiplexTransport::Impl {
         try {
             quint64 previousCycle = 0;
             while (!stopping) {
-                std::vector<std::shared_ptr<jam2::UdpSocket>> keepAlive;
-                std::vector<const jam2::UdpSocket*> sockets;
+                WorkerScratch fresh;
+                auto& scratch = config.reuseWorkerBuffers ? workerScratch : fresh;
+                const auto previousCapacity = scratch.capacity();
+                auto& keepAlive = scratch.keepAlive; keepAlive.clear();
+                auto& sockets = scratch.sockets; sockets.clear();
                 quint64 wait = 10000;
                 const auto lockStart = jam2::monotonic_us();
                 {
@@ -906,13 +1007,17 @@ struct UdpMultiplexTransport::Impl {
                         counters.workerLoopGapMaxUs = qMax(counters.workerLoopGapMaxUs, now - previousCycle);
                     previousCycle = now;
                     updateReceiverOwnership();
-                    processCommands(now); processIngress(); readSockets(now); timers(now); publishReadRoutes();
-                    if (ingressPending()) wait = 0;
+                    processCommands(now); processIngress(); readSockets(now,scratch); timers(now,scratch); publishReadRoutes();
+                    if (ingressPending() || immediateSendWork) wait = 0;
+                    if (immediateSendWork) ++counters.workerSendRepolls;
                     keepAlive.push_back(signalSocket);
                     for (const auto& [peer, link] : links) { (void)peer; if (link->socket && !(receiverOwned.load() && link->phase == Phase::Active)) keepAlive.push_back(link->socket); }
                     for (const auto& [peer, link] : retainedLinks) { (void)peer; if (link->socket && !(receiverOwned.load() && link->phase == Phase::Active)) keepAlive.push_back(link->socket); }
                     for (const auto& socket : keepAlive) sockets.push_back(socket.get());
-                    counters.workerServiceMaxUs = qMax(counters.workerServiceMaxUs, jam2::monotonic_us() - now);
+                    const auto serviceUs = jam2::monotonic_us() - now;
+                    counters.workerServiceMaxUs = qMax(counters.workerServiceMaxUs, serviceUs);
+                    counters.workerServiceSumUs += serviceUs; ++counters.workerTurns;
+                    if (scratch.capacity() != previousCapacity) ++counters.workerWorkspaceGrowths;
                 }
                 jam2::UdpSocket::waitForAny(sockets, wait, &commandWake->signal);
             }
@@ -941,7 +1046,7 @@ struct UdpMultiplexTransport::Impl {
                 {
                     std::lock_guard lock(mutex);
                     const auto now = jam2::monotonic_us();
-                    processIngress(); readSockets(now, true);
+                    processIngress(); readSockets(now,workerScratch,true);
                     controlBudget = 4096;
                     if (now >= nextLeave && leavesSent < 3) {
                         for (const auto& link : closingLinks) {
@@ -988,7 +1093,16 @@ void UdpMultiplexTransport::stop() { if (impl_) impl_->stop(); }
 void UdpMultiplexTransport::receiverAttached()
 {
     if (!impl_) throw std::runtime_error("UDP multiplex transport has not started");
-    impl_->attachReceiver();
+    impl_->attachReceiver(); // Reject a duplicate owner before changing receipt state.
+    { std::lock_guard lock(impl_->mutex);
+        for (const auto* links : {&impl_->links,&impl_->retainedLinks}) for (const auto& [peer,link] : *links) {
+            (void)peer; std::lock_guard intent(link->intentMutex);
+            // Native event counters can restart with the runtime. Keep legacy
+            // repeats on an already-used physical epoch until fresh link proof.
+            if (link->intentUsed) link->allowIntentReceipts=false;
+            link->intentAcknowledged=false; link->intentSent=false; link->hasPendingIntentAck=false;
+        }
+    }
 }
 void UdpMultiplexTransport::receiverDetached() noexcept { if (impl_) impl_->detachReceiver(); }
 bool UdpMultiplexTransport::introduce(const QString& a, const QString& b, const QString& request)
@@ -1038,9 +1152,16 @@ UdpMultiplexTransport::Snapshot UdpMultiplexTransport::snapshot() const
     if (!impl_) return {};
     std::lock_guard lock(impl_->mutex);
     auto result = impl_->counters;
+    result.reusesWorkerBuffers = impl_->config.reuseWorkerBuffers;
+    result.compactFrames=impl_->config.compactFrames; result.combineAcks=impl_->config.combineAcks;
+    result.fastRecovery=impl_->config.fastRecovery; result.acknowledgeNativeIntents=impl_->config.acknowledgeNativeIntents;
+    result.fastReorderUs=impl_->config.fastReorderUs;
     result.running = !impl_->stopping; result.registered = impl_->registered; result.admissionPaused = impl_->paused; result.pauseConfirmed = impl_->pauseConfirmed;
     result.audioQueueDrops = impl_->audioDrops;
     result.audioPacketsSent = impl_->nativeSent.load(); result.audioPacketsReceived = impl_->nativeReceived.load();
+    result.nativeIntentAcksSent=impl_->intentAcksSent; result.nativeIntentAcksReceived=impl_->intentAcksReceived;
+    result.nativeIntentRepeatsSuppressed=impl_->intentRepeatsSuppressed; result.nativeIntentAckDeferrals=impl_->intentAckDeferrals;
+    result.nativeIntentAckInvalid=impl_->intentAckInvalid;
     result.runtimeReceiveEnabled = impl_->config.receiveModel == ReceiveModel::Runtime;
     result.runtimeReceiverAttached = impl_->receiverOwned.load();
     result.runtimeNativeDelivered = impl_->nativeDelivered.load(); result.bootstrapNativeDiscarded = impl_->bootstrapDiscarded.load();
@@ -1054,6 +1175,11 @@ UdpMultiplexTransport::Snapshot UdpMultiplexTransport::snapshot() const
     }
     for (const auto& [peer, link] : impl_->links) {
         LinkSnapshot value; value.peer = peer; value.request = link->request; value.phase = link->phase;
+        { std::lock_guard intent(link->intentMutex);
+            value.nativeIntentSent=link->intentSent; value.nativeIntentAcknowledged=link->intentAcknowledged;
+            value.nativeIntentReceiptsAllowed=link->allowIntentReceipts;
+            if (!link->allowIntentReceipts) ++result.intentReceiptDisabledLinks;
+        }
         value.route = link->route;
         value.attempt = link->attempt; value.helloSent = link->helloSent; value.introduction = link->introduction;
         if (link->socket) value.local = link->socket->local_endpoint();
@@ -1069,6 +1195,13 @@ UdpMultiplexTransport::Snapshot UdpMultiplexTransport::snapshot() const
             const auto streamStats = connection->stats();
             value.retransmissions += streamStats.retransmitted;
             value.inputDeferrals += connection->inputDeferrals();
+            value.ackDatagramsSent += streamStats.ackDatagramsSent; value.acksCoalesced += streamStats.acksCoalesced;
+            value.ackTransmitDeferrals += streamStats.ackTransmitDeferrals; value.invalidAckWindows += streamStats.invalidAckWindows;
+            value.inOrderDirect += streamStats.in_order_direct; value.reorderInsertions += streamStats.reorder_insertions;
+            value.tailBytesPacked += streamStats.tail_bytes_packed; value.fragmentsAvoided += streamStats.fragments_avoided;
+            value.fastRetransmissions+=streamStats.fast_retransmitted; value.sackGapReports+=streamStats.sack_gap_reports;
+            value.ackPairs+=streamStats.ackPairs; value.piggybackedAcks+=streamStats.piggybackedAcks;
+            value.compactPackets+=streamStats.compactPackets; value.compactBytesSaved+=streamStats.compactBytesSaved;
             if (channel == UdpMuxChannel::Control) {
                 value.controlStream = connection->streamId(); value.controlRttUs = streamStats.smoothed_rtt_us;
                 value.controlWindow = streamStats.congestion_window;
@@ -1088,9 +1221,7 @@ jam2::UdpSendResult UdpMultiplexTransport::sendToPeer(
     if (impl_->config.receiveModel == ReceiveModel::Runtime) {
         const auto routes = impl_->readRoutes.load(std::memory_order_acquire);
         for (const auto& route : routes->routes) if (route.peer == id && route.link->readable.load(std::memory_order_acquire)) {
-            const auto result = route.socket->send_to(route.endpoint, packet);
-            if (result.outcome == jam2::UdpSendOutcome::Sent) ++impl_->nativeSent;
-            return result;
+            return impl_->sendNative(route.link,route.socket,route.endpoint,packet);
         }
         return {jam2::UdpSendOutcome::WouldBlock, 0};
     }
@@ -1103,11 +1234,28 @@ jam2::UdpSendResult UdpMultiplexTransport::sendToPeer(
     else for (const auto& [peer, held] : impl_->retainedLinks)
         if (peerId(peer) == id && held->phase == Phase::Active) { link = held; break; }
     if (link && link->socket) {
-        const auto result = link->socket->send_to(link->remote, packet);
-        if (result.outcome == jam2::UdpSendOutcome::Sent) ++impl_->nativeSent;
-        return result;
+        return impl_->sendNative(link,link->socket,link->remote,packet);
     }
     return {jam2::UdpSendOutcome::WouldBlock, 0};
+}
+void UdpMultiplexTransport::transportIntentAccepted(std::uint64_t id,std::span<const std::uint8_t> payload) noexcept
+{
+    if (!impl_ || impl_->stopping || !impl_->config.acknowledgeNativeIntents || payload.size()!=28) return;
+    const auto accepted=[&](const std::shared_ptr<Impl::Link>& link) {
+        std::lock_guard intent(link->intentMutex); link->intentUsed=true;
+        if (!link->allowIntentReceipts) return;
+        std::copy(payload.begin(),payload.end(),link->pendingIntentAck.begin()); link->hasPendingIntentAck=true;
+        impl_->commandWake->notify();
+    };
+    try {
+        const auto routes=impl_->readRoutes.load(std::memory_order_acquire);
+        for (const auto& route : routes->routes) if (route.peer==id && route.link->readable.load(std::memory_order_acquire)) { accepted(route.link); return; }
+        if (impl_->config.receiveModel==ReceiveModel::QueuedWorker) {
+            std::lock_guard lock(impl_->mutex);
+            for (const auto* links : {&impl_->links,&impl_->retainedLinks}) for (const auto& [peer,link] : *links)
+                if (peerId(peer)==id && link->phase==Phase::Active) { accepted(link); return; }
+        }
+    } catch (...) { ++impl_->intentAckDeferrals; }
 }
 std::optional<jam2::UdpSocket::ReceivedDatagram> UdpMultiplexTransport::receiveFor(
     std::span<std::uint8_t> buffer, std::uint64_t timeoutUs, jam2::RealtimeWakeSignal* captureWake)

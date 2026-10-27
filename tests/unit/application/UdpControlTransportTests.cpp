@@ -7,6 +7,9 @@
 #include <QJsonDocument>
 #include <QPointer>
 #include <QThread>
+#include <QtEndian>
+#include <QMessageAuthenticationCode>
+#include <QCryptographicHash>
 
 #include <deque>
 #include <iostream>
@@ -17,6 +20,7 @@
 
 using jam2::application::ControlConnection;
 
+void udpEfficiencyFixtures();
 namespace {
 void require(bool okay, const char* detail) { if (!okay) throw std::runtime_error(detail); }
 template<class Condition> void until(Condition condition)
@@ -206,13 +210,13 @@ void authenticatedUdpStreamsUnderLoss(bool independent)
     auto transmit = [&](bool toServer, const QByteArray& bytes) {
         const auto frame = decodeUdpMux(bytes, sessionId, key);
         require(frame.has_value(), "production UDP stream emitted invalid authentication/framing");
-        if (now < blockPrimaryUntil && toServer && frame->kind == UdpMuxKind::Data && frame->channel == UdpMuxChannel::Control) {
+        if (now < blockPrimaryUntil && toServer && (frame->kind == UdpMuxKind::Data || frame->kind==UdpMuxKind::DataAck) && frame->channel == UdpMuxChannel::Control) {
             ++primaryDrops; return true;
         }
         const auto identity = std::make_tuple(toServer, static_cast<int>(frame->kind), frame->sequence);
         const int count = ++seen[identity];
-        if (count == 1 && ((frame->kind == UdpMuxKind::Data && frame->sequence % 7 == 2) ||
-                          (frame->kind == UdpMuxKind::Ack && frame->sequence % 5 == 0) ||
+        if (count == 1 && (((frame->kind == UdpMuxKind::Data || frame->kind==UdpMuxKind::DataAck) && frame->sequence % 7 == 2) ||
+                          ((frame->kind == UdpMuxKind::Ack || frame->kind == UdpMuxKind::AckWindow || frame->kind==UdpMuxKind::AckPair) && frame->sequence % 5 == 0) ||
                           frame->kind == UdpMuxKind::OpenAck)) return true;
         network.push_back({toServer, bytes, now + (frame->sequence % 3 == 0 ? 1000 : 11000)});
         if (count == 1 && frame->kind == UdpMuxKind::Data && frame->sequence % 11 == 0)
@@ -301,6 +305,57 @@ void authenticatedUdpStreamsUnderLoss(bool independent)
     client.close(); server.close();
 }
 
+void aggregatedAcknowledgementsAndBorrowedPayload()
+{
+    using namespace jam2::application;
+    const QByteArray key(16,'k');
+    auto receiver=std::make_shared<UdpStreamConnection>(1,2,3,UdpMuxChannel::Control,key,"local",true);
+    QObject owner; QByteArray delivered;
+    receiver->start(&owner,[&](const QByteArray& bytes) { delivered+=bytes; },{});
+    QByteArray bytes(1024,'p');
+    std::vector<QByteArray> acks;
+    const auto emitPacket=[&](const QByteArray& packet) { acks.push_back(packet); return true; };
+    for (quint64 sequence=1;sequence<=32;++sequence) {
+        auto wire=encodeUdpMux({UdpMuxKind::Data,UdpMuxChannel::Control,1,2,3,sequence,bytes},key);
+        const auto frame=decodeUdpMuxView({reinterpret_cast<const std::uint8_t*>(wire.constData()),static_cast<std::size_t>(wire.size())},1,key);
+        require(frame && frame->payload.data()==reinterpret_cast<const std::uint8_t*>(wire.constData()+42),"decoder did not borrow authenticated payload");
+        receiver->receiveView(*frame,sequence,emitPacket);
+        wire.fill('x'); // Asynchronous application delivery must own its bytes.
+    }
+    require(acks.empty(),"fragment ACKs were emitted before batch flush");
+    receiver->poll(33,2,[](const QByteArray&) { return false; });
+    require(receiver->stats().ackTransmitDeferrals==1,"would-block lost pending ACK state");
+    receiver->poll(34,2,emitPacket);
+    require(acks.size()==1,"contiguous batch emitted more than one ACK");
+    const auto ack=decodeUdpMux(acks.front(),1,key);
+    require(ack && ack->kind==UdpMuxKind::AckWindow && ack->sequence==32 && ack->payload.isEmpty(),"contiguous ACK wire representation changed");
+    require(receiver->stats().acksCoalesced==31 && receiver->stats().in_order_direct==32,"ACK/fast-path counters missing");
+    until([&] { return delivered.size()==32*1024; });
+    require(delivered==bytes.repeated(32),"borrowed packet storage escaped into asynchronous delivery");
+    auto gaps=std::make_shared<UdpStreamConnection>(1,2,4,UdpMuxChannel::Control,key,"local",true);
+    acks.clear();
+    gaps->receive({UdpMuxKind::Data,UdpMuxChannel::Control,1,2,4,2,bytes},40,emitPacket);
+    gaps->receive({UdpMuxKind::Data,UdpMuxChannel::Control,1,2,4,4,bytes},41,emitPacket);
+    gaps->receive({UdpMuxKind::Data,UdpMuxChannel::IndependentControl,1,2,4,1,bytes},42,emitPacket);
+    gaps->poll(43,2,emitPacket);
+    require(acks.size()==1,"ready ordering-domain ACKs were not combined");
+    const auto primary=decodeUdpMux(acks[0],1,key);
+    require(primary && primary->kind==UdpMuxKind::AckPair && primary->sequence==0 && primary->payload.size()==24 &&
+        qFromBigEndian<quint64>(reinterpret_cast<const uchar*>(primary->payload.constData()))==10,
+        "selective ACK acknowledged a missing fragment or lost gaps");
+    require(qFromBigEndian<quint64>(reinterpret_cast<const uchar*>(primary->payload.constData()+8))==1,
+        "independent ACK lost its ordering domain");
+    auto corrupt=acks[0]; corrupt[corrupt.size()-1]^=1;
+    require(!decodeUdpMux(corrupt,1,key),"corrupt aggregate ACK authenticated");
+    auto old=acks[0]; old[4]=1;
+    old.chop(16); old+=QMessageAuthenticationCode::hash(old,key,QCryptographicHash::Sha256).first(16);
+    require(!decodeUdpMux(old,1,key),"old multiplex version was silently accepted");
+    require(!decodeUdpMux(encodeUdpMux({UdpMuxKind::AckWindow,UdpMuxChannel::Control,1,2,4,0,{}},key),1,key) &&
+        !decodeUdpMux(encodeUdpMux({UdpMuxKind::AckWindow,UdpMuxChannel::Control,1,2,4,1,QByteArray(2,'x')},key),1,key),
+        "empty or malformed aggregate ACK was accepted");
+    receiver->close(); gaps->retire();
+}
+
 void authenticatedControlAndAssets()
 {
     const QString session = QStringLiteral("0123456789abcdef");
@@ -368,6 +423,8 @@ int main(int argc, char** argv)
     QCoreApplication app(argc, argv);
     try {
         framingProgressDeadline();
+        aggregatedAcknowledgementsAndBorrowedPayload();
+        udpEfficiencyFixtures();
         authenticatedControlAndAssets();
         authenticatedUdpStreamsUnderLoss(false);
         authenticatedUdpStreamsUnderLoss(true);

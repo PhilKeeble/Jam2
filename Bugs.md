@@ -35,7 +35,6 @@ cant manually sync when auto is on - wanted it when open jamjar didnt sync
 Update.sh wasnt being clear that it was failing, make it easy for the user 
 
 # TEST
-
 - stretching time not affecting pitch 
 - delete wav on track only deleting the wav 
 - opening a jamjar during a jam and seeing if tracks sync 

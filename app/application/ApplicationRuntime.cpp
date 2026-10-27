@@ -197,6 +197,13 @@ bool ApplicationRuntime::reprobePeers() noexcept
     return true;
 }
 
+bool ApplicationRuntime::requestGridAssignmentRecovery() noexcept
+{
+    if (!isNetworkRunning()) return false;
+    host_.submitGridAssignmentRecovery();
+    return true;
+}
+
 bool ApplicationRuntime::setPeerGainDb(std::uint64_t peerId, double gainDb) noexcept
 {
     if (!isNetworkRunning() || peerId == 0 || !std::isfinite(gainDb) ||

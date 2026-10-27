@@ -129,7 +129,7 @@ std::uint64_t siphash24(
 bool known_packet_type(std::uint8_t value)
 {
     return value >= static_cast<std::uint8_t>(PacketType::Hello) &&
-        value <= static_cast<std::uint8_t>(PacketType::TransportState);
+        value <= static_cast<std::uint8_t>(PacketType::GridAssignmentRequest);
 }
 
 bool valid_payload_size(PacketType type, std::size_t size, NetworkAudioFormat audio_format)
@@ -145,9 +145,14 @@ bool valid_payload_size(PacketType type, std::size_t size, NetworkAudioFormat au
     case PacketType::Ping:
     case PacketType::Pong:
     case PacketType::Bye:
+    case PacketType::GridAssignmentRequest:
         return size == 0;
     case PacketType::MetronomeState:
         return size == kMetronomeStatePayloadSize;
+    case PacketType::GridAssignment:
+        return size == kGridAssignmentPayloadSize;
+    case PacketType::GridAssignmentApplied:
+        return size == kGridAssignmentAppliedPayloadSize;
     case PacketType::TransportState:
         return size == kTransportStatePayloadSize;
     }

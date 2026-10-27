@@ -176,6 +176,10 @@ RunResult run(FourPeerCoordinator& peers, const QString& executable,
                 "audio profile, callback or four-peer topology changed during measurement");
             require(jam.value("udp_multiplex").toObject().value("enabled").toBool() == server,
                 "latency measurement used the wrong transport mode");
+            require(jam.value("grid_authority_beacon_interval_us").toInteger()==(server ? 1000000 : 20000),
+                "authority beacon cadence leaked across connection modes");
+            require(jam.value("grid_authority_phase_freshness_us").toInteger()==(server ? 2500000 : 500000),
+                "authority phase validity leaked across connection modes");
             if (server) {
                 const auto transport = jam.value("udp_multiplex").toObject();
                 require(transport.value("runtime_receive_enabled").toBool() == !queued && transport.value("runtime_receive_owner").toBool() == !queued,

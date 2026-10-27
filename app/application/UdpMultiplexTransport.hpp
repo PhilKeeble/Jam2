@@ -27,6 +27,11 @@ public:
         quint64 controlBytesPerSecond = 65536, assetBytesPerSecond = 0;
         quint64 linkRepairSilenceMs = 10000;
         ReceiveModel receiveModel = ReceiveModel::Runtime;
+        // Explicit diagnostic ablation; normal Server sessions reuse workspace.
+        bool reuseWorkerBuffers = true;
+        bool packUnsentFragments = true;
+        bool compactFrames = true, combineAcks = true, fastRecovery = true, acknowledgeNativeIntents = true;
+        quint64 fastReorderUs = 10000;
     };
     struct LinkSnapshot {
         QString peer, request;
@@ -39,6 +44,12 @@ public:
         quint64 assetQueued = 0, controlQueued = 0, retransmissions = 0;
         quint64 controlStream = 0, assetStream = 0, controlRttUs = 0, assetRttUs = 0;
         quint64 inputDeferrals = 0, lastReceiveAgeMs = 0;
+        quint64 ackDatagramsSent = 0, acksCoalesced = 0, ackTransmitDeferrals = 0, invalidAckWindows = 0;
+        quint64 inOrderDirect = 0, reorderInsertions = 0;
+        quint64 tailBytesPacked = 0, fragmentsAvoided = 0;
+        quint64 fastRetransmissions = 0, sackGapReports = 0, ackPairs = 0, piggybackedAcks = 0;
+        quint64 compactPackets = 0, compactBytesSaved = 0;
+        bool nativeIntentSent = false, nativeIntentAcknowledged = false, nativeIntentReceiptsAllowed = true;
         double controlWindow = 0, assetWindow = 0;
         jam2::Endpoint retainedAudioLocal;
     };
@@ -58,6 +69,14 @@ public:
         quint64 ingressQueueDrops = 0, controlIngressDepth = 0, assetIngressDepth = 0, ingressHighWater = 0;
         quint64 ingressWaitSamples = 0, ingressWaitSumUs = 0, ingressWaitMaxUs = 0;
         quint64 classificationSamples = 0, classificationSumNs = 0, classificationMaxNs = 0;
+        quint64 workerTurns = 0, workerWorkspaceGrowths = 0, workerServiceSumUs = 0;
+        quint64 ingressCopyBytesAvoided = 0, muxCopyBytesAvoided = 0;
+        quint64 workerSendRepolls = 0;
+        bool reusesWorkerBuffers = false;
+        bool compactFrames = false, combineAcks = false, fastRecovery = false, acknowledgeNativeIntents = false;
+        quint64 fastReorderUs = 0, intentReceiptDisabledLinks = 0;
+        quint64 nativeIntentAcksSent = 0, nativeIntentAcksReceived = 0, nativeIntentRepeatsSuppressed = 0;
+        quint64 nativeIntentAckDeferrals = 0, nativeIntentAckInvalid = 0;
         std::vector<LinkSnapshot> links;
     };
     explicit UdpMultiplexTransport(QObject* parent = nullptr);
@@ -80,6 +99,7 @@ public:
     void receiverDetached() noexcept override;
     jam2::UdpSendResult sendToPeer(std::uint64_t id, const jam2::ResolvedUdpEndpoint& endpoint,
         std::span<const std::uint8_t> packet) noexcept override;
+    void transportIntentAccepted(std::uint64_t id,std::span<const std::uint8_t> payload) noexcept override;
     std::optional<jam2::UdpSocket::ReceivedDatagram> receiveFor(std::span<std::uint8_t> buffer,
         std::uint64_t timeoutUs, jam2::RealtimeWakeSignal* captureWake) override;
     std::function<void()> onRegistered;

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 
 namespace jam2::metronome {
 
@@ -23,6 +24,30 @@ struct AuthorityClockMapping {
     std::uint64_t epoch_sample_time = 0;
     std::int64_t render_offset_frames = 0;
     bool valid = false;
+};
+
+struct GridPhaseObservation {
+    std::uint64_t authority_frame = 0, authority_epoch = 0;
+    std::uint64_t local_musical_frame = 0, local_epoch = 0, bar_frames = 0;
+};
+// Signed phase difference on the nearest bar. No clock, I/O or owned state.
+std::optional<std::int64_t> grid_phase_error(const GridPhaseObservation& observation) noexcept;
+
+struct AuthorityBeaconState {
+    std::uint64_t revision = 0, epoch = 0, active_peers = 0;
+    bool operator==(const AuthorityBeaconState&) const noexcept = default;
+};
+class AuthorityBeaconSchedule {
+public:
+    explicit AuthorityBeaconSchedule(std::uint64_t interval_us) noexcept : interval_us_(interval_us) {}
+    bool due(std::uint64_t now_us, AuthorityBeaconState state) const noexcept;
+    void commitAttempt(std::uint64_t now_us, AuthorityBeaconState state) noexcept;
+    std::uint64_t intervalUs() const noexcept { return interval_us_; }
+    std::uint64_t phaseFreshnessUs() const noexcept;
+    bool phaseFresh(std::uint64_t now_us, std::uint64_t received_us) const noexcept;
+private:
+    std::uint64_t interval_us_, next_us_ = 0;
+    std::optional<AuthorityBeaconState> last_;
 };
 
 enum class ClickVoice {

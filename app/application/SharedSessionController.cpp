@@ -540,6 +540,20 @@ QJsonObject SharedSessionController::multiplexDiagnostics() const
         {QStringLiteral("control_window_packets"), link.controlWindow},
         {QStringLiteral("asset_window_packets"), link.assetWindow},
         {QStringLiteral("input_deferrals"), static_cast<qint64>(link.inputDeferrals)},
+        {QStringLiteral("ack_datagrams_sent"),static_cast<qint64>(link.ackDatagramsSent)},
+        {QStringLiteral("fragment_acks_coalesced"),static_cast<qint64>(link.acksCoalesced)},
+        {QStringLiteral("ack_transmit_deferrals"),static_cast<qint64>(link.ackTransmitDeferrals)},
+        {QStringLiteral("invalid_ack_windows"),static_cast<qint64>(link.invalidAckWindows)},
+        {QStringLiteral("in_order_direct_fragments"),static_cast<qint64>(link.inOrderDirect)},
+        {QStringLiteral("reorder_insertions"),static_cast<qint64>(link.reorderInsertions)},
+        {QStringLiteral("tail_bytes_packed"),static_cast<qint64>(link.tailBytesPacked)},
+        {QStringLiteral("fragments_avoided"),static_cast<qint64>(link.fragmentsAvoided)},
+        {QStringLiteral("fast_retransmissions"),static_cast<qint64>(link.fastRetransmissions)},
+        {QStringLiteral("sack_gap_reports"),static_cast<qint64>(link.sackGapReports)},
+        {QStringLiteral("ack_pairs"),static_cast<qint64>(link.ackPairs)}, {QStringLiteral("piggybacked_acks"),static_cast<qint64>(link.piggybackedAcks)},
+        {QStringLiteral("compact_packets"),static_cast<qint64>(link.compactPackets)}, {QStringLiteral("compact_bytes_saved"),static_cast<qint64>(link.compactBytesSaved)},
+        {QStringLiteral("native_intent_sent"),link.nativeIntentSent}, {QStringLiteral("native_intent_acknowledged"),link.nativeIntentAcknowledged},
+        {QStringLiteral("native_intent_receipts_allowed"),link.nativeIntentReceiptsAllowed},
         {QStringLiteral("last_receive_age_ms"), static_cast<qint64>(link.lastReceiveAgeMs)},
         {QStringLiteral("retained_audio_local"), endpoint(link.retainedAudioLocal)}});
     QJsonObject result{{QStringLiteral("enabled"), multiplex_ != nullptr}, {QStringLiteral("running"), stats.running},
@@ -578,6 +592,23 @@ QJsonObject SharedSessionController::multiplexDiagnostics() const
         {QStringLiteral("classification_max_ns"), static_cast<qint64>(stats.classificationMaxNs)},
         {QStringLiteral("worker_loop_gap_max_us"), static_cast<qint64>(stats.workerLoopGapMaxUs)},
         {QStringLiteral("worker_service_max_us"), static_cast<qint64>(stats.workerServiceMaxUs)},
+        {QStringLiteral("mux_version"),jam2::application::kUdpMuxVersion},
+        {QStringLiteral("native_intent_acks_sent"),static_cast<qint64>(stats.nativeIntentAcksSent)},
+        {QStringLiteral("native_intent_acks_received"),static_cast<qint64>(stats.nativeIntentAcksReceived)},
+        {QStringLiteral("native_intent_repeats_suppressed"),static_cast<qint64>(stats.nativeIntentRepeatsSuppressed)},
+        {QStringLiteral("native_intent_ack_deferrals"),static_cast<qint64>(stats.nativeIntentAckDeferrals)},
+        {QStringLiteral("native_intent_ack_invalid"),static_cast<qint64>(stats.nativeIntentAckInvalid)},
+        {QStringLiteral("fast_recovery_threshold"),3}, {QStringLiteral("fast_reorder_us"),static_cast<qint64>(stats.fastReorderUs)},
+        {QStringLiteral("fast_recovery_enabled"),stats.fastRecovery}, {QStringLiteral("compact_frames_enabled"),stats.compactFrames},
+        {QStringLiteral("combine_acks_enabled"),stats.combineAcks}, {QStringLiteral("native_intent_receipts_enabled"),stats.acknowledgeNativeIntents},
+        {QStringLiteral("native_intent_receipt_disabled_links"),static_cast<qint64>(stats.intentReceiptDisabledLinks)},
+        {QStringLiteral("worker_turns"),static_cast<qint64>(stats.workerTurns)},
+        {QStringLiteral("worker_send_credit_repolls"),static_cast<qint64>(stats.workerSendRepolls)},
+        {QStringLiteral("worker_reuses_buffers"),stats.reusesWorkerBuffers},
+        {QStringLiteral("worker_workspace_growths"),static_cast<qint64>(stats.workerWorkspaceGrowths)},
+        {QStringLiteral("worker_service_sum_us"),static_cast<qint64>(stats.workerServiceSumUs)},
+        {QStringLiteral("ingress_copy_bytes_avoided"),static_cast<qint64>(stats.ingressCopyBytesAvoided)},
+        {QStringLiteral("mux_copy_bytes_avoided"),static_cast<qint64>(stats.muxCopyBytesAvoided)},
         {QStringLiteral("worker_lock_wait_max_us"), static_cast<qint64>(stats.workerLockWaitMaxUs)},
         {QStringLiteral("control_bytes_per_second"), static_cast<qint64>(stats.controlBytesPerSecond)},
         {QStringLiteral("asset_bytes_per_second"), static_cast<qint64>(stats.assetBytesPerSecond)},
@@ -1189,6 +1220,11 @@ void SharedSessionController::handleClientEvent(const TransportEvent& event)
         // direct edges again instead of preserving a stale Active state.
         if (!firstAuthentication && runtime_ != nullptr && !multiplex_) {
             (void)runtime_->reprobePeers();
+        }
+        if (!firstAuthentication && runtime_ != nullptr && multiplex_) {
+            // The multiplex retains its proven audio socket. Recover only the
+            // grid control state and its applied receipt on logical reconnect.
+            (void)runtime_->requestGridAssignmentRecovery();
         }
         setLifecycle(Lifecycle::Authenticated);
         if (assetChannelRequired_) {

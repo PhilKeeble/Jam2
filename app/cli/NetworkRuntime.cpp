@@ -60,6 +60,7 @@
 #include "peer_stream.hpp"
 #include "protocol.hpp"
 #include "session_authority.hpp"
+#include "grid_assignment_delivery.hpp"
 #include "stun.hpp"
 #include "transport_timing.hpp"
 #include "tuning_profile.hpp"
@@ -1769,6 +1770,12 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
         std::uint64_t sent_pings = 0;
         std::uint64_t sent_pongs = 0;
         std::uint64_t recv_pongs = 0;
+        std::array<std::uint8_t,jam2::protocol::kTransportStatePayloadSize> accepted_transport_intent{};
+        bool has_accepted_transport_intent=false;
+        jam2::GridAssignmentDelivery grid_delivery;
+        std::uint64_t grid_applied_receipt_revision = 0, grid_applied_receipt_token = 0;
+        std::uint64_t received_grid_assignment_revision = 0, grid_recovery_hello = 0;
+        std::array<std::uint8_t, jam2::protocol::kMetronomeStatePayloadSize> received_grid_assignment{};
         std::uint64_t sent_hellos = 0;
         std::uint64_t sent_hello_acks = 0;
         std::uint64_t recv_hello_acks = 0;
@@ -1882,6 +1889,8 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
         peer.proof_deadline_us = 0;
         peer.next_probe_us = 0;
         peer.last_authenticated_receive_us = 0;
+        peer.grid_delivery.reset();
+        peer.grid_applied_receipt_revision = peer.grid_applied_receipt_token = 0;
         peer.liveness_reprobes += liveness_reprobe ? 1ULL : 0ULL;
         peer.control_reprobes += control_reprobe ? 1ULL : 0ULL;
         return true;
@@ -1986,7 +1995,18 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
 
     std::uint64_t mesh_grid_proposals_sent = 0;
     std::uint64_t mesh_grid_assignments_sent = 0;
+    std::uint64_t grid_assignment_packets = 0, grid_assignment_retries = 0;
+    std::uint64_t grid_assignment_acks_sent = 0, grid_assignment_acks_received = 0;
+    std::uint64_t grid_assignment_invalid_acks = 0, grid_assignment_deferred = 0;
+    std::uint64_t cached_grid_assignment_revision = 0;
+    std::array<std::uint8_t, jam2::protocol::kMetronomeStatePayloadSize> cached_grid_assignment{};
+    struct GridRecoveryRequest { std::uint64_t token, next_send_us; };
+    std::optional<GridRecoveryRequest> pending_grid_recovery;
+    constexpr std::uint64_t kGridRecoveryRetryUs = 1000000;
+    std::uint64_t grid_recovery_requests_sent = 0;
     std::uint64_t mesh_grid_authority_states_sent = 0;
+    std::uint64_t mesh_grid_authority_packets_sent = 0;
+    jam2::metronome::AuthorityBeaconSchedule authority_beacons(options.datagram_transport ? 1000000ULL : 20000ULL);
     std::uint64_t mesh_grid_peer_phases_sent = 0;
     std::uint64_t mesh_transport_source_peer_id = 0;
     std::uint64_t mesh_transport_event_counter = 0;
@@ -2557,10 +2577,46 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
         };
         snapshot.transport_grid_ready = transport_grid_ready();
         snapshot.grid_mapping_error_frames = grid_mapping_error_frames();
+        snapshot.grid_authority_beacon_interval_us = authority_beacons.intervalUs();
+        snapshot.grid_authority_beacon_batches = mesh_grid_authority_states_sent;
+        snapshot.grid_authority_beacon_packets = mesh_grid_authority_packets_sent;
+        snapshot.grid_authority_phase_freshness_us = options.datagram_transport ? authority_beacons.phaseFreshnessUs() : 500000;
+        snapshot.grid_authority_phase_fresh = authority.localIsGridAuthority();
+        snapshot.grid_assignment_reliable = bool(options.datagram_transport);
+        snapshot.grid_assignment_revision = authority.grid().revision;
+        snapshot.grid_assignment_packets = grid_assignment_packets;
+        snapshot.grid_assignment_retries = grid_assignment_retries;
+        snapshot.grid_assignment_acks_sent = grid_assignment_acks_sent;
+        snapshot.grid_assignment_acks_received = grid_assignment_acks_received;
+        snapshot.grid_assignment_invalid_acks = grid_assignment_invalid_acks;
+        snapshot.grid_assignment_deferred = grid_assignment_deferred;
+        snapshot.grid_assignment_recovery_requests = grid_recovery_requests_sent;
+        snapshot.grid_assignment_recovery_pending = pending_grid_recovery.has_value();
+        snapshot.grid_assignment_recovery_retry_us = options.datagram_transport ? kGridRecoveryRetryUs : 0;
+        if (options.datagram_transport) {
+            snapshot.grid_assignment_retry_initial_us = jam2::GridAssignmentDelivery::kInitialRetryUs;
+            snapshot.grid_assignment_retry_max_us = jam2::GridAssignmentDelivery::kMaximumRetryUs;
+            if (authority.localIsBootstrapCoordinator()) {
+                for (const auto& [id, peer] : peers) {
+                    if (peer_endpoint_state(peer.peer_id) != jam2::PeerEndpointState::Active) continue;
+                    if (peer.grid_delivery.revision() == authority.grid().revision && peer.grid_delivery.applied())
+                        ++snapshot.grid_assignment_applied_peers;
+                    else ++snapshot.grid_assignment_pending_peers;
+                }
+            }
+        }
         const std::uint64_t snapshot_time_us = jam2::monotonic_us();
         snapshot.peers.reserve(peers.size());
         for (const auto& entry : peers) {
             const auto& peer = entry.second;
+            if (peer.peer_id.value == authority.grid().authority_peer_id) {
+                if (peer.listener_phase_received_us && snapshot_time_us >= peer.listener_phase_received_us)
+                    snapshot.grid_authority_phase_age_us = snapshot_time_us - peer.listener_phase_received_us;
+                snapshot.grid_authority_phase_fresh = options.datagram_transport
+                    ? authority_beacons.phaseFresh(snapshot_time_us, peer.listener_phase_received_us)
+                    : peer.listener_phase_received_us && snapshot_time_us >= peer.listener_phase_received_us &&
+                        snapshot_time_us - peer.listener_phase_received_us <= 500000;
+            }
             const auto* descriptor = network_session.peer(peer.peer_id);
             if (descriptor == nullptr) {
                 continue;
@@ -2588,6 +2644,9 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                     ? (snapshot_time_us - peer.last_authenticated_receive_us) / 1000ULL
                     : 0ULL,
             });
+            snapshot.peers.back().grid_assignment_revision = peer.grid_delivery.revision();
+            snapshot.peers.back().grid_assignment_attempts = peer.grid_delivery.attempts();
+            snapshot.peers.back().grid_assignment_applied = peer.grid_delivery.applied();
         }
         runtime_host.network_snapshot(snapshot);
     };
@@ -2984,7 +3043,9 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                         const auto& peer = entry.second;
                         const auto* mix = network_session.peerMixStats(peer.peer_id);
                         const auto& stream = network_session.peerStream(peer.peer_id);
-                        const bool phase_fresh = peer.listener_phase_received_us != 0 &&
+                        const bool phase_fresh = options.datagram_transport && peer.peer_id.value == authority.grid().authority_peer_id
+                            ? authority_beacons.phaseFresh(now, peer.listener_phase_received_us)
+                            : peer.listener_phase_received_us != 0 &&
                             now >= peer.listener_phase_received_us &&
                             now - peer.listener_phase_received_us <= 500000ULL;
                         if (peer_endpoint_state(peer.peer_id) != jam2::PeerEndpointState::Active ||
@@ -3074,6 +3135,38 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
         }
         commit_due_transport(commands.state, audio.engine.get());
         sync_engine_control(commands.state, audio.engine.get(), engine_control_mirror, mesh_grid_base_offset_frames);
+        if (options.datagram_transport &&
+            !runtime_host.lane_recording_isolation_enabled.load(std::memory_order_acquire)) {
+            // Confirm application through the existing engine snapshot, outside the
+            // audio callback. Unknown clock mapping or a full command queue defers ACK.
+            for (auto& [id, peer] : peers) {
+                if (peer.grid_applied_receipt_revision == 0) continue;
+                if (peer.grid_applied_receipt_revision != authority.grid().revision) {
+                    peer.grid_applied_receipt_revision = peer.grid_applied_receipt_token = 0;
+                    continue;
+                }
+                if (pending_local_grid_proposal ||
+                    commands.state.grid_request_sequence.load(std::memory_order_acquire) != last_local_grid_request_sequence ||
+                    !commands.state.metronome_epoch_valid.load(std::memory_order_relaxed) ||
+                    peer_endpoint_state(peer.peer_id) != jam2::PeerEndpointState::Active) continue;
+                if (audio.engine) {
+                    const auto applied = audio.engine->snapshot();
+                    if (!applied.metronome_epoch_valid ||
+                        applied.metronome_epoch_frame != commands.state.metronome_epoch_sample_time.load(std::memory_order_relaxed) ||
+                        static_cast<int>(applied.metronome_mode) != commands.state.metronome_mode.load(std::memory_order_relaxed) ||
+                        applied.metronome_enabled != commands.state.metronome.load(std::memory_order_relaxed) ||
+                        applied.leader_audio_local_click != commands.state.leader_audio_local_click.load(std::memory_order_relaxed) ||
+                        !same_metronome_pattern(applied.metronome_pattern, metronome_pattern_from_runtime(commands.state))) continue;
+                }
+                std::array<std::uint8_t, jam2::protocol::kGridAssignmentAppliedPayloadSize> receipt{};
+                write_u64_le(receipt, 0, peer.grid_applied_receipt_revision);
+                if (network_session.sendToPeer(peer.peer_id, jam2::protocol::PacketType::GridAssignmentApplied,
+                        packet_schedule.takeControlSequence(), peer.grid_applied_receipt_token, receipt)) {
+                    ++grid_assignment_acks_sent;
+                    peer.grid_applied_receipt_revision = peer.grid_applied_receipt_token = 0;
+                }
+            }
+        }
         if (!timed_stream_audio_detached && now >= send_deadline) {
             capture_ready_wake.cancelWakeRequest();
             detach_network_capture(audio);
@@ -3355,6 +3448,17 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                     run_state,
                     reset_epoch);
             };
+            if (options.datagram_transport && !authority.localIsBootstrapCoordinator()) {
+                if (runtime_host.takeGridAssignmentRecovery())
+                    pending_grid_recovery = GridRecoveryRequest{jam2::random_u64(), 0};
+                if (pending_grid_recovery && now >= pending_grid_recovery->next_send_us &&
+                    peer_endpoint_state(jam2::PeerId{authority.bootstrapCoordinatorPeerId()}) == jam2::PeerEndpointState::Active) {
+                    if (network_session.sendToPeer(jam2::PeerId{authority.bootstrapCoordinatorPeerId()},
+                            jam2::protocol::PacketType::GridAssignmentRequest, packet_schedule.takeControlSequence(),
+                            pending_grid_recovery->token, {})) ++grid_recovery_requests_sent;
+                    pending_grid_recovery->next_send_us = now + kGridRecoveryRetryUs;
+                }
+            }
             if (pending_local_grid_proposal && now >= next_grid_proposal_send_us) {
                 const auto& proposal = *pending_local_grid_proposal;
                 const auto payload = make_grid_payload(
@@ -3374,8 +3478,32 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                 ++mesh_grid_proposals_sent;
                 next_grid_proposal_send_us = now + 20000ULL;
             }
-            if (authority.localIsBootstrapCoordinator() && authority.grid().revision != 0 &&
-                now >= next_grid_assignment_send_us) {
+            if (options.datagram_transport && authority.localIsBootstrapCoordinator() && authority.grid().revision != 0) {
+                const auto& grid = authority.grid();
+                if (cached_grid_assignment_revision != grid.revision) {
+                    cached_grid_assignment = make_grid_payload(GridMessageKind::Assignment,
+                        grid.revision, grid.authority_epoch_frame, grid.mode, grid.run_state, grid.epoch_reset);
+                    cached_grid_assignment_revision = grid.revision;
+                }
+                for (auto& [id, peer] : peers) {
+                    if (peer_endpoint_state(peer.peer_id) != jam2::PeerEndpointState::Active) {
+                        peer.grid_delivery.reset();
+                        continue;
+                    }
+                    auto& delivery = peer.grid_delivery;
+                    if (delivery.revision() != grid.revision) delivery.begin(grid.revision, jam2::random_u64());
+                    if (!delivery.due(now)) continue;
+                    std::array<std::uint8_t, jam2::protocol::kGridAssignmentPayloadSize> payload{};
+                    std::copy(cached_grid_assignment.begin(), cached_grid_assignment.end(), payload.begin());
+                    write_u64_le(payload, jam2::protocol::kMetronomeStatePayloadSize, delivery.token());
+                    if (delivery.attempts()) ++grid_assignment_retries;
+                    delivery.attempted(now);
+                    ++mesh_grid_assignments_sent;
+                    if (network_session.sendToPeer(peer.peer_id, jam2::protocol::PacketType::GridAssignment,
+                            packet_schedule.takeControlSequence(), grid.authority_peer_id, payload)) ++grid_assignment_packets;
+                }
+            } else if (!options.datagram_transport && authority.localIsBootstrapCoordinator() && authority.grid().revision != 0 &&
+                       now >= next_grid_assignment_send_us) {
                 const auto& grid = authority.grid();
                 const auto payload = make_grid_payload(
                     GridMessageKind::Assignment,
@@ -3395,18 +3523,27 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
             if (authority.localIsGridAuthority() &&
                 commands.state.metronome_epoch_valid.load(std::memory_order_relaxed)) {
                 const auto& grid = authority.grid();
-                const auto payload = make_grid_payload(
-                    GridMessageKind::AuthorityState,
-                    grid.revision,
-                    commands.state.metronome_epoch_sample_time.load(std::memory_order_relaxed),
-                    grid.mode,
-                    grid.run_state);
-                network_session.sendToActive(
-                    jam2::protocol::PacketType::MetronomeState,
-                    packet_schedule.takeControlSequence(),
-                    current_engine_frame(audio.engine.get()),
-                    payload);
-                ++mesh_grid_authority_states_sent;
+                const jam2::metronome::AuthorityBeaconState beacon_state{
+                    grid.revision, commands.state.metronome_epoch_sample_time.load(std::memory_order_relaxed),
+                    network_session.activePeerCount()};
+                if (!options.datagram_transport || authority_beacons.due(now, beacon_state)) {
+                    const auto payload = make_grid_payload(
+                        GridMessageKind::AuthorityState,
+                        grid.revision,
+                        beacon_state.epoch,
+                        grid.mode,
+                        grid.run_state);
+                    const auto sent = network_session.sendToActive(
+                        jam2::protocol::PacketType::MetronomeState,
+                        packet_schedule.takeControlSequence(),
+                        current_engine_frame(audio.engine.get()),
+                        payload);
+                    ++mesh_grid_authority_states_sent;
+                    mesh_grid_authority_packets_sent += sent.peer_count;
+                    // Only Server changes cadence. A new revision/epoch or active
+                    // peer count requests a fresh observation on the next grid turn.
+                    if (options.datagram_transport) authority_beacons.commitAttempt(now, beacon_state);
+                }
             }
             if (!authority.localIsGridAuthority() &&
                 listener_compensated &&
@@ -3646,6 +3783,8 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                     }
 
                     if (endpoint_changed) {
+                        peer.grid_delivery.reset();
+                        peer.grid_applied_receipt_revision = peer.grid_applied_receipt_token = 0;
                         const std::string before = jam2::endpoint_to_string(
                             jam2::format_udp_endpoint(descriptor->endpoint));
                         if (!network_session.rebindPeerEndpoint(
@@ -3673,6 +3812,12 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
 
                     peer.last_authenticated_receive_us = datagram_receive_time_us;
                     if (header.type == jam2::protocol::PacketType::Hello) {
+                        // A fresh runtime can reuse its authenticated membership and
+                        // physical link. Its HELLO also requests the current snapshot.
+                        if (options.datagram_transport && peer.grid_recovery_hello != header.timing_value) {
+                            peer.grid_recovery_hello = header.timing_value;
+                            peer.grid_delivery.reset();
+                        }
                         if (network_session.sendToPeer(
                                 peer.peer_id,
                                 jam2::protocol::PacketType::HelloAck,
@@ -3790,7 +3935,29 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                         ++peer.proof_successes;
                     }
                     ++peer.recv_pongs;
-                } else if (header.type == jam2::protocol::PacketType::MetronomeState) {
+                } else if (header.type == jam2::protocol::PacketType::GridAssignmentRequest) {
+                    if (!options.datagram_transport || !authority.localIsBootstrapCoordinator() ||
+                        authority.grid().revision == 0 || header.timing_value == 0 ||
+                        !peer_stream.acceptReplay(jam2::PeerReplayChannel::Metronome, header.sequence)) {
+                        ++peer.ignored_packets;
+                        continue;
+                    }
+                    // Echo the request nonce as the new application token. A
+                    // repeated request cannot reset/back off the same delivery.
+                    if (peer.grid_delivery.revision() != authority.grid().revision ||
+                        peer.grid_delivery.token() != header.timing_value)
+                        peer.grid_delivery.begin(authority.grid().revision, header.timing_value);
+                } else if (header.type == jam2::protocol::PacketType::GridAssignmentApplied) {
+                    if (!options.datagram_transport || !authority.localIsBootstrapCoordinator() ||
+                        !peer.grid_delivery.acknowledge(read_u64_le(payload, 0), header.timing_value)) {
+                        ++grid_assignment_invalid_acks;
+                    } else {
+                        ++grid_assignment_acks_received;
+                    }
+                } else if (header.type == jam2::protocol::PacketType::MetronomeState ||
+                           header.type == jam2::protocol::PacketType::GridAssignment) {
+                    const bool reliable_assignment = header.type == jam2::protocol::PacketType::GridAssignment;
+                    if (reliable_assignment && !options.datagram_transport) { ++peer.ignored_packets; continue; }
                     if (!peer_stream.acceptReplay(
                             jam2::PeerReplayChannel::Metronome,
                             header.sequence)) {
@@ -3800,7 +3967,14 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                     const auto payload = std::span<const std::uint8_t>(
                         bytes.data() + jam2::protocol::kHeaderSize,
                         header.payload_length);
-                    const MetronomePayload metronome = decode_metronome_payload(payload);
+                    const MetronomePayload metronome = decode_metronome_payload(
+                        payload.first(jam2::protocol::kMetronomeStatePayloadSize));
+                    if ((reliable_assignment && (metronome.kind != GridMessageKind::Assignment ||
+                            read_u64_le(payload, jam2::protocol::kMetronomeStatePayloadSize) == 0)) ||
+                        (options.datagram_transport && !reliable_assignment && metronome.kind == GridMessageKind::Assignment)) {
+                        ++peer.ignored_packets;
+                        continue;
+                    }
                     const int remote_abs_bpm = std::abs(metronome.bpm);
                     if (remote_abs_bpm <= 0 || remote_abs_bpm > 400) {
                         ++peer.ignored_packets;
@@ -3809,6 +3983,7 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                     if (runtime_host.lane_recording_isolation_enabled.load(
                             std::memory_order_acquire) &&
                         metronome.kind != GridMessageKind::PeerPhase) {
+                        if (reliable_assignment) ++grid_assignment_deferred;
                         ++peer.ignored_packets;
                         continue;
                     }
@@ -3816,7 +3991,7 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                         if (commands.state.grid_request_sequence.load(std::memory_order_acquire) !=
                                 last_local_grid_request_sequence ||
                             pending_local_grid_proposal.has_value()) {
-                            return;
+                            return false;
                         }
                         auto shared_pattern = metronome.pattern;
                         const auto local_pattern = metronome_pattern_from_runtime(commands.state);
@@ -3837,6 +4012,7 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                                 std::memory_order_relaxed);
                         }
                         commands.state.metronome_mode.store(metronome.mode, std::memory_order_relaxed);
+                        return true;
                     };
                     if (metronome.kind == GridMessageKind::PeerPhase) {
                         const auto& grid = authority.grid();
@@ -3878,6 +4054,11 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
 
                         }
                     } else if (metronome.kind == GridMessageKind::Assignment) {
+                        if (reliable_assignment && peer.received_grid_assignment_revision == metronome.revision_or_request &&
+                            !std::equal(peer.received_grid_assignment.begin(), peer.received_grid_assignment.end(), payload.begin())) {
+                            ++peer.ignored_packets;
+                            continue;
+                        }
                         const jam2::GridAuthorityState assignment{
                             metronome.revision_or_request,
                             header.timing_value,
@@ -3891,9 +4072,26 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                             peer.peer_id.value,
                             assignment);
                         if (result == jam2::AuthorityUpdateResult::Accepted) {
+                            if (reliable_assignment) {
+                                peer.received_grid_assignment_revision = assignment.revision;
+                                std::copy_n(payload.begin(), peer.received_grid_assignment.size(), peer.received_grid_assignment.begin());
+                            }
                             pending_local_grid_proposal.reset();
-                            store_grid_settings();
+                            const bool stored = store_grid_settings();
                             apply_ordered_grid(assignment.epoch_reset);
+                            if (reliable_assignment && stored) {
+                                peer.grid_applied_receipt_revision = assignment.revision;
+                                peer.grid_applied_receipt_token = read_u64_le(payload, jam2::protocol::kMetronomeStatePayloadSize);
+                                if (pending_grid_recovery && pending_grid_recovery->token == peer.grid_applied_receipt_token)
+                                    pending_grid_recovery.reset();
+                            }
+                        } else if (reliable_assignment && result == jam2::AuthorityUpdateResult::Duplicate && store_grid_settings()) {
+                            // An ACK may have been lost. Re-ACK after application,
+                            // without executing the epoch reset a second time.
+                            peer.grid_applied_receipt_revision = assignment.revision;
+                            peer.grid_applied_receipt_token = read_u64_le(payload, jam2::protocol::kMetronomeStatePayloadSize);
+                            if (pending_grid_recovery && pending_grid_recovery->token == peer.grid_applied_receipt_token)
+                                pending_grid_recovery.reset();
                         }
                     } else if (metronome.kind == GridMessageKind::AuthorityState) {
                         const jam2::GridAuthorityState remote_state{
@@ -3943,20 +4141,32 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                                             std::memory_order_relaxed));
                                     const std::uint64_t local_epoch =
                                         commands.state.metronome_epoch_sample_time.load(std::memory_order_relaxed);
-                                    auto phase = [&](std::uint64_t frame, std::uint64_t epoch) {
-                                        return frame >= epoch
-                                            ? static_cast<std::int64_t>((frame - epoch) % bar_frames)
-                                            : -static_cast<std::int64_t>((epoch - frame) % bar_frames);
-                                    };
-                                    std::int64_t error = phase(projected, metronome.epoch_sample_time) -
-                                        phase(local_frame, local_epoch);
-                                    const std::int64_t interval = static_cast<std::int64_t>(bar_frames);
-                                    if (error > interval / 2) error -= interval;
-                                    if (error < -interval / 2) error += interval;
-                                    mesh_grid_target_offset_frames =
-                                        commands.state.metronome_render_offset_frames.load(
-                                            std::memory_order_relaxed) + error;
-                                    mesh_grid_target_valid = true;
+                                    if (options.datagram_transport) {
+                                        // Server experiment: the same phase calculation is also
+                                        // exercised with accelerated clocks by the native test.
+                                        const auto error = jam2::metronome::grid_phase_error({
+                                            projected, metronome.epoch_sample_time, local_frame, local_epoch, bar_frames});
+                                        if (error) {
+                                            mesh_grid_target_offset_frames = commands.state.metronome_render_offset_frames.load(
+                                                std::memory_order_relaxed) + *error;
+                                            mesh_grid_target_valid = true;
+                                        }
+                                    } else {
+                                        auto phase = [&](std::uint64_t frame, std::uint64_t epoch) {
+                                            return frame >= epoch
+                                                ? static_cast<std::int64_t>((frame - epoch) % bar_frames)
+                                                : -static_cast<std::int64_t>((epoch - frame) % bar_frames);
+                                        };
+                                        std::int64_t error = phase(projected, metronome.epoch_sample_time) -
+                                            phase(local_frame, local_epoch);
+                                        const std::int64_t interval = static_cast<std::int64_t>(bar_frames);
+                                        if (error > interval / 2) error -= interval;
+                                        if (error < -interval / 2) error += interval;
+                                        mesh_grid_target_offset_frames =
+                                            commands.state.metronome_render_offset_frames.load(
+                                                std::memory_order_relaxed) + error;
+                                        mesh_grid_target_valid = true;
+                                    }
                                 }
                             }
                             apply_grid_publisher_role();
@@ -3973,6 +4183,11 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                         bytes.data() + jam2::protocol::kHeaderSize,
                         header.payload_length);
                     const TransportPayload transport = decode_transport_payload(payload);
+                    if (options.datagram_transport && peer.has_accepted_transport_intent &&
+                        std::equal(payload.begin(),payload.end(),peer.accepted_transport_intent.begin())) {
+                        options.datagram_transport->transportIntentAccepted(peer.peer_id.value,payload);
+                        continue; // Recover a lost receipt without executing the action twice.
+                    }
                     const bool track_transport =
                         jam2::is_track_sync_transport_action(transport.action);
                     const bool accept_track_transport = jam2::transport_sync_enabled(
@@ -4091,6 +4306,7 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                         transport.event_counter,
                         transport.grid_revision,
                         !track_transport);
+                    bool receipt_ready=accepted_transport && (!track_transport || !accept_track_transport || !accept_during_recording);
                     if (accepted_transport) {
                         mesh_transport_source_peer_id = peer.peer_id.value;
                         mesh_transport_event_counter = transport.event_counter;
@@ -4158,7 +4374,13 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                                 transport.action,
                                 schedule,
                                 false);
+                            receipt_ready=true;
                         }
+                    }
+                    if (options.datagram_transport && receipt_ready) {
+                        std::copy(payload.begin(),payload.end(),peer.accepted_transport_intent.begin());
+                        peer.has_accepted_transport_intent=true;
+                        options.datagram_transport->transportIntentAccepted(peer.peer_id.value,payload);
                     }
                 } else if (header.type == jam2::protocol::PacketType::Bye) {
                     (void)peer_stream.acceptReplay(

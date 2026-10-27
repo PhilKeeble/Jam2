@@ -12,7 +12,7 @@
 
 namespace jam2::application::server_wire {
 
-inline constexpr int kVersion = 2;
+inline constexpr int kVersion = 4;
 inline constexpr qsizetype kRecordHeaderBytes = 32;
 inline constexpr qsizetype kMaximumDocumentBytes = 4 * 1024 * 1024;
 inline constexpr qsizetype kMaximumQueuedBytes = 5 * 1024 * 1024;
@@ -55,6 +55,9 @@ struct Stats {
     quint64 transportWrites = 0, batchedRecords = 0, coalescedUpdates = 0, cumulativeReceipts = 0;
     quint64 independentRecordsSent = 0, independentRecordsReceived = 0, independentQueuedBytes = 0;
     quint64 assignmentDelaySamples = 0, assignmentDelaySumUs = 0, assignmentDelayMaxUs = 0;
+    quint64 typedManifests = 0, manifestDocumentFallbacks = 0;
+    quint64 typedRegions = 0, typedStructures = 0;
+    quint64 peerDefinitions = 0, peerReferences = 0;
     QString lastRejection;
 };
 void accumulate(Stats& target, const Stats& value) noexcept;
@@ -65,7 +68,12 @@ QJsonObject diagnostics(const Stats& value);
 // Each authenticated logical stream owns its own delta and transfer bindings.
 class Codec {
 public:
-    struct Options { bool numericDocuments = true; qsizetype compressionMinimumBytes = 128; bool typedRenames = true; };
+    struct Options {
+        bool numericDocuments = true;
+        qsizetype compressionMinimumBytes = 128;
+        bool typedRenames = true, typedManifests = true, typedRegions = true, typedStructures = true;
+        bool peerHandles = true;
+    };
     struct Encoded {
         Operation operation{};
         QByteArray payload;

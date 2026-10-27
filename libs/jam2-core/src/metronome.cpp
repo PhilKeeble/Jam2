@@ -370,6 +370,43 @@ std::uint64_t raw_epoch_phase(std::uint64_t epoch, std::int64_t clockOffset, std
     return phase >= interval - offset ? phase - (interval - offset) : phase + offset;
 }
 
+std::optional<std::int64_t> grid_phase_error(const GridPhaseObservation& observation) noexcept
+{
+    if (!observation.bar_frames || observation.bar_frames >
+        static_cast<std::uint64_t>((std::numeric_limits<std::int64_t>::max)()) / 2) return {};
+    const auto phase = [&](std::uint64_t frame, std::uint64_t epoch) {
+        return frame >= epoch
+            ? static_cast<std::int64_t>((frame - epoch) % observation.bar_frames)
+            : -static_cast<std::int64_t>((epoch - frame) % observation.bar_frames);
+    };
+    auto error = phase(observation.authority_frame, observation.authority_epoch) -
+        phase(observation.local_musical_frame, observation.local_epoch);
+    const auto interval = static_cast<std::int64_t>(observation.bar_frames);
+    if (error > interval / 2) error -= interval;
+    if (error < -interval / 2) error += interval;
+    return error;
+}
+
+bool AuthorityBeaconSchedule::due(std::uint64_t now_us, AuthorityBeaconState state) const noexcept
+{
+    return !last_ || *last_ != state || now_us >= next_us_;
+}
+void AuthorityBeaconSchedule::commitAttempt(std::uint64_t now_us, AuthorityBeaconState state) noexcept
+{
+    last_ = state;
+    const auto maximum = (std::numeric_limits<std::uint64_t>::max)();
+    next_us_ = interval_us_ > maximum - now_us ? maximum : now_us + interval_us_;
+}
+std::uint64_t AuthorityBeaconSchedule::phaseFreshnessUs() const noexcept
+{
+    const auto maximum = (std::numeric_limits<std::uint64_t>::max)();
+    return interval_us_ > (maximum - 500000) / 2 ? maximum : interval_us_ * 2 + 500000;
+}
+bool AuthorityBeaconSchedule::phaseFresh(std::uint64_t now_us, std::uint64_t received_us) const noexcept
+{
+    return received_us && now_us >= received_us && now_us - received_us <= phaseFreshnessUs();
+}
+
 AuthorityClockMapping map_authority_clock(
     std::uint64_t authority_epoch_sample_time,
     std::uint64_t projected_authority_sample_time,

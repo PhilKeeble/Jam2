@@ -350,7 +350,7 @@ void testRuntimeCountersAndPeerGain()
     expect(runtime.startNetwork(options) && runtime.isNetworkRunning(),
         "application runtime starts its bounded fake network worker");
     expect(runtime.engineReuses() == 2 &&
-            runtime.reprobePeers() &&
+            runtime.reprobePeers() && runtime.requestGridAssignmentRecovery() &&
             runtime.setPeerGainDb(2, 0.0) &&
             runtime.setPeerGainDb(2, -60.0) &&
             !runtime.setPeerGainDb(0, 0.0) &&
@@ -360,7 +360,7 @@ void testRuntimeCountersAndPeerGain()
         "network peer gain accepts finite bounds and rejects invalid identity/range");
     runtime.stopNetwork();
     expect(!runtime.isNetworkRunning() && !runtime.setPeerGainDb(2, 0.0) &&
-            !runtime.reprobePeers(),
+            !runtime.reprobePeers() && !runtime.requestGridAssignmentRecovery(),
         "peer gain and proof reset reject a stopped network worker");
     runtime.shutdown();
 
@@ -374,6 +374,12 @@ void testRuntimeCountersAndPeerGain()
     host.reset();
     expect(!host.takePeerReprobe(),
         "runtime host reset clears stale UDP proof requests");
+    expect(!host.takeGridAssignmentRecovery(), "runtime host starts with no grid recovery request");
+    host.submitGridAssignmentRecovery(); host.submitGridAssignmentRecovery();
+    expect(host.takeGridAssignmentRecovery() && !host.takeGridAssignmentRecovery() && !host.takePeerReprobe(),
+        "grid recovery coalesces without resetting the audio proof state");
+    host.submitGridAssignmentRecovery(); host.reset();
+    expect(!host.takeGridAssignmentRecovery(), "runtime reset retained old grid recovery request");
 }
 
 void testIncomingAudioDelayEstimate()

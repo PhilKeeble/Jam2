@@ -1,4 +1,5 @@
 #include "ServerControlWire.hpp"
+#include "ContentLimits.hpp"
 #include "miniz_tinfl.h"
 
 #include <QCborValue>
@@ -107,6 +108,11 @@ const Schema* schemaFor(const QString& name)
 {
     for (const auto& s : schemas()) if (name == QLatin1String(s.name)) return &s;
     return nullptr;
+}
+bool scalarAssignment(Operation operation)
+{
+    return operation==Operation::Cell || operation==Operation::MusicStep ||
+        operation==Operation::BeatDivision || operation==Operation::MusicDivision;
 }
 
 struct Writer {
@@ -257,7 +263,51 @@ bool fixedHex(const QString& text, int size, QByteArray& out)
     for (const auto ch : text) if (!((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F'))) return false;
     out = QByteArray::fromHex(text.toLatin1()); return out.size() == size;
 }
-bool encodeStructured(Type type, const QJsonValue& value, Writer& writer)
+struct PeerHandles {
+    QHash<QString,quint16> ids;
+    QVector<QString> values;
+    quint64 definitions=0,references=0;
+};
+bool peerField(const char* field)
+{
+    const QByteArrayView name(field);
+    return name.endsWith("_token") || name=="peer" || name=="a" || name=="b";
+}
+bool writePeer(Writer& writer,const QString& text,PeerHandles& handles,bool compact,bool define=true)
+{
+    if (text.isEmpty()) { writer.number<quint8>(0); return true; }
+    QByteArray identity; if (!fixedHex(text,16,identity)) return false;
+    const auto canonical=QString::fromLatin1(identity.toHex());
+    const auto found=handles.ids.constFind(canonical);
+    if (compact && found!=handles.ids.cend()) {
+        writer.number<quint8>(2); writer.number<quint16>(*found); ++handles.references; return true;
+    }
+    // An unsent scalar assignment may be superseded before reaching the wire.
+    // It can refer to established mappings but must not introduce dependencies.
+    writer.number<quint8>(define ? 1 : 3); writer.bytes+=identity;
+    if (define && found==handles.ids.cend() && handles.values.size()<4096) {
+        handles.values.append(canonical); handles.ids.insert(canonical,static_cast<quint16>(handles.values.size())); ++handles.definitions;
+    }
+    return true;
+}
+bool readPeer(Reader& reader,QString& text,PeerHandles& handles)
+{
+    const auto marker=reader.number<quint8>();
+    if (marker==0) { text.clear(); return reader.okay; }
+    if (marker==2) {
+        const auto handle=reader.number<quint16>();
+        if (!reader.okay || !handle || handle>handles.values.size()) return false;
+        text=handles.values[handle-1]; return true;
+    }
+    if (marker!=1 && marker!=3) return false;
+    const auto identity=reader.take(16); if (!reader.okay) return false;
+    text=QString::fromLatin1(identity.toHex());
+    if (marker==1 && !handles.ids.contains(text) && handles.values.size()<4096) {
+        handles.values.append(text); handles.ids.insert(text,static_cast<quint16>(handles.values.size()));
+    }
+    return true;
+}
+bool encodeStructured(Type type, const QJsonValue& value, Writer& writer,PeerHandles& handles,bool compact)
 {
     if (type == Type::Settings) {
         const auto object = value.toObject();
@@ -289,7 +339,8 @@ bool encodeStructured(Type type, const QJsonValue& value, Writer& writer)
         const auto text = type == Type::Peers ? entry.toObject().value("token").toString() : entry.toString();
         QByteArray bytes;
         if (!fixedHex(text, type == Type::Hashes ? 32 : 16, bytes)) return false;
-        writer.bytes += bytes;
+        if (type==Type::Hashes) writer.bytes+=bytes;
+        else if (!writePeer(writer,text,handles,compact)) return false;
         if (type == Type::Peers) {
             const auto object = entry.toObject();
             const auto id = qFromBigEndian<quint64>(reinterpret_cast<const uchar*>(bytes.constData()));
@@ -298,7 +349,7 @@ bool encodeStructured(Type type, const QJsonValue& value, Writer& writer)
     }
     return true;
 }
-bool decodeStructured(Type type, Reader& r, QJsonValue& value)
+bool decodeStructured(Type type, Reader& r, QJsonValue& value,PeerHandles& handles)
 {
     if (type == Type::Settings) {
         const auto speed = r.number<qint32>(), pitch = r.number<qint32>(); const auto flags = r.number<quint8>();
@@ -317,8 +368,10 @@ bool decodeStructured(Type type, Reader& r, QJsonValue& value)
     const auto count = r.number<quint8>(); if (!r.okay || count > 64) return false;
     QJsonArray array;
     for (quint16 i = 0; i < count; ++i) {
-        const auto bytes = r.take(type == Type::Hashes ? 32 : 16); if (!r.okay) return false;
-        const auto text = QString::fromLatin1(bytes.toHex());
+        QByteArray bytes; QString text;
+        if (type==Type::Hashes) { bytes=r.take(32); text=QString::fromLatin1(bytes.toHex()); }
+        else { if (!readPeer(r,text,handles) || text.isEmpty()) return false; bytes=QByteArray::fromHex(text.toLatin1()); }
+        if (!r.okay) return false;
         if (type == Type::Peers) {
             const auto id = qFromBigEndian<quint64>(reinterpret_cast<const uchar*>(bytes.constData()));
             array.append(QJsonObject{{"token", text}, {"peer_id", QString::number(id)}, {"endpoint", r.text()}});
@@ -359,6 +412,107 @@ bool readDocument(const QByteArray& bytes, QJsonValue& out)
 }
 QByteArray documentBytes(const QJsonValue& value, bool numeric = true) { return (numeric ? numericDocument(value) : QCborValue::fromJsonValue(value)).toCbor(); }
 
+// The owned manifest fields have a fixed schema; unknown extension fields keep
+// the bounded document representation rather than being silently discarded.
+enum class ManifestType { Uuid, Bank, Text, Hash, OptionalHash, U32, Frame, Bool, F64 };
+struct ManifestField { const char* name; ManifestType type; };
+constexpr std::array<ManifestField,16> manifestFields{{
+    {"recording_id",ManifestType::Uuid},{"bank",ManifestType::Bank},{"target_lane_id",ManifestType::Text},
+    {"sha256",ManifestType::Hash},{"name",ManifestType::Text},{"sample_rate",ManifestType::U32},
+    {"source_frames",ManifestType::Frame},{"start_frame",ManifestType::Frame},{"stop_frame",ManifestType::Frame},
+    {"loop_start_frame",ManifestType::Frame},{"loop_end_frame",ManifestType::Frame},{"loop_enabled",ManifestType::Bool},
+    {"reference_kind",ManifestType::Text},{"reference_source_signature",ManifestType::OptionalHash},
+    {"reference_bpm",ManifestType::F64},{"reference_stale",ManifestType::Bool}}};
+QByteArray typedManifest(const QJsonValue& value)
+{
+    if (!value.isArray() || value.toArray().size() > limits::kMaximumLooperBankCount * limits::kMaximumLooperLanesPerBank) return {};
+    Writer out; const auto entries=value.toArray(); out.number<quint16>(static_cast<quint16>(entries.size()));
+    for (const auto& entry : entries) {
+        if (!entry.isObject()) return {};
+        const auto object=entry.toObject(); Writer fields; quint16 mask=0; quint8 flags=0;
+        int found=0;
+        for (std::size_t i=0;i<manifestFields.size();++i) {
+            const auto& f=manifestFields[i]; const auto item=object.value(QLatin1String(f.name));
+            if (item.isUndefined()) continue;
+            ++found; mask|=quint16{1}<<i;
+            switch (f.type) {
+            case ManifestType::Uuid: {
+                if (!item.isString()) return {};
+                const auto uuid=QUuid::fromString(item.toString());
+                if (uuid.isNull() || uuid.toString(QUuid::WithoutBraces)!=item.toString()) return {};
+                fields.bytes+=uuid.toRfc4122(); break;
+            }
+            case ManifestType::Hash: case ManifestType::OptionalHash: {
+                if (!item.isString()) return {};
+                const auto text=item.toString(); QByteArray hash;
+                if (f.type==ManifestType::OptionalHash) fields.number<quint8>(!text.isEmpty());
+                if (!text.isEmpty() || f.type==ManifestType::Hash) {
+                    if (!fixedHex(text,32,hash) || QString::fromLatin1(hash.toHex())!=text) return {};
+                    fields.bytes+=hash;
+                }
+                break;
+            }
+            case ManifestType::Text: if (!item.isString() || !fields.text(item.toString())) return {}; break;
+            case ManifestType::Bank: case ManifestType::U32: {
+                const auto n=item.toInteger(-1);
+                if (!item.isDouble() || n<0 || item.toDouble()!=static_cast<double>(n) ||
+                    (f.type==ManifestType::Bank ? n>=limits::kMaximumLooperBankCount : n>UINT32_MAX)) return {};
+                if (f.type==ManifestType::Bank) fields.number<quint8>(static_cast<quint8>(n));
+                else fields.number<quint32>(static_cast<quint32>(n)); break;
+            }
+            case ManifestType::Frame: {
+                bool okay=false; const auto n=item.toString().toLongLong(&okay);
+                if (!item.isString() || !okay || QString::number(n)!=item.toString() || n < -1) return {};
+                fields.number<qint64>(n); break;
+            }
+            case ManifestType::Bool:
+                if (!item.isBool()) return {};
+                if (item.toBool()) flags|=i==11 ? 1 : 2;
+                break;
+            case ManifestType::F64:
+                if (!item.isDouble() || !std::isfinite(item.toDouble())) return {};
+                fields.number<quint64>(std::bit_cast<quint64>(item.toDouble())); break;
+            }
+        }
+        if (found!=object.size()) return {};
+        out.number<quint16>(mask); out.number<quint8>(flags); out.bytes+=fields.bytes;
+        if (out.bytes.size()>kMaximumDocumentBytes) return {};
+    }
+    return out.bytes;
+}
+bool readManifest(const QByteArray& bytes,QJsonValue& value)
+{
+    Reader r{bytes}; const auto count=r.number<quint16>();
+    if (!r.okay || count>limits::kMaximumLooperBankCount * limits::kMaximumLooperLanesPerBank) return false;
+    QJsonArray entries;
+    for (unsigned entry=0;entry<count;++entry) {
+        const auto mask=r.number<quint16>(); const auto flags=r.number<quint8>(); QJsonObject object;
+        if (flags>3 || ((flags&1) && !(mask&(1<<11))) || ((flags&2) && !(mask&(1<<15)))) return false;
+        for (std::size_t i=0;i<manifestFields.size();++i) {
+            if (!(mask&(quint16{1}<<i))) continue;
+            const auto& f=manifestFields[i]; QJsonValue item;
+            switch (f.type) {
+            case ManifestType::Uuid: item=QUuid::fromRfc4122(r.take(16)).toString(QUuid::WithoutBraces); break;
+            case ManifestType::Hash: item=QString::fromLatin1(r.take(32).toHex()); break;
+            case ManifestType::OptionalHash: {
+                const auto present=r.number<quint8>(); if (present>1) return false;
+                item=present ? QString::fromLatin1(r.take(32).toHex()) : QString{}; break;
+            }
+            case ManifestType::Text: item=r.text(); break;
+            case ManifestType::Bank: { const auto bank=r.number<quint8>(); if (bank>=limits::kMaximumLooperBankCount) return false; item=bank; break; }
+            case ManifestType::U32: item=static_cast<qint64>(r.number<quint32>()); break;
+            case ManifestType::Frame: { const auto n=r.number<qint64>(); if (n < -1) return false; item=QString::number(n); break; }
+            case ManifestType::Bool: item=bool(flags & (i==11 ? 1 : 2)); break;
+            case ManifestType::F64: { const auto n=std::bit_cast<double>(r.number<quint64>()); if (!std::isfinite(n)) return false; item=n; break; }
+            }
+            if (!r.okay) return false;
+            object.insert(QLatin1String(f.name),item);
+        }
+        entries.append(object);
+    }
+    value=entries; return r.done();
+}
+
 // A typed rename within an already bound snapshot. Indices are safe only inside
 // the checked base serial; this never resolves a stale proposal by array index.
 bool applyRename(const QJsonValue& base, quint16 bankIndex, quint16 laneIndex, const QString& name, QJsonValue& out)
@@ -390,6 +544,70 @@ QByteArray typedRename(const QJsonValue& base, const QJsonValue& value)
             Writer w; w.number<quint8>(4); w.number<quint16>(b); w.number<quint16>(l);
             if (!w.text(name.toString())) return {};
             return w.bytes;
+        }
+        return {};
+    }
+    return {};
+}
+
+QJsonArray bankLanes(const QJsonValue& song,qsizetype bank)
+{
+    const auto banks=song.toObject().value("looper").toObject().value("banks").toArray();
+    return bank>=0 && bank<banks.size() ? banks[bank].toObject().value("lanes").toArray() : QJsonArray{};
+}
+bool replaceLanes(const QJsonValue& base,quint16 bankIndex,const QJsonArray& lanes,QJsonValue& out)
+{
+    auto song=base.toObject(); auto looper=song.value("looper").toObject(); auto banks=looper.value("banks").toArray();
+    if (bankIndex>=banks.size() || lanes.size()>limits::kMaximumLooperLanesPerBank) return false;
+    auto bank=banks[bankIndex].toObject(); bank["lanes"]=lanes; banks[bankIndex]=bank;
+    looper["banks"]=banks; song["looper"]=looper; out=song; return true;
+}
+constexpr std::array<const char*,4> regionFields{{"start_frame","stop_frame","loop_start_frame","loop_end_frame"}};
+bool applyRegion(const QJsonValue& base,quint16 bank,quint16 laneIndex,
+    const std::array<qint64,4>& frames,bool loop,QJsonValue& out)
+{
+    auto lanes=bankLanes(base,bank);
+    if (laneIndex>=lanes.size() || !lanes[laneIndex].isObject()) return false;
+    if (frames[0]<0 || frames[0]>limits::kMaximumLooperTimelineFrames ||
+        (frames[1]!=-1 && (frames[1]<=frames[0] || frames[1]>limits::kMaximumLooperTimelineFrames))) return false;
+    const bool unset=frames[2]==-1 && frames[3]==-1;
+    const bool crop=frames[2]>=0 && frames[3]>frames[2] && frames[3]<=limits::kMaximumAssetFrames;
+    auto lane=lanes[laneIndex].toObject();
+    const auto source=lane.value("source_frames").toString().toLongLong();
+    if ((!unset && !crop) || (crop && source>0 && frames[3]>source)) return false;
+    for (std::size_t i=0;i<frames.size();++i) lane[QLatin1String(regionFields[i])]=QString::number(frames[i]);
+    lane["loop_enabled"]=loop; lanes[laneIndex]=lane;
+    return replaceLanes(base,bank,lanes,out);
+}
+QByteArray typedLaneEdit(const QJsonValue& base,const QJsonValue& value,bool region,bool structure)
+{
+    const auto banks=value.toObject().value("looper").toObject().value("banks").toArray();
+    const auto oldBanks=base.toObject().value("looper").toObject().value("banks").toArray();
+    if (!base.isObject() || !value.isObject() || banks.size()!=oldBanks.size() || banks.size()>limits::kMaximumLooperBankCount) return {};
+    for (qsizetype b=0;b<banks.size();++b) {
+        if (banks[b]==oldBanks[b]) continue;
+        const auto lanes=bankLanes(value,b),old=bankLanes(base,b); Writer w; QJsonValue reconstructed;
+        if (lanes.size()>limits::kMaximumLooperLanesPerBank || old.size()>limits::kMaximumLooperLanesPerBank) return {};
+        if (structure && lanes.size()!=old.size()) {
+            qsizetype prefix=0,suffix=0;
+            while (prefix<std::min(lanes.size(),old.size()) && lanes[prefix]==old[prefix]) ++prefix;
+            while (suffix<std::min(lanes.size(),old.size())-prefix && lanes[lanes.size()-suffix-1]==old[old.size()-suffix-1]) ++suffix;
+            if (!replaceLanes(base,static_cast<quint16>(b),lanes,reconstructed) || reconstructed!=value) return {};
+            QJsonArray inserted; for (auto i=prefix;i<lanes.size()-suffix;++i) inserted.append(lanes[i]);
+            w.number<quint8>(6); w.number<quint16>(static_cast<quint16>(b)); w.number<quint16>(static_cast<quint16>(prefix));
+            w.number<quint16>(static_cast<quint16>(old.size()-prefix-suffix)); w.block(documentBytes(inserted)); return w.bytes;
+        }
+        if (!region || lanes.size()!=old.size()) return {};
+        for (qsizetype l=0;l<lanes.size();++l) {
+            if (lanes[l]==old[l]) continue;
+            const auto lane=lanes[l].toObject(); std::array<qint64,4> frames{};
+            for (std::size_t i=0;i<frames.size();++i) {
+                bool okay=false; const auto item=lane.value(QLatin1String(regionFields[i])); frames[i]=item.toString().toLongLong(&okay);
+                if (!item.isString() || !okay || QString::number(frames[i])!=item.toString()) return {};
+            }
+            if (!lane.value("loop_enabled").isBool() || !applyRegion(base,b,l,frames,lane.value("loop_enabled").toBool(),reconstructed) || reconstructed!=value) return {};
+            w.number<quint8>(5); w.number<quint16>(static_cast<quint16>(b)); w.number<quint16>(static_cast<quint16>(l));
+            w.number<quint8>(lane.value("loop_enabled").toBool()); for (const auto n : frames) w.number<qint64>(n); return w.bytes;
         }
         return {};
     }
@@ -446,6 +664,20 @@ bool applyDelta(const QJsonValue& base, const QByteArray& bytes, QJsonValue& out
     if (kind == 4) {
         const auto bank = r.number<quint16>(), lane = r.number<quint16>(); const auto name = r.text();
         return r.done() && applyRename(base, bank, lane, name, out);
+    }
+    if (kind == 5) {
+        const auto bank=r.number<quint16>(),lane=r.number<quint16>(); const auto loop=r.number<quint8>();
+        std::array<qint64,4> frames{}; for (auto& n : frames) n=r.number<qint64>();
+        return r.done() && loop<=1 && applyRegion(base,bank,lane,frames,loop!=0,out);
+    }
+    if (kind == 6) {
+        const auto bank=r.number<quint16>(),prefix=r.number<quint16>(),remove=r.number<quint16>();
+        QJsonValue inserted; const auto content=r.block(); auto lanes=bankLanes(base,bank);
+        if (!r.done() || !readDocument(content,inserted) || !inserted.isArray() || prefix>lanes.size() || remove>lanes.size()-prefix ||
+            lanes.size()-remove+inserted.toArray().size()>limits::kMaximumLooperLanesPerBank) return false;
+        for (unsigned i=0;i<remove;++i) lanes.removeAt(prefix);
+        qsizetype at=prefix; for (const auto& item : inserted.toArray()) { if (!item.isObject()) return false; lanes.insert(at++,item); }
+        return replaceLanes(base,bank,lanes,out);
     }
     const auto count = r.number<quint32>();
     if (!r.okay || count > 65536) return false;
@@ -509,6 +741,7 @@ struct Codec::State {
     struct Transfer { quint32 handle = 0; QByteArray hash; quint64 bytes = 0; quint32 chunk = 0; };
     Transfer outgoing, incoming;
     Stats stats;
+    PeerHandles sentPeers,receivedPeers;
 };
 Codec::Codec() : Codec(Options{}) {}
 Codec::Codec(Options options) : state_(std::make_unique<State>()) { state_->options = options; }
@@ -523,6 +756,8 @@ bool Codec::encode(const QJsonObject& message, Encoded& out, QString& error, qsi
     Writer fields; quint32 mask = 0, booleans = 0; int booleanCount = 0;
     QJsonValue nextSong(QJsonValue::Undefined); quint64 nextSongSerial = state_->sentSongSerial;
     quint64 nextSongUpperBound = state_->sentSongUpperBound, nextCheckpointBytes = state_->checkpointBytes;
+    auto nextPeers=state_->sentPeers;
+    quint8 nextPatchKind=0; bool nextManifest=false,nextManifestFallback=false;
     auto nextTransfer = state_->outgoing;
     for (std::size_t index = 0; index < schema->fields.size(); ++index) {
         const auto& field = schema->fields[index];
@@ -562,6 +797,10 @@ bool Codec::encode(const QJsonObject& message, Encoded& out, QString& error, qsi
         }
         case Type::Hex16:
         case Type::Hash: {
+            if (field.type==Type::Hex16 && peerField(field.name)) {
+                if (!value.isString() || !writePeer(fields,value.toString(),nextPeers,state_->options.peerHandles,!scalarAssignment(schema->operation))) { error=QStringLiteral("Server peer identity is invalid"); return false; }
+                break;
+            }
             const auto text = value.toString(); const auto size = field.type == Type::Hash ? 32 : 16;
             QByteArray bytes;
             // Empty optional IDs/tokens retain their distinction from absence.
@@ -595,7 +834,9 @@ bool Codec::encode(const QJsonObject& message, Encoded& out, QString& error, qsi
                 Writer doc; nextSongSerial = state_->sentSongSerial + 1;
                 doc.number<quint64>(state_->sentSongSerial); doc.number<quint64>(nextSongSerial);
                 auto patch = state_->options.typedRenames ? typedRename(state_->sentSong, value) : QByteArray{};
+                if (patch.isEmpty()) patch=typedLaneEdit(state_->sentSong,value,state_->options.typedRegions,state_->options.typedStructures);
                 if (patch.isEmpty()) patch = delta(state_->sentSong, value, 0, state_->options.numericDocuments);
+                if (!patch.isEmpty()) nextPatchKind=static_cast<quint8>(patch[0]);
                 nextSongUpperBound = state_->sentSongUpperBound + static_cast<quint64>(patch.size());
                 if (!patch.isEmpty() && patch[0] == 1) {
                     nextCheckpointBytes = qFromBigEndian<quint32>(reinterpret_cast<const uchar*>(patch.constData() + 1));
@@ -609,11 +850,24 @@ bool Codec::encode(const QJsonObject& message, Encoded& out, QString& error, qsi
             QByteArray compressed;
             if (bytes.size() >= state_->options.compressionMinimumBytes) { compressed = qCompress(bytes, 1); ++state_->stats.compressionAttempts; }
             else ++state_->stats.compressionSkipped;
-            const bool pack = !compressed.isEmpty() && compressed.size() + 1 < bytes.size();
-            fields.number<quint8>(pack ? 1 : 0); fields.block(pack ? compressed : bytes); break;
+            bool pack = !compressed.isEmpty() && compressed.size() + 1 < bytes.size();
+            QByteArray content=pack ? compressed : bytes;
+            if (schema->operation==Operation::ShareOffer && QByteArrayView(field.name)=="tracks") {
+                const auto typed=state_->options.typedManifests ? typedManifest(value) : QByteArray{};
+                if (!typed.isEmpty()) {
+                    QByteArray packed;
+                    if (typed.size()>=state_->options.compressionMinimumBytes) { packed=qCompress(typed,1); ++state_->stats.compressionAttempts; }
+                    else ++state_->stats.compressionSkipped;
+                    const bool compress=!packed.isEmpty() && packed.size()+1<typed.size();
+                    const auto candidate=compress ? packed : typed;
+                    if (candidate.size()<content.size()) { content=candidate; pack=compress; nextManifest=true; }
+                }
+                nextManifestFallback=!nextManifest;
+            }
+            fields.number<quint8>((pack ? 1 : 0) | (nextManifest ? 2 : 0)); fields.block(content); break;
         }
         case Type::Settings: case Type::Tempo: case Type::Hashes: case Type::Peers: case Type::Participants:
-            if (!encodeStructured(field.type, value, fields)) { error = QStringLiteral("Server structured field violates its fixed schema"); return false; }
+            if (!encodeStructured(field.type, value, fields,nextPeers,state_->options.peerHandles)) { error = QStringLiteral("Server structured field violates its fixed schema"); return false; }
             break;
         }
     }
@@ -647,6 +901,11 @@ bool Codec::encode(const QJsonObject& message, Encoded& out, QString& error, qsi
     }
     if (schema->operation == Operation::AssetStart) { state_->outgoing = nextTransfer; ++state_->nextTransfer; }
     if (schema->operation == Operation::AssetProgress || schema->operation == Operation::AssetDone) state_->stats.assetMetadataBytesSaved += 30;
+    if (nextManifest) ++state_->stats.typedManifests;
+    if (nextManifestFallback) ++state_->stats.manifestDocumentFallbacks;
+    if (nextPatchKind==5) ++state_->stats.typedRegions;
+    if (nextPatchKind==6) ++state_->stats.typedStructures;
+    state_->sentPeers=std::move(nextPeers); state_->stats.peerDefinitions=state_->sentPeers.definitions; state_->stats.peerReferences=state_->sentPeers.references;
     return true;
 }
 
@@ -699,6 +958,7 @@ bool Codec::decode(Operation operation, const QByteArray& bytes, Decoded& out, Q
     int booleanIndex = 0;
     QJsonObject message{{"type", QLatin1String(schema->name)}};
     QJsonValue nextSong(QJsonValue::Undefined); quint64 nextSerial = state_->receivedSongSerial;
+    auto nextPeers=state_->receivedPeers;
     quint64 nextSongUpperBound = state_->receivedSongUpperBound;
     for (std::size_t index = 0; index < schema->fields.size() && r.okay; ++index) {
         if (!(mask & (quint32{1} << index))) continue;
@@ -719,6 +979,9 @@ bool Codec::decode(Operation operation, const QByteArray& bytes, Decoded& out, Q
         }
         case Type::Hex16:
         case Type::Hash: {
+            if (f.type==Type::Hex16 && peerField(f.name)) {
+                QString peer; if (!readPeer(r,peer,nextPeers)) r.okay=false; value=peer; break;
+            }
             const auto present = f.type == Type::Hash ? quint8{1} : r.number<quint8>();
             if (present > 1) r.okay = false;
             const auto binary = present ? r.take(f.type == Type::Hash ? 32 : 16) : QByteArray{};
@@ -740,8 +1003,8 @@ bool Codec::decode(Operation operation, const QByteArray& bytes, Decoded& out, Q
         }
         case Type::Document: {
             const auto packed = r.number<quint8>(); auto content = r.block();
-            if (packed > 1 || content.size() > kMaximumDocumentBytes) { r.okay = false; break; }
-            if (packed) {
+            if (packed > 3 || ((packed&2) && (operation!=Operation::ShareOffer || QByteArrayView(f.name)!="tracks")) || content.size() > kMaximumDocumentBytes) { r.okay = false; break; }
+            if (packed&1) {
                 Reader size{content}; const auto rawBytes = size.number<quint32>();
                 if (!size.okay || !rawBytes || rawBytes > kMaximumDocumentBytes) { r.okay = false; break; }
                 // Qt's qUncompress may grow beyond the advertised length. Keep
@@ -765,11 +1028,12 @@ bool Codec::decode(Operation operation, const QByteArray& bytes, Decoded& out, Q
                 if (nextSongUpperBound > kMaximumDocumentBytes) nextSongUpperBound = documentBytes(value).size();
                 if (nextSongUpperBound > kMaximumDocumentBytes) { r.okay = false; break; }
                 nextSong = value;
-            } else if (!readDocument(content, value)) r.okay = false;
+            } else if (packed&2) { if (!readManifest(content,value)) r.okay=false; }
+            else if (!readDocument(content, value)) r.okay = false;
             break;
         }
         case Type::Settings: case Type::Tempo: case Type::Hashes: case Type::Peers: case Type::Participants:
-            if (!decodeStructured(f.type, r, value)) r.okay = false;
+            if (!decodeStructured(f.type, r, value,nextPeers)) r.okay = false;
             break;
         }
         message.insert(QLatin1String(f.name), value);
@@ -783,6 +1047,7 @@ bool Codec::decode(Operation operation, const QByteArray& bytes, Decoded& out, Q
     if (!r.done()) { error = QStringLiteral("Server typed payload is malformed, stale or truncated"); return false; }
     if (!nextSong.isUndefined()) { state_->receivedSong = nextSong; state_->receivedSongSerial = nextSerial; state_->receivedSongUpperBound = nextSongUpperBound; }
     if (operation == Operation::AssetStart) state_->incoming = transfer;
+    state_->receivedPeers=std::move(nextPeers);
     out.message = message;
     return true;
 }
@@ -850,8 +1115,7 @@ bool Channel::send(const QJsonObject& message)
     // Only complete scalar assignments may supersede an unsent assignment.
     // Transactions, relative actions, snapshots and policy changes are barriers.
     QString key;
-    if (schema && (schema->operation == Operation::Cell || schema->operation == Operation::MusicStep ||
-        schema->operation == Operation::BeatDivision || schema->operation == Operation::MusicDivision)) {
+    if (schema && scalarAssignment(schema->operation)) {
         key = message.value("type").toString() + '/' + QString::number(message.value("section").toInt()) + '/' +
             message.value("lane").toString() + '/' + QString::number(message.value("beat").toInt()) + '/' + QString::number(message.value("step").toInt());
     }
@@ -926,8 +1190,7 @@ bool Channel::enqueue(const Codec::Encoded& encoded)
     stats_.pendingReceipts = awaitingReceipt_.size();
     // Batching has no timer delay for transactions or checkpoints. Scalar edit
     // bursts and successful receipts share one event-loop turn instead.
-    if (options_.batch && (encoded.operation == Operation::Cell || encoded.operation == Operation::MusicStep ||
-        encoded.operation == Operation::BeatDivision || encoded.operation == Operation::MusicDivision)) turnTimer_.start(0);
+    if (options_.batch && scalarAssignment(encoded.operation)) turnTimer_.start(0);
     else flush();
     return true;
 }
@@ -1045,6 +1308,9 @@ Stats Channel::stats() const
     result.checkpointsSent = encoding.checkpointsSent; result.deltasSent = encoding.deltasSent;
     result.savedSnapshotBytes = encoding.savedSnapshotBytes; result.assetHeaderBytesSaved = encoding.assetHeaderBytesSaved;
     result.assetMetadataBytesSaved = encoding.assetMetadataBytesSaved;
+    result.typedManifests=encoding.typedManifests; result.manifestDocumentFallbacks=encoding.manifestDocumentFallbacks;
+    result.typedRegions=encoding.typedRegions; result.typedStructures=encoding.typedStructures;
+    result.peerDefinitions=encoding.peerDefinitions; result.peerReferences=encoding.peerReferences;
     result.compressionAttempts = encoding.compressionAttempts; result.compressionSkipped = encoding.compressionSkipped;
     if (independent_) {
         const auto extra = independent_->stats(); accumulate(result, extra);
@@ -1058,7 +1324,7 @@ void Channel::enableIndependent(Write write, Capacity pending)
     if (independent_) return;
     // Separate replay domains without changing the 32-byte header or tag scheme.
     const auto derive = [](const QByteArray& key) {
-        return QMessageAuthenticationCode::hash(QByteArrayLiteral("jam2-independent-control-v2"), key, QCryptographicHash::Sha256);
+        return QMessageAuthenticationCode::hash(QByteArrayLiteral("jam2-independent-control-v")+QByteArray::number(kVersion), key, QCryptographicHash::Sha256);
     };
     independent_ = std::make_unique<Channel>(derive(sendKey_), derive(receiveKey_), std::move(write), std::move(pending), options_);
     independent_->independentOnly_ = true;
@@ -1091,6 +1357,9 @@ void accumulate(Stats& t, const Stats& v) noexcept
     t.checkpointsSent += v.checkpointsSent; t.deltasSent += v.deltasSent; t.savedSnapshotBytes += v.savedSnapshotBytes;
     t.assetHeaderBytesSaved += v.assetHeaderBytesSaved; t.queueRejects += v.queueRejects;
     t.assetMetadataBytesSaved += v.assetMetadataBytesSaved;
+    t.typedManifests+=v.typedManifests; t.manifestDocumentFallbacks+=v.manifestDocumentFallbacks;
+    t.typedRegions+=v.typedRegions; t.typedStructures+=v.typedStructures;
+    t.peerDefinitions+=v.peerDefinitions; t.peerReferences+=v.peerReferences;
     t.compressionAttempts += v.compressionAttempts; t.compressionSkipped += v.compressionSkipped;
     t.transportWrites += v.transportWrites; t.batchedRecords += v.batchedRecords;
     t.coalescedUpdates += v.coalescedUpdates; t.cumulativeReceipts += v.cumulativeReceipts;
@@ -1114,6 +1383,9 @@ QJsonObject diagnostics(const Stats& s)
         {"pending_dispatch_receipts", static_cast<qint64>(s.pendingReceipts)}, {"checkpoints_sent", static_cast<qint64>(s.checkpointsSent)},
         {"snapshot_deltas_sent", static_cast<qint64>(s.deltasSent)}, {"bytes_avoided_vs_last_checkpoint", static_cast<qint64>(s.savedSnapshotBytes)},
         {"wav_payload_header_bytes_saved", static_cast<qint64>(s.assetHeaderBytesSaved)}, {"wav_metadata_bytes_saved", static_cast<qint64>(s.assetMetadataBytesSaved)},
+        {"typed_manifests",static_cast<qint64>(s.typedManifests)}, {"manifest_document_fallbacks",static_cast<qint64>(s.manifestDocumentFallbacks)},
+        {"typed_region_patches",static_cast<qint64>(s.typedRegions)}, {"typed_lane_splices",static_cast<qint64>(s.typedStructures)},
+        {"peer_handle_definitions",static_cast<qint64>(s.peerDefinitions)}, {"peer_handle_references",static_cast<qint64>(s.peerReferences)}, {"peer_handle_table_limit",4096},
         {"compression_attempts", static_cast<qint64>(s.compressionAttempts)}, {"compression_skipped_small", static_cast<qint64>(s.compressionSkipped)}, {"compression_minimum_bytes", 128},
         {"transport_writes", static_cast<qint64>(s.transportWrites)}, {"records_sharing_writes", static_cast<qint64>(s.batchedRecords)},
         {"unsent_updates_coalesced", static_cast<qint64>(s.coalescedUpdates)}, {"success_receipts_coalesced", static_cast<qint64>(s.cumulativeReceipts)},

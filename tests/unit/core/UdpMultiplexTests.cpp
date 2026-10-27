@@ -192,6 +192,46 @@ void boundedTransportWake()
     require(queued.consumptionCount() == 1, "queued UDP input did not wake the network receiver");
 }
 
+void inOrderAndSelectiveAcknowledgements()
+{
+    jam2::ReliableUdpStream sender, receiver;
+    const std::vector<std::uint8_t> bytes(3*jam2::ReliableUdpStream::kFragmentBytes,42);
+    require(sender.enqueue(bytes),"selective ACK enqueue");
+    require(sender.hasSendCredit(),"newly queued stream has no send credit");
+    sender.poll(1,4,[](auto,auto,bool) { return true; });
+    std::vector<std::uint8_t> result;
+    auto deliver=[&](auto part) { result.insert(result.end(),part.begin(),part.end()); };
+    int acks=0; auto ack=[&](auto) { ++acks; };
+    const auto fragment=std::span(bytes).first(jam2::ReliableUdpStream::kFragmentBytes);
+    require(receiver.receive(2,fragment,deliver,ack) && receiver.receive(3,fragment,deliver,ack),"out-of-order receive");
+    const auto gap=receiver.acknowledgementWindow();
+    require(gap.contiguous==0 && gap.selective==6 && result.empty(),"selective ACK crossed a missing first fragment");
+    require(!sender.acknowledgeWindow({1,std::uint64_t{1}<<63},20) && sender.inFlightFragments()==3,
+        "invalid ACK window partially freed valid fragments");
+    require(sender.acknowledgeWindow(gap,20) && sender.inFlightFragments()==1,"selective ACK did not preserve gap");
+    require(receiver.receive(1,fragment,deliver,ack) && result==bytes,"fast receive did not drain reordered fragments in order");
+    require(receiver.stats().in_order_direct==1 && receiver.stats().reorder_insertions==2,
+        "in-order fragment used owned reorder storage");
+    const auto complete=receiver.acknowledgementWindow();
+    require(complete.contiguous==3 && complete.selective==0 && sender.acknowledgeWindow(complete,30) && sender.empty(),
+        "contiguous ACK did not complete sender");
+    require(receiver.receive(1,fragment,deliver,ack) && result==bytes && acks==4,"duplicate was redelivered or not acknowledged");
+    require(!sender.hasSendCredit(),"empty stream requested immediate worker turns");
+    require(!sender.acknowledgeWindow({4,0},40),"ACK accepted an unsent contiguous sequence");
+    jam2::ReliableUdpStream conflicting;
+    require(conflicting.receive(2,fragment,[](auto) {},[](auto) {}),"conflict fixture failed");
+    auto changed=std::vector<std::uint8_t>(fragment.begin(),fragment.end()); changed[0]^=1;
+    require(!conflicting.receive(2,changed,[](auto) {},[](auto) {}) && conflicting.acknowledgementWindow().selective==2,
+        "conflicting out-of-order retransmission replaced authenticated pending bytes");
+    jam2::ReliableUdpStream paced;
+    require(paced.enqueue(std::vector<std::uint8_t>(8*jam2::ReliableUdpStream::kFragmentBytes,1)),"send-credit fixture enqueue");
+    require(paced.poll(1,2,[](auto,auto,bool) { return true; })==2 && paced.hasSendCredit(),"bounded poll hid remaining congestion credit");
+    require(paced.poll(2,2,[](auto,auto,bool) { return true; })==2 && !paced.hasSendCredit(),"full congestion window requested immediate sends");
+    paced.acknowledge(1,3);
+    require(paced.hasSendCredit() && paced.poll(4,2,[](auto,auto,bool) { return false; })==0,
+        "would-block consumed newly available send credit");
+}
+
 void receiverOwnershipLifecycle()
 {
     class Transport final : public jam2::NetworkDatagramTransport {
@@ -323,6 +363,80 @@ void receiveWaitPerformance(bool requestOneMsTimer)
     require(queued.consumptionCount()==0 && capture.consumptionCount()==0,"timeout benchmark consumed an unsignalled event");
 }
 
+void selectiveFastRecovery()
+{
+    using Stream=jam2::ReliableUdpStream;
+    const std::vector<std::uint8_t> data(4096,42);
+    const auto transmit=[](auto,auto,bool) { return true; };
+    Stream fast;
+    require(fast.enqueue(data) && fast.poll(1,4,transmit)==4,"fast recovery initial window");
+    require(fast.acknowledgeWindow({0,14},1000) && fast.inFlightFragments()==1,"selective evidence lost unacknowledged gap");
+    require(fast.poll(10999,4,transmit)==0,"ordinary reorder grace was bypassed");
+    require(fast.poll(11000,4,[](auto,auto,bool) { return false; })==0 && fast.stats().fast_retransmitted==0,"would-block consumed early retry");
+    require(fast.poll(11001,4,[](auto sequence,auto bytes,bool retry) { return sequence==1 && retry && bytes.size()==1024; })==1 &&
+        fast.stats().fast_retransmitted==1,"selective gap waited for bootstrap RTO");
+    require(fast.acknowledgeWindow({0,14},12000) && fast.poll(22000,4,transmit)==0,"duplicate ACK repeated early repair");
+    require(fast.poll(111001,4,transmit)==1 && fast.stats().fast_retransmitted==1,"ordinary retry timer did not recover lost early repair");
+    Stream reordered;
+    require(reordered.enqueue(data) && reordered.poll(1,4,transmit)==4 && reordered.acknowledgeWindow({0,14},1000) &&
+        reordered.acknowledgeWindow({4,0},10000) && reordered.poll(11000,4,transmit)==0 && reordered.empty() && reordered.stats().fast_retransmitted==0,
+        "reordered fragment arriving in grace caused a spurious resend");
+    Stream duplicate;
+    require(duplicate.enqueue(data) && duplicate.poll(1,4,transmit)==4,"duplicate evidence setup");
+    for (int i=0;i<10;++i) require(duplicate.acknowledgeWindow({0,2},1000+i),"duplicate ACK validity");
+    require(duplicate.poll(50000,4,transmit)==0,"duplicate ACKs counted as distinct later fragments");
+    Stream sparse; require(sparse.enqueue(std::span(data).first(1)) && sparse.poll(1,1,transmit)==1 &&
+        sparse.poll(1000000,1,transmit)==0 && sparse.poll(1000001,1,transmit)==1,"uniform recovery lost the no-evidence timer");
+    Stream reference(Stream::Options{true,true,false});
+    require(reference.enqueue(data) && reference.poll(1,4,transmit)==4 && reference.acknowledgeWindow({0,14},1000) &&
+        reference.poll(11000,4,transmit)==0,"disabled fast recovery still repaired early");
+    Stream longGrace(Stream::Options{true,true,true,2000000});
+    require(longGrace.enqueue(data) && longGrace.poll(1,4,transmit)==4 && longGrace.acknowledgeWindow({0,14},1000) &&
+        longGrace.poll(1000001,4,transmit)==1 && longGrace.poll(2001000,4,transmit)==0 && longGrace.stats().fast_retransmitted==0,
+        "late gap grace bypassed ordinary retry backoff");
+    std::cout << "selective_recovery distinct_later=3 reorder_grace_us=10000 early_retry_us=11001 bootstrap_retry_us=1000001\n";
+}
+void unsentPackingPreservesOwnership()
+{
+    using Stream=jam2::ReliableUdpStream;
+    Stream packed,reference(Stream::Options{true,false});
+    const std::vector<std::uint8_t> bytes(73,42);
+    for (int i=0;i<8;++i) require(packed.enqueue(bytes) && reference.enqueue(bytes),"queue scalar packing fixture");
+    std::vector<std::uint8_t> delivered;
+    require(packed.poll(1,32,[&](auto,auto part,bool) { delivered.insert(delivered.end(),part.begin(),part.end()); return true; })==1 &&
+        reference.poll(1,32,[](auto,auto,bool) { return true; })==4,"already queued scalars were not packed into one fragment");
+    require(delivered==std::vector<std::uint8_t>(584,42) && packed.stats().fragments_avoided==7 && packed.stats().tail_bytes_packed==511,
+        "packing counters or concatenated bytes differ");
+    for (std::uint64_t sequence=1;sequence<=4;++sequence) reference.acknowledge(sequence,2);
+    require(reference.poll(3,32,[](auto,auto part,bool) { return part.size()==73; })==4,"unpacked reference fragment count changed");
+    const auto original=delivered;
+    require(packed.enqueue(bytes),"enqueue after transmit");
+    std::vector<std::uint8_t> retry;
+    packed.poll(1000001,1,[&](auto sequence,auto part,bool repeated) {
+        require(sequence==1 && repeated,"first packet was not the timed-out fragment"); retry.assign(part.begin(),part.end()); return true;
+    });
+    require(retry==original,"later write mutated a sequenced retry fragment");
+    packed.acknowledge(1,1000002);
+    require(packed.poll(1000003,1,[&](auto sequence,auto part,bool repeated) {
+        require(sequence==2 && !repeated && part.size()==73,"pending packet was extended or sequence skipped"); return true;
+    })==1,"sparse write waited for another write");
+    Stream blocked;
+    require(blocked.enqueue(bytes) && blocked.poll(1,1,[](auto,auto,bool) { return false; })==0 && blocked.enqueue(bytes),"would-block packing setup");
+    require(blocked.poll(2,1,[](auto seq,auto part,bool retrying) { return seq==1 && part.size()==146 && !retrying; })==1,
+        "would-block allocated a sequence or prevented unsequenced tail packing");
+    Stream boundary;
+    require(boundary.enqueue(std::vector<std::uint8_t>(1000,1)) && boundary.enqueue(std::vector<std::uint8_t>(1000,2)),"cross-fragment packing setup");
+    std::vector<std::vector<std::uint8_t>> packets;
+    boundary.poll(1,2,[&](auto,auto part,bool) { packets.emplace_back(part.begin(),part.end()); return true; });
+    require(packets.size()==2 && packets[0].size()==1024 && packets[1].size()==976 && packets[0][999]==1 && packets[0][1000]==2,
+        "record boundary packing lost bytes");
+    Stream remote; std::vector<std::uint8_t> received;
+    auto accept=[&](auto part) { received.insert(received.end(),part.begin(),part.end()); };
+    require(remote.receive(2,packets[1],accept,[](auto) {}) && received.empty() &&
+        remote.receive(1,packets[0],accept,[](auto) {}) && received.size()==2000 &&
+        received[999]==1 && received[1000]==2,"loss/reordering across packed record boundaries changed byte order");
+    std::cout << "packing_fixture reference_fragments=8 packed_fragments=1 sparse_poll=immediate retry_bytes=unchanged\n";
+}
 void boundsBackpressureAndIndependentChannels()
 {
     jam2::ReliableUdpStream bulk, control, remote;
@@ -368,8 +482,11 @@ int main(int argc, char** argv)
         invitationCompatibility();
         reliableDeliveryWithLossDuplicationAndReordering();
         boundsBackpressureAndIndependentChannels();
+        unsentPackingPreservesOwnership();
+        selectiveFastRecovery();
         audioRoutingRetainsNativePacketBytes();
         boundedTransportWake();
+        inOrderAndSelectiveAcknowledgements();
         receiverOwnershipLifecycle();
         routedReceivePreservesMultiplexSizedDatagrams();
         datagramWaitPreservesPacketsAndCaptureWake();

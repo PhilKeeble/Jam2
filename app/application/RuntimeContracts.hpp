@@ -163,6 +163,8 @@ struct Jam2OperationalPeer {
     std::uint64_t liveness_reprobes = 0;
     std::uint64_t control_reprobes = 0;
     std::uint64_t last_authenticated_receive_age_ms = 0;
+    std::uint64_t grid_assignment_revision = 0, grid_assignment_attempts = 0;
+    bool grid_assignment_applied = false;
 };
 
 struct Jam2NetworkOperationalSnapshot {
@@ -176,6 +178,19 @@ struct Jam2NetworkOperationalSnapshot {
     // currently mapped authority clock within two audio callbacks.
     bool transport_grid_ready = false;
     std::int64_t grid_mapping_error_frames = 0;
+    std::uint64_t grid_authority_beacon_interval_us = 0;
+    std::uint64_t grid_authority_beacon_batches = 0, grid_authority_beacon_packets = 0;
+    std::uint64_t grid_authority_phase_freshness_us = 0, grid_authority_phase_age_us = 0;
+    bool grid_authority_phase_fresh = false;
+    bool grid_assignment_reliable = false;
+    std::uint64_t grid_assignment_revision = 0;
+    std::uint64_t grid_assignment_pending_peers = 0, grid_assignment_applied_peers = 0;
+    std::uint64_t grid_assignment_packets = 0, grid_assignment_retries = 0;
+    std::uint64_t grid_assignment_acks_sent = 0, grid_assignment_acks_received = 0;
+    std::uint64_t grid_assignment_invalid_acks = 0, grid_assignment_deferred = 0;
+    std::uint64_t grid_assignment_retry_initial_us = 0, grid_assignment_retry_max_us = 0;
+    std::uint64_t grid_assignment_recovery_requests = 0, grid_assignment_recovery_retry_us = 0;
+    bool grid_assignment_recovery_pending = false;
 };
 
 struct Jam2IncomingAudioDelay {
@@ -284,6 +299,8 @@ struct Jam2RuntimeHost {
         const Jam2MetronomeCompensationSettings& settings) noexcept;
     std::optional<std::vector<Jam2RuntimePeer>> takePeerUpdate();
     bool takePeerReprobe() noexcept;
+    void submitGridAssignmentRecovery() noexcept;
+    bool takeGridAssignmentRecovery() noexcept;
     std::vector<Jam2PeerGainUpdate> takePeerGains();
     std::optional<Jam2MetronomeCompensationSettings> takeMetronomeCompensation();
     std::optional<jam2::EngineCommand> takeCommand(std::uint64_t current_frame);
@@ -295,6 +312,7 @@ private:
     std::mutex peer_mutex_;
     std::optional<std::vector<Jam2RuntimePeer>> peer_update_;
     std::atomic<bool> peer_reprobe_requested_{false};
+    std::atomic<bool> grid_assignment_recovery_requested_{false};
     std::mutex command_mutex_;
     std::deque<jam2::EngineCommand> commands_;
     std::mutex peer_gain_mutex_;

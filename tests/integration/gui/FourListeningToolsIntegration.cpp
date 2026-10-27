@@ -5,6 +5,7 @@
 
 #include <QCoreApplication>
 #include <QFile>
+#include <QDir>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QTemporaryDir>
@@ -12,6 +13,7 @@
 #include <QProcess>
 
 #include <array>
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <iostream>
@@ -188,6 +190,18 @@ int main(int argc, char** argv) {
         waitAll(peers, [](std::size_t, const QJsonObject& state) {
             return state.value(QStringLiteral("performance")).toObject().value(QStringLiteral("global_transport_playing")).toBool();
         }, QStringLiteral("shared playback started"));
+        if (serverMode) {
+            const auto receipts=waitAll(peers, [](std::size_t index,const QJsonObject& state) {
+                const auto transport=state.value("jam").toObject().value("udp_multiplex").toObject();
+                if (index!=0) return transport.value("native_intent_acks_sent").toInteger()>0;
+                const auto links=transport.value("links").toArray();
+                return links.size()==3 && std::all_of(links.begin(),links.end(),[](const QJsonValue& link) { return link.toObject().value("native_intent_acknowledged").toBool(); }) &&
+                    transport.value("native_intent_repeats_suppressed").toInteger()>0;
+            },QStringLiteral("runtime accepted and receipted shared playback on all four peers"));
+            const auto transport=receipts[0].value("jam").toObject().value("udp_multiplex").toObject();
+            std::cout << "runtime_transport_receipts=" << transport.value("native_intent_acks_received").toInteger()
+                << " suppressed_repeats=" << transport.value("native_intent_repeats_suppressed").toInteger() << '\n';
+        }
         // Several numeric edits settle together; only their stable final state
         // is prepared and committed through the real control/engine boundary.
         invoke(peers.peer(2), QStringLiteral("looper.speed.value"), QStringLiteral("set-value"), 0.5);
@@ -280,6 +294,20 @@ int main(int argc, char** argv) {
         }, QStringLiteral("stopped speed/pitch/focus edits persist into the next shared Play"));
         for (std::size_t i = 0; i < 4; ++i) requireSummary(peers.peer(i), QStringLiteral("0.82"), 5, 900, i == 2);
         for (const auto& state : resumed) {
+            const auto jam=state.value(QStringLiteral("jam")).toObject();
+            const auto performance=state.value(QStringLiteral("performance")).toObject();
+            std::cout << "listening_resume grid_ready=" << jam.value("transport_grid_ready").toBool()
+                << " mapping_error_frames=" << jam.value("grid_mapping_error_frames").toInteger()
+                << " epoch_valid=" << performance.value("metronome_epoch_valid").toBool()
+                << " engine_frame=" << performance.value("engine_frame").toInteger() << '\n';
+            if (!jam.value("transport_grid_ready").toBool() || !performance.value("metronome_epoch_valid").toBool()) {
+                QJsonArray before,after;
+                for (const auto& previous : resumed) before.append(previous);
+                for (std::size_t peer=0;peer<4;++peer) after.append(snapshot(peers.peer(peer)));
+                const auto diagnostic=QJsonDocument(QJsonObject{{"at_resume",before},{"at_assertion",after}}).toJson(QJsonDocument::Compact);
+                QFile file(qEnvironmentVariable("JAM2_TEST_ARTIFACT_ROOT",QDir::tempPath())+"/listening-grid-failure.json");
+                require(file.open(QIODevice::WriteOnly) && file.write(diagnostic)==diagnostic.size(),"write listening grid failure evidence");
+            }
             require(state.value(QStringLiteral("jam")).toObject().value(QStringLiteral("transport_grid_ready")).toBool() &&
                 state.value(QStringLiteral("performance")).toObject().value(QStringLiteral("metronome_epoch_valid")).toBool(),
                 QStringLiteral("listening edits and restart must retain a valid synchronized epoch/grid"));

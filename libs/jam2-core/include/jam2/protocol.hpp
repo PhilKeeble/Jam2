@@ -29,6 +29,10 @@ enum class PacketType : std::uint8_t {
     MetronomeState = 6,
     Bye = 7,
     TransportState = 8,
+    // Server UDP-multiplex control only. Other modes retain MetronomeState.
+    GridAssignment = 9,
+    GridAssignmentApplied = 10,
+    GridAssignmentRequest = 11,
 };
 
 struct Header {
@@ -37,7 +41,8 @@ struct Header {
     std::uint32_t sequence{};
     // Audio/metronome/transport packets carry a sample-time value. Endpoint
     // proof and ping/pong packets carry their monotonic challenge token. No
-    // packet needs both.
+    // Grid assignments carry an authority ID; applied receipts and recovery
+    // requests carry their application token. No packet needs both.
     std::uint64_t timing_value{};
     std::uint16_t payload_length{};
     std::uint64_t auth_tag{};
@@ -47,6 +52,8 @@ constexpr std::size_t kHeaderSize = 36;
 constexpr std::size_t kMaxAudioFramesPerPacket = 256;
 constexpr std::size_t kMetronomeStatePayloadSize = 56;
 constexpr std::size_t kTransportStatePayloadSize = 28;
+constexpr std::size_t kGridAssignmentPayloadSize = kMetronomeStatePayloadSize + 8;
+constexpr std::size_t kGridAssignmentAppliedPayloadSize = 8;
 constexpr std::size_t kMaxDatagramSize = kHeaderSize + kMaxAudioFramesPerPacket * 3;
 constexpr std::size_t kPeerIdentityPayloadSize = 8;
 

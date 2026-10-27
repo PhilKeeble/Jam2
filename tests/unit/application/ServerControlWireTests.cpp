@@ -14,6 +14,9 @@
 #include <stdexcept>
 
 namespace wire = jam2::application::server_wire;
+void serverControlCoverageFixtures();
+void serverControlRefinementFixtures();
+void serverControlRefinementPerformance();
 namespace {
 void require(bool value, const char* reason) { if (!value) throw std::runtime_error(reason); }
 QJsonObject song(int lanes = 12)
@@ -42,7 +45,7 @@ void recordsAndDeltas()
     require(sender.encode({{"type", "session.heartbeat"}, {"sequence", 0x01020304}}, encoded, error) &&
         encoded.payload.toHex() == "0101020304", "golden positional heartbeat bytes changed");
     const auto golden = wire::authenticate(encoded.operation, 0x0102030405060708ULL, encoded.payload, QByteArray(32, '\0'));
-    require(golden.toHex() == "00000021000302000102030405060708f97e1cd6bea05d2856b5a780cfba1fa50101020304",
+    require(golden.toHex() == "00000021000304000102030405060708d608ad9239c625646ee9a6b022cabd560101020304",
         "golden big-endian/HMAC record changed");
     auto message = song();
     require(sender.encode(message, encoded, error), "encode checkpoint");
@@ -254,6 +257,19 @@ void editBursts(bool benchmark)
     require(a.send({{"type","beat.set"},{"revision",4}}) && toB.empty(), "sparse assignment did not use event-loop scheduling");
     QCoreApplication::processEvents(); deliver(toB,b);
     require(seen == QStringList{"4"} && a.stats().assignmentDelaySamples > 0, "sparse assignment waited for another edit or lost delay diagnostics");
+    seen.clear();
+    // The first record for an identity can be superseded, including by an
+    // assignment for another cell. Definitions must survive in wire order.
+    require(a.send({{"type","beat.set"},{"beat",1},{"revision",5},{"authority_token",QString(32,'a')}}) &&
+        a.send({{"type","beat.set"},{"beat",2},{"revision",6},{"authority_token",QString(32,'b')}}) &&
+        a.send({{"type","beat.set"},{"beat",1},{"revision",7},{"authority_token",QString(32,'a')}}),"coalesced identity queue");
+    QCoreApplication::processEvents(); deliver(toB,b); QCoreApplication::processEvents(); deliver(toA,a);
+    require(seen==QStringList{"6","7"} && a.stats().peerDefinitions==0,"superseded scalar introduced a peer dictionary dependency");
+    require(a.send({{"type","session.connection.failure"},{"a",QString(32,'b')},{"b",QString(32,'a')}}),"peer definition after coalescing");
+    deliver(toB,b); QCoreApplication::processEvents(); deliver(toA,a); seen.clear();
+    require(a.send({{"type","beat.set"},{"revision",8},{"authority_token",QString(32,'a')}}),"established peer scalar reference");
+    QCoreApplication::processEvents(); deliver(toB,b); QCoreApplication::processEvents(); deliver(toA,a);
+    require(seen==QStringList{"8"} && a.stats().peerDefinitions==2 && a.stats().peerReferences>0,"literal scalar polluted later peer handle numbering");
     QCoreApplication::processEvents(); deliver(toA,a);
     // A rejected action between successes must keep its explicit result even
     // when both neighboring successes would otherwise share one cumulative ACK.
@@ -288,7 +304,7 @@ void independentSafety()
     restricted.enableIndependent([](const auto&) { return true; }, [] { return qint64{0}; });
     wire::Codec codec; wire::Codec::Encoded encoded;
     require(codec.encode(song(),encoded,error), "prepare forbidden independent operation");
-    const auto key = QMessageAuthenticationCode::hash("jam2-independent-control-v2", ab, QCryptographicHash::Sha256);
+    const auto key = QMessageAuthenticationCode::hash(QByteArrayLiteral("jam2-independent-control-v")+QByteArray::number(wire::kVersion), ab, QCryptographicHash::Sha256);
     require(!restricted.receiveIndependent(wire::authenticate(encoded.operation,1,encoded.payload,key),error), "dependent checkpoint accepted on independent ordering");
     wire::Channel stalled(ab,ba,[](const auto&) { return true; }, [] { return qint64{0}; });
     stalled.enableIndependent([](const auto&) { return false; }, [] { return qint64{16*1024}; });
@@ -412,8 +428,8 @@ int main(int argc, char** argv)
 {
     QCoreApplication app(argc, argv);
     try {
-        if (argc > 1 && QByteArrayView(argv[1]) == "--performance") { performance(); editBursts(true); }
-        else { recordsAndDeltas(); assets(); channels(); editBursts(false); independentSafety(); }
+        if (argc > 1 && QByteArrayView(argv[1]) == "--performance") { performance(); editBursts(true); serverControlRefinementPerformance(); }
+        else { serverControlCoverageFixtures(); serverControlRefinementFixtures(); recordsAndDeltas(); assets(); channels(); editBursts(false); independentSafety(); }
         return 0;
     } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }

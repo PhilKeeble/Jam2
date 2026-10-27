@@ -2516,6 +2516,32 @@ QJsonObject MainWindow::automationJamSnapshot() const
         {QStringLiteral("grid_mapping_error_frames"), network.has_value()
             ? static_cast<qint64>(network->grid_mapping_error_frames)
             : 0LL},
+        {QStringLiteral("grid_authority_beacon_interval_us"), network.has_value()
+            ? static_cast<qint64>(network->grid_authority_beacon_interval_us) : 0LL},
+        {QStringLiteral("grid_authority_beacon_batches"), network.has_value()
+            ? static_cast<qint64>(network->grid_authority_beacon_batches) : 0LL},
+        {QStringLiteral("grid_authority_beacon_packets"), network.has_value()
+            ? static_cast<qint64>(network->grid_authority_beacon_packets) : 0LL},
+        {QStringLiteral("grid_authority_phase_freshness_us"), network.has_value()
+            ? static_cast<qint64>(network->grid_authority_phase_freshness_us) : 0LL},
+        {QStringLiteral("grid_authority_phase_age_us"), network.has_value()
+            ? static_cast<qint64>(network->grid_authority_phase_age_us) : 0LL},
+        {QStringLiteral("grid_authority_phase_fresh"), network.has_value() && network->grid_authority_phase_fresh},
+        {QStringLiteral("grid_assignment_reliable"), network.has_value() && network->grid_assignment_reliable},
+        {QStringLiteral("grid_assignment_revision"), network ? static_cast<qint64>(network->grid_assignment_revision) : 0LL},
+        {QStringLiteral("grid_assignment_pending_peers"), network ? static_cast<qint64>(network->grid_assignment_pending_peers) : 0LL},
+        {QStringLiteral("grid_assignment_applied_peers"), network ? static_cast<qint64>(network->grid_assignment_applied_peers) : 0LL},
+        {QStringLiteral("grid_assignment_packets"), network ? static_cast<qint64>(network->grid_assignment_packets) : 0LL},
+        {QStringLiteral("grid_assignment_retries"), network ? static_cast<qint64>(network->grid_assignment_retries) : 0LL},
+        {QStringLiteral("grid_assignment_acks_sent"), network ? static_cast<qint64>(network->grid_assignment_acks_sent) : 0LL},
+        {QStringLiteral("grid_assignment_acks_received"), network ? static_cast<qint64>(network->grid_assignment_acks_received) : 0LL},
+        {QStringLiteral("grid_assignment_invalid_acks"), network ? static_cast<qint64>(network->grid_assignment_invalid_acks) : 0LL},
+        {QStringLiteral("grid_assignment_deferred"), network ? static_cast<qint64>(network->grid_assignment_deferred) : 0LL},
+        {QStringLiteral("grid_assignment_retry_initial_us"), network ? static_cast<qint64>(network->grid_assignment_retry_initial_us) : 0LL},
+        {QStringLiteral("grid_assignment_retry_max_us"), network ? static_cast<qint64>(network->grid_assignment_retry_max_us) : 0LL},
+        {QStringLiteral("grid_assignment_recovery_requests"), network ? static_cast<qint64>(network->grid_assignment_recovery_requests) : 0LL},
+        {QStringLiteral("grid_assignment_recovery_pending"), network && network->grid_assignment_recovery_pending},
+        {QStringLiteral("grid_assignment_recovery_retry_us"), network ? static_cast<qint64>(network->grid_assignment_recovery_retry_us) : 0LL},
         {QStringLiteral("control_connected"), sessionController_.isConnected()},
         {QStringLiteral("control_completed_connections"), static_cast<qint64>(sessionController_.clientStats().completedConnections)},
         {QStringLiteral("control_reconnect_attempts"), session.reconnectAttempts},
@@ -2541,6 +2567,15 @@ QJsonObject MainWindow::automationJamSnapshot() const
     if (role == QStringLiteral("creator")) {
         snapshot.insert(QStringLiteral("invite_url"), meshInviteUrl());
     }
+    QJsonArray gridAssignments;
+    if (network && network->grid_assignment_reliable) {
+        for (const auto& peer : network->peers) gridAssignments.append(QJsonObject{
+            {QStringLiteral("peer_id"), QString::number(peer.peer_id)},
+            {QStringLiteral("revision"), static_cast<qint64>(peer.grid_assignment_revision)},
+            {QStringLiteral("attempts"), static_cast<qint64>(peer.grid_assignment_attempts)},
+            {QStringLiteral("applied"), peer.grid_assignment_applied}});
+    }
+    snapshot.insert(QStringLiteral("grid_assignment_peers"), gridAssignments);
     return snapshot;
 }
 
