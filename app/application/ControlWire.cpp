@@ -1,4 +1,5 @@
-#include "ServerControlWire.hpp"
+#include "ControlWire.hpp"
+#include "PeerName.hpp"
 #include "ContentLimits.hpp"
 #include "miniz_tinfl.h"
 
@@ -25,7 +26,7 @@
 #include <utility>
 #include <vector>
 
-namespace jam2::application::server_wire {
+namespace jam2::application::control_wire {
 namespace {
 constexpr qsizetype kChunkBytes = 24 * 1024, kMaximumAssetBytes = 512 * 1024 * 1024;
 constexpr qsizetype kPartBytes = 32 * 1024;
@@ -50,9 +51,9 @@ const std::vector<Schema>& schemas()
             {Endpoint,"session.endpoint.update",{{"udp_endpoint",Text}}}, {End,"session.end",{{"detail",Text}}}, {Error,"session.error",{{"message",Text}}},
             {SyncSet,"jam.sync.set",{}}, {SyncRequest,"jam.sync.request",{}},
             {MetronomeSet,"jam.metronome.state.set",{{"enabled",Bool}}}, {MetronomeRequest,"jam.metronome.state.request",{{"enabled",Bool}}},
-            {ListeningRequest,"jam.listening.request",{}}, {ListeningPrepare,"jam.listening.prepare",{}},
-            {ListeningReady,"jam.listening.ready",{}}, {ListeningFailed,"jam.listening.failed",{}},
-            {ListeningCommit,"jam.listening.commit",{}}, {ListeningCancel,"jam.listening.cancel",{}},
+            {ListeningRequest,"jam.listening.request",{}},
+            {ListeningFailed,"jam.listening.failed",{}},
+            {ListeningCancel,"jam.listening.cancel",{}},
             {ListeningState,"jam.listening.state",{}}, {ListeningReset,"jam.listening.reset",{}},
             {ListeningApplied,"jam.listening.applied",{{"actual_frame",FrameText}}},
             {Cell,"beat.set",{{"section",U8},{"lane",Lane},{"beat",U16},{"text",Text}}},
@@ -265,6 +266,7 @@ bool fixedHex(const QString& text, int size, QByteArray& out)
 }
 struct PeerHandles {
     QHash<QString,quint16> ids;
+    QHash<QString,QString> names;
     QVector<QString> values;
     quint64 definitions=0,references=0;
 };
@@ -344,7 +346,15 @@ bool encodeStructured(Type type, const QJsonValue& value, Writer& writer,PeerHan
         if (type == Type::Peers) {
             const auto object = entry.toObject();
             const auto id = qFromBigEndian<quint64>(reinterpret_cast<const uchar*>(bytes.constData()));
-            if (object.size() != 3 || object.value("peer_id").toString() != QString::number(id) || !object.value("endpoint").isString() || !writer.text(object.value("endpoint").toString())) return false;
+            const auto name = PeerName::fromWire(object.value("name").toString().toUtf8());
+            if (object.size() != 4 || !name || object.value("peer_id").toString() != QString::number(id) ||
+                !object.value("endpoint").isString() || !writer.text(object.value("endpoint").toString())) return false;
+            const bool defineName = handles.names.value(text) != name->text();
+            writer.number<quint8>(defineName ? static_cast<quint8>(name->utf8().size()) : 0);
+            if (defineName) {
+                writer.bytes += name->utf8();
+                if (handles.ids.contains(text)) handles.names.insert(text,name->text());
+            }
         }
     }
     return true;
@@ -374,7 +384,18 @@ bool decodeStructured(Type type, Reader& r, QJsonValue& value,PeerHandles& handl
         if (!r.okay) return false;
         if (type == Type::Peers) {
             const auto id = qFromBigEndian<quint64>(reinterpret_cast<const uchar*>(bytes.constData()));
-            array.append(QJsonObject{{"token", text}, {"peer_id", QString::number(id)}, {"endpoint", r.text()}});
+            const auto endpoint = r.text();
+            const auto length = r.number<quint8>();
+            if (length > PeerName::kMaximumUtf8Bytes) return false;
+            auto displayName=handles.names.value(text);
+            if (length) {
+                const auto name = PeerName::fromWire(r.take(length));
+                if (!name) return false;
+                displayName=name->text();
+                if (handles.ids.contains(text)) handles.names.insert(text,displayName);
+            }
+            if (displayName.isEmpty()) return false;
+            array.append(QJsonObject{{"token", text}, {"peer_id", QString::number(id)}, {"endpoint", endpoint}, {"name",displayName}});
         } else array.append(text);
     }
     value = array; return r.okay;
@@ -712,7 +733,7 @@ bool requiresReceipt(Operation operation)
 {
     using enum Operation;
     switch (operation) {
-    case Heartbeat: case HeartbeatReply: case ListeningReady: case ListeningFailed: case ListeningApplied:
+    case Heartbeat: case HeartbeatReply: case ListeningFailed: case ListeningApplied:
     case ListeningCancel: case BankReady: case BankCancel: case RecordingState:
     case AssetProgress: case AssetChunk: case Binary: case Receipt:
         return false;
@@ -725,7 +746,7 @@ bool independentOperation(Operation operation)
     // their existing owner. Commands and model/policy edits cannot overtake.
     using enum Operation;
     switch (operation) {
-    case Heartbeat: case HeartbeatReply: case ListeningReady: case ListeningFailed:
+    case Heartbeat: case HeartbeatReply: case ListeningFailed:
     case ListeningApplied: case BankReady: case RecordingState: return true;
     default: return false;
     }
@@ -812,7 +833,7 @@ bool Codec::encode(const QJsonObject& message, Encoded& out, QString& error, qsi
                     if (text.size() != 36 || text[8] != '-' || text[13] != '-' || text[18] != '-' || text[23] != '-') { error = QStringLiteral("Server UUID syntax is invalid"); return false; }
                     hex.remove(QLatin1Char('-'));
                 }
-                if (!fixedHex(hex, size, bytes)) { error = QStringLiteral("Server binary identity is invalid"); return false; }
+                if (!fixedHex(hex, size, bytes)) { error = QStringLiteral("Control binary identity is invalid"); return false; }
                 fields.bytes += bytes;
             }
             break;
@@ -872,7 +893,7 @@ bool Codec::encode(const QJsonObject& message, Encoded& out, QString& error, qsi
         }
     }
     for (auto it = message.begin(); it != message.end(); ++it) {
-        if (!schema->allowed.contains(it.key())) { error = QStringLiteral("unsupported field for Server operation: ") + it.key(); return false; }
+        if (!schema->allowed.contains(it.key())) { error = QStringLiteral("unsupported field for Control operation: ") + it.key(); return false; }
     }
     if (schema->operation == Operation::AssetStart) {
         if (state_->nextTransfer == 0 || message.value("chunk_size").toInt() != kChunkBytes || message.value("file_bytes").toInteger() < 44 || message.value("file_bytes").toInteger() > kMaximumAssetBytes) { error = QStringLiteral("Server asset start is invalid"); return false; }
@@ -885,7 +906,7 @@ bool Codec::encode(const QJsonObject& message, Encoded& out, QString& error, qsi
     else payload.number<quint16>(static_cast<quint16>(mask));
     for (int offset = 0; offset < booleanCount; offset += 8) payload.number<quint8>(static_cast<quint8>(booleans >> offset));
     payload.bytes += fields.bytes;
-    if (payload.bytes.size() > kMaximumDocumentBytes) { error = QStringLiteral("Server operation exceeds its bound"); return false; }
+    if (payload.bytes.size() > kMaximumDocumentBytes) { error = QStringLiteral("Control operation exceeds its bound"); return false; }
     out = {schema->operation, payload.bytes};
     const auto parts = std::max<qsizetype>(1, (out.payload.size() + kPartBytes - 1) / kPartBytes);
     const auto required = out.payload.size() + parts * (parts > 1 ? 40 : 32);
@@ -912,9 +933,9 @@ bool Codec::encode(const QJsonObject& message, Encoded& out, QString& error, qsi
 bool Codec::encodeAsset(const QByteArray& chunk, Encoded& out, QString& error)
 {
     const auto& t = state_->outgoing;
-    if (chunk.size() <= 48 || chunk.size() > 48 + kChunkBytes || t.handle == 0 || chunk.first(32) != t.hash) { error = QStringLiteral("Server WAV chunk has no matching transfer"); return false; }
+    if (chunk.size() <= 48 || chunk.size() > 48 + kChunkBytes || t.handle == 0 || chunk.first(32) != t.hash) { error = QStringLiteral("Typed WAV chunk has no matching transfer"); return false; }
     Reader r{chunk}; r.take(32); const auto index = r.number<quint32>(); const auto offset = r.number<quint64>(); const auto length = r.number<quint32>();
-    if (!r.okay || index > kMaximumAssetBytes / kChunkBytes || offset != quint64{index} * t.chunk || offset >= t.bytes || length != static_cast<quint32>(std::min<quint64>(t.chunk, t.bytes - offset)) || chunk.size() != 48 + length) { error = QStringLiteral("Server WAV chunk index, size or offset is invalid"); return false; }
+    if (!r.okay || index > kMaximumAssetBytes / kChunkBytes || offset != quint64{index} * t.chunk || offset >= t.bytes || length != static_cast<quint32>(std::min<quint64>(t.chunk, t.bytes - offset)) || chunk.size() != 48 + length) { error = QStringLiteral("Typed WAV chunk index, size or offset is invalid"); return false; }
     Writer w; w.number<quint32>(t.handle); w.number<quint16>(static_cast<quint16>(index)); w.bytes += chunk.sliced(48);
     out = {Operation::AssetChunk, w.bytes}; state_->stats.assetHeaderBytesSaved += 42;
     return true;
@@ -925,7 +946,7 @@ bool Codec::decode(Operation operation, const QByteArray& bytes, Decoded& out, Q
     out = {};
     Reader r{bytes};
     if (operation == Operation::Binary) {
-        if (bytes.isEmpty() || bytes.size() > 65536) { error = QStringLiteral("Server diagnostic binary size is invalid"); return false; }
+        if (bytes.isEmpty() || bytes.size() > 65536) { error = QStringLiteral("Control diagnostic binary size is invalid"); return false; }
         out.asset = bytes; return true;
     }
     if (operation == Operation::Receipt) {
@@ -941,12 +962,12 @@ bool Codec::decode(Operation operation, const QByteArray& bytes, Decoded& out, Q
         const auto handle = r.number<quint32>(); const auto index = r.number<quint16>();
         const auto& t = state_->incoming; const auto offset = quint64{index} * t.chunk;
         const auto length = bytes.size() - 6;
-        if (!r.okay || !t.handle || handle != t.handle || offset >= t.bytes || length != static_cast<qsizetype>(std::min<quint64>(t.chunk, t.bytes - offset))) { error = QStringLiteral("Server WAV chunk uses an invalid transfer, index or size"); return false; }
+        if (!r.okay || !t.handle || handle != t.handle || offset >= t.bytes || length != static_cast<qsizetype>(std::min<quint64>(t.chunk, t.bytes - offset))) { error = QStringLiteral("Typed WAV chunk uses an invalid transfer, index or size"); return false; }
         Writer legacy; legacy.bytes = t.hash; legacy.number<quint32>(index); legacy.number<quint64>(offset); legacy.number<quint32>(static_cast<quint32>(length)); legacy.bytes += bytes.sliced(6);
         out.asset = legacy.bytes; return true;
     }
     const auto* schema = schemaFor(operation);
-    if (!schema || bytes.size() > kMaximumDocumentBytes) { error = QStringLiteral("Server operation or size is unsupported"); return false; }
+    if (!schema || bytes.size() > kMaximumDocumentBytes) { error = QStringLiteral("Control operation or size is unsupported"); return false; }
     const quint32 mask = schema->fields.size() <= 8 ? r.number<quint8>() : r.number<quint16>();
     if (!r.okay || (mask >> schema->fields.size()) != 0) { error = QStringLiteral("Server presence mask is invalid"); return false; }
     int booleanCount = 0;
@@ -1063,14 +1084,14 @@ QByteArray authenticate(Operation op, quint64 sequence, const QByteArray& payloa
 }
 bool verify(const QByteArray& body, quint64 sequence, const QByteArray& key, Operation& op, quint8& flags, QByteArray& payload, QString& error)
 {
-    if (body.size() < 28 || body.size() > 28 + 65536 || key.size() != 32) { error = QStringLiteral("Server record length/key is invalid"); return false; }
+    if (body.size() < 28 || body.size() > 28 + 65536 || key.size() != 32) { error = QStringLiteral("Control record length/key is invalid"); return false; }
     Reader r{body}; op = static_cast<Operation>(r.number<quint16>()); const auto version = r.number<quint8>(); flags = r.number<quint8>();
-    if (version != kVersion || flags > 1 || !sequence || r.number<quint64>() != sequence) { error = QStringLiteral("Server record version, flags or sequence is invalid"); return false; }
+    if (version != kVersion || flags > 1 || !sequence || r.number<quint64>() != sequence) { error = QStringLiteral("Control record version, flags or sequence is invalid"); return false; }
     const auto received = r.take(16); Writer complete; complete.number<quint32>(static_cast<quint32>(body.size())); complete.bytes += body;
     complete.bytes.replace(16, 16, QByteArray(16, '\0'));
     const auto expected = QMessageAuthenticationCode::hash(complete.bytes, key, QCryptographicHash::Sha256).first(16);
     unsigned difference = 0; for (int i = 0; i < 16; ++i) difference |= static_cast<unsigned char>(received[i]) ^ static_cast<unsigned char>(expected[i]);
-    if (difference) { error = QStringLiteral("Server record authentication failed"); return false; }
+    if (difference) { error = QStringLiteral("Control record authentication failed"); return false; }
     payload = body.sliced(28); return true;
 }
 
@@ -1172,7 +1193,7 @@ bool Channel::sendBinary(const QByteArray& payload)
 }
 bool Channel::enqueue(const Codec::Encoded& encoded)
 {
-    if (sendSequence_ >= UINT64_MAX - 256) { failed_ = true; if (onFailure) onFailure(QStringLiteral("Server wire counter exhausted")); return false; }
+    if (sendSequence_ >= UINT64_MAX - 256) { failed_ = true; if (onFailure) onFailure(QStringLiteral("Control wire counter exhausted")); return false; }
     // The first authenticated record sequence identifies this application
     // message. Transport datagram/fragment numbers remain entirely separate.
     const auto id = sendSequence_;
@@ -1402,4 +1423,4 @@ QJsonObject diagnostics(const Stats& s)
         {"dispatch_result_latency_sum_us", static_cast<qint64>(s.resultLatencySumUs)}, {"dispatch_result_latency_max_us", static_cast<qint64>(s.resultLatencyMaxUs)},
         {"flush_interval_ms", 5}, {"flush_records_per_turn", 16}, {"maximum_pending_dispatch_receipts_per_channel", 128}, {"assembly_idle_timeout_ms", 10000}};
 }
-} // namespace jam2::application::server_wire
+} // namespace jam2::application::control_wire

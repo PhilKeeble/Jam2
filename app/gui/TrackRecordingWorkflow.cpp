@@ -65,14 +65,7 @@ bool positiveBeatFrames(
 
 }
 
-bool jam2::gui::recording_group_can_start(bool hasArmedPeer, bool allArmedReady,
-    std::size_t readyPeers, RecordingReadinessPolicy policy) noexcept
-{
-    return hasArmedPeer && readyPeers > 0 &&
-        (policy == RecordingReadinessPolicy::ReadyPeers || allArmedReady);
-}
-
-std::optional<jam2::gui::RecordingBeatSchedule> jam2::gui::server_recording_schedule(
+std::optional<jam2::gui::RecordingBeatSchedule> jam2::gui::shared_recording_schedule(
     const PlaybackGrid::Position& position, std::uint64_t countdownBeat,
     std::uint64_t targetBeat, int beatsPerBar) noexcept
 {

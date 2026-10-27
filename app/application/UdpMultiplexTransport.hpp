@@ -8,6 +8,7 @@
 #include <vector>
 
 namespace jam2::application {
+struct UdpSocketBuffers { std::optional<int> sendBytes, receiveBytes; };
 class UdpMultiplexTransport final : public QObject, public jam2::NetworkDatagramTransport {
 public:
     enum class LinkPhase { Preparing, Offered, Probing, Reporting, Active, Failed };
@@ -19,6 +20,12 @@ public:
     static constexpr quint64 kReceiverHandoverTimeoutMs = 2000;
     struct Config {
         bool creator = false;
+        jam2::ConnectionStrategy strategy = jam2::ConnectionStrategy::Jam2Server;
+        quint16 bindPort = 0;
+        UdpSocketBuffers socketBuffers;
+        std::optional<jam2::Endpoint> publicEndpoint;
+        jam2::Endpoint stunServer{"stun.l.google.com",19302};
+        int stunTimeoutMs = 1000, stunRetries = 3;
         QString sessionHex, keyHex, localToken;
         jam2::Endpoint server{"jam2gether.com", 40404};
         QString bindHost = QStringLiteral("0.0.0.0");
@@ -26,8 +33,9 @@ public:
         // Zero removes the fixed asset rate cap; reliable-stream congestion control still applies.
         quint64 controlBytesPerSecond = 65536, assetBytesPerSecond = 0;
         quint64 linkRepairSilenceMs = 10000;
+        quint64 pendingAdmissionTimeoutMs = 30000;
         ReceiveModel receiveModel = ReceiveModel::Runtime;
-        // Explicit diagnostic ablation; normal Server sessions reuse workspace.
+        // Explicit diagnostic ablation; normal sessions reuse workspace.
         bool reuseWorkerBuffers = true;
         bool packUnsentFragments = true;
         bool compactFrames = true, combineAcks = true, fastRecovery = true, acknowledgeNativeIntents = true;
@@ -52,9 +60,19 @@ public:
         bool nativeIntentSent = false, nativeIntentAcknowledged = false, nativeIntentReceiptsAllowed = true;
         double controlWindow = 0, assetWindow = 0;
         jam2::Endpoint retainedAudioLocal;
+        int sendBufferBytes=0, receiveBufferBytes=0;
     };
     struct Snapshot {
         bool running = false, registered = false, admissionPaused = false, pauseConfirmed = false;
+        bool usesRendezvous = false;
+        jam2::Endpoint bootstrapLocal, bootstrapPublic;
+        UdpSocketBuffers requestedBuffers;
+        int signalSendBufferBytes=0, signalReceiveBufferBytes=0;
+        quint64 physicalSocketCount=0;
+        quint64 bootstrapRejected = 0, bootstrapAuthenticationRejects = 0, bootstrapAttempts = 0;
+        quint64 pendingAdmissionTimeouts = 0, pendingAdmissionTimeoutMs = 0;
+        quint64 stunRequestsSent = 0, stunResponsesRejected = 0;
+        quint64 introductionPending = 0;
         quint64 signalPacketsSent = 0, signalPacketsReceived = 0;
         quint64 audioPacketsSent = 0, audioPacketsReceived = 0, audioQueueDrops = 0;
         quint64 assetBytesSent = 0, controlBytesSent = 0, invalidMuxPackets = 0;
@@ -94,7 +112,9 @@ public:
     std::optional<jam2::Endpoint> peerEndpoint(quint64 peerId) const;
     std::optional<jam2::Endpoint> observedEndpoint(const QString& peer) const;
     QString coordinatorToken() const;
+    std::optional<jam2::Endpoint> bootstrapEndpoint() const;
     Snapshot snapshot() const;
+    std::optional<jam2::NetworkTransportInfo> transportInfo() const override;
     void receiverAttached() override;
     void receiverDetached() noexcept override;
     jam2::UdpSendResult sendToPeer(std::uint64_t id, const jam2::ResolvedUdpEndpoint& endpoint,
@@ -103,6 +123,7 @@ public:
     std::optional<jam2::UdpSocket::ReceivedDatagram> receiveFor(std::span<std::uint8_t> buffer,
         std::uint64_t timeoutUs, jam2::RealtimeWakeSignal* captureWake) override;
     std::function<void()> onRegistered;
+    std::function<void(const QString&)> onBootstrapFailure;
     std::function<void(const QString&)> onJoinRequest;
     std::function<void(const QString&)> onLinkReady;
     std::function<void(const QString&)> onPeerLeft;

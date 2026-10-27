@@ -24,8 +24,8 @@ macOS keeps its existing `Jam2.app` GUI launch and command-line behavior.
 jam2 list-devices
 jam2 test-device <id>
 jam2 local [audio options]
-jam2 network create [--profile fast|moderate|safe] [options]
-jam2 network join <jam2-url> [--profile fast|moderate|safe] [options]
+jam2 network create --name Alice [--profile fast|moderate|safe] [options]
+jam2 network join <jam2-url> --name Alex [--profile fast|moderate|safe] [options]
 jam2 debug describe --json
 jam2 debug run <scenario.json>
 ```
@@ -55,16 +55,16 @@ Use `-h` or `--help` for the command menu, then apply it to a command or network
 Host:
 
 ```powershell
-.\release\jam2.exe network create --bind 0.0.0.0:49000 --profile fast --audio-device 0 --input-channels 1 --output-channels 1,2
+.\release\jam2.exe network create --name Alice --bind 0.0.0.0:49000 --profile fast --audio-device 0 --input-channels 1 --output-channels 1,2
 ```
 
 Client:
 
 ```powershell
-.\release\jam2.exe network join "jam2://..." --profile fast --audio-device 0 --input-channels 1 --output-channels 1,2
+.\release\jam2.exe network join "jam2://..." --name Alex --profile fast --audio-device 0 --input-channels 1 --output-channels 1,2
 ```
 
-The creator's TCP coordinator authenticates the joiner, supplies the immutable
+The creator's multiplex control coordinator authenticates the joiner, supplies the immutable
 sample-rate/frame-size contract, and distributes direct UDP candidates and
 current membership. Device ids, channel selections, callback buffer size, and
 receive/playout tuning remain local to each machine.
@@ -73,6 +73,7 @@ receive/playout tuning remain local to each machine.
 
 | Option | Purpose |
 | --- | --- |
+| `--name <letters>` | Required create/join name: 1 to 8 Unicode letters after NFC normalization; duplicate names are allowed. |
 | `--profile fast\|moderate\|safe` | Applies a named set of numeric tuning values. Explicit numeric flags override the selected profile. |
 | `--audio-device` | Selects the host audio device id. |
 | `--sample-rate` | Creator-owned session sample rate. A joiner receives it from the session contract. |
@@ -115,7 +116,7 @@ Use stats while testing and tuning. The engine reports raw measurements such as 
 Use CSV logs for comparisons between runs:
 
 ```powershell
-.\release\jam2.exe network create --stats enabled --stats-interval-ms 1000 --log-stats logs
+.\release\jam2.exe network create --name Alice --stats enabled --stats-interval-ms 1000 --log-stats logs
 ```
 
 See [Diagnosing](Diagnosing.md) and [Profiles](Profiles.md) for practical tuning guidance.

@@ -1,4 +1,5 @@
 #pragma once
+#include "ControlWireVersion.hpp"
 
 #include <QByteArray>
 #include <QJsonObject>
@@ -10,9 +11,9 @@
 #include <functional>
 #include <memory>
 
-namespace jam2::application::server_wire {
+namespace jam2::application::control_wire {
 
-inline constexpr int kVersion = 4;
+inline constexpr int kVersion = kControlWireVersion;
 inline constexpr qsizetype kRecordHeaderBytes = 32;
 inline constexpr qsizetype kMaximumDocumentBytes = 4 * 1024 * 1024;
 inline constexpr qsizetype kMaximumQueuedBytes = 5 * 1024 * 1024;
@@ -23,8 +24,8 @@ enum class Operation : quint16 {
     Contract = 1, Membership, Heartbeat, HeartbeatReply, Introduce, Repair,
     PairFailure, Endpoint, End, Error,
     SyncSet = 16, SyncRequest, MetronomeSet, MetronomeRequest,
-    ListeningRequest = 24, ListeningPrepare, ListeningReady, ListeningFailed,
-    ListeningCommit, ListeningCancel, ListeningState, ListeningReset,
+    ListeningRequest = 24, ListeningFailed = 27, ListeningCancel = 29,
+    ListeningState, ListeningReset,
     ListeningApplied = 32,
     Cell = 40, Hit, BeatDivision, MusicDivision, MusicStep, Resize, Song, Render,
     BankRequest = 56, BankPrepare, BankReady, BankCancel, BankSwitch,
@@ -169,4 +170,4 @@ private:
     std::function<void()> closeAfterDrain_;
 };
 
-} // namespace jam2::application::server_wire
+} // namespace jam2::application::control_wire

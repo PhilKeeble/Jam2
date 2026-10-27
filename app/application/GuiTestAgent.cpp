@@ -755,9 +755,9 @@ void GuiTestAgent::handle(const QJsonObject& command)
     if (type == QStringLiteral("jam.create") || type == QStringLiteral("jam.join")) {
         const bool create = type == QStringLiteral("jam.create");
         const bool fieldsOk = create
-            ? onlyFields(command, {"format", "type", "id", "port", "test_input", "strategy", "rendezvous", "diagnostics", "queued_server_receive"})
+            ? onlyFields(command, {"format", "type", "id", "name", "port", "test_input", "strategy", "rendezvous", "diagnostics", "queued_server_receive"})
             : onlyFields(command, {
-                "format", "type", "id", "port", "invite_url", "test_input", "diagnostics", "queued_server_receive"});
+                "format", "type", "id", "name", "port", "invite_url", "test_input", "diagnostics", "queued_server_receive"});
         int port = 0;
         const QString testInput = command.value(QStringLiteral("test_input"))
             .toString(QStringLiteral("silence"));
@@ -800,6 +800,7 @@ void GuiTestAgent::handle(const QJsonObject& command)
                 port,
                 command.value(QStringLiteral("invite_url")).toString(),
                 testInputMode,
+                command.value(QStringLiteral("name")).toString(),
                 error, strategy, rendezvous, command.value(QStringLiteral("diagnostics")).toBool(false),
                 command.value(QStringLiteral("queued_server_receive")).toBool(false)
                     ? jam2::application::UdpMultiplexTransport::ReceiveModel::QueuedWorker : jam2::application::UdpMultiplexTransport::ReceiveModel::Runtime)) {
@@ -936,7 +937,9 @@ void GuiTestAgent::handle(const QJsonObject& command)
             diagnostics.received_packets = 1000;
             diagnostics.packet_gap_samples = 1000;
             Jam2PeerDiagnostics peer;
-            peer.peer_id = 2;
+            const auto session=window_.sessionController_.snapshot();
+            const auto remote=std::find_if(session.peers.cbegin(),session.peers.cend(),[&](const auto& member) { return member.token!=session.localToken; });
+            peer.peer_id = remote!=session.peers.cend() ? remote->peerId : 2;
             peer.rtt_ms = 12.602;
             peer.has_rtt = true;
             peer.incoming_audio = jam2_estimate_incoming_audio_delay(

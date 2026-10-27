@@ -426,6 +426,7 @@ UserPreferences UserPreferencesStore::load()
         settings.endGroup();
     }
     settings.beginGroup(QStringLiteral("create"));
+    out.create.name = settings.value(QStringLiteral("name"),out.create.name).toString();
     out.create.bindHost = settings.value(QStringLiteral("bind_host"), out.create.bindHost).toString();
     out.create.port = settings.value(QStringLiteral("port"), out.create.port).toInt();
     out.create.publicHost = settings.value(QStringLiteral("public_host"), out.create.publicHost).toString();
@@ -449,6 +450,7 @@ UserPreferences UserPreferencesStore::load()
     settings.beginGroup(QStringLiteral("runtime")); loadRuntime(settings, out.create.runtime); settings.endGroup();
     settings.endGroup();
     settings.beginGroup(QStringLiteral("join"));
+    out.join.name = settings.value(QStringLiteral("name"),out.join.name).toString();
     out.join.bindHost = settings.value(QStringLiteral("bind_host"), out.join.bindHost).toString();
     out.join.port = settings.value(QStringLiteral("port"), out.join.port).toInt();
     settings.beginGroup(QStringLiteral("tuning")); loadTuning(settings, out.join.tuning); settings.endGroup();
@@ -678,6 +680,7 @@ bool UserPreferencesStore::saveChecked(const UserPreferences& p)
     settings.beginGroup(QStringLiteral("create_jam_audio")); saveAudio(settings, p.createJamAudio); settings.endGroup();
     settings.beginGroup(QStringLiteral("join_jam_audio")); saveAudio(settings, p.joinJamAudio); settings.endGroup();
     settings.beginGroup(QStringLiteral("create"));
+    settings.setValue(QStringLiteral("name"),p.create.name);
     settings.setValue(QStringLiteral("bind_host"), p.create.bindHost);
     settings.setValue(QStringLiteral("port"), p.create.port);
     settings.setValue(QStringLiteral("public_host"), p.create.publicHost);
@@ -695,6 +698,7 @@ bool UserPreferencesStore::saveChecked(const UserPreferences& p)
     settings.beginGroup(QStringLiteral("runtime")); saveRuntime(settings, p.create.runtime); settings.endGroup();
     settings.endGroup();
     settings.beginGroup(QStringLiteral("join"));
+    settings.setValue(QStringLiteral("name"),p.join.name);
     settings.setValue(QStringLiteral("bind_host"), p.join.bindHost);
     settings.setValue(QStringLiteral("port"), p.join.port);
     settings.beginGroup(QStringLiteral("tuning")); saveTuning(settings, p.join.tuning); settings.endGroup();

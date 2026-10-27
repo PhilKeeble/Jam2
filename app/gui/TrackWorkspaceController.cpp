@@ -207,6 +207,11 @@ bool TrackWorkspaceController::incomingAssetExpected(
         incomingAssetSourcePeerToken == sourcePeerToken;
 }
 
+QString TrackWorkspaceController::peerName(const QString& token) const
+{
+    return callbacks_.peerName ? callbacks_.peerName(token) : QString{};
+}
+
 void TrackWorkspaceController::discardPendingAssetRequestFromPeer(const QString& peerToken)
 {
     // Requests awaiting START have no ReceiveSequence yet, so the transfer
@@ -220,7 +225,7 @@ void TrackWorkspaceController::discardPendingAssetRequestFromPeer(const QString&
     incomingAssetSourcePeerToken.clear();
     pendingTrackAssetSources.remove(hash);
     appendAssetLog(QStringLiteral("released pending looper asset request after peer interruption: hash=%1 source=%2")
-        .arg(hash, peerToken.left(8)));
+        .arg(hash, peerName(peerToken)));
 }
 
 void TrackWorkspaceController::abandonIncomingAsset(const QString& hash)
@@ -233,7 +238,7 @@ void TrackWorkspaceController::abandonIncomingAsset(const QString& hash)
                     ? QStringLiteral("track-share")
                     : QStringLiteral("arrangement"),
                 hash,
-                incomingAssetSourcePeerToken));
+                peerName(incomingAssetSourcePeerToken)));
         incomingAssetWorkflow = IncomingAssetWorkflow::None;
         incomingAssetHash.clear();
         incomingAssetSourcePeerToken.clear();
@@ -322,7 +327,7 @@ void TrackWorkspaceController::acceptIncomingAsset(
     incomingAssetHash.clear();
     incomingAssetSourcePeerToken.clear();
     appendAssetLog(QStringLiteral("accepted incoming looper asset: workflow=%1 hash=%2 source=%3 path=%4")
-        .arg(workflow, hash, source, path));
+        .arg(workflow, hash, peerName(source), path));
     if (callbacks_.incomingAssetAccepted) {
         callbacks_.incomingAssetAccepted();
     }

@@ -92,17 +92,20 @@ bool reconcileSynchronizedSongStructure(
     QJsonObject& localSong,
     const QJsonObject& incomingSong);
 
-// One composed Server proposal survives superseding asynchronous validation.
+// Composed proposals survive superseding asynchronous validation.
 // The authority revision and validation generation prevent reuse after commit,
 // cancellation, session reset, or unrelated local changes.
 enum class SharedSongScope { Tracks, IdeaFull, IdeaChords, IdeaBeats };
 
-class ServerSongProposalStaging {
+class SharedSongProposalStaging {
 public:
     QJsonObject base(const QJsonObject& applied, quint64 authorityRevision,
         quint64 validationGeneration) const;
+    QJsonObject trackProposalBase(const QJsonObject& applied, const QString& source,
+        quint64 authorityRevision, quint64 validationGeneration) const;
     void stage(const QJsonObject& composed, quint64 authorityRevision,
-        quint64 validationGeneration, SharedSongScope scope = SharedSongScope::Tracks);
+        quint64 validationGeneration, SharedSongScope scope = SharedSongScope::Tracks,
+        const QString& source = {}, const QJsonObject& proposed = {});
     QVector<SharedSongScope> scopes(quint64 authorityRevision, quint64 validationGeneration) const;
     void reject(quint64 validationGeneration);
 private:
@@ -110,4 +113,6 @@ private:
     quint64 authorityRevision_ = 0;
     quint64 validationGeneration_ = 0;
     QVector<SharedSongScope> scopes_;
+    struct Proposal { QString source; QJsonObject song; };
+    QVector<Proposal> proposals_;
 };

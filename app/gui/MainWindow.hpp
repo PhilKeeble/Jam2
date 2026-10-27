@@ -118,6 +118,7 @@ private:
         int localPort,
         const QString& inviteUrl,
         Jam2TestInputMode testInput,
+        const QString& name,
         QString& error,
         jam2::ConnectionStrategy strategy = jam2::ConnectionStrategy::Direct,
         jam2::Endpoint rendezvousServer = {"jam2gether.com", 40404},

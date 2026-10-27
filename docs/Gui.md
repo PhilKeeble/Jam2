@@ -1,14 +1,16 @@
 # Jam2 GUI
 
-Running `jam2` with no arguments is the normal way to use Jam2. The GUI and persistent local audio engine live in one application process; starting, joining, leaving, and changing peer membership attach or detach the direct UDP session without reopening an unchanged audio device. The authenticated TCP control connection between GUIs carries shared settings, song grid edits, and looper arrangement sync. Audio travels directly between peers over UDP.
+Running `jam2` with no arguments is the normal way to use Jam2. The GUI and persistent local audio engine live in one application process; starting, joining, leaving, and changing peer membership attach or detach the direct UDP session without reopening an unchanged audio device. All connection strategies use the same authenticated typed binary control streams over the UDP multiplex for shared settings, song grid edits and looper arrangement sync. Audio travels directly between peers over UDP.
+
+Names are mandatory: 1 to 8 Unicode letters after NFC normalization, with no digits, spaces or symbols. Duplicate names are allowed. Peer controls and popups use these names; internal identities remain distinct.
 
 ## Start A Jam
 
 On the creator's machine:
 
 1. Open `jam2`.
-2. In **Start Jam**, choose the bind host and UDP port. `0.0.0.0:49000` is the usual starting point.
-3. Leave STUN enabled for internet testing, or enable **No STUN** for manual/LAN testing.
+2. In **Start Jam**, enter your name and choose the bind host and UDP port. `0.0.0.0:49000` is the usual starting point.
+3. Choose Jam2 Server for external rendezvous, STUN for creator endpoint discovery, or Direct for a supplied creator endpoint. Direct/STUN require the creator UDP port to be reachable; the creator introduces the other peers for hole punching.
 4. Choose the local audio device and input/output channels.
 5. Choose a tuning profile. `fast` is the default, `moderate` is more forgiving, and `safe` is the current Wi-Fi profile.
 6. Start the jam and send the generated `jam2://...` URL to the other player.
@@ -25,7 +27,7 @@ buffer, prefill, and jitter/playout settings.
 On the joining machine:
 
 1. Open `jam2`.
-2. Paste the `jam2://...` URL into **Join Jam**.
+2. Paste the `jam2://...` URL into **Join Jam** and enter your name.
 3. Choose the local audio device, channels, and Join profile.
 4. The sample rate, network frame size, and named session profile are received
    from the creator before network audio starts. Device, channels, levels, and
@@ -100,7 +102,7 @@ The song grid lets both players share simple song structure:
 - Beat divisions.
 - Section sizes.
 
-The GUI control plane uses authenticated TCP connections to the creator for
+The GUI control plane uses authenticated reliable multiplex streams to the creator for
 ordering and distribution. It is not a room server and does not relay audio.
 
 ## Generated Practice Ideas

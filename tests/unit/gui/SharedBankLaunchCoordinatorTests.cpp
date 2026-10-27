@@ -17,7 +17,7 @@ void require(bool condition, const std::string& message)
     if (!condition) throw std::runtime_error(message);
 }
 
-void testFourPeerBarrierSnapshot()
+void testFourPeerReadinessSnapshot()
 {
     using jam2::gui::SharedBankLaunchCoordinator;
     using jam2::gui::SharedBankReadyResult;
@@ -50,10 +50,8 @@ void testFourPeerBarrierSnapshot()
         "host barrier must snapshot exactly the other three original peers");
 
     require(!coordinator.markHostReady(0) && coordinator.markHostReady(1) &&
-            !coordinator.readyToCommit(),
-        "host readiness must match the prepared bank and still wait for peers");
-    require(coordinator.readyToCommit(jam2::gui::BankReadinessPolicy::LocalReady),
-        "Server bank preparation cannot be vetoed by three missing readiness replies");
+            coordinator.readyToCommit(),
+        "host preparation must match the bank and cannot be blocked by three missing replies");
     require(coordinator.markPeerReady(
                 1, QStringLiteral("stale"), QStringLiteral("peer-2"),
                 QStringLiteral("creator")) == SharedBankReadyResult::Stale &&
@@ -80,13 +78,13 @@ void testFourPeerBarrierSnapshot()
             coordinator.markPeerReady(
                 1, QStringLiteral("switch-a"), QStringLiteral("peer-2"),
                 QStringLiteral("creator")) == SharedBankReadyResult::Duplicate &&
-            !coordinator.readyToCommit(),
-        "out-of-order and duplicate readiness must remain idempotent while one peer is due");
+            coordinator.readyToCommit(),
+        "out-of-order and duplicate readiness must remain idempotent while one peer is still due");
 
     require(!coordinator.removeExpectedPeer(QStringLiteral("missing")) &&
             coordinator.removeExpectedPeer(QStringLiteral("peer-3")) &&
             coordinator.readyToCommit(),
-        "a departed original peer must stop blocking the remaining prepared peers");
+        "a departed peer must be removed from the readiness evidence");
     const auto completed = coordinator.take();
     require(completed.active() && completed.switchId == QStringLiteral("switch-a") &&
             completed.bankIndex == 1 && completed.requestedTargetBeat == 24 &&
@@ -216,7 +214,7 @@ int main(int argc, char** argv)
 {
     QCoreApplication application(argc, argv);
     try {
-        testFourPeerBarrierSnapshot();
+        testFourPeerReadinessSnapshot();
         testPeerPreparationReplacementAndClear();
         testBoundaryBeatAndFrameSchedule();
         std::cout << "Shared bank launch coordinator tests passed\n";

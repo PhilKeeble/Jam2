@@ -93,11 +93,7 @@ void apply_socket_options(jam2::UdpSocket& socket, const Options& options)
     }
 }
 
-void print_socket_options(const jam2::UdpSocket& socket)
-{
-    std::cout << "UDP send buffer bytes: " << socket.send_buffer_size() << "\n";
-    std::cout << "UDP receive buffer bytes: " << socket.recv_buffer_size() << "\n";
-}
+
 
 
 
@@ -1516,19 +1512,28 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
     }
 
     jam2::NetworkRuntime network;
-    jam2::UdpSocket socket;
-    apply_socket_options(socket, options);
-    socket.bind(options.bind);
-    const jam2::Endpoint local = socket.local_endpoint();
+    std::optional<jam2::UdpSocket> socket;
+    jam2::NetworkTransportInfo transport_info;
+    if (options.datagram_transport) {
+        const auto info = options.datagram_transport->transportInfo();
+        if (!info) throw std::runtime_error("network transport has no active local endpoint");
+        transport_info = *info;
+    } else {
+        socket.emplace();
+        apply_socket_options(*socket, options);
+        socket->bind(options.bind);
+        transport_info = {socket->local_endpoint(), socket->send_buffer_size(), socket->recv_buffer_size()};
+    }
+    const jam2::Endpoint local = transport_info.local;
     const jam2::SessionInfo session{local, *options.session_id, *options.session_key};
 
     std::optional<jam2::Endpoint> public_candidate;
-    if (options.bootstrap_role == jam2::SessionBootstrapRole::Creator) {
+    if (socket && options.bootstrap_role == jam2::SessionBootstrapRole::Creator) {
         if (options.public_endpoint) {
             public_candidate = options.public_endpoint;
         } else if (!options.no_stun) {
             public_candidate = jam2::stun::discover_public_endpoint(
-                socket,
+                *socket,
                 options.stun_server,
                 options.stun_timeout_ms,
                 options.stun_retries);
@@ -1548,7 +1553,8 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
         }
         std::cout << "\n";
     }
-    print_socket_options(socket);
+    std::cout << "UDP send buffer bytes: " << transport_info.send_buffer_bytes << "\n";
+    std::cout << "UDP receive buffer bytes: " << transport_info.receive_buffer_bytes << "\n";
     // Constructed before the audio attachment so it remains alive until after
     // that attachment has been detached and acknowledged by the callback.
     jam2::RealtimeWakeSignal capture_ready_wake;
@@ -1562,7 +1568,7 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
               audio.engine->snapshot().audio_buffer_frames,
               options.frame_size)
         : jam2::NetworkAudioPacing::Scheduled;
-    const int drained_startup_packets = drain_pending_udp(socket);
+    const int drained_startup_packets = socket ? drain_pending_udp(*socket) : 0;
     if (drained_startup_packets > 0) {
         std::cout << "Drained startup UDP packets: " << drained_startup_packets << "\n";
     }
@@ -1577,7 +1583,7 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                 options.bootstrap_role == jam2::SessionBootstrapRole::Creator
                     ? "jam2 network create (typed runtime)"
                     : "jam2 network join (typed runtime)",
-                "mesh", options, socket, local, peer_context, "coordinator-membership"));
+                "mesh", options, transport_info, peer_context, "coordinator-membership"));
         std::cout << "Stats CSV: " << csv_log->path().string() << "\n";
     }
     if (runtime_host.startup) {
@@ -1848,8 +1854,11 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
         options,
         options.stats_enabled);
     CliPeerStreamPlayback mesh_playback(audio.engine.get());
+    jam2::NetworkSessionTransport source = options.datagram_transport
+        ? jam2::NetworkSessionTransport{options.datagram_transport}
+        : jam2::NetworkSessionTransport{std::move(*socket)};
     jam2::NetworkSession network_session(
-        std::move(socket),
+        std::move(source),
         session,
         make_network_session_contract(options),
         options.bootstrap_role,
@@ -1861,7 +1870,6 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
         // Keep the fallback silence clock on the host clock so synthetic
         // device drift cannot mask a capture/sender ownership regression.
         0);
-    if (options.datagram_transport) network_session.setDatagramTransport(options.datagram_transport);
     network_session_control = &network_session;
     auto& packet_schedule = network_session.schedule();
     auto peer_endpoint_state = [&](jam2::PeerId peer_id) {
@@ -1979,7 +1987,7 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
     jam2::EngineSnapshot diagnostics_engine_baseline;
     std::uint64_t diagnostics_baseline_us = start_time;
     // Public create/join validation measures established UDP audio, not
-    // TCP/audio bootstrap time. Standalone internal lifecycle runs retain a
+    // control/audio bootstrap time. Standalone internal lifecycle runs retain a
     // finite local deadline even when their intentional peer list is empty.
     const bool wait_for_first_peer = options.stream_ms > 0 && options.arm_stream_on_first_peer;
     std::uint64_t send_deadline = options.stream_ms > 0 && !wait_for_first_peer

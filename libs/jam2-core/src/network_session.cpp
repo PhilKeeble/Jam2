@@ -158,7 +158,7 @@ struct NetworkSession::Impl {
         NetworkPeerSendStats send;
     };
 
-    UdpSocket socket;
+    std::optional<UdpSocket> socket;
     std::shared_ptr<NetworkDatagramTransport> datagram_transport;
     ~Impl() { if (datagram_transport) datagram_transport->receiverDetached(); }
     SessionInfo session;
@@ -177,7 +177,7 @@ struct NetworkSession::Impl {
     std::unique_ptr<RoutedReceivePacket> routed_receive_packet;
 
     Impl(
-        UdpSocket&& owned_socket,
+        NetworkSessionTransport source,
         const SessionInfo& session_info,
         const NetworkSessionContract& session_contract,
         SessionBootstrapRole role,
@@ -186,7 +186,8 @@ struct NetworkSession::Impl {
         const PeerStreamConfig& peer_config,
         PeerStreamPlayback* output,
         int packet_clock_drift_ppm)
-        : socket(std::move(owned_socket)),
+        : socket(std::holds_alternative<UdpSocket>(source)
+              ? std::optional<UdpSocket>(std::move(std::get<UdpSocket>(source))) : std::nullopt),
           session(session_info),
           contract(session_contract),
           bootstrap_role(role),
@@ -225,6 +226,12 @@ struct NetworkSession::Impl {
             if (!addPeer(peer, peer_config)) {
                 throw std::runtime_error("duplicate NetworkSession peer descriptor");
             }
+        }
+        if (auto* routed = std::get_if<std::shared_ptr<NetworkDatagramTransport>>(&source)) {
+            if (!*routed) throw std::invalid_argument("NetworkSession requires a datagram transport");
+            routed_receive_packet = std::make_unique<RoutedReceivePacket>();
+            (*routed)->receiverAttached();
+            datagram_transport = std::move(*routed);
         }
     }
 
@@ -383,10 +390,12 @@ struct NetworkSession::Impl {
         protocol::PacketType type,
         std::span<const std::uint8_t> packet)
     {
+        if (bootstrap_state == SessionBootstrapState::Closed)
+            throw std::logic_error("cannot send through a closed NetworkSession");
         ++peer.send.attempts;
         const UdpSendResult sent = datagram_transport
             ? datagram_transport->sendToPeer(peer.descriptor.peer_id.value, peer.descriptor.endpoint, packet)
-            : socket.send_to(peer.descriptor.endpoint, packet);
+            : socket->send_to(peer.descriptor.endpoint, packet);
         peer.send.last_error_code = sent.error_code;
         peer.send.last_outcome = sent.outcome;
         switch (sent.outcome) {
@@ -432,7 +441,7 @@ struct NetworkSession::Impl {
 };
 
 NetworkSession::NetworkSession(
-    UdpSocket&& socket,
+    NetworkSessionTransport transport,
     const SessionInfo& session,
     const NetworkSessionContract& contract,
     SessionBootstrapRole bootstrap_role,
@@ -442,7 +451,7 @@ NetworkSession::NetworkSession(
     PeerStreamPlayback* playback,
     int packet_clock_drift_ppm)
     : NetworkSession(
-          std::move(socket),
+          std::move(transport),
           session,
           contract,
           bootstrap_role,
@@ -455,7 +464,7 @@ NetworkSession::NetworkSession(
 }
 
 NetworkSession::NetworkSession(
-    UdpSocket&& socket,
+    NetworkSessionTransport transport,
     const SessionInfo& session,
     const NetworkSessionContract& contract,
     SessionBootstrapRole bootstrap_role,
@@ -465,7 +474,7 @@ NetworkSession::NetworkSession(
     PeerStreamPlayback* playback,
     int packet_clock_drift_ppm)
     : impl_(std::make_unique<Impl>(
-          std::move(socket),
+          std::move(transport),
           session,
           contract,
           bootstrap_role,
@@ -811,12 +820,13 @@ std::optional<NetworkDatagram> NetworkSession::receiveFor(
     std::uint64_t timeout_us,
     RealtimeWakeSignal* wake_signal)
 {
+    if (impl_->bootstrap_state == SessionBootstrapState::Closed) return std::nullopt;
     const auto buffer = impl_->datagram_transport
         ? std::span<std::uint8_t>(*impl_->routed_receive_packet)
         : std::span<std::uint8_t>(impl_->receive_packet);
     const auto received = impl_->datagram_transport
         ? impl_->datagram_transport->receiveFor(buffer, timeout_us, wake_signal)
-        : impl_->socket.recv_from_for(buffer, timeout_us, wake_signal);
+        : impl_->socket->recv_from_for(buffer, timeout_us, wake_signal);
     if (!received || received->size > buffer.size()) {
         return std::nullopt;
     }
@@ -838,6 +848,8 @@ protocol::ParseResult NetworkSession::parse(std::span<const std::uint8_t> packet
 void NetworkSession::setDatagramTransport(std::shared_ptr<NetworkDatagramTransport> transport)
 {
     if (transport == impl_->datagram_transport) return;
+    if (!transport && !impl_->socket)
+        throw std::invalid_argument("routed NetworkSession has no native socket fallback");
     auto receive_packet = transport ? std::make_unique<Impl::RoutedReceivePacket>() : nullptr;
     if (transport) transport->receiverAttached();
     if (impl_->datagram_transport) impl_->datagram_transport->receiverDetached();

@@ -85,7 +85,7 @@ int main()
     std::set<std::uint16_t> reservedPorts;
     if (!portsReserved) {
         check(false, qPrintable(QStringLiteral(
-            "could not reserve 16 ports valid for both loopback TCP and UDP: %1")
+            "could not reserve 16 ports valid for loopback UDP: %1")
                 .arg(reservationError)));
     }
     if (portsReserved) {
@@ -93,7 +93,7 @@ int main()
             reservedPorts.insert(loopbackPorts.port(index));
         }
         check(reservedPorts.size() == 16,
-            "TCP/UDP loopback reservations were not unique");
+            "UDP loopback reservations were not unique");
         bool rejectedOutOfRange = false;
         try {
             (void)loopbackPorts.port(16);
@@ -106,14 +106,12 @@ int main()
     loopbackPorts.release();
     for (const std::uint16_t port : reservedPorts) {
         QUdpSocket udp;
-        QTcpServer tcp;
         const bool udpRebound = udp.bind(
             QHostAddress::LocalHost,
             port,
             QUdpSocket::DontShareAddress);
-        const bool tcpRebound = tcp.listen(QHostAddress::LocalHost, port);
-        check(udpRebound && tcpRebound,
-            "released loopback reservation retained a TCP or UDP port");
+        check(udpRebound,
+            "released loopback reservation retained a UDP port");
     }
 
     reservationError.clear();

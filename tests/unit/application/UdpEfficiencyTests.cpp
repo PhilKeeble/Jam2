@@ -69,10 +69,10 @@ void udpEfficiencyFixtures()
     a=std::make_shared<UdpStreamConnection>(1,2,4,UdpMuxChannel::Control,key,"local",false,UdpStreamConnection::Options{},8);
     b=std::make_shared<UdpStreamConnection>(1,2,4,UdpMuxChannel::Control,key,"local",true,full,8);
     ab.clear(); ba.clear(); a->poll(30,1,toB);
-    auto opening=decodeUdpMux(ab.front(),1,key); check(opening.has_value(),"fallback Open invalid"); b->receive(*opening,31,toA);
-    auto fallback=decodeUdpMux(ba.front(),1,key); check(fallback && fallback->payload.isEmpty(),"full-only peer did not decline compact mapping");
+    auto opening=decodeUdpMux(ab.front(),1,key); check(opening.has_value(),"diagnostic full Open invalid"); b->receive(*opening,31,toA);
+    auto fallback=decodeUdpMux(ba.front(),1,key); check(fallback && fallback->payload.isEmpty(),"diagnostic full-only peer did not omit its handle");
     a->receive(*fallback,32,toB); ab.clear();
-    check(a->compactHandle()==0 && a->write("fallback") && a->poll(33,1,toB)==1 && decodeUdpMux(ab.front(),1,key).has_value(),"full framing fallback did not send immediately");
+    check(!a->isConnected() && a->compactHandle()!=0,"compact stream silently downgraded to unbound full framing");
     a->retire(); b->retire();
     std::cout << "udp_efficiency compact_envelope_bytes=32 saved_per_datagram=26 piggyback=checked ack_pair=atomic sparse_ack=immediate\n";
 }

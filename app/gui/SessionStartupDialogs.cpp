@@ -1,4 +1,5 @@
 #include "SessionStartupDialogs.hpp"
+#include "PeerName.hpp"
 
 #include "GuiControlContract.hpp"
 #include "GuiPresentation.hpp"
@@ -310,6 +311,10 @@ StartJamDialog::StartJamDialog(
     auto* contentLayout = new QVBoxLayout(content);
 
     bindHost_ = new QLineEdit(initial.create.bindHost, content);
+    name_ = new QLineEdit(initial.create.name, content);
+    name_->setMaxLength(32);
+    name_->setPlaceholderText(jam2::application::peerNameRequirement());
+    registerDialogField(*name_, "name", "session.peer-name");
     port_ = spin(content, 1, 65535, initial.create.port);
     publicHost_ = new QLineEdit(initial.create.publicHost, content);
     stunServer_ = new QLineEdit(initial.create.stunServer, content);
@@ -324,6 +329,7 @@ StartJamDialog::StartJamDialog(
 
     auto* connectionForm = new QFormLayout();
     connectionForm_ = connectionForm;
+    connectionForm->addRow(QStringLiteral("Your name"), name_);
     connectionForm->addRow(QStringLiteral("Connection strategy"), strategy_);
     connectionForm->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
     connectionForm->addRow(QStringLiteral("Bind"), bindHost_);
@@ -577,6 +583,9 @@ StartJamDialog::StartJamDialog(
     outer->addWidget(scroll, 1);
     outer->addWidget(buttons);
     start->setDefault(true);
+    const auto validateName = [this,start] { start->setEnabled(jam2::application::PeerName::fromInput(name_->text()).has_value()); };
+    connect(name_, &QLineEdit::textChanged, this, validateName);
+    validateName();
     updateConnectionStrategy();
 }
 
@@ -584,6 +593,8 @@ StartJamDialogState StartJamDialog::state() const
 {
     StartJamDialogState result;
     result.create = createTemplate_;
+    const auto name = jam2::application::PeerName::fromInput(name_->text());
+    result.create.name = name ? name->text() : QString{};
     result.create.bindHost = bindHost_->text().trimmed();
     result.create.port = port_->value();
     result.create.publicHost = publicHost_->text().trimmed();
@@ -688,12 +699,17 @@ JoinJamDialog::JoinJamDialog(
     auto* content = new QWidget(this);
     auto* contentLayout = new QVBoxLayout(content);
     inviteUrl_ = new QLineEdit(initial.inviteUrl, content);
+    name_ = new QLineEdit(initial.join.name, content);
+    name_->setMaxLength(32);
+    name_->setPlaceholderText(jam2::application::peerNameRequirement());
+    registerDialogField(*name_, "name", "session.peer-name");
     inviteUrl_->setMinimumWidth(420);
     bindHost_ = new QLineEdit(initial.join.bindHost, content);
     port_ = spin(content, 1, 65535, initial.join.port);
     auto* connectionForm = new QFormLayout();
     connectionForm->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
     connectionForm->addRow(QStringLiteral("jam2 URL"), inviteUrl_);
+    connectionForm->addRow(QStringLiteral("Your name"), name_);
     connectionForm->addRow(QStringLiteral("Local UDP bind host"), bindHost_);
     connectionForm->addRow(QStringLiteral("Local UDP bind port"), port_);
     auto* connectionBox = new QGroupBox(QStringLiteral("Connection"), content);
@@ -899,6 +915,9 @@ JoinJamDialog::JoinJamDialog(
     outer->addWidget(scroll, 1);
     outer->addWidget(buttons);
     join->setDefault(true);
+    const auto validateName = [this,join] { join->setEnabled(jam2::application::PeerName::fromInput(name_->text()).has_value()); };
+    connect(name_, &QLineEdit::textChanged, this, validateName);
+    validateName();
 }
 
 JoinJamDialogState JoinJamDialog::state() const
@@ -906,6 +925,8 @@ JoinJamDialogState JoinJamDialog::state() const
     JoinJamDialogState result;
     result.inviteUrl = inviteUrl_->text().trimmed();
     result.join = joinTemplate_;
+    const auto name = jam2::application::PeerName::fromInput(name_->text());
+    result.join.name = name ? name->text() : QString{};
     result.join.bindHost = bindHost_->text().trimmed();
     result.join.port = port_->value();
     result.join.tuning.profile = profile_->currentData().toString();

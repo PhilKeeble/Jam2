@@ -70,7 +70,7 @@ void activeAudio(const States& states)
     for (const auto& state : states) require(jam(state).value("active_remote_peer_count").toInt()==3 &&
         transport(state).value("enabled").toBool() && transport(state).value("runtime_native_delivered").toInteger()>0,
         "exact-four-peer Server audio topology lost");
-    for (const auto& state : states) require(jam(state).value("incoming_audio_breakdown").toString().count("<b>Peer ")==3 &&
+    for (const auto& state : states) require(jam(state).value("incoming_audio_breakdown").toString().count(" incoming:")==3 &&
         state.value("performance").toObject().value("headless_audio").toBool(),"all twelve directed fake-audio paths must remain measurable");
 }
 void report(const States& states,const QString& phase,CandidateNetwork::AuthorityBeaconStats beacons)
@@ -107,14 +107,14 @@ int assignmentTrial(const QString& executable,const QString& signaller)
     FourPeerCoordinator peers; require(peers.launch(executable,arguments,error),error);
     for (int i=0;i<4;++i) { QJsonObject hello; require(peers.peer(i).readEvent(hello,30s,error) && hello.value("event")=="hello",error); }
     reservations.release();
-    const auto created=command(peers.peer(0),{{"type","jam.create"},{"id","create"},{"port",ports[0]},
+    const auto created=command(peers.peer(0),{{"type","jam.create"}, {QStringLiteral("name"), QStringLiteral("Alex")},{"id","create"},{"port",ports[0]},
         {"strategy","server"},{"rendezvous",server.endpoint},{"test_input","tone-440"},{"diagnostics",true}});
-    for (int i=1;i<4;++i) command(peers.peer(i),{{"type","jam.join"},{"id","join"},{"port",ports[i]},
+    for (int i=1;i<4;++i) command(peers.peer(i),{{"type","jam.join"}, {QStringLiteral("name"), QStringLiteral("Alex")},{"id","join"},{"port",ports[i]},
         {"invite_url",created.value("invite_url")},{"test_input","tone-440"},{"diagnostics",true}});
     until(peers,raw,"assignments-off-start",[](const auto& states) {
         return std::all_of(states.begin(),states.end(),[](const auto& state) {
             return jam(state).value("active_remote_peer_count").toInt()==3 &&
-                jam(state).value("incoming_audio_breakdown").toString().count("<b>Peer ")==3;
+                jam(state).value("incoming_audio_breakdown").toString().count(" incoming:")==3;
         });
     });
     const auto off=sample(peers,raw,"assignments-off-start",1500);
@@ -137,12 +137,26 @@ int assignmentTrial(const QString& executable,const QString& signaller)
         const auto before=server.network->gridAssignmentStats().forwarded;
         const auto ackBefore=server.network->gridAssignmentAckStats().forwarded;
         const auto state=sample(peers,raw,phase,3000);
-        require(allApplied(state) && server.network->gridAssignmentStats().forwarded==before &&
+        const auto revision=jam(state[0]).value("grid_assignment_revision");
+        const bool receiptsApplied=jam(state[0]).value("grid_assignment_pending_peers").toInteger()==0 &&
+            jam(state[0]).value("grid_assignment_applied_peers").toInteger()==3 &&
+            std::all_of(state.begin()+1,state.end(),[&](const auto& peer) {
+                return jam(peer).value("grid_assignment_revision")==revision &&
+                    !jam(peer).value("grid_assignment_recovery_pending").toBool();
+            });
+        require(receiptsApplied && server.network->gridAssignmentStats().forwarded==before &&
             server.network->gridAssignmentAckStats().forwarded==ackBefore &&
             jam(state[0]).value("grid_assignment_packets")==jam(initial[0]).value("grid_assignment_packets"),
-            "settled assignment/ACK traffic did not stop at the production sender");
+            QStringLiteral("settled assignment/ACK traffic continued: applied=%1 assignments=%2/%3 acks=%4/%5 producer=%6/%7")
+                .arg(receiptsApplied).arg(before).arg(server.network->gridAssignmentStats().forwarded)
+                .arg(ackBefore).arg(server.network->gridAssignmentAckStats().forwarded)
+                .arg(jam(initial[0]).value("grid_assignment_packets").toInteger())
+                .arg(jam(state[0]).value("grid_assignment_packets").toInteger()));
         std::cout << "assignment_socket policy=event-driven phase=" << phase.toStdString() << " steady_assignment_packets=0 steady_ack_packets=0 window_ms=3000\n";
-        return state;
+        // Clock phase readiness is a separate, sampled condition. Keep its
+        // existing tolerance and require recovery without conflating it with
+        // the independently acknowledged assignment state or idle packet counts.
+        return allReady(state) ? state : until(peers,raw,phase+"-clock-ready",allApplied);
     };
     current=quiet("settled-startup");
     const auto reconnectRevision=jam(current[0]).value("grid_assignment_revision");
@@ -287,13 +301,13 @@ int assignmentTrial(const QString& executable,const QString& signaller)
             jam(states[0]).value("grid_assignment_applied_peers").toInteger()==2 &&
             jam(states[0]).value("grid_assignment_pending_peers").toInteger()==0;
     });
-    command(peers.peer(3),{{"type","jam.join"},{"id","assignment-rejoin"},{"port",ports[3]},
+    command(peers.peer(3),{{"type","jam.join"}, {QStringLiteral("name"), QStringLiteral("Alex")},{"id","assignment-rejoin"},{"port",ports[3]},
         {"invite_url",created.value("invite_url")},{"test_input","tone-440"},{"diagnostics",true}});
     current=until(peers,raw,"rejoin-current-assignment",[&](const States& states) {
         return allApplied(states) && jam(states[3]).value("grid_assignment_revision")==jam(states[0]).value("grid_assignment_revision") &&
             std::all_of(states.begin(),states.end(),[](const QJsonObject& state) {
                 return jam(state).value("active_remote_peer_count").toInt()==3 &&
-                    jam(state).value("incoming_audio_breakdown").toString().count("<b>Peer ")==3;
+                    jam(state).value("incoming_audio_breakdown").toString().count(" incoming:")==3;
             });
     });
     activeAudio(current); quiet("settled-after-rejoin");
@@ -342,15 +356,15 @@ int main(int argc,char** argv)
         FourPeerCoordinator peers; require(peers.launch(QString::fromLocal8Bit(argv[1]),arguments,error),error);
         for (int i=0;i<4;++i) { QJsonObject hello; require(peers.peer(i).readEvent(hello,30s,error) && hello.value("event")=="hello",error); }
         reservations.release();
-        const auto created=command(peers.peer(0),{{"type","jam.create"},{"id","create"},{"port",ports[0]},
+        const auto created=command(peers.peer(0),{{"type","jam.create"}, {QStringLiteral("name"), QStringLiteral("Alex")},{"id","create"},{"port",ports[0]},
             {"strategy","server"},{"rendezvous",server.endpoint},{"test_input","tone-440"},{"diagnostics",true}});
         require(created.value("invite_url").toString().contains("strategy=server"),"Server mode not selected");
-        for (int i=1;i<4;++i) command(peers.peer(i),{{"type","jam.join"},{"id","join"},{"port",ports[i]},
+        for (int i=1;i<4;++i) command(peers.peer(i),{{"type","jam.join"}, {QStringLiteral("name"), QStringLiteral("Alex")},{"id","join"},{"port",ports[i]},
             {"invite_url",created.value("invite_url")},{"test_input","tone-440"},{"diagnostics",true}});
         until(peers,raw,"off-start-audio",[](const auto& states) {
             return std::all_of(states.begin(),states.end(),[](const auto& state) { return jam(state).value("active_remote_peer_count").toInt()==3 &&
                 transport(state).value("runtime_native_delivered").toInteger()>0 &&
-                jam(state).value("incoming_audio_breakdown").toString().count("<b>Peer ")==3; });
+                jam(state).value("incoming_audio_breakdown").toString().count(" incoming:")==3; });
         });
         const auto disabled=sample(peers,raw,"off-from-start",1500);
         require(jam(disabled[0]).value("transport_grid_ready").toBool(),"local authority failed to initialize its own grid");

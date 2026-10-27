@@ -589,161 +589,12 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
     }
 
     using namespace jam2::control_protocol;
-    const QByteArray directionKey(32, 'k');
-    const QJsonObject controlMessage{
-        {QStringLiteral("type"), QStringLiteral("beat.set")},
-        {QStringLiteral("lane"), QStringLiteral("chord")},
-        {QStringLiteral("section"), 0},
-        {QStringLiteral("beat"), 0},
-        {QStringLiteral("text"), QStringLiteral("Cmaj7")},
-    };
-    QByteArray encoded = encodeAuthenticated(controlMessage, directionKey, 7);
-    QByteArray body;
-    QString error;
-    const bool framed = takeFrame(encoded, body, error) == TakeFrameResult::Ready;
-    AuthenticatedPayload decoded;
-    record(QStringLiteral("control.valid-authenticated-frame"),
-        framed && decodeAuthenticated(body, directionKey, 7, decoded, error) &&
-            decoded.type == AuthenticatedPayloadType::Json && decoded.message == controlMessage,
-        error);
-
-    QByteArray tampered = body;
-    if (tampered.size() > kAuthenticatedHeaderBytes) {
-        tampered[kAuthenticatedHeaderBytes] = static_cast<char>(tampered[kAuthenticatedHeaderBytes] ^ 1);
-    }
-    error.clear();
-    record(QStringLiteral("control.reject-tampered-tag"),
-        !decodeAuthenticated(tampered, directionKey, 7, decoded, error), error);
-    error.clear();
-    record(QStringLiteral("control.reject-replayed-sequence"),
-        !decodeAuthenticated(body, directionKey, 8, decoded, error), error);
-
-
-    const quint32 excessiveLength = static_cast<quint32>(kMaxJsonBytes + kAuthenticatedHeaderBytes + 1);
-    QByteArray excessiveFrame;
-
-    excessiveFrame.append(static_cast<char>((excessiveLength >> 24) & 0xffU));
-    excessiveFrame.append(static_cast<char>((excessiveLength >> 16) & 0xffU));
-    excessiveFrame.append(static_cast<char>((excessiveLength >> 8) & 0xffU));
-    excessiveFrame.append(static_cast<char>(excessiveLength & 0xffU));
-    error.clear();
-    record(QStringLiteral("control.reject-excessive-frame"),
-        takeFrame(excessiveFrame, body, error) == TakeFrameResult::Invalid, error);
-    record(QStringLiteral("control.reject-excessive-json"),
-        encodeHandshake(QJsonObject{{QStringLiteral("value"), QString(70 * 1024, QLatin1Char('x'))}}).isEmpty());
-
-    const QJsonObject largeControlMessage{
-        {QStringLiteral("type"), QStringLiteral("song.set")},
-        {QStringLiteral("payload"), QString(140 * 1024, QLatin1Char('x'))},
-    };
-    const AuthenticatedJsonFrames largeFrames = encodeAuthenticatedJsonFrames(
-        largeControlMessage, directionKey, 20);
-    LargeJsonReceiver largeReceiver;
-    QJsonObject reconstructedLargeMessage;
-    bool largeReady = false;
-    bool largeValid = largeFrames.chunked && !largeFrames.frames.isEmpty();
-    quint64 largeSequence = 20;
-    error.clear();
-    for (QByteArray frame : largeFrames.frames) {
-        QByteArray largeBody;
-        AuthenticatedPayload largePayload;
-        bool ready = false;
-        largeValid = largeValid &&
-            takeFrame(frame, largeBody, error) == TakeFrameResult::Ready &&
-            decodeAuthenticated(
-                largeBody, directionKey, largeSequence++, largePayload, error) &&
-            largePayload.type == AuthenticatedPayloadType::LargeJsonChunk &&
-            largeReceiver.accept(
-                largePayload.binary, reconstructedLargeMessage, ready, error);
-        largeReady = largeReady || ready;
-    }
-    record(QStringLiteral("control.large-json-authenticated-compressed-atomic-reassembly"),
-        largeValid && largeReady && reconstructedLargeMessage == largeControlMessage &&
-            !largeReceiver.active(),
-        error);
-    record(QStringLiteral("control.reject-json-over-large-message-bound"),
-        encodeAuthenticatedJsonFrames(
-            QJsonObject{{QStringLiteral("value"),
-                QString(kMaxLargeJsonBytes + 1, QLatin1Char('x'))}},
-            directionKey,
-            100).frames.isEmpty());
-
+    // Current typed-record authentication, sequence and document bounds are
+    // covered by the native control-wire CTests, not the retired TCP codec.
     const jam2::application::asset_chunk::Chunk assetChunk{
-        QString(64, QLatin1Char('a')), 3, 12, QByteArray("raw-audio", 9)};
-    const QByteArray assetPayload = jam2::application::asset_chunk::encode(assetChunk);
-    QByteArray binaryFrame = encodeAuthenticatedBinary(assetPayload, directionKey, 9);
-    QByteArray binaryBody;
-    AuthenticatedPayload decodedBinary;
-    jam2::application::asset_chunk::Chunk decodedChunk;
-    error.clear();
-    const bool binaryFramed = takeFrame(binaryFrame, binaryBody, error) == TakeFrameResult::Ready;
-    const bool binaryAuthenticated = binaryFramed &&
-        decodeAuthenticated(binaryBody, directionKey, 9, decodedBinary, error);
+        QString(64, QLatin1Char('a')), 3, 12, QByteArray("raw-audio",9)};
+    const QByteArray assetPayload=jam2::application::asset_chunk::encode(assetChunk);
     QString chunkError;
-    const bool binaryDecoded = binaryAuthenticated &&
-        decodedBinary.type == AuthenticatedPayloadType::AssetChunk &&
-        jam2::application::asset_chunk::decode(decodedBinary.binary, decodedChunk, chunkError);
-    record(QStringLiteral("control.valid-authenticated-binary-asset-chunk"),
-        binaryDecoded && decodedChunk.sha256 == assetChunk.sha256 &&
-            decodedChunk.index == assetChunk.index && decodedChunk.offset == assetChunk.offset &&
-            decodedChunk.data == assetChunk.data,
-        error.isEmpty() ? chunkError : error);
-
-    const QJsonObject heartbeat{
-        {QStringLiteral("type"), QStringLiteral("session.heartbeat")},
-        {QStringLiteral("sample_rate"), 48000},
-        {QStringLiteral("heartbeat_id"), 1},
-    };
-    const QJsonObject heartbeatAck{
-        {QStringLiteral("type"), QStringLiteral("session.heartbeat.ack")},
-        {QStringLiteral("sample_rate"), 48000},
-        {QStringLiteral("heartbeat_id"), 1},
-    };
-    const QByteArray heartbeatFrame = encodeAuthenticated(heartbeat, directionKey, 10);
-    const QByteArray interleavedBinaryFrame = encodeAuthenticatedBinary(assetPayload, directionKey, 11);
-    const QByteArray heartbeatAckFrame = encodeAuthenticated(heartbeatAck, directionKey, 12);
-    QByteArray fragmented;
-    bool fragmentedNeedsMore = true;
-    for (qsizetype index = 0; index + 1 < interleavedBinaryFrame.size(); ++index) {
-        fragmented.append(interleavedBinaryFrame[index]);
-        QByteArray prematureBody;
-        QString prematureError;
-        fragmentedNeedsMore = fragmentedNeedsMore &&
-            takeFrame(fragmented, prematureBody, prematureError) == TakeFrameResult::NeedMore;
-    }
-    fragmented.append(interleavedBinaryFrame.back());
-    QByteArray fragmentedBody;
-    AuthenticatedPayload fragmentedPayload;
-    QString interleavingError;
-    const bool fragmentedReady =
-        takeFrame(fragmented, fragmentedBody, interleavingError) == TakeFrameResult::Ready &&
-        decodeAuthenticated(
-            fragmentedBody, directionKey, 11, fragmentedPayload, interleavingError) &&
-        fragmentedPayload.type == AuthenticatedPayloadType::AssetChunk && fragmented.isEmpty();
-
-    QByteArray coalesced = heartbeatFrame + interleavedBinaryFrame + heartbeatAckFrame;
-    bool interleaved = true;
-    for (quint64 sequence = 10; sequence <= 12; ++sequence) {
-        QByteArray nextBody;
-        AuthenticatedPayload nextPayload;
-        interleaved = interleaved &&
-            takeFrame(coalesced, nextBody, interleavingError) == TakeFrameResult::Ready &&
-            decodeAuthenticated(nextBody, directionKey, sequence, nextPayload, interleavingError);
-        if (sequence == 11) {
-            interleaved = interleaved &&
-                nextPayload.type == AuthenticatedPayloadType::AssetChunk &&
-                nextPayload.binary == assetPayload;
-        } else {
-            interleaved = interleaved && nextPayload.type == AuthenticatedPayloadType::Json;
-        }
-    }
-    record(QStringLiteral("control.binary-fragmentation-coalescing-heartbeat-interleaving"),
-        fragmentedNeedsMore && fragmentedReady && interleaved && coalesced.isEmpty(),
-        interleavingError);
-    record(QStringLiteral("control.reject-oversize-authenticated-binary"),
-        encodeAuthenticatedBinary(
-            QByteArray(kMaxBinaryBytes + 1, 'x'), directionKey, 13).isEmpty());
-
     QByteArray malformedAsset = assetPayload;
     malformedAsset[44] = 0x7f;
     jam2::application::asset_chunk::Chunk rejectedChunk;
@@ -862,6 +713,7 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
                 jam2::application::limits::kMaximumAssetChunkBytes &&
             excessiveChunk.isEmpty());
 
+    const QJsonObject controlMessage{{"type","beat.set"},{"lane","chord"},{"section",0},{"beat",0},{"text","Cmaj7"}};
     QString modelError;
     record(QStringLiteral("model.accept-valid-beat"),
         jam2::application::validateControlMessage(controlMessage, modelError), modelError);
@@ -924,6 +776,7 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
         membershipEntries.append(QJsonObject{
             {QStringLiteral("token"), peerToken},
             {QStringLiteral("peer_id"), QString::number(index + 1)},
+            {QStringLiteral("name"), QStringLiteral("Alex")},
             {QStringLiteral("endpoint"), QStringLiteral("127.0.0.1:%1").arg(49000 + index)},
         });
     }

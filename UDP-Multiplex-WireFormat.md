@@ -1,5 +1,7 @@
 # UDP Multiplex Wire Format: Discussion Draft
 
+> Current branch status: Direct, STUN and Jam2 Server share the current typed UDP multiplex. TCP and older multiplex fallback paths have been removed, and create/join requires a validated peer name. Earlier rollout restrictions and TCP-retention choices below are historical. See [REVIEW-WIRE-FORMAT.md](REVIEW-WIRE-FORMAT.md#unified-multiplex-transport-and-mandatory-peer-names) for the implemented behavior, limits and native test evidence.
+
 Date: 2026-10-25  
 Repository/branch: Jam2, `UDP-Multiplex`  
 Status: design notes for the next session; no wire-format or topology implementation authorised by this document.

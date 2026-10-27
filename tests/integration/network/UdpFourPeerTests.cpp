@@ -133,6 +133,8 @@ int main(int argc, char** argv) {
             peers[index] = std::make_unique<UdpMultiplexTransport>();
             control[index] = std::make_unique<ControlClient>();
             asset[index] = std::make_unique<ControlClient>();
+            control[index]->setPeerName(*jam2::application::PeerName::fromInput("Alex"));
+            asset[index]->setPeerName(*jam2::application::PeerName::fromInput("Alex"));
             peers[index]->onSignalerStatus = [index](const QString& value) {
                 std::cout << index << ": " << value.toStdString() << std::endl;
             };
@@ -356,7 +358,7 @@ int main(int argc, char** argv) {
         }
         until([&] { audio(); return edits[1] == 1 && edits[2] == 1 && edits[3] == 1 &&
             readiness[1] == 1 && readiness[2] == 1 && readiness[3] == 1; }, "four-peer coalesced edits and independent replies");
-        require(coordinator.stats().serverWire.independentRecordsReceived >= 3, "independent ordering was not used on four-peer star");
+        require(coordinator.stats().wire.independentRecordsReceived >= 3, "independent ordering was not used on four-peer star");
         if (pressure) {
             const auto beforeNoise = peers[0]->snapshot();
             std::array<std::uint8_t,80> invalid{};

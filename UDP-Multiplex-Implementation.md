@@ -1,15 +1,13 @@
 # UDP multiplex implementation notes
 
+> Current branch status: Direct, STUN and Jam2 Server share the current typed UDP multiplex. TCP and older multiplex fallback paths have been removed, and create/join requires a validated peer name. Earlier rollout restrictions and TCP-retention choices below are historical. See [REVIEW-WIRE-FORMAT.md](REVIEW-WIRE-FORMAT.md#unified-multiplex-transport-and-mandatory-peer-names) for the implemented behavior, limits and native test evidence.
+
 The experimental implementation is on `UDP-Multiplex` in both repositories.
 The reviewed design remains in [UDP-Muliplex.md](UDP-Muliplex.md).
 
 ## Running it
 
-Use the normal Release build and `release/jam2.exe`. In Start Jam, choose
-**Jam2 Server**. Its invitation points to `jam2gether.com:40404` and includes
-`strategy=server`. Existing STUN/Direct invites and transports retain their
-previous behavior. Existing saved preferences migrate to STUN or Direct;
-new preferences default to Jam2 Server.
+Use the normal Release build and `release/jam2.exe`. All three strategies use the same current transport. Enter a mandatory 1-8-letter peer name when creating or joining. Jam2 Server invitations select external rendezvous (`strategy=server`); Direct/STUN invitations point to the creator's reachable UDP port and use creator-coordinated mesh introductions. All participants must use the current branch build.
 
 Run the companion Go binary with `--jam2-server --listen 0.0.0.0:40404`.
 The Python sweep remains a separate explicit server mode. One process cannot

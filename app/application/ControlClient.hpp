@@ -1,8 +1,9 @@
 #pragma once
 
 #include "ControlProtocol.hpp"
-#include "NativeTcpTransport.hpp"
-#include "ServerControlWire.hpp"
+#include "ControlConnection.hpp"
+#include "ControlWire.hpp"
+#include "PeerName.hpp"
 
 #include <QJsonObject>
 #include <QElapsedTimer>
@@ -31,24 +32,13 @@ public:
         quint64 connectionAttempts = 0;
         quint64 completedConnections = 0;
         quint64 disconnectedConnections = 0;
-        quint64 largeJsonMessagesSent = 0;
-        quint64 largeJsonMessagesReceived = 0;
-        quint64 largeJsonRawBytesSent = 0;
-        quint64 largeJsonCompressedBytesSent = 0;
-        jam2::application::server_wire::Stats serverWire;
+        jam2::application::control_wire::Stats wire;
     };
 
     explicit ControlClient(QObject* parent = nullptr);
+    void setPeerName(const jam2::application::PeerName& name) { localName_ = name; }
     ~ControlClient() override;
 
-    void connectToHost(
-        const QString& host,
-        quint16 port,
-        const QString& sessionHex,
-        const QString& keyHex,
-        const QString& meshPeerToken = QString(),
-        const QString& meshUdpEndpoint = QString(),
-        Channel channel = Channel::Control);
     void connectViaTransport(
         const jam2::application::ControlConnection::Pointer& connection,
         const QString& sessionHex, const QString& keyHex,
@@ -62,7 +52,7 @@ public:
     Stats stats() const;
 
     std::function<void(const QJsonObject&)> onMessage;
-    std::function<jam2::application::server_wire::DispatchDecision(const QJsonObject&)> validateServerMessage;
+    std::function<jam2::application::control_wire::DispatchDecision(const QJsonObject&)> validateMessage;
     std::function<void(const QByteArray&)> onBinaryMessage;
     std::function<void(const jam2::control_protocol::TransportEvent&)> onEvent;
 
@@ -85,7 +75,7 @@ private:
         const jam2::application::ControlConnection::Pointer& connection,
         const QString& detail);
     void handleHandshake(const QJsonObject& message);
-    void retireServerWire();
+    void retireWire();
     bool writeFrame(const QByteArray& frame);
     void reject(
         const QString& reason,
@@ -95,8 +85,7 @@ private:
     void publishEvent(jam2::control_protocol::TransportEvent event);
 
     jam2::application::ControlConnection::Pointer connection_;
-    std::shared_ptr<jam2::application::server_wire::Channel> serverWire_;
-    jam2::application::NativeTcpConnector connector_;
+    std::shared_ptr<jam2::application::control_wire::Channel> wire_;
     quint64 connectionGeneration_ = 0;
     QTimer authenticationTimer_;
     QTimer frameTimer_;
@@ -109,14 +98,12 @@ private:
     QByteArray transcript_;
     QByteArray receiveKey_;
     QByteArray sendKey_;
-    jam2::control_protocol::LargeJsonReceiver largeJsonReceiver_;
     QString sessionHex_;
     QString meshPeerToken_;
+    jam2::application::PeerName localName_;
     QString meshUdpEndpoint_;
     Channel channel_ = Channel::Control;
     HandshakeState handshakeState_ = HandshakeState::WaitingForChallenge;
-    quint64 receiveSequence_ = 1;
-    quint64 sendSequence_ = 1;
     bool readScheduled_ = false;
     bool manualClose_ = true;
     bool failureReportedForAttempt_ = false;

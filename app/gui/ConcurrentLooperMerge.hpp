@@ -2,12 +2,9 @@
 
 #include <QJsonObject>
 
-enum class LooperConflictPolicy { KeepCurrent, LatestReceived };
-
-// Legacy rebasing permits intervening track-only edits. Server generated-Idea
-// operations replace their declared scope atomically in later receive order.
-bool canRebaseIdeaOverTrackEdits(const QJsonObject& baseSong, const QJsonObject& currentSong,
-    LooperConflictPolicy policy = LooperConflictPolicy::KeepCurrent);
+// Generated-Idea operations replace their declared scope atomically in later
+// authority receive order; the scope compositor retains unrelated fields.
+bool canRebaseIdeaOverTrackEdits(const QJsonObject& baseSong, const QJsonObject& currentSong);
 
 // Three-way reconciliation for concurrent Track-lane metadata proposals. The
 // base is the authoritative model both edits started from, current is the
@@ -17,5 +14,4 @@ QJsonObject mergeConcurrentLooperMetadata(
     const QJsonObject& currentSong,
     const QJsonObject& proposedSong,
     int* mergedChanges = nullptr,
-    int* conflicts = nullptr,
-    LooperConflictPolicy policy = LooperConflictPolicy::KeepCurrent);
+    int* conflicts = nullptr);

@@ -1,4 +1,5 @@
 #include "TrackWorkspaceSupport.hpp"
+#include "ConcurrentLooperMerge.hpp"
 #include "LooperAssetMaterializer.hpp"
 
 #include <QCoreApplication>
@@ -783,7 +784,7 @@ int main(int argc, char** argv)
     try {
         QTemporaryDir root = makeRoot();
         testSharedReferenceClassification();
-        ServerSongProposalStaging proposals;
+        SharedSongProposalStaging proposals;
         const QJsonObject applied{{"idea", "old"}, {"tracks", "old"}};
         auto idea = applied; idea["idea"] = "cleared";
         proposals.stage(idea, 12, 41, SharedSongScope::IdeaFull);
@@ -804,6 +805,31 @@ int main(int argc, char** argv)
         proposals.stage(applied, 13, 43);
         require(proposals.scopes(13, 43) == QVector<SharedSongScope>{SharedSongScope::Tracks},
             "a committed or rejected scope leaked into a new proposal");
+        const auto song=[](const QString& name,const QString& hash,double gain=0) {
+            return QJsonObject{{"looper",QJsonObject{{"banks",QJsonArray{QJsonObject{
+                {"lanes",QJsonArray{QJsonObject{{"id","lane"},{"name",name},{"asset_hash",hash},{"gain_db",0}},
+                    QJsonObject{{"id","other"},{"name","Other"},{"asset_hash",""},{"gain_db",gain}}}}}
+            }}}}};
+        };
+        SharedSongProposalStaging pending;
+        const auto empty=song("Empty Track 2",{});
+        const auto imported=song("remove-during-transfer",QString(64,'a'));
+        pending.stage(imported,20,1,SharedSongScope::Tracks,"A",imported);
+        const auto other=song("Empty Track 2",{},-6);
+        auto composed=mergeConcurrentLooperMetadata(empty,pending.base(empty,20,1),other);
+        pending.stage(composed,20,2,SharedSongScope::Tracks,"B",other);
+        const auto removal=song("remove-during-transfer",{});
+        const auto editBase=pending.trackProposalBase(empty,"A",20,2);
+        require(editBase==imported,"same-source superseding edit forgot its pending proposal base");
+        const auto merged=mergeConcurrentLooperMetadata(editBase,pending.base(empty,20,2),removal);
+        const auto lanes=merged.value("looper").toObject().value("banks").toArray().first().toObject()
+            .value("lanes").toArray();
+        const auto lane=lanes.first().toObject();
+        require(lane.value("asset_hash").toString().isEmpty() && lane.value("name")=="remove-during-transfer" &&
+            lanes.at(1).toObject().value("gain_db")==-6,"cancelling an unpublished WAV lost its name or a different peer's edit to another lane");
+        require(pending.trackProposalBase(empty,"A",21,2)==empty &&
+            pending.trackProposalBase(empty,"A",20,3)==empty,
+            "pending peer edit survived a committed or cancelled generation");
         testPendingWavPresentation();
         testMetadataAndRejection(root.path());
         testTrackSidecarJson(root.path());

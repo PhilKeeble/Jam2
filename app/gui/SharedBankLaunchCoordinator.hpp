@@ -9,8 +9,6 @@
 
 namespace jam2::gui {
 
-enum class BankReadinessPolicy { AllPeers, LocalReady };
-
 enum class SharedBankReadyResult {
     Accepted,
     Duplicate,
@@ -54,7 +52,7 @@ public:
         const QString& sourcePeerToken,
         const QString& selfPeerToken);
     bool removeExpectedPeer(const QString& peerToken);
-    bool readyToCommit(BankReadinessPolicy policy = BankReadinessPolicy::AllPeers) const noexcept;
+    bool readyToCommit() const noexcept;
     SharedBankLaunchSnapshot take();
     void clear() noexcept;
 

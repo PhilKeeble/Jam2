@@ -3,6 +3,7 @@
 #include "AssetChunkProtocol.hpp"
 #include "ContentLimits.hpp"
 #include "ControlProtocol.hpp"
+#include "ControlWire.hpp"
 
 #include "pcm16_wav.hpp"
 
@@ -286,13 +287,13 @@ void AssetTransferService::queueSend(const QString& hash, const QString& targetP
         // A second request for an active stream means the receiver no longer
         // considers that stream usable (for example, an arrangement update
         // superseded its pending contribution before the queued chunks
-        // arrived). TCP control delivery is reliable, so this is a recovery
+        // arrived). The ordered control stream is reliable, so this is a recovery
         // request rather than a harmless duplicate. Restart from byte zero;
         // otherwise the sender waits for acknowledgements to a stream the
         // receiver has deliberately abandoned.
         context_.appendAssetLog(QStringLiteral(
             "restarting active looper asset after receiver re-request: hash=%1 target=%2")
-            .arg(hash, targetPeerToken.left(8)));
+            .arg(hash, context_.peerName(targetPeerToken)));
         ++outgoingLooperAssetGeneration_;
         resetOutgoing();
         outgoingLooperAssetQueue_.prepend(request);
@@ -444,7 +445,7 @@ void AssetTransferService::continueSend()
         context_.appendAssetLog(QStringLiteral(
             "looper asset send progress timeout: hash=%1 target=%2 offset=%3 "
             "next_chunk=%4 acked_chunks=%5")
-            .arg(outgoingLooperAssetHash_, outgoingLooperAssetTargetToken_.left(8))
+            .arg(outgoingLooperAssetHash_, context_.peerName(outgoingLooperAssetTargetToken_))
             .arg(outgoingLooperAssetOffset_)
             .arg(outgoingLooperAssetNextChunk_)
             .arg(outgoingLooperAssetAckedChunks_));
@@ -462,7 +463,7 @@ void AssetTransferService::continueSend()
                 outgoingLooperAssetTargetToken_;
             context_.appendAssetLog(QStringLiteral(
                 "automation dropped one outgoing looper asset start: hash=%1 target=%2")
-                .arg(outgoingLooperAssetHash_, outgoingLooperAssetTargetToken_.left(8)));
+                .arg(outgoingLooperAssetHash_, context_.peerName(outgoingLooperAssetTargetToken_)));
             resetOutgoing();
             return;
         }
@@ -579,9 +580,9 @@ void AssetTransferService::continueSend()
     const qint64 binaryBodyBytes = outgoingLooperAssetBytes_ +
         static_cast<qint64>(outgoingLooperAssetNextChunk_) *
             jam2::application::asset_chunk::kHeaderBytes;
-    const qint64 authenticatedWireBytes = binaryBodyBytes +
+    const qint64 authenticatedWireBytes = outgoingLooperAssetBytes_ +
         static_cast<qint64>(outgoingLooperAssetNextChunk_) *
-            (jam2::control_protocol::kAuthenticatedHeaderBytes + 4);
+            (6 + jam2::application::control_wire::kRecordHeaderBytes);
     context_.appendAssetLog(QStringLiteral(
         "sent looper asset: raw_bytes=%1 chunks=%2 binary_body_bytes=%3 "
         "authenticated_chunk_wire_bytes=%4 replaced_text_data_characters=%5 "

@@ -26,7 +26,7 @@ Both peers need:
 - the same `--sample-rate` value;
 - either `--headless-audio` or one machine-local `--audio-device ID`.
 
-The coordinator needs TCP `49000` for benchmark control and TCP/UDP `49001`
+The coordinator needs TCP `49000` for benchmark control and UDP `49001`
 for Jam2 create/join. The agent needs outbound access to those ports. Start the
 coordinator first and then the agent.
 

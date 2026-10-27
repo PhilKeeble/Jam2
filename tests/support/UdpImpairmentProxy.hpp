@@ -65,6 +65,7 @@ class UdpImpairmentProxy final {
 public:
     using DatagramTransformer =
         std::function<QByteArray(UdpProxyDirection, const QByteArray&)>;
+    using DatagramDelivery = std::function<bool(const QByteArray&)>;
 
     UdpImpairmentProxy(
         QHostAddress serverAddress,
@@ -78,6 +79,9 @@ public:
     bool rebindServerEndpoint(QString& error);
     void pump();
     void setDatagramTransformer(DatagramTransformer transformer);
+    // Apply the same deterministic impairment scheduler to dynamically punched
+    // sockets. The delivery owns the exact source/destination route for this packet.
+    void forwardDatagram(UdpProxyDirection direction, QByteArray bytes, DatagramDelivery delivery);
 
     std::optional<QByteArray> capturedAudioClientToServer() const;
     std::optional<QByteArray> capturedAudioServerToClient() const;
@@ -106,6 +110,7 @@ private:
         QHostAddress destinationAddress;
         quint16 destinationPort = 0;
         QByteArray bytes;
+        DatagramDelivery delivery;
     };
 
     struct PendingLater {
@@ -122,18 +127,21 @@ private:
         UdpProxyDirection direction,
         QByteArray bytes,
         const QHostAddress& destinationAddress,
-        quint16 destinationPort);
+        quint16 destinationPort,
+        const DatagramDelivery& delivery = {});
     bool queue(
         UdpProxyDirection direction,
         TimePoint releaseAt,
         const QHostAddress& destinationAddress,
         quint16 destinationPort,
-        const QByteArray& bytes);
+        const QByteArray& bytes,
+        const DatagramDelivery& delivery = {});
     bool send(
         UdpProxyDirection direction,
         const QHostAddress& destinationAddress,
         quint16 destinationPort,
-        const QByteArray& bytes);
+        const QByteArray& bytes,
+        const DatagramDelivery& delivery = {});
     bool inject(
         UdpProxyDirection direction,
         const QHostAddress& destinationAddress,
@@ -165,6 +173,7 @@ private:
     DirectionProxyStats clientToServerStats_;
     DirectionProxyStats serverToClientStats_;
     DatagramTransformer transformer_;
+    DatagramDelivery clientDelivery_, serverDelivery_;
     std::priority_queue<PendingDatagram, std::vector<PendingDatagram>, PendingLater> pending_;
     std::uint64_t nextOrder_ = 0;
     std::size_t pendingHighWater_ = 0;

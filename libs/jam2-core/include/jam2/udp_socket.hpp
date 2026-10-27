@@ -133,18 +133,25 @@ private:
 #endif
 };
 
-// Network-only socket routing seam. Legacy sessions keep their owned UdpSocket;
-// Server mode supplies a link transport whose selected socket is per peer.
+struct NetworkTransportInfo {
+    Endpoint local;
+    int send_buffer_bytes = 0;
+    int receive_buffer_bytes = 0;
+};
+
+// Public sessions use multiplex-owned sockets. Native diagnostics may instead
+// give NetworkSession one owned socket directly.
 class NetworkDatagramTransport {
 public:
     // Multiplex control fragments can exceed the native audio packet maximum.
     static constexpr std::size_t kReceiveBufferBytes = 1500;
     virtual ~NetworkDatagramTransport() = default;
+    virtual std::optional<NetworkTransportInfo> transportInfo() const { return std::nullopt; }
     // NetworkSession owns one receiver registration. Failed attachment must
     // leave this transport detached; replacement preserves the old receiver.
     virtual void receiverAttached() {}
     virtual void receiverDetached() noexcept {}
-    // Optional Server-only receipt after the control owner accepts/schedules
+    // Optional receipt after the control owner accepts/schedules
     // a native transport intent. This is never an audio callback.
     virtual void transportIntentAccepted(std::uint64_t, std::span<const std::uint8_t>) noexcept {}
     virtual UdpSendResult sendToPeer(

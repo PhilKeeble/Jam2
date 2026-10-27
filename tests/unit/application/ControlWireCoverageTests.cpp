@@ -1,4 +1,4 @@
-#include "ServerControlWire.hpp"
+#include "ControlWire.hpp"
 #include "ControlMessageValidation.hpp"
 #include "ControlProtocol.hpp"
 
@@ -11,7 +11,7 @@
 #include <vector>
 
 namespace {
-namespace wire=jam2::application::server_wire;
+namespace wire=jam2::application::control_wire;
 using Source=jam2::application::ControlMessageSource;
 void check(bool value,const QString& reason) { if (!value) throw std::runtime_error(reason.toStdString()); }
 const QString peer(32,'a'),uuid=QStringLiteral("12345678-1234-1234-1234-123456789abc"),hash(64,'b');
@@ -41,7 +41,7 @@ std::vector<Fixture> fixtures()
     add(Contract,"session.contract",{{"protocol_version",2},{"audio_format","pcm16-mono"},{"profile","fast"},{"sample_rate",48000},{"frame_size",64},{"coordinator_token",peer}});
     add(Membership,"session.membership",{{"page_index",0},{"page_count",1},{"coordinator_token",peer},{"editor_authority_token",""},
         {"arrangement_authority_token",peer},{"editor_revision",0},{"arrangement_revision",0},{"revision",1},
-        {"peers",QJsonArray{QJsonObject{{"token",peer},{"peer_id",QString::number(0xaaaaaaaaaaaaaaaaULL)},{"endpoint","127.0.0.1:1234"}}}}});
+        {"peers",QJsonArray{QJsonObject{{"token",peer},{"name","Alex"},{"peer_id",QString::number(0xaaaaaaaaaaaaaaaaULL)},{"endpoint","127.0.0.1:1234"}}}}});
     add(Heartbeat,"session.heartbeat",{{"sequence",1}}); add(HeartbeatReply,"session.heartbeat.ack",{{"sequence",1}});
     add(Introduce,"session.udp.introduce",{{"peer",peer},{"nonce",peer}}); add(Repair,"session.udp.recover",{{"peer",peer}});
     add(PairFailure,"session.connection.failure",{{"a",peer},{"b",QString(32,'c')},{"detail","unreachable"}});
@@ -51,11 +51,10 @@ std::vector<Fixture> fixtures()
     add(SyncSet,"jam.sync.set",setPolicy); add(SyncRequest,"jam.sync.request",policy);
     add(MetronomeSet,"jam.metronome.state.set",{{"enabled",false}}); add(MetronomeRequest,"jam.metronome.state.request",{{"enabled",true}});
     add(ListeningRequest,"jam.listening.request",{{"settings",settings},{"changed_groups",7}});
-    add(ListeningPrepare,"jam.listening.prepare",{{"revision",1},{"settings",settings},{"bank",0}});
-    add(ListeningReady,"jam.listening.ready",{{"revision",1}}); add(ListeningFailed,"jam.listening.failed",{{"revision",1},{"reason","failed"}});
+    add(ListeningFailed,"jam.listening.failed",{{"revision",1},{"reason","failed"}});
     QJsonObject timing{{"revision",1},{"tempo",tempo},{"target_frame","1000"},{"epoch_frame","0"},{"epoch_position",0.0}};
     auto commit=timing; commit["bank"]=0; commit["source_seconds"]=0.0; commit["playing"]=false;
-    add(ListeningCommit,"jam.listening.commit",commit); add(ListeningCancel,"jam.listening.cancel",{{"revision",1},{"reason","cancelled"}});
+    add(ListeningCancel,"jam.listening.cancel",{{"revision",1},{"reason","cancelled"}});
     auto state=commit; state["settings"]=settings; add(ListeningState,"jam.listening.state",state);
     add(ListeningReset,"jam.listening.reset",timing); add(ListeningApplied,"jam.listening.applied",{{"revision",1},{"actual_frame","1000"}});
     add(Cell,"beat.set",{{"section",0},{"lane","chord"},{"beat",0},{"text","Am"}});
@@ -92,17 +91,17 @@ std::vector<Fixture> fixtures()
 }
 }
 
-void serverControlCoverageFixtures()
+void controlWireCoverageFixtures()
 {
     const auto all=fixtures(); QSet<quint16> seen; const QByteArray key(32,'k');
     const QSet<QString> coordinator{
         "session.udp.introduce","session.connection.failure","session.contract","session.membership","session.heartbeat","session.end",
-        "jam.sync.set","jam.metronome.state.set","jam.listening.prepare","jam.listening.commit","jam.listening.cancel","jam.listening.state",
+        "jam.sync.set","jam.metronome.state.set","jam.listening.cancel","jam.listening.state",
         "jam.listening.reset","bank.prepare","bank.cancel","bank.switch","looper.recording.group.start","looper.recording.group.finish",
         "looper.recording.group.recover","looper.recording.resync.state"};
     const QSet<QString> peerOnly{
         "jam.listening.applied","session.udp.recover","session.heartbeat.ack","session.endpoint.update","jam.sync.request","jam.metronome.state.request",
-        "jam.listening.request","jam.listening.ready","jam.listening.failed","bank.ready","bank.request","looper.recording.group.recover.request",
+        "jam.listening.request","jam.listening.failed","bank.ready","bank.request","looper.recording.group.recover.request",
         "looper.recording.resync.request"};
     for (const auto& f : all) {
         const auto name=f.message.value("type").toString(); QString error;
@@ -129,12 +128,12 @@ void serverControlCoverageFixtures()
         previous.replace(16,16,QMessageAuthenticationCode::hash(previous,key,QCryptographicHash::Sha256).first(16));
         check(!wire::verify(previous.sliced(4),1,key,operation,flags,payload,error),name+" accepted authenticated previous application version");
         if (f.operation!=wire::Operation::AssetProgress) {
-            error.clear(); const bool valid=jam2::application::validateControlMessage(f.message,error,true);
+            error.clear(); const bool valid=jam2::application::validateControlMessage(f.message,error);
             check(valid,name+" domain fixture: "+error);
             for (const auto source : {Source::LocalCreator,Source::LocalJoiner,Source::AuthenticatedPeer,Source::Coordinator,Source::Internal}) {
                 const bool expected=source!=Source::Internal && (coordinator.contains(name) ? source==Source::LocalCreator || source==Source::Coordinator :
                     peerOnly.contains(name) ? source==Source::LocalJoiner || source==Source::AuthenticatedPeer : true);
-                check(jam2::application::evaluateControlMessage(f.message,source,true).accepted==expected,name+" source authorization drift");
+                check(jam2::application::evaluateControlMessage(f.message,source).accepted==expected,name+" source authorization drift");
             }
         }
         // Cover common optional slots and every fixture field's absence/type.
@@ -156,12 +155,33 @@ void serverControlCoverageFixtures()
             if (f.operation==wire::Operation::ShareOffer && field.key()=="tracks") {
                 // This is the explicitly bounded document escape; its owner
                 // must still reject a non-array manifest.
-                check(!jam2::application::validateControlMessage(wrong,error,true),"manifest owner accepted wrong document shape");
+                check(!jam2::application::validateControlMessage(wrong,error),"manifest owner accepted wrong document shape");
             } else check(!optionalA.encode(wrong,encoded,error),name+" accepted wrong field type: "+field.key());
         }
     }
-    check(all.size()==51 && seen.size()==51,"named operation fixture register incomplete");
+    check(all.size()==48 && seen.size()==48,"named operation fixture register incomplete");
     wire::Codec a,b; bind(a,b); wire::Codec::Encoded encoded; wire::Codec::Decoded decoded; QString error;
+    {
+        auto membership=all[1].message;
+        QJsonArray named;
+        const QStringList names{"Alice","Alex",QStringLiteral("\u00c9lodie"),"Alex"};
+        for (int i=0;i<4;++i) {
+            const auto token=QString(32,QChar('a'+i));
+            named.append(QJsonObject{{"token",token},{"peer_id",QString::number(*jam2::control_protocol::peerIdFromToken(token))},
+                {"endpoint",QStringLiteral("127.0.0.1:%1").arg(41000+i)},{"name",names[i]}});
+        }
+        membership["peers"]=named;
+        wire::Codec sender,receiver; wire::Codec::Encoded first,again; wire::Codec::Decoded value;
+        check(sender.encode(membership,first,error) && receiver.decode(first.operation,first.payload,value,error) && value.message==membership,"four-peer named membership did not round trip");
+        check(sender.encode(membership,again,error) && again.payload.size()+20<first.payload.size() &&
+            receiver.decode(again.operation,again.payload,value,error) && value.message==membership,"established membership repeated full name definitions");
+        auto changed=named[1].toObject(); changed["name"]="Bob"; named[1]=changed; membership["peers"]=named;
+        check(sender.encode(membership,again,error) && receiver.decode(again.operation,again.payload,value,error) && value.message==membership,"rejoin name update changed stable identity or lost binding");
+        for (const auto& invalid : {QString{},QStringLiteral("Alice2"),QStringLiteral("Alexander"),QStringLiteral("<Alice>")}) {
+            changed["name"]=invalid; named[1]=changed; membership["peers"]=named;
+            check(!sender.encode(membership,again,error),"binary membership accepted invalid user name");
+        }
+    }
     QByteArray chunk(48+24576,'w'); chunk.replace(0,32,QByteArray::fromHex(hash.toLatin1()));
     qToBigEndian(quint32{0},reinterpret_cast<uchar*>(chunk.data()+32)); qToBigEndian(quint64{0},reinterpret_cast<uchar*>(chunk.data()+36));
     qToBigEndian(quint32{24576},reinterpret_cast<uchar*>(chunk.data()+44));

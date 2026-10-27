@@ -1,5 +1,6 @@
 #include "ApplicationUpdateService.hpp"
 #include "UpdateDialog.hpp"
+#include "GuiControlContract.hpp"
 #include "UpdateUi.hpp"
 
 #include <QApplication>
@@ -173,6 +174,8 @@ void testDialogAndCancellation()
     Fixture fixture;
     int closeRequests = 0;
     UpdateDialog dialog(fixture.service, [&] { ++closeRequests; return true; });
+    for (auto* action : dialog.findChildren<QPushButton*>())
+        require(jam2::gui::hasCompleteGuiControlContract(*action),"update action missing GUI inventory contract");
     fixture.service.statusChanged = [&] { dialog.refresh(); };
     dialog.show(); fixture.available();
     require(button(dialog, "Jam2DownloadUpdate")->isVisible() && !button(dialog, "Jam2RestartUpdate")->isVisible(),

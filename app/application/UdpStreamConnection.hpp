@@ -1,4 +1,5 @@
 #pragma once
+#include "ControlWireVersion.hpp"
 
 #include "ControlConnection.hpp"
 #include "reliable_udp_stream.hpp"
@@ -12,7 +13,7 @@ namespace jam2::application {
 
 enum class UdpStreamRetirement { Replaced, PeerLeft };
 enum class UdpMuxChannel : quint8 { Control = 1, Asset = 2, IndependentControl = 3 };
-inline constexpr quint8 kUdpMuxVersion = 3;
+inline constexpr quint8 kUdpMuxVersion = kControlWireVersion;
 enum class UdpMuxKind : quint8 { Open = 1, OpenAck, Data, Ack, Close, CloseAck, PeerLeave, AckWindow, AckPair, DataAck, IntentAck };
 struct UdpMuxFrameView {
     UdpMuxKind kind = UdpMuxKind::Data;
@@ -71,7 +72,6 @@ public:
     bool terminal() const;
     bool reusable() const;
     void retire(UdpStreamRetirement reason = UdpStreamRetirement::Replaced);
-    ControlTransport transport() const override { return ControlTransport::ReliableUdp; }
     bool hasIndependentControl() const override { return channel_ == UdpMuxChannel::Control; }
     bool writeIndependent(const QByteArray& bytes) override;
     qint64 independentBytesToWrite() const override;

@@ -7,21 +7,16 @@
 #include <memory>
 
 namespace jam2::application {
-// Ordered reliable bytes for the existing authenticated control/asset protocol.
-// Implementations provide TCP I/O or a logical stream of the punched UDP link.
-enum class ControlTransport { Tcp, ReliableUdp };
-
-// TCP keeps its existing absolute five-second bound. Multiplexed UDP
-// expires only after ten seconds without new ordered message bytes.
+// Ordered reliable bytes on one punched UDP link.
+inline constexpr qint64 kControlStreamQueueBytes=256*1024;
+// An incomplete record expires after ten seconds without ordered progress.
 struct ControlFrameDeadline {
     qint64 began = -1, progress = -1;
     void clear() { began = progress = -1; }
     void received(qint64 now) { if (began < 0) began = now; progress = now; }
-    int remaining(ControlTransport transport, qint64 now) const {
-        if (began < 0) return transport == ControlTransport::Tcp ? 5000 : 10000;
-        const auto left = transport == ControlTransport::Tcp ? 5000 - (now - began)
-            : qint64{10000} - (now - progress);
-        return static_cast<int>((std::max)(qint64{0}, left));
+    int remaining(qint64 now) const {
+        const auto left=progress<0 ? qint64{10000} : qint64{10000}-(now-progress);
+        return static_cast<int>((std::max)(qint64{0},left));
     }
 };
 class ControlConnection {
@@ -37,13 +32,11 @@ public:
     virtual qint64 bytesToWrite() const = 0;
     virtual qint64 maxPendingReadBytes() const = 0;
     virtual QString peerHost() const = 0;
-    virtual ControlTransport transport() const { return ControlTransport::Tcp; }
-    // Optional independent ordering for self-contained Server control replies.
-    // TCP and test byte streams retain their single ordered path by default.
+    // Optional independent ordering for bounded self-contained replies.
     virtual bool hasIndependentControl() const { return false; }
     virtual bool writeIndependent(const QByteArray&) { return false; }
     virtual qint64 independentBytesToWrite() const { return 0; }
     virtual void startIndependent(QObject*, DataHandler) {}
-    int authenticationDeadlineMs() const { return transport() == ControlTransport::Tcp ? 5000 : 20000; }
+    int authenticationDeadlineMs() const { return 20000; }
 };
 } // namespace jam2::application

@@ -1,4 +1,4 @@
-#include "ServerControlWire.hpp"
+#include "ControlWire.hpp"
 #include "ControlProtocol.hpp"
 
 #include <QCoreApplication>
@@ -13,10 +13,10 @@
 #include <iostream>
 #include <stdexcept>
 
-namespace wire = jam2::application::server_wire;
-void serverControlCoverageFixtures();
-void serverControlRefinementFixtures();
-void serverControlRefinementPerformance();
+namespace wire = jam2::application::control_wire;
+void controlWireCoverageFixtures();
+void controlWireRefinementFixtures();
+void controlWireRefinementPerformance();
 namespace {
 void require(bool value, const char* reason) { if (!value) throw std::runtime_error(reason); }
 QJsonObject song(int lanes = 12)
@@ -331,53 +331,35 @@ void performance()
         std::cout << "workload=100-fresh-checkpoints numeric=" << numeric << " compressed=" << compress
             << " authenticated_bytes=" << bytes << " encode_decode_ns=" << timer.nsecsElapsed() << '\n';
     }
-    for (const auto& mode : {"direct", "stun", "server", "server-text-snapshots", "server-compress-small", "server-generic-edits"}) {
+    for (const auto& mode : {"typed", "typed-text-snapshots", "typed-compress-small", "typed-generic-edits"}) {
         wire::Codec::Options options;
-        if (QByteArrayView(mode) == "server-text-snapshots") options.numericDocuments = false;
-        if (QByteArrayView(mode) == "server-compress-small") options.compressionMinimumBytes = 0;
-        if (QByteArrayView(mode) == "server-generic-edits") options.typedRenames = false;
+        if (QByteArrayView(mode) == "typed-text-snapshots") options.numericDocuments = false;
+        if (QByteArrayView(mode) == "typed-compress-small") options.compressionMinimumBytes = 0;
+        if (QByteArrayView(mode) == "typed-generic-edits") options.typedRenames = false;
         wire::Codec encoder(options), decoder;
         quint64 bytes = 0; QElapsedTimer timer; timer.start();
         auto message = song(64); QString error;
         for (int i = 0; i < count; ++i) {
             message = rename(message, QStringLiteral("Take-%1").arg(i)); message["arrangement_revision"] = i + 1;
-            if (QByteArrayView(mode).startsWith("server")) {
                 wire::Codec::Encoded encoded; wire::Codec::Decoded decoded;
                 require(encoder.encode(message, encoded, error), "benchmark binary encode");
                 const auto frame = wire::authenticate(encoded.operation, i + 1, encoded.payload, key);
                 wire::Operation operation{}; quint8 flags = 0; QByteArray body;
                 require(wire::verify(frame.sliced(4), i + 1, key, operation, flags, body, error) && decoder.decode(operation, body, decoded, error) && decoded.message == message, "benchmark binary convergence");
                 bytes += frame.size();
-            } else {
-                const auto frames = jam2::control_protocol::encodeAuthenticatedJsonFrames(message, key, 1);
-                require(!frames.frames.isEmpty(), "benchmark legacy encode");
-                jam2::control_protocol::LargeJsonReceiver large;
-                QJsonObject received;
-                quint64 sequence = 1;
-                for (const auto& f : frames.frames) {
-                    jam2::control_protocol::AuthenticatedPayload payload;
-                    require(jam2::control_protocol::decodeAuthenticated(f.sliced(4), key, sequence++, payload, error), "benchmark legacy decode");
-                    if (payload.type == jam2::control_protocol::AuthenticatedPayloadType::Json) received = payload.message;
-                    else { bool ready = false; require(large.accept(payload.binary, received, ready, error), "benchmark legacy chunks"); }
-                    bytes += f.size();
-                }
-                require(received == message, "benchmark legacy convergence");
-            }
+
         }
         std::cout << "mode=" << mode << " workload=64-lane-rename operations=" << count
             << " authenticated_bytes=" << bytes << " encode_decode_ns=" << timer.nsecsElapsed()
             << " compression_attempts=" << encoder.stats().compressionAttempts << " compression_skipped=" << encoder.stats().compressionSkipped << '\n';
-        if (QByteArrayView(mode) == "server") require(bytes < 200000, "ordinary renames retained full snapshot wire cost");
+        if (QByteArrayView(mode) == "typed") require(bytes < 200000, "ordinary renames retained full snapshot wire cost");
     }
-    quint64 legacyWavBytes = 0;
-    for (const auto& mode : {"direct", "stun", "server"}) {
-        const bool binary = QByteArrayView(mode) == "server";
+    for (const auto& mode : {"typed"}) {
         wire::Codec sender, receiver; wire::Codec::Encoded encoded; wire::Codec::Decoded decoded;
         QString error; quint64 bytes = 0, sequence = 1;
         const QByteArray file(1024 * 1024, 'w'), hash(32, 'a');
         const QString hashText = QString::fromLatin1(hash.toHex());
         const auto metadata = [&](const QJsonObject& message, bool reverse) {
-            if (binary) {
                 auto& encoder = reverse ? receiver : sender;
                 auto& decoder = reverse ? sender : receiver;
                 require(encoder.encode(message, encoded, error), "WAV metadata benchmark encode");
@@ -386,41 +368,27 @@ void performance()
                 require(wire::verify(frame.sliced(4), sequence - 1, key, operation, flags, payload, error) &&
                     decoder.decode(operation, payload, decoded, error) && decoded.message == message, "WAV metadata benchmark round trip");
                 bytes += frame.size();
-            } else {
-                const auto frame = jam2::control_protocol::encodeAuthenticated(message, key, sequence++);
-                jam2::control_protocol::AuthenticatedPayload payload;
-                require(jam2::control_protocol::decodeAuthenticated(frame.sliced(4), key, sequence - 1, payload, error) && payload.message == message,
-                    "WAV legacy metadata benchmark round trip");
-                bytes += frame.size();
-            }
+
         };
         QElapsedTimer timer; timer.start();
         metadata({{"type", "looper.asset.start"}, {"sha256", hashText}, {"file_bytes", file.size()}, {"chunk_size", 24576}}, false);
         quint32 chunks = 0;
         for (qsizetype offset = 0; offset < file.size(); offset += 24576) {
             const auto chunk = legacyChunk(hash, chunks, file.mid(offset, 24576));
-            if (binary) {
                 require(sender.encodeAsset(chunk, encoded, error), "WAV benchmark encode chunk");
                 const auto frame = wire::authenticate(encoded.operation, sequence++, encoded.payload, key);
                 wire::Operation operation{}; quint8 flags = 0; QByteArray payload;
                 require(wire::verify(frame.sliced(4), sequence - 1, key, operation, flags, payload, error) &&
                     receiver.decode(operation, payload, decoded, error) && decoded.asset == chunk, "WAV benchmark binary bytes changed");
                 bytes += frame.size();
-            } else {
-                const auto frame = jam2::control_protocol::encodeAuthenticatedBinary(chunk, key, sequence++);
-                jam2::control_protocol::AuthenticatedPayload payload;
-                require(jam2::control_protocol::decodeAuthenticated(frame.sliced(4), key, sequence - 1, payload, error) && payload.binary == chunk,
-                    "WAV benchmark legacy bytes changed");
-                bytes += frame.size();
-            }
+
             metadata({{"type", "looper.asset.ack"}, {"sha256", hashText}, {"chunks", static_cast<qint64>(++chunks)}}, true);
         }
         metadata({{"type", "looper.asset.done"}, {"sha256", hashText}, {"chunks", static_cast<qint64>(chunks)}}, false);
         std::cout << "mode=" << mode << " workload=wav-transfer-codec raw_bytes=" << file.size() << " chunks=" << chunks
             << " authenticated_bytes_both_directions=" << bytes << " overhead_bytes=" << bytes - file.size()
             << " encode_decode_ns=" << timer.nsecsElapsed() << '\n';
-        if (!binary) legacyWavBytes = bytes;
-        else require(bytes < legacyWavBytes, "typed WAV framing failed to reduce data/metadata overhead");
+        require(bytes-file.size()<8192,"typed WAV overhead exceeded its bounded transfer budget");
     }
 }
 }
@@ -428,8 +396,8 @@ int main(int argc, char** argv)
 {
     QCoreApplication app(argc, argv);
     try {
-        if (argc > 1 && QByteArrayView(argv[1]) == "--performance") { performance(); editBursts(true); serverControlRefinementPerformance(); }
-        else { serverControlCoverageFixtures(); serverControlRefinementFixtures(); recordsAndDeltas(); assets(); channels(); editBursts(false); independentSafety(); }
+        if (argc > 1 && QByteArrayView(argv[1]) == "--performance") { performance(); editBursts(true); controlWireRefinementPerformance(); }
+        else { controlWireCoverageFixtures(); controlWireRefinementFixtures(); recordsAndDeltas(); assets(); channels(); editBursts(false); independentSafety(); }
         return 0;
     } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }

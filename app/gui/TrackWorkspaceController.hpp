@@ -38,6 +38,7 @@ public:
         std::function<void(const QString&, const QString&)> incomingAssetAbandoned;
         std::function<void(const QString&, const QString&, bool)> assetProgress;
         std::function<void(bool)> assetWorkStateChanged;
+        std::function<QString(const QString&)> peerName;
     };
 
     struct LooperWaveformPreview {
@@ -83,6 +84,7 @@ public:
         std::function<void(const QString&)> failed = {});
     QObject* dispatchContext() noexcept override;
     int sessionSampleRate() const noexcept override;
+    QString peerName(const QString& token) const override;
     QString assetPathForSend(const QString& hash) const override;
     QString incomingAssetPath(const QString& hash) const override;
     bool incomingAssetExpected(
@@ -168,7 +170,7 @@ public:
     bool automaticTrackSharePending = false;
     bool sharingPolicyReceived = false;
     QJsonObject stagedHostSong;
-    ServerSongProposalStaging serverSongProposals;
+    SharedSongProposalStaging sharedSongProposals;
     int stagedHostSongRevision = 0;
     QMap<quint64, QJsonObject> authoritativeTrackHistory;
 

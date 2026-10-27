@@ -80,7 +80,7 @@ The selected suite names are:
   convergence;
 - `performance`: fake-audio transport, recording, prepared playback, and the
   metronome/epoch impairment matrix;
-- `network`: TCP/security boundaries and authenticated UDP adversarial cases;
+- `network`: typed-control/security boundaries and authenticated UDP adversarial cases;
   and
 - `full`: every default hardware-independent CTest.
 

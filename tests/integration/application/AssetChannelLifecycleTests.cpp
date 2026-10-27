@@ -1,11 +1,12 @@
 #include "ControlClient.hpp"
+#include "ControlByteLink.hpp"
+#include "AssetChunkProtocol.hpp"
 #include "ControlProtocol.hpp"
 #include "ControlServer.hpp"
 
 #include <QCoreApplication>
 #include <QElapsedTimer>
 #include <QHostAddress>
-#include <QTcpServer>
 #include <QThread>
 
 #include <functional>
@@ -35,13 +36,6 @@ bool pumpUntil(const std::function<bool()>& predicate, int timeoutMs = 5000)
     return predicate();
 }
 
-quint16 reserveLoopbackPort()
-{
-    QTcpServer reservation;
-    if (!reservation.listen(QHostAddress::LocalHost, 0)) return 0;
-    return reservation.serverPort();
-}
-
 } // namespace
 
 int main(int argc, char* argv[])
@@ -54,19 +48,19 @@ int main(int argc, char* argv[])
     constexpr auto key = "000102030405060708090a0b0c0d0e0f";
     constexpr auto token = "00000000000000020000000000000002";
 
-    const quint16 port = reserveLoopbackPort();
     ControlServer server;
-    expect(port != 0 && server.listen(port, QString::fromLatin1(session),
-        QString::fromLatin1(key)), "asset lifecycle server listens on loopback");
-
+    expect(server.listenViaTransport(QString::fromLatin1(session),QString::fromLatin1(key)),"configure typed lifecycle listener");
     bool controlAuthenticated = false;
     ControlClient control;
+    control.setPeerName(*jam2::application::PeerName::fromInput("Alex"));
     control.onEvent = [&](const TransportEvent& event) {
         controlAuthenticated = controlAuthenticated ||
             event.type == TransportEventType::Authenticated;
     };
-    control.connectToHost(
-        QStringLiteral("127.0.0.1"), port,
+    auto [controlServer,controlBytes]=jam2::test::endpoints();
+    server.acceptTransport(controlServer);
+    control.connectViaTransport(
+        controlBytes,
         QString::fromLatin1(session), QString::fromLatin1(key),
         QString::fromLatin1(token), QStringLiteral("127.0.0.1:42002"));
     expect(pumpUntil([&] { return controlAuthenticated; }),
@@ -75,14 +69,17 @@ int main(int argc, char* argv[])
     bool firstAssetAuthenticated = false;
     bool firstAssetDisconnected = false;
     ControlClient firstAsset;
+    firstAsset.setPeerName(*jam2::application::PeerName::fromInput("Alex"));
     firstAsset.onEvent = [&](const TransportEvent& event) {
         firstAssetAuthenticated = firstAssetAuthenticated ||
             event.type == TransportEventType::Authenticated;
         firstAssetDisconnected = firstAssetDisconnected ||
             (event.type == TransportEventType::Disconnected && event.authenticated);
     };
-    firstAsset.connectToHost(
-        QStringLiteral("127.0.0.1"), port,
+    auto [firstAssetServer,firstAssetBytes]=jam2::test::endpoints();
+    server.acceptTransport(firstAssetServer);
+    firstAsset.connectViaTransport(
+        firstAssetBytes,
         QString::fromLatin1(session), QString::fromLatin1(key),
         QString::fromLatin1(token), QString{}, ControlClient::Channel::Asset);
     expect(pumpUntil([&] {
@@ -94,14 +91,17 @@ int main(int argc, char* argv[])
     bool replacementAuthenticated = false;
     bool replacementRejected = false;
     ControlClient replacement;
+    replacement.setPeerName(*jam2::application::PeerName::fromInput("Alex"));
     replacement.onEvent = [&](const TransportEvent& event) {
         replacementAuthenticated = replacementAuthenticated ||
             event.type == TransportEventType::Authenticated;
         replacementRejected = replacementRejected ||
             event.failure == jam2::control_protocol::TransportFailure::AuthenticationRejected;
     };
-    replacement.connectToHost(
-        QStringLiteral("127.0.0.1"), port,
+    auto [replacementServer,replacementBytes]=jam2::test::endpoints();
+    server.acceptTransport(replacementServer);
+    replacement.connectViaTransport(
+        replacementBytes,
         QString::fromLatin1(session), QString::fromLatin1(key),
         QString::fromLatin1(token), QString{}, ControlClient::Channel::Asset);
 
@@ -116,7 +116,10 @@ int main(int argc, char* argv[])
         receivedFrom = source;
         received = payload;
     };
-    const QByteArray probe = QByteArrayLiteral("replacement-channel-probe");
+    const auto data=QByteArray(256,'w');
+    const QString hash(64,'a');
+    expect(replacement.send({{"type","looper.asset.start"},{"sha256",hash},{"file_bytes",data.size()},{"chunk_size",24576}}),"bind replacement transfer");
+    const QByteArray probe=jam2::application::asset_chunk::encode({hash,0,0,data});
     const bool sent = !probe.isEmpty() && replacement.sendBinary(probe);
     expect(sent && pumpUntil([&] {
         return received == probe && receivedFrom == QString::fromLatin1(token);

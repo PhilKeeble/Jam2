@@ -32,7 +32,7 @@ struct ListeningToolsSettings {
 
 QJsonObject listeningSettingsJson(const ListeningToolsSettings& settings);
 bool parseListeningSettings(const QJsonObject& object, ListeningToolsSettings& settings, QString& error);
-bool validateListeningMessage(const QJsonObject& message, QString& error, bool serverBinary = false);
+bool validateListeningMessage(const QJsonObject& message, QString& error);
 
 // GUI/control-thread owner. Preparation runs through the existing file worker;
 // only fixed-shape staged swaps and tempo commands enter the audio engine.
@@ -43,7 +43,6 @@ public:
         bool sync = true;
         bool network = false;
         bool creator = true;
-        bool serverBinary = false;
         bool engineRunning = false;
         bool protectedRecording = false;
         bool transportChanging = false;
@@ -89,7 +88,7 @@ public:
     void reset();
     void tick();
     // Content owner calls before clearing/replacing the prepared source. A
-    // Server selection survives invalidation even after its planned boundary.
+    // Shared selection survives invalidation even after its planned boundary.
     void sourceWillChange();
     const ListeningToolsSettings& appliedSettings() const noexcept { return applied_; }
     const ListeningToolsSettings& selectedSettings() const noexcept { return draft_; }
@@ -100,7 +99,7 @@ public:
     bool pendingForBank(int bank) const noexcept { return pending() && bank_ == bank; }
     QJsonObject stats() const;
 private:
-    struct ServerSelection {
+    struct SharedSelection {
         ListeningToolsSettings settings;
         int revision = 0, bank = 0;
         jam2::PlaybackTempo tempo;
@@ -108,20 +107,20 @@ private:
         double epochPosition = 0.0, sourceSeconds = 0.0;
         bool playing = false;
     };
-    bool publishServerSelection(quint8 changedGroups, const ListeningToolsSettings& proposed);
-    void adoptServerSelection(const ServerSelection& selection);
-    bool deferServerSelectionForContentChange();
-    QJsonObject serverSelectionMessage(const ServerSelection& selection) const;
-    std::optional<ServerSelection> serverSelection_, deferredServerSelection_;
-    quint64 serverLateReschedules_ = 0;
-    quint64 serverContentDeferrals_ = 0;
-    quint64 serverSourceInvalidations_ = 0, serverPostBoundaryDeferrals_ = 0;
-    quint8 serverEditGroups_ = 0;
-    quint64 serverPeerFailures_ = 0;
-    struct ServerApplication { int revision = 0; std::uint64_t frame = 0; };
-    std::optional<ServerApplication> pendingServerApplication_;
-    std::optional<ServerApplication> lastServerApplication_;
-    std::map<QString, ServerApplication> serverApplications_;
+    bool publishSharedSelection(quint8 changedGroups, const ListeningToolsSettings& proposed);
+    void adoptSharedSelection(const SharedSelection& selection);
+    bool deferSharedSelectionForContentChange();
+    QJsonObject sharedSelectionMessage(const SharedSelection& selection) const;
+    std::optional<SharedSelection> sharedSelection_, deferredSharedSelection_;
+    quint64 sharedLateReschedules_ = 0;
+    quint64 sharedContentDeferrals_ = 0;
+    quint64 sharedSourceInvalidations_ = 0, sharedPostBoundaryDeferrals_ = 0;
+    quint8 sharedEditGroups_ = 0;
+    quint64 sharedPeerFailures_ = 0;
+    struct SharedApplication { int revision = 0; std::uint64_t frame = 0; };
+    std::optional<SharedApplication> pendingSharedApplication_;
+    std::optional<SharedApplication> lastSharedApplication_;
+    std::map<QString, SharedApplication> sharedApplications_;
     void request();
     void begin(int revision, ListeningToolsSettings settings, int bank, bool shared);
     void ready();
@@ -151,8 +150,6 @@ private:
     bool coupled_ = true;
     bool queuedEdit_ = false;
     QString sourceSignature_;
-    QSet<QString> expected_;
-    QSet<QString> ready_;
     std::optional<PreparedMixResult> prepared_;
     std::optional<QJsonObject> deferredState_;
     std::optional<jam2::EngineCommand> pendingReset_;

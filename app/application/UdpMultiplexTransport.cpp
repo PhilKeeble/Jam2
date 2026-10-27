@@ -1,6 +1,9 @@
 #include "UdpMultiplexTransport.hpp"
 #include "ControlProtocol.hpp"
 #include "protocol.hpp"
+#include "stun.hpp"
+#include "PeerBootstrap.hpp"
+#include "PeerIntroductionCoordinator.hpp"
 
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -58,6 +61,8 @@ struct UdpMultiplexTransport::Impl {
         quint64 introduction = 0;
         int attempt = 0, helloSent = 0;
         bool gotHello = false, gotAck = false, report = false;
+        bool hostLink = false, remoteReported = false;
+        quint64 nextBootstrap = 0;
         quint64 deadline = 0, nextAction = 0;
         std::atomic<quint64> lastReceive{0};
         std::atomic<bool> stalledNotified{false}, mediaStarted{false}, readable{false};
@@ -92,10 +97,13 @@ struct UdpMultiplexTransport::Impl {
     struct ReadRoutes {
         std::vector<ReadRoute> routes;
         std::vector<const jam2::UdpSocket*> sockets;
+        std::vector<std::size_t> readerIndices;
     };
     struct IngressPacket {
         std::shared_ptr<Link> link;
         bool signal = false;
+        bool bootstrap = false, proof = false;
+        jam2::ResolvedUdpEndpoint source{};
         quint16 size = 0;
         quint64 queuedUs = 0;
         std::array<std::uint8_t, jam2::NetworkDatagramTransport::kReceiveBufferBytes> bytes;
@@ -108,7 +116,8 @@ struct UdpMultiplexTransport::Impl {
         std::vector<std::shared_ptr<jam2::UdpSocket>> keepAlive;
         std::vector<const jam2::UdpSocket*> sockets;
         std::vector<std::shared_ptr<Link>> readLinks, ordered;
-        std::size_t capacity() const noexcept { return keepAlive.capacity()+sockets.capacity()+readLinks.capacity()+ordered.capacity(); }
+        std::vector<const jam2::UdpSocket*> seenSockets;
+        std::size_t capacity() const noexcept { return keepAlive.capacity()+sockets.capacity()+readLinks.capacity()+ordered.capacity()+seenSockets.capacity(); }
     } workerScratch;
 
     jam2::NetworkRuntime network;
@@ -141,6 +150,15 @@ struct UdpMultiplexTransport::Impl {
     std::map<std::pair<CommandKind, QString>, MembershipAction> membershipActions;
     std::map<QString, std::shared_ptr<Link>> links, retainedLinks;
     std::map<QString, PairRequest> requests;
+    std::unique_ptr<PeerIntroductionCoordinator> directCoordinator;
+    QString directJoinRequest;
+    int directJoinAttempts=0;
+    quint64 directAttemptDeadline=0;
+    quint64 bootstrapFailureWindow = 0, bootstrapFailures = 0;
+    std::optional<jam2::stun::BindingRequest> stunRequest;
+    std::optional<jam2::ResolvedUdpEndpoint> stunEndpoint;
+    quint64 stunDeadline=0;
+    int stunAttempts=0;
     std::set<QString> admitted, pendingJoins, terminalRequests;
     std::deque<QString> terminalOrder;
     std::set<std::uint16_t> usedPorts;
@@ -166,20 +184,34 @@ struct UdpMultiplexTransport::Impl {
         key = control_protocol::decodeHex(config.keyHex, 16);
         const QByteArray sid = control_protocol::decodeHex(config.sessionHex, 8);
         if (key.size() != 16 || sid.size() != 8 || !token(config.localToken) || peerId(config.localToken) == 0 ||
-            config.maximumPeers < 0 || config.controlBytesPerSecond < 1024 || (config.assetBytesPerSecond != 0 && config.assetBytesPerSecond < 1024) || config.linkRepairSilenceMs < 1000 || config.fastReorderUs > 2000000)
+            config.maximumPeers < 0 || config.pendingAdmissionTimeoutMs < 1 || config.pendingAdmissionTimeoutMs > 60000 || config.controlBytesPerSecond < 1024 || (config.assetBytesPerSecond != 0 && config.assetBytesPerSecond < 1024) || config.linkRepairSilenceMs < 1000 || config.fastReorderUs > 2000000 ||
+            (config.socketBuffers.sendBytes && *config.socketBuffers.sendBytes<=0) ||
+            (config.socketBuffers.receiveBytes && *config.socketBuffers.receiveBytes<=0) ||
+            config.stunTimeoutMs<1 || config.stunTimeoutMs>60000 || config.stunRetries<1 || config.stunRetries>100)
             throw std::runtime_error("Invalid UDP multiplex configuration");
         for (char byte : sid) session = (session << 8) | static_cast<unsigned char>(byte);
         std::copy(key.begin(), key.end(), nativeKey.begin());
         config.sessionHex = config.sessionHex.toLower(); config.keyHex = config.keyHex.toLower();
         config.localToken = config.localToken.toLower();
-        server = jam2::resolve_udp_endpoint(config.server);
         signalSocket = std::make_shared<jam2::UdpSocket>();
-        signalSocket->bind({config.bindHost.toStdString(), 0});
+        signalSocket->bind({config.bindHost.toStdString(),
+            config.strategy==jam2::ConnectionStrategy::Jam2Server ? std::uint16_t{0} : config.bindPort});
+        configureSocket(*signalSocket);
+        server = jam2::resolve_udp_endpoint(config.strategy!=jam2::ConnectionStrategy::Jam2Server && config.creator
+            ? jam2::Endpoint{"127.0.0.1",signalSocket->local_endpoint().port} : config.server);
         usedPorts.insert(signalSocket->local_endpoint().port);
-        try { localHost = signalSocket->local_endpoint_for(server).host; }
+        try { localHost = signalSocket->local_endpoint_for(
+            config.strategy!=jam2::ConnectionStrategy::Jam2Server && config.creator
+                ? jam2::resolve_udp_endpoint({"192.0.2.1",9}) : server).host; }
         catch (const std::exception& error) { log(QStringLiteral("LAN candidate unavailable: %1").arg(QString::fromUtf8(error.what()))); }
         joining = !config.creator;
         coordinator = config.creator ? config.localToken : QString{};
+        if (config.strategy!=jam2::ConnectionStrategy::Jam2Server) {
+            if (config.creator) directCoordinator=std::make_unique<PeerIntroductionCoordinator>(session,config.localToken);
+            else directJoinRequest=QString::fromLatin1(control_protocol::randomNonce().toHex());
+        }
+        counters.usesRendezvous=config.strategy==jam2::ConnectionStrategy::Jam2Server;
+        counters.bootstrapLocal=signalSocket->local_endpoint();
         audioWake.requestWake();
         joinDeadline = jam2::monotonic_us() + 30000000;
         counters.controlBytesPerSecond = config.controlBytesPerSecond;
@@ -219,7 +251,10 @@ struct UdpMultiplexTransport::Impl {
         const auto append = [&](const auto& collection) {
             for (const auto& [peer, link] : collection) if (link->phase == Phase::Active && link->socket) {
                 next->routes.push_back({link, link->socket, link->remote, peerId(peer)});
-                next->sockets.push_back(link->socket.get()); link->readable.store(true, std::memory_order_release);
+                if (std::find(next->sockets.begin(),next->sockets.end(),link->socket.get())==next->sockets.end()) {
+                    next->readerIndices.push_back(next->routes.size()-1); next->sockets.push_back(link->socket.get());
+                }
+                link->readable.store(true, std::memory_order_release);
             }
         };
         append(links); append(retainedLinks);
@@ -255,10 +290,162 @@ struct UdpMultiplexTransport::Impl {
         std::lock_guard lock(mutex);
         receiverRequested = false; commandWake->notify();
     }
-    bool queueIngress(const ReadRoute& route, std::span<const std::uint8_t> packet, bool signal)
+    bool rendezvous() const noexcept { return config.strategy==jam2::ConnectionStrategy::Jam2Server; }
+    bool signalRuntimeOwned() const
+    {
+        if (!receiverOwned.load(std::memory_order_acquire)) return false;
+        const auto routes=readRoutes.load(std::memory_order_acquire);
+        return std::any_of(routes->routes.begin(),routes->routes.end(),[&](const ReadRoute& route) { return route.socket==signalSocket; });
+    }
+    void activateLink(const std::shared_ptr<Link>& link,quint64 now)
+    {
+        if (link->phase==Phase::Active) return;
+        link->phase=Phase::Active; link->lastReceive=now;
+        if (config.creator && link->hostLink)
+            link->deadline=now+config.pendingAdmissionTimeoutMs*1000;
+        if (const auto held=retainedLinks.find(link->peer);held!=retainedLinks.end()) {
+            for (const auto& [channel,connection] : held->second->streams) { (void)channel; connection->retire(); }
+            retainedLinks.erase(held);
+        }
+        const auto peer=link->peer;
+        post([peer](auto& self) { if (self.onLinkReady) self.onLinkReady(peer); });
+    }
+    void sendBootstrap(const std::shared_ptr<jam2::UdpSocket>& socket,const jam2::ResolvedUdpEndpoint& destination,
+        PeerBootstrapMessage message)
+    {
+        message.session=session; message.sender=config.localToken;
+        const auto packet=encodePeerBootstrap(message,key);
+        if (!packet.isEmpty() && socket->send_to(destination,view(packet)).outcome==jam2::UdpSendOutcome::Sent) ++counters.signalPacketsSent;
+    }
+    PeerBootstrapMessage bootstrapMessage(PeerBootstrapKind kind,const std::shared_ptr<Link>& link) const
+    {
+        PeerBootstrapMessage message; message.kind=kind; message.request=link->request;
+        message.introduction=link->introduction; message.attempt=static_cast<quint8>(link->attempt);
+        return message;
+    }
+    void bootstrapFailure(const QString& detail)
+    {
+        joining=false;
+        post([detail](auto& self) { if (self.onBootstrapFailure) self.onBootstrapFailure(detail); });
+    }
+    void restartDirectJoin(quint64 now,bool rotate)
+    {
+        if (config.creator) return;
+        if (rotate) {
+            if (const auto found=links.find(coordinator);found!=links.end() && found->second->phase==Phase::Active)
+                retainedLinks[coordinator]=found->second;
+            links.erase(coordinator);
+            signalSocket=candidate();
+            counters.bootstrapLocal=signalSocket->local_endpoint();
+        }
+        directJoinRequest=QString::fromLatin1(control_protocol::randomNonce().toHex());
+        if (!directJoinAttempts) joinDeadline=now+45000000;
+        ++directJoinAttempts;
+        joining=directJoinAttempts<=10; nextJoin=0; directAttemptDeadline=now+3000000; ++counters.bootstrapAttempts;
+        if (!joining) bootstrapFailure(QStringLiteral("Direct creator connection failed after ten fresh socket attempts"));
+    }
+    void receiveBootstrap(std::span<const std::uint8_t> packet,const jam2::ResolvedUdpEndpoint& source,quint64 now)
+    {
+        if (rendezvous()) return;
+        if (!bootstrapFailureWindow || now-bootstrapFailureWindow>=10000000) { bootstrapFailureWindow=now; bootstrapFailures=0; }
+        if (bootstrapFailures>=64) { ++counters.bootstrapRejected; return; }
+        const auto decoded=decodePeerBootstrap(packet,session,key);
+        if (!decoded) { ++bootstrapFailures; ++counters.bootstrapAuthenticationRejects; return; }
+        ++counters.signalPacketsReceived;
+        const auto& message=*decoded;
+        if (config.creator) {
+            if (!registered) return;
+            if (message.sender==config.localToken || peerId(message.sender)==peerId(config.localToken)) { ++counters.bootstrapRejected; return; }
+            if (message.kind==PeerBootstrapKind::Join) {
+                const auto existing=links.find(message.sender);
+                if (existing!=links.end() && existing->second->hostLink && existing->second->request==message.request && existing->second->remote==source) {
+                    auto response=bootstrapMessage(existing->second->phase==Phase::Active ? PeerBootstrapKind::Accepted : PeerBootstrapKind::Welcome,existing->second);
+                    response.observed=PeerBootstrapEndpoint::from(jam2::format_udp_endpoint(source));
+                    sendBootstrap(signalSocket,source,std::move(response)); return;
+                }
+                const bool full=config.maximumPeers>0 && admitted.size()>=static_cast<std::size_t>(config.maximumPeers) && !admitted.contains(message.sender);
+                const auto pending=std::count_if(links.begin(),links.end(),[&](const auto& entry) { return entry.second->hostLink && !admitted.contains(entry.first) && entry.second->phase!=Phase::Failed; });
+                if (full || pending>=control_protocol::kMaxPendingPeers) {
+                    PeerBootstrapMessage rejected; rejected.kind=PeerBootstrapKind::Rejected; rejected.request=message.request;
+                    sendBootstrap(signalSocket,source,std::move(rejected)); ++counters.bootstrapRejected; return;
+                }
+                if (existing!=links.end() && existing->second->phase==Phase::Active) retainedLinks[message.sender]=existing->second;
+                auto link=std::make_shared<Link>(); link->peer=message.sender; link->request=message.request;
+                link->hostLink=true; link->socket=signalSocket; link->remote=source; link->attempt=1;
+                link->introduction=jam2::random_u64(); link->phase=Phase::Probing; link->deadline=now+3000000;
+                if (!counters.bootstrapPublic.host.empty()) link->observed=jam2::resolve_udp_endpoint(counters.bootstrapPublic);
+                links[message.sender]=link; ++counters.bootstrapAttempts;
+                auto response=bootstrapMessage(PeerBootstrapKind::Welcome,link); response.observed=PeerBootstrapEndpoint::from(jam2::format_udp_endpoint(source));
+                sendBootstrap(signalSocket,source,std::move(response)); link->nextBootstrap=now+500000;
+                return;
+            }
+            if (message.kind==PeerBootstrapKind::JoinReady) {
+                const auto found=links.find(message.sender);
+                if (found==links.end()) return;
+                const auto link=found->second;
+                if (!link->hostLink || link->request!=message.request || link->introduction!=message.introduction || link->remote!=source) return;
+                link->remoteReported=true;
+                if (link->phase==Phase::Active) sendBootstrap(signalSocket,source,bootstrapMessage(PeerBootstrapKind::Accepted,link));
+                return;
+            }
+            if (directCoordinator) directCoordinator->receive(message,PeerBootstrapEndpoint::from(jam2::format_udp_endpoint(source)),now);
+            return;
+        }
+        if (source!=server) return;
+        if (message.kind==PeerBootstrapKind::Rejected && message.request==directJoinRequest) {
+            bootstrapFailure(QStringLiteral("Creator rejected UDP admission (session limit or pending authentication cap)")); return;
+        }
+        if (message.kind==PeerBootstrapKind::Welcome && message.request==directJoinRequest) {
+            coordinator=message.sender; joining=false;
+            const auto found=links.find(coordinator);
+            if (found!=links.end() && found->second->request==message.request && found->second->introduction==message.introduction) return;
+            auto link=std::make_shared<Link>(); link->peer=coordinator; link->request=message.request;
+            link->hostLink=true; link->socket=signalSocket; link->remote=source; link->attempt=1;
+            link->introduction=message.introduction; link->observed=jam2::resolve_udp_endpoint(message.observed.endpoint());
+            link->phase=Phase::Probing; link->deadline=now+3000000; links[coordinator]=link;
+            return;
+        }
+        if (message.sender!=coordinator) return;
+        if (message.kind==PeerBootstrapKind::Prepare) {
+            auto found=links.find(message.partner);
+            if (found!=links.end()) {
+                const auto prior=found->second;
+                if (prior->request==message.request && prior->attempt>=message.attempt) return;
+                if (prior->request!=message.request && message.attempt!=1) return;
+                if (prior->phase==Phase::Active) retainedLinks[message.partner]=prior;
+                else for (const auto& [channel,connection] : prior->streams) { (void)channel; connection->retire(); }
+            } else if (message.attempt!=1) return;
+            auto link=std::make_shared<Link>(); link->peer=message.partner; link->request=message.request;
+            link->attempt=message.attempt; link->introduction=message.introduction; link->socket=candidate();
+            link->phase=Phase::Preparing; link->deadline=now+8000000; links[message.partner]=link;
+            ++counters.bootstrapAttempts; return;
+        }
+        const auto found=std::find_if(links.begin(),links.end(),[&](const auto& entry) {
+            const auto& link=entry.second; return link->request==message.request && link->introduction==message.introduction;
+        });
+        if (found==links.end()) return;
+        const auto link=found->second;
+        if (message.kind==PeerBootstrapKind::Accepted && link->hostLink) {
+            if (link->gotHello && link->gotAck) activateLink(link,now);
+        } else if (!link->hostLink && link->attempt==message.attempt) {
+            if (message.kind==PeerBootstrapKind::Offer && (link->phase==Phase::Preparing || link->phase==Phase::Offered)) {
+                link->remote=jam2::resolve_udp_endpoint(message.endpoint.endpoint());
+                link->observed=jam2::resolve_udp_endpoint(message.observed.endpoint());
+                link->route=message.lan ? QStringLiteral("lan") : QStringLiteral("public");
+                link->phase=Phase::Offered; link->nextAction=0;
+            } else if (message.kind==PeerBootstrapKind::Go && link->phase==Phase::Offered) {
+                link->phase=Phase::Probing; link->nextAction=0; link->deadline=now+3000000;
+            } else if (message.kind==PeerBootstrapKind::Complete && link->gotHello && link->gotAck) {
+                activateLink(link,now);
+                sendBootstrap(link->socket,server,bootstrapMessage(PeerBootstrapKind::CompleteAck,link));
+            }
+        }
+    }
+    bool queueIngress(const ReadRoute& route, std::span<const std::uint8_t> packet, bool signal,
+        bool bootstrap=false,bool proof=false,const jam2::ResolvedUdpEndpoint& source={})
     {
         if (packet.size() > jam2::NetworkDatagramTransport::kReceiveBufferBytes) { ++invalidClassified; return false; }
-        const bool asset = !signal && packet.size() >= 8 && muxChannel(packet)==UdpMuxChannel::Asset &&
+        const bool asset = !signal && !bootstrap && !proof && packet.size() >= 8 && muxChannel(packet)==UdpMuxChannel::Asset &&
             (muxKind(packet)==UdpMuxKind::Data || muxKind(packet)==UdpMuxKind::DataAck);
         {
             std::lock_guard lock(ingressMutex);
@@ -266,6 +453,7 @@ struct UdpMultiplexTransport::Impl {
             if (queue.count == queue.packets.size()) { ++ingressDrops; return false; }
             auto& slot = queue.packets[queue.write];
             slot.link = route.link; slot.signal = signal; slot.size = static_cast<quint16>(packet.size());
+            slot.bootstrap=bootstrap; slot.proof=proof; slot.source=source;
             slot.queuedUs = jam2::monotonic_us(); std::copy(packet.begin(), packet.end(), slot.bytes.begin());
             queue.write = (queue.write + 1) % queue.packets.size(); ++queue.count;
             ingressHighWater = (std::max<quint64>)(ingressHighWater, controlIngress.count + assetIngress.count);
@@ -297,8 +485,17 @@ struct UdpMultiplexTransport::Impl {
             const auto now = jam2::monotonic_us(), delay = now >= packet.queuedUs ? now - packet.queuedUs : 0;
             ++counters.ingressWaitSamples; counters.ingressWaitSumUs += delay;
             counters.ingressWaitMaxUs = (std::max)(counters.ingressWaitMaxUs, delay);
-            if (!packet.link->readable.load(std::memory_order_acquire) || packet.link->phase != Phase::Active) continue;
             const auto contents = std::span(packet.bytes).first(packet.size);
+            if (packet.bootstrap) { receiveBootstrap(contents,packet.source,now); continue; }
+            if (packet.proof) {
+                for (const auto& [peer,link] : links) {
+                    (void)peer;
+                    if (link->remote==packet.source && (link->phase==Phase::Probing || link->phase==Phase::Reporting))
+                        directProof(link,contents,packet.source);
+                }
+                continue;
+            }
+            if (!packet.link || !packet.link->readable.load(std::memory_order_acquire) || packet.link->phase != Phase::Active) continue;
             if (packet.signal) receiveSignal(QJsonDocument::fromJson(bytes(contents)).object(), now);
             else muxReceive(packet.link, contents, now);
         }
@@ -331,17 +528,30 @@ struct UdpMultiplexTransport::Impl {
         std::size_t work = 0; bool waited = false;
         for (;;) {
             bool receivedAny = false;
-            const auto count = routes->routes.size();
+            const auto count = routes->readerIndices.size();
             for (std::size_t checked = 0; checked < count; ++checked) {
-                const auto& route = routes->routes[receiveCursor++ % count];
-                if (!route.link->readable.load(std::memory_order_acquire)) continue;
-                const auto packet = route.socket->recv_from_for(buffer, 0);
+                const auto& initial = routes->routes[routes->readerIndices[receiveCursor++ % count]];
+                const ReadRoute* selected=&initial;
+                const auto& routeSocket=initial.socket;
+                if (!initial.link->readable.load(std::memory_order_acquire)) continue;
+                const auto packet = routeSocket->recv_from_for(buffer, 0);
                 if (!packet) continue;
                 receivedAny = true; ++work;
                 ClassificationTimer timing((++classifications & (kClassificationTimingStride-1)) == 0 ? this : nullptr);
                 const auto payload = buffer.first(packet->size);
+                if (packet->endpoint!=initial.endpoint) {
+                    const auto matched=std::find_if(routes->routes.begin(),routes->routes.end(),[&](const ReadRoute& candidate) {
+                        return candidate.socket==routeSocket && candidate.endpoint==packet->endpoint && candidate.link->readable.load(std::memory_order_acquire);
+                    });
+                    if (matched!=routes->routes.end()) selected=&*matched;
+                }
+                const auto& route=*selected;
                 if (!route.link->readable.load(std::memory_order_acquire)) ++invalidClassified;
-                else if (packet->endpoint == server) queueIngress(route, payload, true);
+                else if (!rendezvous() && isPeerBootstrap(payload)) {
+                    if (payload.size()>=64 && payload.size()<=kPeerBootstrapMaximumBytes) queueIngress(route,payload,false,true,false,packet->endpoint);
+                    else ++invalidClassified;
+                }
+                else if (rendezvous() && packet->endpoint == server) queueIngress(route, payload, true);
                 else if (packet->endpoint == route.endpoint) {
                     route.link->lastReceive.store(jam2::monotonic_us(), std::memory_order_relaxed);
                     route.link->stalledNotified.store(false, std::memory_order_relaxed);
@@ -352,7 +562,9 @@ struct UdpMultiplexTransport::Impl {
                     }
                     if (payload.size() >= 8 && std::equal(payload.begin(),payload.begin()+4,"J2MX")) queueIngress(route,payload,false);
                     else ++invalidClassified;
-                } else ++invalidClassified;
+                } else if (!rendezvous() && config.creator && payload.size()>=jam2::protocol::kHeaderSize &&
+                    std::equal(payload.begin(),payload.begin()+4,"JAM2")) queueIngress(route,payload,false,false,true,packet->endpoint);
+                else ++invalidClassified;
                 if (work >= kClassificationPacketsPerCall) { ++classificationYields; return {}; }
             }
             if (stopping) return {};
@@ -397,11 +609,16 @@ struct UdpMultiplexTransport::Impl {
         const auto packet = QJsonDocument(object).toJson(QJsonDocument::Compact);
         if (socket->send_to(server, view(packet)).outcome == jam2::UdpSendOutcome::Sent) ++counters.signalPacketsSent;
     }
+    void configureSocket(jam2::UdpSocket& socket) const {
+        if (config.socketBuffers.sendBytes) socket.set_send_buffer_size(*config.socketBuffers.sendBytes);
+        if (config.socketBuffers.receiveBytes) socket.set_recv_buffer_size(*config.socketBuffers.receiveBytes);
+    }
     std::shared_ptr<jam2::UdpSocket> candidate()
     {
         for (int index = 0; index < 100; ++index) {
             auto socket = std::make_shared<jam2::UdpSocket>();
             socket->bind({config.bindHost.toStdString(), 0});
+            configureSocket(*socket);
             if (usedPorts.insert(socket->local_endpoint().port).second) return socket;
         }
         throw std::runtime_error("Could not allocate an unused UDP candidate port");
@@ -426,6 +643,33 @@ struct UdpMultiplexTransport::Impl {
     {
         while (!commands.empty()) {
             const auto command = std::move(commands.front()); commands.pop_front();
+            if (!rendezvous()) {
+                if (command.kind==CommandKind::Recover) { if (command.a==coordinator) { directJoinAttempts=0; restartDirectJoin(now,true); } continue; }
+                if (command.kind==CommandKind::PrepareRecovery || command.kind==CommandKind::RegisterMember) continue;
+                if (command.kind==CommandKind::Introduce) {
+                    if (directCoordinator) directCoordinator->introduce(command.a,command.b,command.request,now);
+                    continue;
+                }
+                if (command.kind==CommandKind::Admit) {
+                    if (config.creator) {
+                        admitted.insert(command.a); pendingJoins.erase(command.a);
+                        const auto found=links.find(command.a);
+                        if (found!=links.end() && directCoordinator)
+                            directCoordinator->admit(command.a,PeerBootstrapEndpoint::from(jam2::format_udp_endpoint(found->second->remote)));
+                    }
+                    continue;
+                }
+                if (command.kind==CommandKind::Reject) {
+                    pendingJoins.erase(command.a);
+                    const auto found=links.find(command.a);
+                    if (found!=links.end() && !admitted.contains(command.a)) {
+                        for (const auto& [channel,connection] : found->second->streams) { (void)channel; connection->retire(); }
+                        links.erase(found);
+                    }
+                    continue;
+                }
+                if (command.kind==CommandKind::Remove && directCoordinator) directCoordinator->remove(command.a);
+            }
             switch (command.kind) {
             case CommandKind::Recover:
                 if (!config.creator && command.a == coordinator) {
@@ -474,7 +718,7 @@ struct UdpMultiplexTransport::Impl {
                     for (const auto& [channel, connection] : found->second->streams) { (void)channel; connection->close(); }
                     links.erase(found);
                 }
-                if (config.creator) {
+                if (config.creator && rendezvous()) {
                     membershipActions.erase({CommandKind::Admit, command.a});
                     queueMembership(command.kind, command.a, now);
                 }
@@ -546,13 +790,8 @@ struct UdpMultiplexTransport::Impl {
                     number(message,"attempt") != static_cast<quint64>(link->attempt) || link->phase == Phase::Active || link->phase == Phase::Failed) return;
                 if (kind == QLatin1String("jam_connected")) {
                     if (!link->gotHello || !link->gotAck) return;
-                    link->phase = Phase::Active; link->lastReceive = now;
-                    if (const auto held = retainedLinks.find(peer); held != retainedLinks.end()) {
-                        for (const auto& [channel, connection] : held->second->streams) { (void)channel; connection->retire(); }
-                        retainedLinks.erase(held);
-                    }
+                    activateLink(link,now);
                     log(QStringLiteral("UDP link active: %1, attempt %2, local port %3, route=%4, remote=%5").arg(peer).arg(link->attempt).arg(link->socket->local_endpoint().port).arg(link->route, QString::fromStdString(jam2::endpoint_to_string(jam2::format_udp_endpoint(link->remote)))));
-                    post([peer](auto& self) { if (self.onLinkReady) self.onLinkReady(peer); });
                     return;
                 }
                 link->phase = Phase::Failed; link->socket.reset();
@@ -759,6 +998,7 @@ struct UdpMultiplexTransport::Impl {
         auto found = link->streams.find(logicalChannel);
         if (frame->kind == UdpMuxKind::Open && config.creator) {
             const auto handle=frame->payload.size()==2 ? qFromBigEndian<quint16>(frame->payload.data()) : 0;
+            if (config.compactFrames && !handle) { ++counters.invalidMuxPackets; return; }
             if (handle) {
                 const auto existing=link->compactStreams.find(handle);
                 if (existing!=link->compactStreams.end()) if (const auto bound=existing->second.lock();bound && bound->streamId()!=frame->stream) {
@@ -781,45 +1021,54 @@ struct UdpMultiplexTransport::Impl {
             }
         }
         if (found == link->streams.end() || found->second->streamId() != frame->stream) return;
-        const auto proposedHandle=found->second->compactHandle();
         found->second->receiveView(*frame, now, [&](const QByteArray& outgoing) { return muxSend(link, outgoing); });
-        if (proposedHandle && !found->second->compactHandle()) link->compactStreams.erase(proposedHandle);
         if (!config.creator && found->second->isConnected()) notifyStream(link, found->second, false);
     }
     void readSockets(quint64 now, WorkerScratch& scratch, bool draining = false)
     {
-        // The runtime and shutdown reader never wait on/read an active socket
-        // concurrently. Candidate/directory sockets remain worker-owned.
-        std::unique_lock reader(receiverMutex, std::try_to_lock);
-        std::array<std::uint8_t, 1500> buffer{};
-        auto read = [&](const std::shared_ptr<jam2::UdpSocket>& socket, const std::shared_ptr<Link>& link) {
-            for (int count = 0; count < 32; ++count) {
-                if (link && link->phase == Phase::Active &&
-                    ((!draining && receiverOwned.load(std::memory_order_acquire)) || !reader.owns_lock())) break;
-                const auto received = socket->recv_from_for(buffer, 0);
+        std::unique_lock reader(receiverMutex,std::try_to_lock);
+        std::array<std::uint8_t,1500> buffer{};
+        auto& seen=scratch.seenSockets; seen.clear();
+        auto read=[&](const std::shared_ptr<jam2::UdpSocket>& socket) {
+            if (!socket || std::find(seen.begin(),seen.end(),socket.get())!=seen.end()) return;
+            seen.push_back(socket.get());
+            const auto routes=readRoutes.load(std::memory_order_acquire);
+            const bool activeSocket=std::any_of(routes->routes.begin(),routes->routes.end(),[&](const ReadRoute& route) { return route.socket==socket; });
+            if (activeSocket && ((!draining && receiverOwned.load(std::memory_order_acquire)) || !reader.owns_lock())) return;
+            for (int count=0;count<32;++count) {
+                const auto received=socket->recv_from_for(buffer,0);
                 if (!received) break;
-                const auto packet = std::span<const std::uint8_t>(buffer.data(), received->size);
-                if (received->endpoint == server) {
-                    const auto object = QJsonDocument::fromJson(bytes(packet)).object();
-                    receiveSignal(object, now);
-                } else if (link && received->endpoint == link->remote) {
-                    link->lastReceive = now; link->stalledNotified = false;
-                    if (link->phase != Phase::Active) directProof(link, packet, received->endpoint);
-                    else if (packet.size() >= 4 && std::equal(packet.begin(), packet.begin()+4, "J2MX"))
-                        muxReceive(link, packet, now);
-                    else if (packet.size() >= 4 && std::equal(packet.begin(), packet.begin()+4, "JAM2"))
-                        queueAudio(link, packet);
+                const auto packet=std::span<const std::uint8_t>(buffer.data(),received->size);
+                if (stunRequest && stunEndpoint && received->endpoint==*stunEndpoint) {
+                    try {
+                        counters.bootstrapPublic=jam2::stun::parse_binding_response(packet,stunRequest->transaction_id);
+                        registered=true; stunRequest.reset(); stunEndpoint.reset();
+                        post([](auto& self) { if (self.onRegistered) self.onRegistered(); });
+                    } catch (const std::exception&) { ++counters.stunResponsesRejected; }
+                    continue;
                 }
-                if (link && link->socket != socket) break;
+                if (!rendezvous() && isPeerBootstrap(packet)) { receiveBootstrap(packet,received->endpoint,now); continue; }
+                if (rendezvous() && received->endpoint==server) { receiveSignal(QJsonDocument::fromJson(bytes(packet)).object(),now); continue; }
+                std::shared_ptr<Link> selected;
+                for (const auto* collection : {&links,&retainedLinks}) {
+                    for (const auto& [peer,link] : *collection) {
+                        (void)peer;
+                        if (link->socket==socket && link->remote==received->endpoint) { selected=link; break; }
+                    }
+                    if (selected) break;
+                }
+                if (!selected) continue;
+                selected->lastReceive=now; selected->stalledNotified=false;
+                if (selected->phase!=Phase::Active) directProof(selected,packet,received->endpoint);
+                else if (packet.size()>=4 && std::equal(packet.begin(),packet.begin()+4,"J2MX")) muxReceive(selected,packet,now);
+                else if (packet.size()>=4 && std::equal(packet.begin(),packet.begin()+4,"JAM2")) queueAudio(selected,packet);
             }
         };
-        read(signalSocket, {});
-        // receiveSignal can replace a candidate in links: retain the old shared
-        // socket through this receive batch and never iterate an invalidated map.
-        auto& current = scratch.readLinks; current.clear();
-        for (const auto& [peer, link] : links) { (void)peer; current.push_back(link); }
-        for (const auto& [peer, link] : retainedLinks) { (void)peer; current.push_back(link); }
-        for (const auto& link : current) if (link->socket) { const auto socket = link->socket; read(socket, link); }
+        read(signalSocket);
+        auto& current=scratch.readLinks; current.clear();
+        for (const auto& [peer,link] : links) { (void)peer; current.push_back(link); }
+        for (const auto& [peer,link] : retainedLinks) { (void)peer; current.push_back(link); }
+        for (const auto& link : current) read(link->socket);
     }
     bool pending() const
     {
@@ -839,6 +1088,18 @@ struct UdpMultiplexTransport::Impl {
             assetBudget = (std::min)(4096.0, assetBudget + seconds * config.assetBytesPerSecond);
         }
         lastBudget = now;
+        if (stunRequest && now>=stunDeadline) {
+            if (stunAttempts>=config.stunRetries) {
+                stunRequest.reset(); stunEndpoint.reset();
+                post([](auto& self) { if (self.onBootstrapFailure) self.onBootstrapFailure(QStringLiteral("STUN endpoint discovery timed out on the creator UDP socket")); });
+            } else {
+                const auto result=signalSocket->send_to(*stunEndpoint,stunRequest->bytes);
+                if (result.outcome==jam2::UdpSendOutcome::Sent) ++counters.stunRequestsSent;
+                else ++counters.sendErrors;
+                ++stunAttempts; stunDeadline=now+static_cast<quint64>(config.stunTimeoutMs)*1000;
+            }
+        }
+        if (rendezvous()) {
         if (config.creator) {
             const bool full = config.maximumPeers > 0 && admitted.size() >= static_cast<std::size_t>(config.maximumPeers);
             if (full && !pending() && !paused) {
@@ -897,6 +1158,37 @@ struct UdpMultiplexTransport::Impl {
             }
             ++it;
         }
+        } else {
+            if (!config.creator && joining && now>=nextJoin) {
+                if (now>=joinDeadline) { bootstrapFailure(QStringLiteral("Direct creator admission timed out")); }
+                else {
+                    if (now>=directAttemptDeadline) restartDirectJoin(now,true);
+                    if (joining) {
+                        PeerBootstrapMessage join; join.kind=PeerBootstrapKind::Join; join.request=directJoinRequest;
+                        sendBootstrap(signalSocket,server,std::move(join)); nextJoin=now+500000;
+                    }
+                }
+            }
+            if (directCoordinator) {
+                for (auto& transmission : directCoordinator->poll(now))
+                    sendBootstrap(signalSocket,jam2::resolve_udp_endpoint(transmission.to.endpoint()),std::move(transmission.message));
+                for (const auto& failed : directCoordinator->takeFailures())
+                    failure(failed.a,failed.b,QStringLiteral("Peer introduction failed after ten fresh socket pairs; healthy links remain active"));
+                counters.introductionPending=directCoordinator->pending();
+            }
+        }
+        // Failed unauthenticated attempts must not accumulate beyond the
+        // bounded set currently proving/authenticating a creator connection.
+        if (config.creator && !rendezvous()) std::erase_if(links,[&](const auto& entry) {
+            const auto& link=entry.second;
+            if (!link->hostLink || admitted.contains(entry.first)) return false;
+            const bool expired=link->phase==Phase::Active && now>=link->deadline;
+            if (expired) ++counters.pendingAdmissionTimeouts;
+            if (link->phase!=Phase::Failed && !expired) return false;
+            for (const auto& [channel,connection] : link->streams) { (void)channel; connection->retire(); }
+            pendingJoins.erase(entry.first);
+            return true;
+        });
         auto& ordered = scratch.ordered; ordered.clear();
         for (const auto& [peer, link] : links) { (void)peer; ordered.push_back(link); }
         for (const auto& [peer, link] : retainedLinks) { (void)peer; ordered.push_back(link); }
@@ -957,14 +1249,27 @@ struct UdpMultiplexTransport::Impl {
                 continue;
             }
             if (link->phase == Phase::Failed || !link->socket) continue;
+            if (!rendezvous() && link->hostLink && config.creator && now>=link->nextBootstrap) {
+                auto welcome=bootstrapMessage(PeerBootstrapKind::Welcome,link);
+                welcome.observed=PeerBootstrapEndpoint::from(jam2::format_udp_endpoint(link->remote));
+                sendBootstrap(signalSocket,link->remote,std::move(welcome)); link->nextBootstrap=now+500000;
+            }
             if ((link->phase == Phase::Preparing || link->phase == Phase::Offered) && now >= link->deadline) {
                 link->phase = Phase::Failed; link->socket.reset(); pendingJoins.erase(link->peer);
                 failure(config.localToken, link->peer, QStringLiteral("UDP candidate registration or READY handoff timed out")); continue;
             }
             if (link->phase == Phase::Preparing && now >= link->nextAction) {
-                send(link->socket, fields("jam_candidate", link)); link->nextAction = now + 500000;
+                if (rendezvous()) send(link->socket, fields("jam_candidate", link));
+                else {
+                    auto candidateMessage=bootstrapMessage(PeerBootstrapKind::Candidate,link);
+                    candidateMessage.local=PeerBootstrapEndpoint::from({localHost,link->socket->local_endpoint().port});
+                    sendBootstrap(link->socket,server,std::move(candidateMessage));
+                }
+                link->nextAction = now + 500000;
             } else if (link->phase == Phase::Offered && now >= link->nextAction) {
-                send(link->socket, fields("jam_ready", link)); link->nextAction = now + 500000;
+                if (rendezvous()) send(link->socket, fields("jam_ready", link));
+                else sendBootstrap(link->socket,server,bootstrapMessage(PeerBootstrapKind::Ready,link));
+                link->nextAction = now + 500000;
             } else if (link->phase == Phase::Probing) {
                 if (link->gotHello && link->gotAck) {
                     link->phase = Phase::Reporting; link->report = true; link->nextAction = 0; link->deadline = now + 8000000;
@@ -977,6 +1282,28 @@ struct UdpMultiplexTransport::Impl {
                 }
             }
             if (link->phase == Phase::Reporting) {
+                if (!rendezvous()) {
+                    if (link->hostLink) {
+                        if (!link->report || now>=link->deadline) {
+                            link->phase=Phase::Failed;
+                            if (!config.creator) restartDirectJoin(now,true);
+                            else failure(config.localToken,link->peer,QStringLiteral("Direct creator return-path proof timed out"));
+                        } else if (config.creator && link->remoteReported) {
+                            activateLink(link,now);
+                            sendBootstrap(signalSocket,link->remote,bootstrapMessage(PeerBootstrapKind::Accepted,link));
+                        } else if (!config.creator && now>=link->nextAction) {
+                            sendBootstrap(link->socket,server,bootstrapMessage(PeerBootstrapKind::JoinReady,link));
+                            link->nextAction=now+500000;
+                        }
+                    } else if (now>=link->deadline) {
+                        link->phase=Phase::Failed;
+                        failure(config.localToken,link->peer,QStringLiteral("Peer introduction completion timed out"));
+                    } else if (now>=link->nextAction) {
+                        auto outcome=bootstrapMessage(PeerBootstrapKind::Outcome,link); outcome.success=link->report;
+                        sendBootstrap(link->socket,server,std::move(outcome)); link->nextAction=now+500000;
+                    }
+                    continue;
+                }
                 if (now >= link->deadline) {
                     link->phase = Phase::Failed; link->socket.reset(); pendingJoins.erase(link->peer);
                     failure(config.localToken, link->peer, QStringLiteral("UDP attempt result synchronization timed out"));
@@ -990,6 +1317,21 @@ struct UdpMultiplexTransport::Impl {
     void run()
     {
         try {
+            if (!rendezvous()) {
+                if (config.creator) {
+                    auto advertised=config.publicEndpoint.value_or(jam2::Endpoint{localHost,signalSocket->local_endpoint().port});
+                    const bool discover=config.strategy==jam2::ConnectionStrategy::Stun && !config.publicEndpoint;
+                    const auto discoveryEndpoint=discover ? std::optional{jam2::resolve_udp_endpoint(config.stunServer)} : std::nullopt;
+                    {
+                        std::lock_guard lock(mutex);
+                        if (discover) {
+                            stunEndpoint=discoveryEndpoint;
+                            stunRequest=jam2::stun::make_binding_request();
+                        } else { counters.bootstrapPublic=advertised; registered=true; }
+                    }
+                    if (registered) post([](auto& self) { if (self.onRegistered) self.onRegistered(); });
+                } else { std::lock_guard lock(mutex); restartDirectJoin(jam2::monotonic_us(),false); }
+            }
             quint64 previousCycle = 0;
             while (!stopping) {
                 WorkerScratch fresh;
@@ -1010,9 +1352,14 @@ struct UdpMultiplexTransport::Impl {
                     processCommands(now); processIngress(); readSockets(now,scratch); timers(now,scratch); publishReadRoutes();
                     if (ingressPending() || immediateSendWork) wait = 0;
                     if (immediateSendWork) ++counters.workerSendRepolls;
-                    keepAlive.push_back(signalSocket);
-                    for (const auto& [peer, link] : links) { (void)peer; if (link->socket && !(receiverOwned.load() && link->phase == Phase::Active)) keepAlive.push_back(link->socket); }
-                    for (const auto& [peer, link] : retainedLinks) { (void)peer; if (link->socket && !(receiverOwned.load() && link->phase == Phase::Active)) keepAlive.push_back(link->socket); }
+                    const bool signalOwned=signalRuntimeOwned();
+                    const auto keep=[&](const std::shared_ptr<jam2::UdpSocket>& socket) {
+                        if (socket && !(signalOwned && socket==signalSocket) &&
+                            std::find(keepAlive.begin(),keepAlive.end(),socket)==keepAlive.end()) keepAlive.push_back(socket);
+                    };
+                    keep(signalSocket);
+                    for (const auto& [peer, link] : links) { (void)peer; if (link->socket && !(receiverOwned.load() && link->phase == Phase::Active)) keep(link->socket); }
+                    for (const auto& [peer, link] : retainedLinks) { (void)peer; if (link->socket && !(receiverOwned.load() && link->phase == Phase::Active)) keep(link->socket); }
                     for (const auto& socket : keepAlive) sockets.push_back(socket.get());
                     const auto serviceUs = jam2::monotonic_us() - now;
                     counters.workerServiceMaxUs = qMax(counters.workerServiceMaxUs, serviceUs);
@@ -1068,10 +1415,11 @@ struct UdpMultiplexTransport::Impl {
                 if (complete && leavesSent == 3) break;
                 jam2::UdpSocket::waitForAny(sockets, 10000);
             }
-            if (config.creator) { ++directoryRevision; send(signalSocket, fields("jam_leave")); }
+            if (config.creator && rendezvous()) { ++directoryRevision; send(signalSocket, fields("jam_leave")); }
         } catch (const std::exception& exception) {
             const auto detail = QString::fromUtf8(exception.what());
-            failure(config.localToken, coordinator, detail);
+            if (!rendezvous()) post([detail](auto& self) { if (self.onBootstrapFailure) self.onBootstrapFailure(detail); });
+            else failure(config.localToken, coordinator, detail);
         }
         stopping = true; audioWake.signal(jam2::monotonic_us());
         receiverChanged.notify_all();
@@ -1082,7 +1430,7 @@ UdpMultiplexTransport::UdpMultiplexTransport(QObject* parent) : QObject(parent) 
 UdpMultiplexTransport::~UdpMultiplexTransport() { stop(); }
 bool UdpMultiplexTransport::start(const Config& config, QString& error)
 {
-    stop();
+    stop(); error.clear();
     try {
         impl_ = std::make_unique<Impl>(this, config);
         impl_->worker = std::thread([state = impl_.get()] { state->run(); });
@@ -1090,6 +1438,15 @@ bool UdpMultiplexTransport::start(const Config& config, QString& error)
     } catch (const std::exception& exception) { impl_.reset(); error = QString::fromUtf8(exception.what()); return false; }
 }
 void UdpMultiplexTransport::stop() { if (impl_) impl_->stop(); }
+std::optional<jam2::NetworkTransportInfo> UdpMultiplexTransport::transportInfo() const
+{
+    if (!impl_) return std::nullopt;
+    std::lock_guard lock(impl_->mutex);
+    if (impl_->stopping || !impl_->signalSocket) return std::nullopt;
+    return jam2::NetworkTransportInfo{impl_->signalSocket->local_endpoint(),
+        impl_->signalSocket->send_buffer_size(), impl_->signalSocket->recv_buffer_size()};
+}
+
 void UdpMultiplexTransport::receiverAttached()
 {
     if (!impl_) throw std::runtime_error("UDP multiplex transport has not started");
@@ -1147,11 +1504,29 @@ QString UdpMultiplexTransport::coordinatorToken() const
     if (!impl_) return {};
     std::lock_guard lock(impl_->mutex); return impl_->coordinator;
 }
+std::optional<jam2::Endpoint> UdpMultiplexTransport::bootstrapEndpoint() const
+{
+    if (!impl_) return {};
+    std::lock_guard lock(impl_->mutex);
+    if (!impl_->registered || impl_->counters.bootstrapPublic.port==0) return {};
+    return impl_->counters.bootstrapPublic;
+}
 UdpMultiplexTransport::Snapshot UdpMultiplexTransport::snapshot() const
 {
     if (!impl_) return {};
     std::lock_guard lock(impl_->mutex);
     auto result = impl_->counters;
+    result.requestedBuffers=impl_->config.socketBuffers;
+    result.pendingAdmissionTimeoutMs=impl_->config.pendingAdmissionTimeoutMs;
+    std::set<const jam2::UdpSocket*> physical;
+    if (impl_->signalSocket) {
+        physical.insert(impl_->signalSocket.get());
+        result.signalSendBufferBytes=impl_->signalSocket->send_buffer_size();
+        result.signalReceiveBufferBytes=impl_->signalSocket->recv_buffer_size();
+    }
+    for (const auto* links : {&impl_->links,&impl_->retainedLinks})
+        for (const auto& [peer,link] : *links) { (void)peer; if (link->socket) physical.insert(link->socket.get()); }
+    result.physicalSocketCount=physical.size();
     result.reusesWorkerBuffers = impl_->config.reuseWorkerBuffers;
     result.compactFrames=impl_->config.compactFrames; result.combineAcks=impl_->config.combineAcks;
     result.fastRecovery=impl_->config.fastRecovery; result.acknowledgeNativeIntents=impl_->config.acknowledgeNativeIntents;
@@ -1182,7 +1557,11 @@ UdpMultiplexTransport::Snapshot UdpMultiplexTransport::snapshot() const
         }
         value.route = link->route;
         value.attempt = link->attempt; value.helloSent = link->helloSent; value.introduction = link->introduction;
-        if (link->socket) value.local = link->socket->local_endpoint();
+        if (link->socket) {
+            value.local = link->socket->local_endpoint();
+            value.sendBufferBytes=link->socket->send_buffer_size();
+            value.receiveBufferBytes=link->socket->recv_buffer_size();
+        }
         if (link->remote.port) value.remote = jam2::format_udp_endpoint(link->remote);
         if (link->observed.port) value.observed = jam2::format_udp_endpoint(link->observed);
         value.receivedHello = link->gotHello; value.receivedAck = link->gotAck;

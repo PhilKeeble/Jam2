@@ -404,7 +404,7 @@ int main(int argc, char* argv[])
     portReservations.release();
 
     if (!send(coordinator.peer(0), {
-            {QStringLiteral("type"), QStringLiteral("jam.create")},
+            {QStringLiteral("type"), QStringLiteral("jam.create")}, {QStringLiteral("name"), QStringLiteral("Alex")},
             {QStringLiteral("id"), QStringLiteral("create")},
             {QStringLiteral("port"), ports[0]},
             {QStringLiteral("test_input"), QStringLiteral("tone-440")},
@@ -418,7 +418,7 @@ int main(int argc, char* argv[])
     }
     for (std::size_t peer = 1; peer < arguments.size(); ++peer) {
         if (!send(coordinator.peer(peer), {
-                {QStringLiteral("type"), QStringLiteral("jam.join")},
+                {QStringLiteral("type"), QStringLiteral("jam.join")}, {QStringLiteral("name"), QStringLiteral("Alex")},
                 {QStringLiteral("id"), QStringLiteral("join-%1").arg(peer + 1)},
                 {QStringLiteral("port"), ports[peer]},
                 {QStringLiteral("invite_url"), invite},

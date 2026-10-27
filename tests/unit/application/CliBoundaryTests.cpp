@@ -741,6 +741,21 @@ void testWindowsStartup(const QString& executable)
 
 void testStagedLocalRuntime(const QString& executable)
 {
+    for (const QString& name : {QString{}, QStringLiteral("Alex2"), QStringLiteral("Alexander"),
+            QStringLiteral("A B"), QStringLiteral("<script>")}) {
+        for (const QString& strategy : {QStringLiteral("direct"), QStringLiteral("stun"), QStringLiteral("server")}) {
+            const auto rejected = runProcess(executable, {
+                QStringLiteral("network"), QStringLiteral("create"), QStringLiteral("--name"), name,
+                QStringLiteral("--connection-strategy"), strategy,
+                QStringLiteral("--headless-audio"), QStringLiteral("on")});
+            expect(rejected.finished && rejected.status == QProcess::NormalExit && rejected.code != 0 &&
+                rejected.output.contains("1 to 8 letters") && !rejected.output.contains("Local UDP bind:"),
+                "invalid names reject before transport/audio startup in every public connection mode");
+        }
+    }
+    const auto missing = runProcess(executable, {QStringLiteral("network"), QStringLiteral("create")});
+    expect(missing.finished && missing.status == QProcess::NormalExit && missing.code != 0 &&
+        missing.output.contains("1 to 8 letters"), "public network startup requires an explicit name");
     const ProcessResult createHelp = runProcess(executable, {
         QStringLiteral("network"), QStringLiteral("create"),
         QStringLiteral("--help"),

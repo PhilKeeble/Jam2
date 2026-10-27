@@ -1,4 +1,5 @@
 #include "ControlMessageValidation.hpp"
+#include "PeerName.hpp"
 #include "ContentLimits.hpp"
 #include "ControlProtocol.hpp"
 #include "GenerationRecipe.hpp"
@@ -484,7 +485,7 @@ bool jam2::application::isArrangementControlMessageType(const QString& type) noe
 
 bool jam2::application::validateControlMessage(
     const QJsonObject& message,
-    QString& reason, bool serverBinary)
+    QString& reason)
 {
     const QString type = message.value(QStringLiteral("type")).toString();
     if (type.isEmpty() || type.size() > 64) {
@@ -519,6 +520,7 @@ bool jam2::application::validateControlMessage(
             const quint64 encodedId = peer.value(QStringLiteral("peer_id"))
                 .toString().toULongLong(&encodedIdOk);
             if (!peerValue.isObject() ||
+                !PeerName::fromWire(peer.value(QStringLiteral("name")).toString().toUtf8()) ||
                 !peerId || !encodedIdOk || encodedId != *peerId ||
                 !isBoundedString(peer.value(QStringLiteral("endpoint")), 255)) {
                 reason = QStringLiteral("mesh peer entry is invalid");
@@ -579,7 +581,7 @@ bool jam2::application::validateControlMessage(
             ? true : (reason = QStringLiteral("session error text is invalid"), false);
     }
     if (type.startsWith(QStringLiteral("jam.listening."))) {
-        return jam2::gui::validateListeningMessage(message, reason, serverBinary);
+        return jam2::gui::validateListeningMessage(message, reason);
     }
     if (type == QStringLiteral("jam.sync.set") ||
         type == QStringLiteral("jam.sync.request")) {
@@ -706,7 +708,7 @@ bool jam2::application::validateControlMessage(
         const bool targetValid = targetValue.isUndefined() ||
             (targetValue.isString() &&
                 (targetText.isEmpty() ||
-                    (targetOk && targetBeat <= (std::numeric_limits<qint64>::max)())));
+                    (targetOk && targetBeat <= static_cast<quint64>((std::numeric_limits<qint64>::max)()))));
         return isBoundedInteger(message.value(QStringLiteral("bank")), 0,
             limits::kMaximumLooperBankCount - 1) && targetValid
             ? true : (reason = QStringLiteral("bank transition is invalid"), false);
@@ -726,7 +728,7 @@ bool jam2::application::validateControlMessage(
         return isBoundedInteger(message.value(QStringLiteral("bank")), 0,
             limits::kMaximumLooperBankCount - 1) &&
             isUuid(message.value(QStringLiteral("switch_id")).toString()) &&
-            targetOk && targetBeat <= (std::numeric_limits<qint64>::max)()
+            targetOk && targetBeat <= static_cast<quint64>((std::numeric_limits<qint64>::max)())
             ? true : (reason = QStringLiteral("bank transition is invalid"), false);
     }
     if (type == QStringLiteral("looper.track.share.request")) {
@@ -820,7 +822,7 @@ bool jam2::application::validateControlMessage(
             participants.size() <= 64 &&
             isBoundedInteger(message.value(QStringLiteral("count_in_bars")), 0, 8) &&
             countdownOk && targetOk && targetBeat >= countdownBeat &&
-            targetBeat <= (std::numeric_limits<qint64>::max)()
+            targetBeat <= static_cast<quint64>((std::numeric_limits<qint64>::max)())
             ? true : (reason = QStringLiteral("recording group start is invalid"), false);
     }
     if (type == QStringLiteral("looper.recording.group.finish")) {
@@ -881,19 +883,16 @@ bool jam2::application::validateControlMessage(
                 limits::kMaximumAssetChunks)
             ? true : (reason = QStringLiteral("asset completion is invalid"), false);
     }
-    if (type == QStringLiteral("debug.lifecycle.disconnect")) {
-        return true;
-    }
     reason = QStringLiteral("unknown message type");
     return false;
 }
 
 jam2::application::ControlMessageDecision jam2::application::evaluateControlMessage(
     const QJsonObject& message,
-    ControlMessageSource source, bool serverBinary)
+    ControlMessageSource source)
 {
     ControlMessageDecision decision;
-    if (!validateControlMessage(message, decision.reason, serverBinary)) {
+    if (!validateControlMessage(message, decision.reason)) {
         return decision;
     }
 
@@ -906,8 +905,6 @@ jam2::application::ControlMessageDecision jam2::application::evaluateControlMess
         type == QStringLiteral("session.end") ||
         type == QStringLiteral("jam.sync.set") ||
         type == QStringLiteral("jam.metronome.state.set") ||
-        type == QStringLiteral("jam.listening.prepare") ||
-        type == QStringLiteral("jam.listening.commit") ||
         type == QStringLiteral("jam.listening.cancel") ||
         type == QStringLiteral("jam.listening.state") ||
         type == QStringLiteral("jam.listening.reset") ||
@@ -919,24 +916,19 @@ jam2::application::ControlMessageDecision jam2::application::evaluateControlMess
         type == QStringLiteral("looper.recording.group.recover") ||
         type == QStringLiteral("looper.recording.resync.state");
 
-    const bool peerOnly = (serverBinary && type == QStringLiteral("jam.listening.applied")) ||
+    const bool peerOnly = (type == QStringLiteral("jam.listening.applied")) ||
         type == QStringLiteral("session.udp.recover") ||
         type == QStringLiteral("session.heartbeat.ack") ||
         type == QStringLiteral("session.endpoint.update") ||
         type == QStringLiteral("jam.sync.request") ||
         type == QStringLiteral("jam.metronome.state.request") ||
         type == QStringLiteral("jam.listening.request") ||
-        type == QStringLiteral("jam.listening.ready") ||
         type == QStringLiteral("jam.listening.failed") ||
         type == QStringLiteral("bank.ready") ||
         type == QStringLiteral("bank.request") ||
         type == QStringLiteral("looper.recording.group.recover.request") ||
         type == QStringLiteral("looper.recording.resync.request");
-    const bool internalOnly = type == QStringLiteral("debug.lifecycle.disconnect");
-
-    const bool authorized = internalOnly
-        ? source == ControlMessageSource::Internal
-        : coordinatorOnly
+    const bool authorized = coordinatorOnly
             ? source == ControlMessageSource::Coordinator ||
                 source == ControlMessageSource::LocalCreator
             : peerOnly

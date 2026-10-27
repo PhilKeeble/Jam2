@@ -4,16 +4,18 @@
 
 Jam2 is a small direct peer-to-peer music jamming tool for two people. It pairs low-latency mono UDP audio with a shared metronome, hard technical stats, and a Qt GUI for starting or joining a jam without adding accounts, rooms, relays, or hosted audio paths.
 
+This `UDP-Multiplex` branch uses one current typed UDP transport for Direct, STUN and Jam2 Server. All participants need a matching current branch build; older TCP/multiplex builds do not interoperate. See [the protocol review](REVIEW-WIRE-FORMAT.md#unified-multiplex-transport-and-mandatory-peer-names).
+
 ## Quick Start
 
-1. Download the latest Jam2 release from the GitHub Releases page for this repository.
-2. Extract the release zip.
+1. Build the current branch in Release using [Building](docs/Building.md), and use the same build on each machine.
+2. Use the resulting `release` folder on Windows or the normal app bundle on macOS.
 3. Run `jam2.exe` on Windows (or `Jam2.app` on macOS). Running `jam2` with no arguments opens the GUI.
-4. On the creator's machine, open **Start Jam**, choose the local audio device and tuning profile, then create the jam.
+4. On the creator's machine, open **Start Jam**, enter your name, choose the local audio device and tuning profile, then create the jam.
 5. Send the generated `jam2://...` connection string to the other player.
-6. On the joining machine, open **Join Jam**, paste the connection string, choose the local audio device and the channels you want to use for input and output, then connect.
+6. On the joining machine, open **Join Jam**, paste the connection string, enter your name, choose the local audio device and the channels you want to use for input and output, then connect.
 
-For LAN testing, use **No STUN** and a reachable LAN host/IP. For internet testing, leave STUN enabled unless you already know the public endpoint or port-forwarded address to use.
+Names require 1 to 8 Unicode letters; digits, spaces and symbols are rejected. Duplicate names are allowed, with distinct internal peer IDs. For LAN testing, use Direct and a reachable LAN host/IP. For internet Direct/STUN use, forward the creator UDP port; the creator introduces the other peers for hole punching. Jam2 Server uses external rendezvous for discovery. Audio remains direct peer to peer in every strategy.
 
 JamTaster's model weights are a separate optional download. Open JamTaster and
 choose **Download models** if they are missing; it shows the size before approval

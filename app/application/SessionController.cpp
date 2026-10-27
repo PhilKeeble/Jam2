@@ -4,7 +4,6 @@
 #include "AutomationChannel.hpp"
 #include "ControlProtocol.hpp"
 #include "DebugActionValidation.hpp"
-#include "NativeTcpTransport.hpp"
 #include "SharedSessionController.hpp"
 
 #include "common.hpp"
@@ -106,6 +105,8 @@ public:
         parseBootstrapOptions();
         runtimeOptions_ = parseRuntimeOptions(runnerOptions_ + bootstrapRunnerOptions_);
         if (!creator_) runtimeOptions_.connection_strategy = session_.strategy;
+        if (creator_ && runtimeOptions_.no_stun && runtimeOptions_.connection_strategy==jam2::ConnectionStrategy::Stun)
+            runtimeOptions_.connection_strategy=jam2::ConnectionStrategy::Direct;
         runtimeOptions_.no_stun = runtimeOptions_.no_stun || runtimeOptions_.connection_strategy != jam2::ConnectionStrategy::Stun;
         determineRequestedContract();
 
@@ -193,6 +194,7 @@ public:
             if (snapshot.role == SharedSessionController::Role::Inactive) {
                 return;
             }
+            publishCreatorInvite();
             QMap<QString, QString> next;
             for (const SharedSessionController::PeerSnapshot& peer : snapshot.peers) {
                 next[peer.token] = peer.endpoint;
@@ -235,18 +237,14 @@ public:
             const jam2::control_protocol::TransportEvent& event,
             bool serverSide) {
             if (serverSide) {
-                writeConsoleLine((runtimeOptions_.connection_strategy == jam2::ConnectionStrategy::Jam2Server ? QStringLiteral("UDP control: ") : QStringLiteral("TCP control: ")) + event.detail);
+                writeConsoleLine(QStringLiteral("UDP control: ") + event.detail);
             } else {
                 handleClientEvent(event);
             }
         };
-        sessionController_.endpointOverride = [this](const QString& observer, const QString& peer) {
-            return debugTopology().value(observer).toObject().value(peer).toString();
-        };
         sessionController_.bindRuntime(
             runtime_,
             [this](const SharedSessionController::Snapshot& snapshot) {
-                networkStarted_ = true;
                 return runtimeOptionsForSnapshot(snapshot);
             });
     }
@@ -259,8 +257,8 @@ public:
             QTimer::singleShot(waitMs_, this, [this] {
                 if ((creator_ && !hadAuthenticatedPeer_) ||
                     (!creator_ && !runtime_.isNetworkRunning())) {
-                    emitStartup(QStringLiteral("error"), QStringLiteral("TCP bootstrap timed out"));
-                    writeConsoleLine(QStringLiteral("TCP bootstrap timed out"), true);
+                    emitStartup(QStringLiteral("error"), QStringLiteral("UDP multiplex bootstrap timed out"));
+                    writeConsoleLine(QStringLiteral("UDP multiplex bootstrap timed out"), true);
                     finish(3);
                 }
             });
@@ -268,15 +266,11 @@ public:
         if (creator_) {
             writeConsoleLine(QStringLiteral("Mode: create"));
             coordinatorToken_ = localToken_;
-            if (runtimeOptions_.connection_strategy == jam2::ConnectionStrategy::Jam2Server) {
-                localEndpointText_ = bindText_.isEmpty() ? QStringLiteral("0.0.0.0:49000") : bindText_;
-                runtimeStarted_ = true;
-                completeCreatorBootstrap();
-            } else startRunner(reserveCreatorEndpoint());
+            localEndpointText_ = bindText_.isEmpty() ? QStringLiteral("0.0.0.0:49000") : bindText_;
+            completeCreatorBootstrap();
         } else {
             writeConsoleLine(QStringLiteral("Mode: join"));
-            if (runtimeOptions_.connection_strategy == jam2::ConnectionStrategy::Jam2Server) localEndpointText_ = bindText_.isEmpty() ? QStringLiteral("0.0.0.0:49000") : bindText_;
-            else reserveJoinEndpoint();
+            localEndpointText_ = bindText_.isEmpty() ? QStringLiteral("0.0.0.0:49000") : bindText_;
             emitStartup(QStringLiteral("connecting"));
             connectCoordinator();
         }
@@ -1013,7 +1007,11 @@ private:
         bool haveSessionKey = false;
         for (int i = 0; i < originalOptions_.size(); ++i) {
             const QString arg = originalOptions_[i];
-            if (arg == QStringLiteral("--bind")) {
+            if (arg == QStringLiteral("--name")) {
+                const auto name = jam2::application::PeerName::fromInput(takeOptionValue(i,arg));
+                if (!name) throw std::runtime_error(jam2::application::peerNameRequirement().toStdString());
+                peerName_ = name->text();
+            } else if (arg == QStringLiteral("--bind")) {
                 bindText_ = takeOptionValue(i, arg);
             } else if (arg == QStringLiteral("--wait-ms")) {
                 bool ok = false;
@@ -1041,7 +1039,6 @@ private:
                        arg == QStringLiteral("--stun-retries")) {
                 bootstrapRunnerOptions_ << arg << takeOptionValue(i, arg);
             } else if (arg == QStringLiteral("--no-stun")) {
-                noStun_ = true;
                 bootstrapRunnerOptions_ << arg;
             } else {
                 runnerOptions_ << arg;
@@ -1050,6 +1047,7 @@ private:
         if (creator_ && haveSessionId != haveSessionKey) {
             throw std::runtime_error("--session-id and --session-key must be provided together");
         }
+        if (peerName_.isEmpty()) throw std::runtime_error("network create/join requires --name (1 to 8 letters)");
         if (!creator_ && (haveSessionId || haveSessionKey || !publicEndpointText_.isEmpty())) {
             throw std::runtime_error("join session identity and coordinator endpoint come from the jam2 URL");
         }
@@ -1089,110 +1087,6 @@ private:
             } else if (originalOptions_[i] == QStringLiteral("--frame-size")) {
                 requestedContract_.frameSize = originalOptions_[i + 1].toInt();
             }
-        }
-    }
-
-    void reserveJoinEndpoint()
-    {
-        const QString requested = bindText_.isEmpty() ? QStringLiteral("0.0.0.0:0") : bindText_;
-        const jam2::Endpoint endpoint = jam2::parse_bind_endpoint(requested.toStdString());
-        jam2::NetworkRuntime networkRuntime;
-        jam2::UdpSocket reservation;
-        reservation.bind(endpoint);
-        const jam2::Endpoint local = reservation.local_endpoint();
-        localEndpointText_ = QStringLiteral("%1:%2")
-            .arg(QString::fromStdString(endpoint.host))
-            .arg(local.port);
-    }
-
-    QString reserveCreatorEndpoint() const
-    {
-        const QString requested = bindText_.isEmpty()
-            ? QStringLiteral("0.0.0.0:49000")
-            : bindText_;
-        const jam2::Endpoint endpoint = jam2::parse_bind_endpoint(requested.toStdString());
-        if (endpoint.port != 0) {
-            return requested;
-        }
-
-        jam2::NetworkRuntime networkRuntime;
-        for (int attempt = 0; attempt < 32; ++attempt) {
-            jam2::application::NativeTcpPortReservation tcpReservation;
-            if (!tcpReservation.bind(QString::fromStdString(endpoint.host), 0)) {
-                continue;
-            }
-            const quint16 port = tcpReservation.localPort();
-            try {
-                jam2::UdpSocket udpReservation;
-                udpReservation.bind(jam2::Endpoint{endpoint.host, port});
-            } catch (const std::exception&) {
-                continue;
-            }
-            return QStringLiteral("%1:%2")
-                .arg(QString::fromStdString(endpoint.host))
-                .arg(port);
-        }
-        throw std::runtime_error("could not reserve a creator port usable by both TCP and UDP");
-    }
-
-    QStringList peerSpecsExcludingSelf() const
-    {
-        QStringList result;
-        const QJsonObject observer = debugTopology().value(localToken_).toObject();
-        for (auto it = peers_.cbegin(); it != peers_.cend(); ++it) {
-            if (it.key() != localToken_ && !it.value().isEmpty()) {
-                const QString endpoint = observer.value(it.key()).toString(it.value());
-                result << QStringLiteral("%1@%2").arg(requirePeerId(it.key())).arg(endpoint);
-            }
-        }
-        return result;
-    }
-
-    void applyPeerSpecs(const QStringList& specs)
-    {
-        runtimeOptions_.mesh_peers.clear();
-        runtimeOptions_.mesh_peer_ids.clear();
-        runtimeOptions_.mesh_peers.reserve(static_cast<std::size_t>(specs.size()));
-        runtimeOptions_.mesh_peer_ids.reserve(static_cast<std::size_t>(specs.size()));
-        for (const QString& spec : specs) {
-            const qsizetype separator = spec.indexOf(QLatin1Char('@'));
-            if (separator <= 0 || separator + 1 >= spec.size()) {
-                throw std::runtime_error("typed membership entry must be peer-id@endpoint");
-            }
-            bool ok = false;
-            const quint64 peerId = spec.left(separator).toULongLong(&ok);
-            if (!ok || peerId == 0) {
-                throw std::runtime_error("typed membership peer id must be non-zero");
-            }
-            runtimeOptions_.mesh_peer_ids.push_back(peerId);
-            runtimeOptions_.mesh_peers.push_back(
-                jam2::parse_endpoint(spec.mid(separator + 1).toStdString()));
-        }
-        runtimeOptions_.mesh_peers_configured = true;
-    }
-
-    void startRunner(const QString& bind)
-    {
-        if (runtime_.isNetworkRunning() || networkStarted_) {
-            return;
-        }
-        const quint64 coordinatorId = requirePeerId(
-            coordinatorToken_.isEmpty() ? localToken_ : coordinatorToken_);
-        const QStringList initialPeerSpecs = peerSpecsExcludingSelf();
-        runtimeOptions_.bind = jam2::parse_bind_endpoint(bind.toStdString());
-        runtimeOptions_.session_id = session_.session_id;
-        runtimeOptions_.session_key = session_.key;
-        runtimeOptions_.bootstrap_role = creator_
-            ? jam2::SessionBootstrapRole::Creator
-            : jam2::SessionBootstrapRole::Joiner;
-        runtimeOptions_.local_peer_id = requirePeerId(localToken_);
-        runtimeOptions_.bootstrap_coordinator_peer_id = coordinatorId;
-        runtimeOptions_.arm_stream_on_first_peer = true;
-        applyPeerSpecs(initialPeerSpecs);
-        networkStarted_ = true;
-        if (!runtime_.startNetwork(runtimeOptions_)) {
-            networkStarted_ = false;
-            finish(2);
         }
     }
 
@@ -1243,9 +1137,7 @@ private:
                 jam2::endpoint_to_string(*startup.public_candidate));
         }
         runtimeStarted_ = true;
-        if (creator_ && runtimeOptions_.connection_strategy != jam2::ConnectionStrategy::Jam2Server) {
-            completeCreatorBootstrap();
-        } else if (sessionController_.snapshot().networkAttachmentReady &&
+        if (sessionController_.snapshot().networkAttachmentReady &&
                    udpMeshActive_) {
             emitJoinConnected();
         }
@@ -1253,7 +1145,7 @@ private:
 
     void completeCreatorBootstrap()
     {
-        if (controlStarted_ || localEndpointText_.isEmpty() || !runtimeStarted_) {
+        if (controlStarted_ || localEndpointText_.isEmpty()) {
             return;
         }
         const jam2::Endpoint local = jam2::parse_endpoint(localEndpointText_.toStdString());
@@ -1289,23 +1181,37 @@ private:
             .toInt(SharedSessionController::kDefaultHeartbeatMissLimit);
         controlConfig.strategy = runtimeOptions_.connection_strategy;
         controlConfig.rendezvousServer = runtimeOptions_.rendezvous_server;
+        controlConfig.name = peerName_;
+        controlConfig.socketBuffers={runtimeOptions_.socket_send_buffer,runtimeOptions_.socket_recv_buffer};
+        controlConfig.bindHost=QString::fromStdString(local.host);
+        controlConfig.publicEndpoint=runtimeOptions_.public_endpoint;
+        controlConfig.stunServer=runtimeOptions_.stun_server;
+        controlConfig.stunTimeoutMs=runtimeOptions_.stun_timeout_ms; controlConfig.stunRetries=runtimeOptions_.stun_retries;
         if (!sessionController_.startCreator(controlConfig)) {
-            writeConsoleLine(QStringLiteral("TCP coordinator listen failed: ") + sessionController_.errorString(), true);
+            writeConsoleLine(QStringLiteral("UDP multiplex coordinator listen failed: ") + sessionController_.errorString(), true);
             finish(2);
             return;
         }
         controlStarted_ = true;
-        const jam2::Endpoint advertised = jam2::parse_endpoint(advertisedText.toStdString());
-        session_.endpoint = advertised;
-        session_.strategy = runtimeOptions_.connection_strategy;
-        connectionUrl_ = QString::fromStdString(jam2::make_jam_url(session_));
-        writeConsoleLine(runtimeOptions_.connection_strategy == jam2::ConnectionStrategy::Jam2Server
-            ? QStringLiteral("UDP rendezvous: %1").arg(advertisedText)
-            : QStringLiteral("TCP coordinator: 0.0.0.0:%1").arg(local.port));
-        writeConsoleLine(QStringLiteral("Connection string:"));
-        writeConsoleLine(connectionUrl_);
+        publishCreatorInvite();
+    }
+
+    void publishCreatorInvite()
+    {
+        if (!creator_ || !controlStarted_ || invitePublished_) return;
+        if (runtimeOptions_.connection_strategy==jam2::ConnectionStrategy::Jam2Server) session_.endpoint=runtimeOptions_.rendezvous_server;
+        else {
+            const auto state=sessionController_.multiplexSnapshot();
+            if (!state.registered || !state.bootstrapPublic.port) return;
+            session_.endpoint=state.bootstrapPublic;
+            publicCandidateText_=QString::fromStdString(jam2::endpoint_to_string(session_.endpoint));
+        }
+        session_.strategy=runtimeOptions_.connection_strategy;
+        connectionUrl_=QString::fromStdString(jam2::make_jam_url(session_));
+        writeConsoleLine(QStringLiteral("UDP session endpoint: %1").arg(QString::fromStdString(jam2::endpoint_to_string(session_.endpoint))));
+        writeConsoleLine(QStringLiteral("Connection string:")); writeConsoleLine(connectionUrl_);
         writeConsoleLine(QStringLiteral("Waiting for peers..."));
-        emitStartup(QStringLiteral("waiting"));
+        invitePublished_=true; emitStartup(QStringLiteral("waiting"));
     }
 
     void handleAuthenticatedPeer(const QString& token, const QJsonObject& message)
@@ -1315,11 +1221,6 @@ private:
         writeConsoleLine(QStringLiteral("Coordinator membership accepted peer %1; remote peers=%2")
             .arg(QString::number(requirePeerId(token)))
             .arg(std::max(0, static_cast<int>(peers_.size()) - 1)));
-    }
-
-    QJsonObject debugTopology() const
-    {
-        return debugNetwork_.value(QStringLiteral("topology")).toObject();
     }
 
     void handleCoordinatorMessage(const QJsonObject& message)
@@ -1335,7 +1236,7 @@ private:
     void handleClientEvent(const jam2::control_protocol::TransportEvent& event)
     {
         using jam2::control_protocol::TransportEventType;
-        writeConsoleLine((runtimeOptions_.connection_strategy == jam2::ConnectionStrategy::Jam2Server ? QStringLiteral("UDP control: ") : QStringLiteral("TCP control: ")) + event.detail);
+        writeConsoleLine(QStringLiteral("UDP control: ") + event.detail);
         if (event.type == TransportEventType::SessionEnded) {
             controlEndReason_ = event.detail;
             controlEndFailure_ = event.failure;
@@ -1348,7 +1249,7 @@ private:
         } else if (event.type == TransportEventType::Disconnected && !finishing_) {
             if (runtime_.isNetworkRunning()) {
                 writeConsoleLine(QStringLiteral(
-                    "Coordinator TCP is unavailable; existing proven UDP peers continue and membership is frozen."));
+                    "Coordinator UDP multiplex is unavailable; existing proven UDP peers continue and membership is frozen."));
             }
         }
     }
@@ -1378,6 +1279,10 @@ private:
             .value(QStringLiteral("heartbeat_miss_limit"))
             .toInt(SharedSessionController::kDefaultHeartbeatMissLimit);
         controlConfig.strategy = session_.strategy;
+        controlConfig.name = peerName_;
+        controlConfig.socketBuffers={runtimeOptions_.socket_send_buffer,runtimeOptions_.socket_recv_buffer};
+        const auto localBind=jam2::parse_bind_endpoint(localEndpointText_.toStdString());
+        controlConfig.bindHost=QString::fromStdString(localBind.host); controlConfig.localPort=localBind.port;
         (void)sessionController_.startJoiner(controlConfig);
     }
 
@@ -1387,9 +1292,7 @@ private:
             return;
         }
         joinedStartupEmitted_ = true;
-        writeConsoleLine(runtimeOptions_.connection_strategy == jam2::ConnectionStrategy::Jam2Server
-            ? QStringLiteral("UDP multiplex bootstrap complete; direct UDP mesh active.")
-            : QStringLiteral("TCP bootstrap complete; direct UDP mesh active."));
+        writeConsoleLine(QStringLiteral("UDP multiplex bootstrap complete; direct UDP mesh active."));
         emitStartup(QStringLiteral("connected"));
     }
 
@@ -1420,7 +1323,7 @@ private:
         }
         object[QStringLiteral("endpoint_mode")] = creator_
             ? (publicCandidateText_.isEmpty() ? QStringLiteral("local/manual") : QStringLiteral("STUN/manual public candidate"))
-            : QStringLiteral("jam2-url TCP bootstrap");
+            : QStringLiteral("jam2-url UDP multiplex bootstrap");
         object[QStringLiteral("direct_udp_mesh_active")] = udpMeshActive_;
         object[QStringLiteral("transport_grid_ready")] = transportGridReady_;
         object[QStringLiteral("grid_mapping_error_frames")] =
@@ -1544,10 +1447,6 @@ private:
                 {QStringLiteral("active_connection_high_water"), static_cast<qint64>(controlServerStats.activeConnectionHighWater)},
                 {QStringLiteral("disconnected_connections"), static_cast<qint64>(controlServerStats.disconnectedConnections)},
                 {QStringLiteral("pre_authentication_disconnects"), static_cast<qint64>(controlServerStats.preAuthenticationDisconnects)},
-                {QStringLiteral("large_json_messages_sent"), static_cast<qint64>(controlServerStats.largeJsonMessagesSent)},
-                {QStringLiteral("large_json_messages_received"), static_cast<qint64>(controlServerStats.largeJsonMessagesReceived)},
-                {QStringLiteral("large_json_raw_bytes_sent"), static_cast<qint64>(controlServerStats.largeJsonRawBytesSent)},
-                {QStringLiteral("large_json_compressed_bytes_sent"), static_cast<qint64>(controlServerStats.largeJsonCompressedBytesSent)},
             }},
             {QStringLiteral("control_client"), QJsonObject{
                 {QStringLiteral("authentication_rejects"), static_cast<qint64>(controlClientStats.authenticationRejects)},
@@ -1558,10 +1457,6 @@ private:
                 {QStringLiteral("connection_attempts"), static_cast<qint64>(controlClientStats.connectionAttempts)},
                 {QStringLiteral("completed_connections"), static_cast<qint64>(controlClientStats.completedConnections)},
                 {QStringLiteral("disconnected_connections"), static_cast<qint64>(controlClientStats.disconnectedConnections)},
-                {QStringLiteral("large_json_messages_sent"), static_cast<qint64>(controlClientStats.largeJsonMessagesSent)},
-                {QStringLiteral("large_json_messages_received"), static_cast<qint64>(controlClientStats.largeJsonMessagesReceived)},
-                {QStringLiteral("large_json_raw_bytes_sent"), static_cast<qint64>(controlClientStats.largeJsonRawBytesSent)},
-                {QStringLiteral("large_json_compressed_bytes_sent"), static_cast<qint64>(controlClientStats.largeJsonCompressedBytesSent)},
             }},
         };
         if (automationChannel_) {
@@ -1582,8 +1477,6 @@ private:
     }
 
     bool creator_ = false;
-    bool noStun_ = false;
-    bool networkStarted_ = false;
     bool runtimeStarted_ = false;
     bool controlStarted_ = false;
     bool joinedStartupEmitted_ = false;
@@ -1612,7 +1505,9 @@ private:
     QString explicitSessionKey_;
     QString sessionHex_;
     QString keyHex_;
+    bool invitePublished_=false;
     QString localToken_;
+    QString peerName_;
     QString coordinatorToken_;
     QString localEndpointText_;
     QString connectionUrl_;

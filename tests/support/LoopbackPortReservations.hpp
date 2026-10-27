@@ -1,7 +1,6 @@
 #pragma once
 
 #include <QString>
-#include <QTcpServer>
 #include <QUdpSocket>
 
 #include <cstddef>
@@ -19,7 +18,6 @@ public:
 
 private:
     struct Reservation {
-        std::unique_ptr<QTcpServer> tcp;
         std::unique_ptr<QUdpSocket> udp;
         std::uint16_t port = 0;
     };

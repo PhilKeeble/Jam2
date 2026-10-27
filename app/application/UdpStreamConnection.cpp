@@ -45,7 +45,7 @@ quint16 compactUdpMuxHandle(std::span<const std::uint8_t> packet) noexcept
 QByteArray compactUdpMuxKey(const QByteArray& key,quint64 session,quint64 introduction,quint64 stream,bool initiator)
 {
     QByteArray context(25,'\0'); put64(context,0,session); put64(context,8,introduction); put64(context,16,stream); context[24]=initiator ? 1 : 2;
-    context.prepend("jam2-mux-compact-v3");
+    context.prepend(QByteArrayLiteral("jam2-mux-compact-v")+QByteArray::number(kControlWireVersion));
     return QMessageAuthenticationCode::hash(context,key,QCryptographicHash::Sha256);
 }
 QByteArray encodeCompactUdpMux(const UdpMuxFrameView& frame,quint16 handle,const QByteArray& key)
@@ -392,7 +392,7 @@ void UdpStreamConnection::receiveView(const UdpMuxFrameView& frame, quint64 nowU
     }
     if (frame.kind == UdpMuxKind::OpenAck) {
         const auto handle=frame.payload.size()==2 ? qFromBigEndian<quint16>(frame.payload.data()) : 0;
-        if (handle!=compactHandle_ && handle!=0) return;
+        if (handle!=compactHandle_) return;
         if (!incoming_) { connected_=true; compactHandle_=handle; compactConfirmed_=compactHandle_!=0; } return;
     }
     auto& sender = independent ? independentSender_ : sender_;

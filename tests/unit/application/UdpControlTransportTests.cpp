@@ -1,4 +1,6 @@
 #include "ControlClient.hpp"
+#include "ControlByteLink.hpp"
+#include "AssetChunkProtocol.hpp"
 #include "ControlServer.hpp"
 #include "UdpStreamConnection.hpp"
 
@@ -33,82 +35,8 @@ template<class Condition> void until(Condition condition)
     require(condition(), "timed out waiting for native control protocol");
 }
 
-// A byte-only fixture: all authentication, framing, sequencing, JSON and binary
-// handling under test are the actual ControlClient/ControlServer implementations.
-class Bytes final : public ControlConnection, public std::enable_shared_from_this<Bytes> {
-public:
-    std::weak_ptr<Bytes> remote;
-    bool connected = true, paused = false;
-    jam2::application::ControlTransport kind = jam2::application::ControlTransport::Tcp;
-    jam2::application::ControlTransport transport() const override { return kind; }
-    QPointer<QObject> context;
-    DataHandler data;
-    DisconnectHandler disconnected;
-    std::deque<QByteArray> input;
-    qint64 buffered = 0, highWater = 0;
-    void drain()
-    {
-        if (!context || !data || !connected || paused) return;
-        const std::weak_ptr<Bytes> weak = shared_from_this();
-        QMetaObject::invokeMethod(context, [weak] {
-            const auto self = weak.lock();
-            if (!self || !self->connected || self->paused) return;
-            while (!self->input.empty() && self->data) {
-                const QByteArray bytes = std::move(self->input.front());
-                self->input.pop_front(); self->buffered -= bytes.size();
-                self->data(bytes);
-            }
-        }, Qt::QueuedConnection);
-    }
-    void start(QObject* owner, DataHandler onData, DisconnectHandler onDisconnected) override
-    {
-        context = owner; data = std::move(onData); disconnected = std::move(onDisconnected); drain();
-    }
-    bool write(const QByteArray& bytes, bool closeAfterWrite = false) override
-    {
-        const auto other = remote.lock();
-        if (!connected || !other || !other->connected ||
-            other->buffered + bytes.size() > 256 * 1024) return false;
-        // Split framing boundaries without interpreting any protocol fields.
-        for (qsizetype offset = 0; offset < bytes.size(); offset += 503) {
-            other->input.push_back(bytes.mid(offset, 503));
-        }
-        other->buffered += bytes.size();
-        other->highWater = std::max(other->highWater, other->buffered);
-        other->drain();
-        if (closeAfterWrite) {
-            const std::weak_ptr<Bytes> weak = shared_from_this();
-            QMetaObject::invokeMethod(context, [weak] { if (const auto self = weak.lock()) self->close(); },
-                Qt::QueuedConnection);
-        }
-        return true;
-    }
-    void close() override
-    {
-        if (!connected) return;
-        connected = false;
-        if (const auto other = remote.lock(); other && other->connected) {
-            other->connected = false;
-            const auto callback = other->disconnected;
-            if (other->context && callback) {
-                QMetaObject::invokeMethod(other->context, [callback] { callback(QStringLiteral("byte link closed")); },
-                    Qt::QueuedConnection);
-            }
-        }
-        data = {}; disconnected = {}; input.clear(); buffered = 0;
-    }
-    bool isConnected() const override { return connected; }
-    qint64 bytesToWrite() const override { return 0; }
-    qint64 maxPendingReadBytes() const override { return highWater; }
-    QString peerHost() const override { return QStringLiteral("127.0.0.1"); }
-};
-
-auto endpoints()
-{
-    auto first = std::make_shared<Bytes>(), second = std::make_shared<Bytes>();
-    first->remote = second; second->remote = first;
-    return std::make_pair(first, second);
-}
+using jam2::test::Bytes;
+using jam2::test::endpoints;
 
 
 void framingProgressDeadline()
@@ -116,19 +44,17 @@ void framingProgressDeadline()
     using namespace jam2::application;
     ControlFrameDeadline deadline;
     deadline.received(0);
-    require(deadline.remaining(ControlTransport::ReliableUdp, 9999) == 1, "UDP idle bound is not ten seconds");
+    require(deadline.remaining(9999)==1,"record idle bound is not ten seconds");
     deadline.received(9000);
-    require(deadline.remaining(ControlTransport::ReliableUdp, 10000) == 9000, "new bytes did not extend UDP idle deadline");
-    require(deadline.remaining(ControlTransport::Tcp, 5000) == 0, "legacy TCP absolute bound changed");
+    require(deadline.remaining(10000)==9000,"ordered progress did not extend record idle deadline");
     deadline.received(200000);
-    require(deadline.remaining(ControlTransport::ReliableUdp, 200001) == 9999, "progressing message acquired an absolute UDP timeout");
-    require(deadline.remaining(ControlTransport::ReliableUdp, 210000) == 0, "stalled message has no idle deadline");
+    require(deadline.remaining(200001)==9999 && deadline.remaining(210000)==0,"progress/stall record deadlines differ");
 
     const QString session = "0123456789abcdef", key = "0123456789abcdef0123456789abcdef";
     ControlServer server;
     ControlClient client;
+    client.setPeerName(*jam2::application::PeerName::fromInput("Alex"));
     auto [toServer, toClient] = endpoints();
-    toServer->kind = toClient->kind = ControlTransport::ReliableUdp;
     require(server.listenViaTransport(session, key), "configure progress deadline test");
     server.acceptTransport(toServer);
     client.connectViaTransport(toClient, session, key, QString(32, '2'), "127.0.0.1:50000");
@@ -184,7 +110,6 @@ public:
     qint64 bytesToWrite() const override { return connection_->bytesToWrite(); }
     qint64 maxPendingReadBytes() const override { return connection_->maxPendingReadBytes(); }
     QString peerHost() const override { return connection_->peerHost(); }
-    jam2::application::ControlTransport transport() const override { return jam2::application::ControlTransport::ReliableUdp; }
 private:
     std::shared_ptr<jam2::application::UdpStreamConnection> connection_;
 };
@@ -253,13 +178,14 @@ void authenticatedUdpStreamsUnderLoss(bool independent)
     wait([&] { return outgoing->isConnected(); });
     ControlServer server;
     ControlClient client;
+    client.setPeerName(*jam2::application::PeerName::fromInput("Alex"));
     require(server.listenViaTransport(session, keyText), "UDP control fixture did not configure");
     const ControlConnection::Pointer incomingControl = independent ? ControlConnection::Pointer(incoming) : std::make_shared<OrderedOnly>(incoming);
     const ControlConnection::Pointer outgoingControl = independent ? ControlConnection::Pointer(outgoing) : std::make_shared<OrderedOnly>(outgoing);
     server.acceptTransport(incomingControl);
     client.connectViaTransport(outgoingControl, session, keyText, token, QStringLiteral("127.0.0.1:52000"));
     wait([&] { return client.isConnected() && server.hasPeer(); });
-    require(server.serverWireDiagnostics().size() == 1, "Server wire diagnostics did not expose its authenticated peer channel");
+    require(server.wireDiagnostics().size() == 1, "Server wire diagnostics did not expose its authenticated peer channel");
     // Hold the main ordering for 250 ms of deterministic network time. An
     // independent readiness reply must bypass it; an edit must remain behind it.
     bool ready = false, edited = false;
@@ -363,6 +289,8 @@ void authenticatedControlAndAssets()
     const QString token = QStringLiteral("22222222222222222222222222222222");
     ControlServer server;
     ControlClient client, assets;
+    client.setPeerName(*jam2::application::PeerName::fromInput("Alex"));
+    assets.setPeerName(*jam2::application::PeerName::fromInput("Alex"));
     require(server.listenViaTransport(session, key), "external transport could not configure control server");
     auto [serverBytes, clientBytes] = endpoints();
     bool authenticated = false;
@@ -370,12 +298,12 @@ void authenticatedControlAndAssets()
     server.acceptTransport(serverBytes);
     client.connectViaTransport(clientBytes, session, key, token, QStringLiteral("127.0.0.1:50000"));
     until([&] { return authenticated && client.isConnected(); });
-    require(server.serverWireDiagnostics().isEmpty(), "legacy TCP transport unexpectedly enabled the Server codec");
+    require(server.wireDiagnostics().size()==1, "typed channel was not installed");
 
     QJsonObject received;
     server.onMessage = [&](const QString&, const QJsonObject& value) { received = value; };
-    const QJsonObject change{{QStringLiteral("type"), QStringLiteral("test.control")},
-                            {QStringLiteral("value"), 42}};
+    const QJsonObject change{{QStringLiteral("type"), QStringLiteral("beat.set")},
+                            {QStringLiteral("text"), "updated"}};
     require(client.send(change), "authenticated control send failed");
     until([&] { return received == change; });
 
@@ -386,9 +314,14 @@ void authenticatedControlAndAssets()
     QByteArray binary(64000, 'w'), delivered;
     for (qsizetype i = 0; i < binary.size(); ++i) binary[i] = static_cast<char>(i % 251);
     server.onAssetBinaryMessage = [&](const QString& peer, const QByteArray& bytes) {
-        require(peer == token, "asset changed authenticated peer identity"); delivered += bytes;
+        require(peer == token, "asset changed authenticated peer identity");
+        jam2::application::asset_chunk::Chunk chunk; QString error;
+        require(jam2::application::asset_chunk::decode(bytes,chunk,error),"typed WAV chunk did not reconstruct"); delivered += chunk.data;
     };
-    require(assets.sendBinary(binary), "asset frame was rejected by shared transport boundary");
+    const QString hash(64,'a');
+    require(assets.send({{"type","looper.asset.start"},{"sha256",hash},{"file_bytes",binary.size()},{"chunk_size",24576}}),"bind typed WAV transfer");
+    for (qsizetype offset=0;offset<binary.size();offset+=24576)
+        require(assets.sendBinary(jam2::application::asset_chunk::encode({hash,static_cast<quint32>(offset/24576),static_cast<quint64>(offset),binary.mid(offset,24576)})),"typed WAV chunk send");
     until([&] { return delivered.size() == binary.size(); });
     require(delivered == binary, "asset bytes changed across stream framing boundaries");
     assets.close();

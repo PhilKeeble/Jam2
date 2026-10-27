@@ -1,4 +1,5 @@
 #include "UpdateDialog.hpp"
+#include "GuiControlContract.hpp"
 #include "ApplicationUpdateService.hpp"
 #include <QCloseEvent>
 #include <QDialogButtonBox>
@@ -29,7 +30,10 @@ UpdateDialog::UpdateDialog(jam2::update::ApplicationUpdateService& service,
     progress_ = new QProgressBar(this); progress_->setObjectName(QStringLiteral("Jam2UpdateProgress")); layout->addWidget(progress_);
     auto* actions = new QDialogButtonBox(this);
     const auto button = [this, actions](const QString& text, const QString& name, QDialogButtonBox::ButtonRole role) {
-        auto* result = actions->addButton(text, role); result->setObjectName(name); result->setAutoDefault(false); return result;
+        auto* result = actions->addButton(text, role); result->setObjectName(name); result->setAutoDefault(false);
+        jam2::gui::registerGuiControl(*result,QStringLiteral("application.update.")+name,
+            QStringLiteral("application.update"),jam2::gui::GuiControlAvailability::StateGated);
+        return result;
     };
     download_ = button(QStringLiteral("Download update"), QStringLiteral("Jam2DownloadUpdate"), QDialogButtonBox::ActionRole);
     restart_ = button(QStringLiteral("Restart and install"), QStringLiteral("Jam2RestartUpdate"), QDialogButtonBox::ActionRole);

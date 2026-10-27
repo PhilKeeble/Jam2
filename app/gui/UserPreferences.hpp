@@ -66,6 +66,7 @@ struct CreatePreference {
     int socketRecvBuffer = 0;
     LocalTuningPreference tuning;
     RuntimePreference runtime;
+    QString name;
 };
 
 struct JoinPreference {
@@ -73,6 +74,7 @@ struct JoinPreference {
     int port = 49000;
     LocalTuningPreference tuning;
     RuntimePreference runtime;
+    QString name;
 };
 
 struct LoggingPreference {

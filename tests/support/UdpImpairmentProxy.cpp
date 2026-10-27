@@ -121,6 +121,13 @@ void UdpImpairmentProxy::setDatagramTransformer(DatagramTransformer transformer)
     transformer_ = std::move(transformer);
 }
 
+void UdpImpairmentProxy::forwardDatagram(
+    UdpProxyDirection direction, QByteArray bytes, DatagramDelivery delivery)
+{
+    (direction == UdpProxyDirection::ClientToServer ? clientDelivery_ : serverDelivery_) = delivery;
+    schedule(direction, std::move(bytes), {}, 0, delivery);
+}
+
 std::optional<QByteArray> UdpImpairmentProxy::capturedAudioClientToServer() const
 {
     return clientToServerState_.capturedAudio;
@@ -142,7 +149,7 @@ bool UdpImpairmentProxy::injectClientToServer(const QByteArray& bytes)
 
 bool UdpImpairmentProxy::injectServerToClient(const QByteArray& bytes)
 {
-    if (clientAddress_.isNull() || clientPort_ == 0) {
+    if (!serverDelivery_ && (clientAddress_.isNull() || clientPort_ == 0)) {
         ++serverToClientStats_.injectionErrors;
         return false;
     }
@@ -226,7 +233,8 @@ void UdpImpairmentProxy::schedule(
     UdpProxyDirection direction,
     QByteArray bytes,
     const QHostAddress& destinationAddress,
-    quint16 destinationPort)
+    quint16 destinationPort,
+    const DatagramDelivery& delivery)
 {
     auto& proxyStats = mutableStats(direction);
     auto& directionState = state(direction);
@@ -276,8 +284,8 @@ void UdpImpairmentProxy::schedule(
     const bool duplicate = chance(settings.duplicatePercent);
     const bool timed = delayMs > 0.0 || reordered;
     if (!timed) {
-        if (!send(direction, destinationAddress, destinationPort, bytes)) return;
-        if (duplicate && send(direction, destinationAddress, destinationPort, bytes)) {
+        if (!send(direction, destinationAddress, destinationPort, bytes, delivery)) return;
+        if (duplicate && send(direction, destinationAddress, destinationPort, bytes, delivery)) {
             ++proxyStats.duplicated;
         }
         return;
@@ -293,13 +301,13 @@ void UdpImpairmentProxy::schedule(
         directionState.lastReleaseAt = releaseAt;
     }
     ++proxyStats.delayed;
-    if (!queue(direction, releaseAt, destinationAddress, destinationPort, bytes)) return;
+    if (!queue(direction, releaseAt, destinationAddress, destinationPort, bytes, delivery)) return;
     if (duplicate && queue(
             direction,
             releaseAt + std::chrono::nanoseconds(1),
             destinationAddress,
             destinationPort,
-            bytes)) {
+            bytes, delivery)) {
         ++proxyStats.duplicated;
     }
 }
@@ -309,7 +317,8 @@ bool UdpImpairmentProxy::queue(
     TimePoint releaseAt,
     const QHostAddress& destinationAddress,
     quint16 destinationPort,
-    const QByteArray& bytes)
+    const QByteArray& bytes,
+    const DatagramDelivery& delivery)
 {
     auto& proxyStats = mutableStats(direction);
     if (pending_.size() >= maximumPendingPackets_) {
@@ -323,6 +332,7 @@ bool UdpImpairmentProxy::queue(
         destinationAddress,
         destinationPort,
         bytes,
+        delivery,
     });
     pendingHighWater_ = std::max(pendingHighWater_, pending_.size());
     return true;
@@ -332,13 +342,15 @@ bool UdpImpairmentProxy::send(
     UdpProxyDirection direction,
     const QHostAddress& destinationAddress,
     quint16 destinationPort,
-    const QByteArray& bytes)
+    const QByteArray& bytes,
+    const DatagramDelivery& delivery)
 {
     QUdpSocket& socket = direction == UdpProxyDirection::ClientToServer
         ? serverSocket_ : clientSocket_;
     auto& proxyStats = mutableStats(direction);
-    const qint64 written = socket.writeDatagram(bytes, destinationAddress, destinationPort);
-    if (written != bytes.size()) {
+    const bool written = delivery ? delivery(bytes) :
+        socket.writeDatagram(bytes, destinationAddress, destinationPort) == bytes.size();
+    if (!written) {
         ++proxyStats.sendErrors;
         return false;
     }
@@ -355,8 +367,10 @@ bool UdpImpairmentProxy::inject(
     QUdpSocket& socket = direction == UdpProxyDirection::ClientToServer
         ? serverSocket_ : clientSocket_;
     auto& proxyStats = mutableStats(direction);
-    const qint64 written = socket.writeDatagram(bytes, destinationAddress, destinationPort);
-    if (written != bytes.size()) {
+    const auto& delivery = direction == UdpProxyDirection::ClientToServer ? clientDelivery_ : serverDelivery_;
+    const bool written = delivery ? delivery(bytes) :
+        socket.writeDatagram(bytes, destinationAddress, destinationPort) == bytes.size();
+    if (!written) {
         ++proxyStats.injectionErrors;
         return false;
     }
@@ -374,7 +388,7 @@ void UdpImpairmentProxy::releaseDue()
             datagram.direction,
             datagram.destinationAddress,
             datagram.destinationPort,
-            datagram.bytes);
+            datagram.bytes, datagram.delivery);
     }
 }
 

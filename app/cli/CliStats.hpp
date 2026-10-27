@@ -1835,8 +1835,7 @@ CsvStatsLog::Context make_csv_context(
     std::string command_line,
     std::string_view mode,
     const Options& options,
-    const jam2::UdpSocket& socket,
-    const jam2::Endpoint& local,
+    const jam2::NetworkTransportInfo& transport,
     const jam2::Endpoint& peer,
     std::string_view endpoint_mode);
 void print_periodic_stream_stats(

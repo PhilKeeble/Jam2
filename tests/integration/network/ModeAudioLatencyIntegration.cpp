@@ -78,7 +78,7 @@ std::vector<Measurement> incoming(const QString& html)
     // Read the exact production GUI breakdown, retaining frame counts rather
     // than comparing its rounded whole-millisecond latency pill.
     static const QRegularExpression pattern(QStringLiteral(
-        "<b>Peer [0-9]+ incoming: ~([0-9.]+) ms</b><br>"
+        "<b>[^<]+ incoming: ~([0-9.]+) ms</b><br>"
         "Network RTT/2 ([0-9.]+) ms \\(RTT [0-9.]+ ms\\)<br>"
         "Jitter buffer [0-9.]+ ms \\(([0-9]+) fr\\) \\| Mixer queue [0-9.]+ ms \\(([0-9]+) fr\\)<br>"
         "Playback ring [0-9.]+ ms \\(([0-9]+) fr\\) \\| Output [0-9.]+ ms \\(([0-9]+) fr, [^)]+\\)"));
@@ -128,11 +128,11 @@ RunResult run(FourPeerCoordinator& peers, const QString& executable,
         require(peers.peer(i).readEvent(hello, 30s, error) && hello.value("event") == "hello", error);
     }
     ports.release();
-    if (repetition == 0) command(peers.peer(0), {{"type", "jam.create"}, {"id", "invalid-diagnostics"},
+    if (repetition == 0) command(peers.peer(0), {{"type", "jam.create"}, {QStringLiteral("name"), QStringLiteral("Alex")}, {"id", "invalid-diagnostics"},
         {"port", local[0]}, {"diagnostics", "invalid"}}, "command_rejected");
-    if (repetition == 0) command(peers.peer(0), {{"type", "jam.create"}, {"id", "invalid-receive-model"},
+    if (repetition == 0) command(peers.peer(0), {{"type", "jam.create"}, {QStringLiteral("name"), QStringLiteral("Alex")}, {"id", "invalid-receive-model"},
         {"port", local[0]}, {"queued_server_receive", "invalid"}}, "command_rejected");
-    QJsonObject create{{"type", "jam.create"}, {"id", "create"}, {"port", local[0]},
+    QJsonObject create{{"type", "jam.create"}, {QStringLiteral("name"), QStringLiteral("Alex")}, {"id", "create"}, {"port", local[0]},
         {"test_input", "tone-440"}, {"strategy", server ? "server" : "direct"}, {"diagnostics", true}};
     if (server) create.insert("rendezvous", signaller.endpoint);
     if (queued) create.insert("queued_server_receive",true);
@@ -140,7 +140,7 @@ RunResult run(FourPeerCoordinator& peers, const QString& executable,
     require(created.value("invite_url").toString().startsWith("jam2://") &&
         created.value("invite_url").toString().contains("strategy=server") == server,
         "invitation does not select the mode under comparison");
-    for (int i = 1; i < 4; ++i) command(peers.peer(i), {{"type", "jam.join"}, {"id", "join"},
+    for (int i = 1; i < 4; ++i) command(peers.peer(i), {{"type", "jam.join"}, {QStringLiteral("name"), QStringLiteral("Alex")}, {"id", "join"},
         {"port", local[i]}, {"invite_url", created.value("invite_url")}, {"test_input", "tone-440"}, {"diagnostics", true},
         {"queued_server_receive",queued}}, "command_applied");
     QElapsedTimer ready; ready.start();
@@ -174,13 +174,13 @@ RunResult run(FourPeerCoordinator& peers, const QString& executable,
             require(jam.value("active_remote_peer_count").toInt() == 3 && performance.value("headless_audio").toBool() &&
                 performance.value("sample_rate").toInt() == sampleRate && performance.value("audio_buffer_frames").toInt() == callbackFrames,
                 "audio profile, callback or four-peer topology changed during measurement");
-            require(jam.value("udp_multiplex").toObject().value("enabled").toBool() == server,
+            require(jam.value("udp_multiplex").toObject().value("enabled").toBool(),
                 "latency measurement used the wrong transport mode");
-            require(jam.value("grid_authority_beacon_interval_us").toInteger()==(server ? 1000000 : 20000),
+            require(jam.value("grid_authority_beacon_interval_us").toInteger()==1000000,
                 "authority beacon cadence leaked across connection modes");
-            require(jam.value("grid_authority_phase_freshness_us").toInteger()==(server ? 2500000 : 500000),
+            require(jam.value("grid_authority_phase_freshness_us").toInteger()==2500000,
                 "authority phase validity leaked across connection modes");
-            if (server) {
+            {
                 const auto transport = jam.value("udp_multiplex").toObject();
                 require(transport.value("runtime_receive_enabled").toBool() == !queued && transport.value("runtime_receive_owner").toBool() == !queued,
                     "latency measurement used the wrong socket-reader model");

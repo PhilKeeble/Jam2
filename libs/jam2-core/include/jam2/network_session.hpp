@@ -6,6 +6,7 @@
 #include <optional>
 #include <span>
 #include <vector>
+#include <variant>
 
 #include "common.hpp"
 #include "peer_mixer.hpp"
@@ -190,10 +191,12 @@ struct NetworkSendResult {
 // Owns one UDP session, one packet schedule, and one mature PeerStream per
 // remote peer. Creator/joiner remains bootstrap metadata only; steady-state
 // audio fan-out, timing, resampling, and mixing are role-free.
+using NetworkSessionTransport = std::variant<UdpSocket, std::shared_ptr<NetworkDatagramTransport>>;
+
 class NetworkSession {
 public:
     NetworkSession(
-        UdpSocket&& socket,
+        NetworkSessionTransport transport,
         const SessionInfo& session,
         const NetworkSessionContract& contract,
         SessionBootstrapRole bootstrap_role,
@@ -203,7 +206,7 @@ public:
         PeerStreamPlayback* playback,
         int packet_clock_drift_ppm = 0);
     NetworkSession(
-        UdpSocket&& socket,
+        NetworkSessionTransport transport,
         const SessionInfo& session,
         const NetworkSessionContract& contract,
         SessionBootstrapRole bootstrap_role,

@@ -198,7 +198,7 @@ std::string make_jam_url(const SessionInfo& info)
         session_bytes[session_bytes.size() - 1 - i] = static_cast<std::uint8_t>((info.session_id >> (i * 8)) & 0xffU);
     }
     const std::string strategy = info.strategy == ConnectionStrategy::Jam2Server
-        ? "&strategy=server" : "";
+        ? "&strategy=server" : info.strategy == ConnectionStrategy::Direct ? "&strategy=direct" : "";
     return "jam2://v1?endpoint=" + endpoint_to_string(info.endpoint) + "&session=" +
         hex_encode(session_bytes.data(), session_bytes.size()) + "&key=" +
         hex_encode(info.key.data(), info.key.size()) + strategy;
@@ -218,7 +218,7 @@ SessionInfo parse_jam_url(std::string_view url)
         throw std::runtime_error("jam2 URL key must be 16 bytes encoded as 32 hex characters");
     }
     SessionInfo info;
-    // Legacy invitations have no strategy field and retain their TCP bootstrap.
+    // An omitted strategy selects the direct creator endpoint.
     std::size_t offset = 0;
     while (offset <= query.size()) {
         const std::size_t end = query.find('&', offset);

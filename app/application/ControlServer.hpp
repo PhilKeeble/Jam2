@@ -1,8 +1,9 @@
 #pragma once
 
 #include "ControlProtocol.hpp"
-#include "NativeTcpTransport.hpp"
-#include "ServerControlWire.hpp"
+#include "ControlConnection.hpp"
+#include "ControlWire.hpp"
+#include "PeerName.hpp"
 
 #include <QJsonObject>
 #include <QJsonArray>
@@ -34,21 +35,16 @@ public:
         quint64 activeConnectionHighWater = 0;
         quint64 disconnectedConnections = 0;
         quint64 preAuthenticationDisconnects = 0;
-        quint64 largeJsonMessagesSent = 0;
-        quint64 largeJsonMessagesReceived = 0;
-        quint64 largeJsonRawBytesSent = 0;
-        quint64 largeJsonCompressedBytesSent = 0;
         quint64 assetAcceptedConnections = 0;
         quint64 assetActiveConnections = 0;
         quint64 assetConnectionHighWater = 0;
         quint64 assetDisconnectedConnections = 0;
-        jam2::application::server_wire::Stats serverWire;
+        jam2::application::control_wire::Stats wire;
     };
 
     explicit ControlServer(QObject* parent = nullptr);
     ~ControlServer() override;
 
-    bool listen(quint16 port, const QString& sessionHex, const QString& keyHex);
     bool listenViaTransport(const QString& sessionHex, const QString& keyHex);
     void acceptTransport(const jam2::application::ControlConnection::Pointer& connection);
     void close();
@@ -63,10 +59,10 @@ public:
     bool hasPeer() const;
     QString errorString() const;
     Stats stats() const;
-    QJsonArray serverWireDiagnostics() const;
+    QJsonArray wireDiagnostics() const;
 
     std::function<void(const QString&, const QJsonObject&)> onMessage;
-    std::function<jam2::application::server_wire::DispatchDecision(const QJsonObject&)> validateServerMessage;
+    std::function<jam2::application::control_wire::DispatchDecision(const QJsonObject&)> validateMessage;
     std::function<void(const QString&, const QByteArray&)> onBinaryMessage;
     std::function<void(const QString&, const QJsonObject&)> onAssetMessage;
     std::function<void(const QString&, const QByteArray&)> onAssetBinaryMessage;
@@ -78,7 +74,7 @@ public:
 private:
     struct Peer {
         jam2::application::ControlConnection::Pointer connection;
-        std::shared_ptr<jam2::application::server_wire::Channel> serverWire;
+        std::shared_ptr<jam2::application::control_wire::Channel> wire;
         std::unique_ptr<QTimer> authenticationTimer;
         std::unique_ptr<QTimer> frameTimer;
         QElapsedTimer frameClock;
@@ -92,10 +88,8 @@ private:
         bool assetChannel = false;
         bool receivedAnyInput = false;
         bool readScheduled = false;
-        quint64 receiveSequence = 1;
-        quint64 sendSequence = 1;
-        jam2::control_protocol::LargeJsonReceiver largeJsonReceiver;
         QString token;
+        jam2::application::PeerName name;
     };
 
     using PeerHandle = std::shared_ptr<Peer>;
@@ -123,9 +117,7 @@ private:
     void noteAuthenticationReject();
     bool authenticationWorkAvailable();
 
-    jam2::application::NativeTcpListener server_;
     QList<PeerHandle> peers_;
-    quint64 listenGeneration_ = 0;
     bool transportListening_ = false;
     QString sessionHex_;
     QByteArray masterKey_;

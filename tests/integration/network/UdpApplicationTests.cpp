@@ -61,7 +61,7 @@ int main(int argc, char** argv) {
         auto statsArguments = [&](int i) { return QStringList{"--stats", "enabled", "--stats-interval-ms", "250",
             "--stats-warmup-ms", "0", "--log-stats", QDir(artifact).filePath(QString::number(i))}; };
         const QStringList audio{"--headless-audio", "on", "--test-input", "tone-440", "--stream-ms", "10000", "--wait-ms", "15000"};
-        QStringList creator{"network", "create", "--connection-strategy", "server",
+        QStringList creator{"network", "create", "--name", "Alice", "--connection-strategy", "server",
             "--rendezvous", QStringLiteral("127.0.0.1:%1").arg(port), "--max-peers", "3"};
         creator += audio; creator += statsArguments(0);
         peers[0] = std::make_unique<Child>(executable, creator);
@@ -74,7 +74,7 @@ int main(int argc, char** argv) {
         }, 5000, "creator did not generate server-mode invitation");
         require(url.contains("strategy=server"), "creator invitation omitted explicit server strategy");
         for (int index = 1; index < 4; ++index) {
-            QStringList arguments{"network", "join", url}; arguments += audio; arguments += statsArguments(index);
+            QStringList arguments{"network", "join", url, "--name", "Alex"}; arguments += audio; arguments += statsArguments(index);
             peers[index] = std::make_unique<Child>(executable, arguments);
             // Stagger application joins while the existing synthetic audio runs.
             QElapsedTimer stagger; stagger.start();

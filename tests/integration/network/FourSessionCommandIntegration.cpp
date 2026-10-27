@@ -1,7 +1,7 @@
 #include "AutomationProcess.hpp"
 #include "LoopbackPortReservations.hpp"
 #include "TestTiming.hpp"
-#include "UdpImpairmentProxy.hpp"
+#include "UdpCandidateNetwork.hpp"
 
 #include "engine.hpp"
 
@@ -40,7 +40,6 @@ constexpr std::uint64_t kTransportGridToleranceFrames =
 // assertions use engine frames, so allowing instrumented and older hosts more
 // wall time does not weaken the behavior under test.
 constexpr auto kStateWaitTimeout = 60s;
-jam2::test::UdpImpairmentProxy* activeUdpProxy = nullptr;
 
 QString deterministicHex(int seed, int bytes)
 {
@@ -105,7 +104,6 @@ bool waitForEvent(
         jam2::test::deadmanTimeout(timeout);
     QString lastEvent;
     while (std::chrono::steady_clock::now() < deadline) {
-        if (activeUdpProxy != nullptr) activeUdpProxy->pump();
         QJsonObject event;
         QString readError;
         if (!process.readEvent(event, 250ms, readError)) {
@@ -227,16 +225,15 @@ QJsonObject scenario(
     const QString& sessionId,
     const QString& sessionKey,
     const QString& peerToken,
-    const QString& artifactRoot,
-    const QJsonObject& topology)
+    const QString& artifactRoot)
 {
     QJsonObject network{
+        {QStringLiteral("name"), QStringLiteral("Alex")},
         {QStringLiteral("bind"),
             QStringLiteral("127.0.0.1:%1").arg(port)},
         {QStringLiteral("no_stun"), true},
         {QStringLiteral("wait_ms"), 120000},
         {QStringLiteral("peer_token"), peerToken},
-        {QStringLiteral("topology"), topology},
     };
     if (index == 0) {
         network.insert(QStringLiteral("session_id"), sessionId);
@@ -357,41 +354,21 @@ int main(int argc, char* argv[])
 
     QString error;
     LoopbackPortReservations reservations;
-    if (!reservations.reserve(kPeerCount + 1, error)) {
+    if (!reservations.reserve(kPeerCount, error)) {
         return fail(error);
     }
     std::array<quint16, kPeerCount> ports{};
     for (std::size_t index = 0; index < kPeerCount; ++index) {
         ports[index] = reservations.port(index);
     }
-    const quint16 intentionallyWrongPort = reservations.port(kPeerCount);
     const QString sessionId = deterministicHex(7, 8);
     const QString sessionKey = deterministicHex(11, 16);
     std::array<QString, kPeerCount> peerTokens{};
     for (std::size_t index = 0; index < kPeerCount; ++index) {
         peerTokens[index] = deterministicHex(31 + static_cast<int>(index), 16);
     }
-    jam2::test::DirectionImpairment cleanPath;
-    jam2::test::UdpImpairmentProxy endpointProxy(
-        QHostAddress::LocalHost,
-        ports[1],
-        cleanPath,
-        cleanPath,
-        0x4a414d3252454249ULL);
-    if (!endpointProxy.start(error)) {
-        return fail(error);
-    }
-    activeUdpProxy = &endpointProxy;
-    QJsonObject topology;
-    for (const QString& token : peerTokens) topology.insert(token, QJsonObject{});
-    QJsonObject creatorView = topology.value(peerTokens[0]).toObject();
-    creatorView.insert(peerTokens[1], endpointProxy.publicEndpoint());
-    topology.insert(peerTokens[0], creatorView);
-    QJsonObject firstJoinerView = topology.value(peerTokens[1]).toObject();
-    firstJoinerView.insert(
-        peerTokens[0],
-        QStringLiteral("127.0.0.1:%1").arg(intentionallyWrongPort));
-    topology.insert(peerTokens[1], firstJoinerView);
+    ThreadedCandidateNetwork endpointProxy(ports[0],true);
+    endpointProxy.setMultiplexImpairment(false);
     std::array<QString, kPeerCount> scenarioPaths{};
     std::array<QString, kPeerCount> manifestPaths{};
     for (std::size_t index = 0; index < kPeerCount; ++index) {
@@ -409,26 +386,17 @@ int main(int argc, char* argv[])
                 scenario(
                     static_cast<int>(index),
                     ports[index],
-                    ports[0],
+                    endpointProxy.port(),
                     sessionId,
                     sessionKey,
                     peerTokens[index],
-                    peerRoot,
-                    topology),
+                    peerRoot),
                 error)) {
             return fail(error);
         }
     }
 
     reservations.release();
-    QUdpSocket wrongEndpointSink;
-    if (!wrongEndpointSink.bind(
-            QHostAddress::LocalHost,
-            intentionallyWrongPort,
-            QUdpSocket::DontShareAddress)) {
-        return fail(QStringLiteral("reserving the deliberately stale UDP endpoint: ") +
-            wrongEndpointSink.errorString());
-    }
     std::array<std::unique_ptr<AutomationProcess>, kPeerCount> peers{};
     for (std::size_t index = 0; index < kPeerCount; ++index) {
         peers[index] = AutomationProcess::launch(
@@ -482,14 +450,9 @@ int main(int argc, char* argv[])
         }
     }
 
-    const QString priorProxyEndpoint = endpointProxy.serverPublicEndpoint();
-    const auto proxyStatsBeforeRebind = endpointProxy.stats();
-    if (!endpointProxy.rebindServerEndpoint(error) ||
-        endpointProxy.serverPublicEndpoint() == priorProxyEndpoint) {
-        return fail(error.isEmpty()
-            ? QStringLiteral("UDP proxy endpoint did not change during rebind")
-            : error);
-    }
+    const auto droppedBefore=endpointProxy.droppedCount();
+    if (endpointProxy.blockCreatorLink(peerTokens[1])!=1)
+        return fail(QStringLiteral("could not cut exactly one established creator multiplex mapping"));
     QJsonObject staleEdge;
     if (!waitForEvent(
             *peers[1],
@@ -501,28 +464,23 @@ int main(int argc, char* argv[])
             },
             staleEdge,
             error)) {
-        return fail(QStringLiteral("remapped UDP edge did not leave Active state: ") + error);
+        return fail(QStringLiteral("failed multiplex edge did not leave Active state: ") + error);
     }
     QJsonObject recoveredEdge;
     if (!waitForEvent(
             *peers[1],
             kStateWaitTimeout,
-            [](const QJsonObject& event) {
+            [&](const QJsonObject& event) {
                 return event.value(QStringLiteral("event")).toString() ==
                         QStringLiteral("peer_snapshot") &&
-                    event.value(QStringLiteral("active_remote_peer_count")).toInt() == 3;
+                    event.value(QStringLiteral("active_remote_peer_count")).toInt() == 3 && endpointProxy.hasFreshCreatorLink(peerTokens[1]);
             },
             recoveredEdge,
             error)) {
-        return fail(QStringLiteral("remapped UDP edge did not recover: ") + error);
+        return fail(QStringLiteral("failed multiplex edge did not recover: ") + error);
     }
-    const auto proxyStatsAfterRebind = endpointProxy.stats();
-    if (proxyStatsAfterRebind.serverEndpointRebinds != 1 ||
-        proxyStatsAfterRebind.serverToClient.forwarded <=
-            proxyStatsBeforeRebind.serverToClient.forwarded) {
-        return fail(QStringLiteral(
-            "recovered peer did not send through the observed remapped UDP endpoint"));
-    }
+    if (endpointProxy.droppedCount()<=droppedBefore)
+        return fail(QStringLiteral("multiplex recovery did not exercise the failed mapping"));
 
     for (std::size_t index = 0; index < kPeerCount; ++index) {
         if (!waitForTransportGridReady(

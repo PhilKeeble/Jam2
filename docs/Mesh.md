@@ -4,9 +4,9 @@ Every Jam2 network session uses one bootstrap model and one direct UDP full-mesh
 
 ## Create And Join Model
 
-One participant creates the jam and remains its TCP coordinator. Other participants join the `jam2://...` URL published by that creator.
+One participant creates the jam and remains its control coordinator. Other participants join the `jam2://...` URL published by that creator.
 
-The TCP coordinator only handles session setup and control:
+The control coordinator handles session setup and control:
 
 - authenticating the session id and key;
 - checking the immutable protocol, sample-rate, and frame-size contract;
@@ -15,7 +15,7 @@ The TCP coordinator only handles session setup and control:
 - carrying revisioned grid/arrangement authority state and authenticated routed
   control messages.
 
-The creator binds TCP and UDP to the same local numeric port. A joiner first authenticates to that TCP port, receives the contract and membership, then starts its UDP session. TCP never carries or relays audio.
+All three connection strategies use the same current UDP multiplex and typed binary control protocol on this branch. Direct and STUN join the forwarded creator UDP port directly. The creator introduces the other peers to one another, coordinates hole punching, and retries failed introductions with fresh sockets/attempt identities while preserving healthy links and its fixed listening port. Jam2 Server uses the external rendezvous service for discovery; Direct/STUN never register or maintain keepalives with that service. Control and on-demand WAV streams use separate reliable logical channels; audio retains its native packets and receive path. WAV sharing keeps the creator-mediated star topology. No TCP control or older multiplex version fallback remains.
 
 Every proven UDP edge is direct peer to peer. Each engine sends its local mono PCM packet to every other active peer, receives one independent stream from each peer, and mixes those streams locally. For `N` peers, each peer sends to `N - 1` peers and the session has `N * (N - 1)` directed UDP paths.
 
@@ -26,41 +26,43 @@ There is no public static topology command, separate two-person transport, centr
 Creator:
 
 ```powershell
-.\release\jam2.exe network create --bind 0.0.0.0:49000 --public-endpoint 203.0.113.10:49000 --profile fast --audio-device 5 --sample-rate 44100
+.\release\jam2.exe network create --name Alice --bind 0.0.0.0:49000 --public-endpoint 203.0.113.10:49000 --profile fast --audio-device 5 --sample-rate 44100
 ```
 
 The creator prints a `jam2://...` URL. A joiner uses that URL:
 
 ```powershell
-.\release\jam2.exe network join "jam2://..." --bind 0.0.0.0:49001 --profile fast --audio-device 16 --sample-rate 44100
+.\release\jam2.exe network join "jam2://..." --name Alex --bind 0.0.0.0:49001 --profile fast --audio-device 16 --sample-rate 44100
 ```
 
-Use `network create -h` and `network join -h` for the full option list. Device ids and channel selections are local. The coordinator rejects incompatible protocol, sample-rate, or frame-size contracts before UDP starts.
+Use `network create -h` and `network join -h` for the full option list. Device ids and channel selections are local. The coordinator rejects incompatible protocol, sample-rate, or frame-size contracts before network audio starts.
 
 ## GUI Flow
 
 The GUI exposes the same create/join model as **Start Jam** and **Join Jam**:
 
-1. The creator selects the device, channels, profile, bind port, and reachable public endpoint, then starts the jam.
+1. The creator enters a name, selects the connection strategy, device, channels, profile, bind port and reachable endpoint, then starts the jam.
 2. Jam2 copies or displays the generated invite URL.
-3. Each joiner pastes that URL, selects local device and channel settings, and joins.
+3. Each joiner pastes that URL, enters a name, selects local device/channel settings, and joins.
 4. The creator authenticates the joiner and distributes updated membership.
 5. The existing audio engine adds or updates only the affected peer stream; unchanged audio devices and peer streams keep running.
 
 The creator may optionally impose a session peer limit through the GUI or
 `network create --max-peers`. `0` means no user-selected cap.
 
+Names contain 1 to 8 Unicode letters after NFC normalization. Digits, symbols, whitespace and invisible filler letters are rejected. Duplicate names are allowed; stable internal IDs remain distinct. Names bind to IDs on join and supply GUI peer labels.
+
 ## Address Discovery And Reachability
 
-STUN is used only to discover a candidate public UDP endpoint. It is never in the audio path and does not make an unreachable TCP or UDP port reachable by itself.
+STUN discovers the creator's public UDP endpoint using its actual listening socket; it is never part of the audio path. A configured public endpoint can be supplied instead. Discovery does not make an unreachable port reachable.
 
-On a LAN, publish a stable LAN address. Across the internet, every participant needs a public or forwarded UDP endpoint reachable by every other participant. The creator also needs its TCP coordinator port reachable. Because the creator uses the same numeric TCP and UDP port, forward both protocols for that port when manual forwarding is required. Other peers need their selected UDP ports forwarded when NAT does not establish a usable direct mapping.
+For Direct/STUN internet use, forward the creator's chosen UDP port. Other participants connect to it directly and use creator-coordinated hole punching for their mutual links; they do not need a continuously connected external server. On a LAN, publish a reachable LAN address. Restrictive NAT or firewall policy can still prevent a mesh edge despite fresh-port retries.
 
 A peer behind CGNAT or restrictive/symmetric NAT can fail to form one or more direct edges. Jam2 deliberately provides no relay audio fallback. Use [Connection Test](ConnectionTest.md) when routes are uncertain, and never publish `0.0.0.0` as a peer candidate.
 
 ## Coordinator Loss
 
-If the creator's TCP coordinator disappears, already proven UDP audio edges may
+If the creator's control connection disappears, already proven UDP audio edges may
 continue during a bounded reconnect grace period. The creator sends an
 authenticated heartbeat every 30 seconds; a joiner allows five consecutive
 misses (about 150 seconds) for the same coordinator to return. Membership and
@@ -99,5 +101,5 @@ Track transport replay counters are source-specific and remain monotonic across 
 - Two peers remain the main low-latency use case.
 - Three and four peers are expected small-group experiments.
 - Larger direct meshes have no artificial cap, but upload bandwidth, CPU, and route stability become practical limits quickly.
-- Membership is coordinated over creator TCP; audio remains direct UDP.
+- Membership/control use the creator's typed reliable UDP streams; audio remains direct UDP.
 - There are no rooms, accounts, relays, moderation services, or server-side audio mixing.

@@ -127,8 +127,8 @@ int main(int argc, char** argv) {
     QCoreApplication app(argc, argv);
     try {
         require(argc == 2 || argc == 3, QStringLiteral("expected release/jam2 executable and optional Go signaller"));
-        const bool serverMode = argc == 3;
-        const auto server = serverMode ? std::make_unique<ServerFixture>(QString::fromLocal8Bit(argv[2])) : nullptr;
+        const bool useRendezvous = argc == 3;
+        const auto server = useRendezvous ? std::make_unique<ServerFixture>(QString::fromLocal8Bit(argv[2])) : nullptr;
         QTemporaryDir directory;
         require(directory.isValid(), QStringLiteral("fixture directory unavailable"));
         const QString wav = fixture(directory.path());
@@ -149,14 +149,14 @@ int main(int argc, char** argv) {
             require(peers.peer(i).readEvent(hello, 60s, error) && hello.value(QStringLiteral("event")) == QStringLiteral("hello"), error);
         }
         reservations.release();
-        QJsonObject create{{QStringLiteral("type"), QStringLiteral("jam.create")},
+        QJsonObject create{{QStringLiteral("type"), QStringLiteral("jam.create")}, {QStringLiteral("name"), QStringLiteral("Alex")},
             {QStringLiteral("id"), QStringLiteral("create")}, {QStringLiteral("port"), ports[0]},
             {QStringLiteral("test_input"), QStringLiteral("tone-440")}};
-        if (serverMode) { create.insert("strategy", "server"); create.insert("rendezvous", server->endpoint); }
+        if (useRendezvous) { create.insert("strategy", "server"); create.insert("rendezvous", server->endpoint); }
         const auto created = command(peers.peer(0), create);
-        if (serverMode) require(created.value("invite_url").toString().contains("strategy=server"), "creator did not select Server-only protocol");
+        if (useRendezvous) require(created.value("invite_url").toString().contains("strategy=server"), "creator did not select Server discovery");
         for (std::size_t i = 1; i < 4; ++i)
-            command(peers.peer(i), {{QStringLiteral("type"), QStringLiteral("jam.join")},
+            command(peers.peer(i), {{QStringLiteral("type"), QStringLiteral("jam.join")}, {QStringLiteral("name"), QStringLiteral("Alex")},
                 {QStringLiteral("id"), QStringLiteral("join")}, {QStringLiteral("port"), ports[i]},
                 {QStringLiteral("invite_url"), created.value(QStringLiteral("invite_url"))},
                 {QStringLiteral("test_input"), QStringLiteral("tone-440")}});
@@ -175,14 +175,14 @@ int main(int argc, char** argv) {
                 content.value(QStringLiteral("prepared_mix_frames")).toInteger() > 0 &&
                 !content.value(QStringLiteral("prepared_mix_worker_running")).toBool();
         }, QStringLiteral("real prepared WAV on four peers"));
-        if (serverMode) waitAll(peers, [](std::size_t index, const QJsonObject& state) {
+        waitAll(peers, [](std::size_t index, const QJsonObject& state) {
             if (index == 0) return true;
             const auto tools = listening(state);
-            const int authoritative = tools.value(QStringLiteral("server_authoritative_revision")).toInt();
+            const int authoritative = tools.value(QStringLiteral("shared_authoritative_revision")).toInt();
             return authoritative > 0 && tools.value(QStringLiteral("phase")).toInt(-1) == 0 &&
-                tools.value(QStringLiteral("server_applied_revision")).toInt() == authoritative &&
-                !tools.value(QStringLiteral("server_deferred_state")).toBool();
-        }, QStringLiteral("initial Server listening state survives startup song/WAV changes without another edit"));
+                tools.value(QStringLiteral("shared_applied_revision")).toInt() == authoritative &&
+                !tools.value(QStringLiteral("shared_deferred_state")).toBool();
+        }, QStringLiteral("initial Shared listening state survives startup song/WAV changes without another edit"));
         for (std::size_t i = 0; i < 4; ++i) requireSummary(peers.peer(i), QStringLiteral("1.00"), 0, 0, false);
         invoke(peers.peer(2), QStringLiteral("looper.listening-tools"), QStringLiteral("click"));
         requireSummary(peers.peer(2), QStringLiteral("1.00"), 0, 0, true);
@@ -190,7 +190,7 @@ int main(int argc, char** argv) {
         waitAll(peers, [](std::size_t, const QJsonObject& state) {
             return state.value(QStringLiteral("performance")).toObject().value(QStringLiteral("global_transport_playing")).toBool();
         }, QStringLiteral("shared playback started"));
-        if (serverMode) {
+        {
             const auto receipts=waitAll(peers, [](std::size_t index,const QJsonObject& state) {
                 const auto transport=state.value("jam").toObject().value("udp_multiplex").toObject();
                 if (index!=0) return transport.value("native_intent_acks_sent").toInteger()>0;
@@ -212,15 +212,15 @@ int main(int argc, char** argv) {
         auto slow = waitAll(peers, [](std::size_t, const QJsonObject& state) { return applied(state, 500000, 500000, 300, 640, true); },
             QStringLiteral("peer-originated speed, pitch and focus commit"));
         for (std::size_t i = 0; i < 4; ++i) requireSummary(peers.peer(i), QStringLiteral("0.50"), 3, 640, i == 2);
-        if (serverMode) waitAll(peers, [](std::size_t index, const QJsonObject& state) {
+        waitAll(peers, [](std::size_t index, const QJsonObject& state) {
             if (index != 0) return true;
             const auto tools = listening(state);
-            const auto reports = tools.value(QStringLiteral("server_peer_applications")).toArray();
+            const auto reports = tools.value(QStringLiteral("shared_peer_applications")).toArray();
             if (reports.size() != 3) return false;
             for (const auto& report : reports)
-                if (report.toObject().value(QStringLiteral("revision")).toInt() != tools.value(QStringLiteral("server_authoritative_revision")).toInt()) return false;
+                if (report.toObject().value(QStringLiteral("revision")).toInt() != tools.value(QStringLiteral("shared_authoritative_revision")).toInt()) return false;
             return true;
-        }, QStringLiteral("all three receivers acknowledge actual application of the Server listening state"));
+        }, QStringLiteral("all three receivers acknowledge actual application of the Shared listening state"));
         invoke(peers.peer(2), QStringLiteral("looper.listening-tools"), QStringLiteral("click"));
         requireSummary(peers.peer(2), QStringLiteral("0.50"), 3, 640, false);
         invoke(peers.peer(2), QStringLiteral("looper.listening-tools"), QStringLiteral("click"));

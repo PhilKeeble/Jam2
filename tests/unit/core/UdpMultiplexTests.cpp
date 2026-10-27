@@ -37,7 +37,7 @@ void localRouteDiscovery()
     require(!explicitLocal.recv_from_for(bytes, 0), "local route discovery sent an unsolicited packet");
 }
 
-void invitationCompatibility()
+void reusableInvitations()
 {
     jam2::SessionInfo info{{"jam2gether.com", 40404}, 0x123456789abcdef0ULL, {}};
     info.strategy = jam2::ConnectionStrategy::Jam2Server;
@@ -49,12 +49,14 @@ void invitationCompatibility()
         "server invitation did not retain strategy and credentials");
     require(jam2::make_jam_url(parsed) == url, "recreating a jam changed its reusable invitation");
     info.strategy = jam2::ConnectionStrategy::Direct;
-    const auto legacy = jam2::make_jam_url(info);
-    require(legacy.find("strategy=") == std::string::npos &&
-        jam2::parse_jam_url(legacy).strategy == jam2::ConnectionStrategy::Stun,
-        "legacy invitation encoding/bootstrap changed");
+    const auto direct = jam2::make_jam_url(info);
+    require(direct.find("strategy=direct") != std::string::npos &&
+        jam2::parse_jam_url(direct).strategy == jam2::ConnectionStrategy::Direct,
+        "direct invitation lost its discovery strategy");
+    info.strategy=jam2::ConnectionStrategy::Stun;
+    require(jam2::parse_jam_url(jam2::make_jam_url(info)).strategy==jam2::ConnectionStrategy::Stun,"STUN invitation lost its discovery strategy");
     bool rejected = false;
-    try { (void)jam2::parse_jam_url(legacy + "&strategy=unknown"); }
+    try { (void)jam2::parse_jam_url(jam2::make_jam_url(info) + "&strategy=unknown"); }
     catch (const std::exception&) { rejected = true; }
     require(rejected, "unknown strategy was accepted");
 }
@@ -146,7 +148,6 @@ void audioRoutingRetainsNativePacketBytes()
         }
     };
     jam2::NetworkRuntime native;
-    jam2::UdpSocket placeholder; placeholder.bind({"127.0.0.1", 0});
     jam2::SessionInfo info{{"127.0.0.1", 0}, 99, {}};
     const std::array<jam2::NetworkPeerDescriptor, 2> peers{{
         {{2}, jam2::resolve_udp_endpoint({"127.0.0.1", 53000}), jam2::PeerEndpointState::Active},
@@ -155,10 +156,9 @@ void audioRoutingRetainsNativePacketBytes()
     jam2::PeerStreamConfig config;
     config.sample_rate = contract.sample_rate;
     config.frames_per_packet = contract.frames_per_packet;
-    jam2::NetworkSession session(std::move(placeholder), info, contract,
-        jam2::SessionBootstrapRole::Creator, {1}, peers, config, nullptr);
     const auto transport = std::make_shared<Routed>();
-    session.setDatagramTransport(transport);
+    jam2::NetworkSession session(std::shared_ptr<jam2::NetworkDatagramTransport>(transport), info, contract,
+        jam2::SessionBootstrapRole::Creator, {1}, peers, config, nullptr);
     std::vector<std::uint8_t> pcm(128 * 3);
     for (std::size_t i = 0; i < pcm.size(); ++i) pcm[i] = static_cast<std::uint8_t>(i % 251);
     const auto result = session.sendToActive(jam2::protocol::PacketType::Audio, 7, 896, pcm);
@@ -273,6 +273,25 @@ void receiverOwnershipLifecycle()
     require(first->detachments==2 && second->detachments==1,"destruction detached an already closed receiver");
     { auto session = makeSession(); session.setDatagramTransport(first); }
     require(first->detachments==3,"session destruction retained receiver ownership");
+    {
+        auto direct = std::shared_ptr<jam2::NetworkDatagramTransport>(first);
+        jam2::NetworkSession session(direct, jam2::SessionInfo{{"127.0.0.1",0},99,{}}, {},
+            jam2::SessionBootstrapRole::Creator, {1}, std::span<const jam2::NetworkPeerDescriptor>{}, {}, nullptr);
+        require(first->attachments==4,"construction did not attach the routed receiver");
+        bool threw=false;
+        try { session.setDatagramTransport({}); } catch (const std::invalid_argument&) { threw=true; }
+        require(threw && first->detachments==3,"routed session silently fell back to a missing native socket");
+    }
+    require(first->detachments==4,"routed construction did not release receiver ownership");
+    for (auto transport : {std::shared_ptr<Transport>{}, rejected}) {
+        bool threw=false;
+        try {
+            jam2::NetworkSession session(std::shared_ptr<jam2::NetworkDatagramTransport>(transport),
+                jam2::SessionInfo{{"127.0.0.1",0},99,{}}, {}, jam2::SessionBootstrapRole::Creator,
+                {1}, std::span<const jam2::NetworkPeerDescriptor>{}, {}, nullptr);
+        } catch (const std::exception&) { threw=true; }
+        require(threw,"invalid routed construction succeeded");
+    }
 }
 
 void routedReceivePreservesMultiplexSizedDatagrams()
@@ -479,7 +498,7 @@ int main(int argc, char** argv)
         }
         initialRtoLearnsHotspotLatencyWithoutInventingLoss();
         localRouteDiscovery();
-        invitationCompatibility();
+        reusableInvitations();
         reliableDeliveryWithLossDuplicationAndReordering();
         boundsBackpressureAndIndependentChannels();
         unsentPackingPreservesOwnership();

@@ -11,8 +11,9 @@
 #include "AutomationChannel.hpp"
 #include "AssetChunkProtocol.hpp"
 #include "ControlProtocol.hpp"
+#include "ControlWire.hpp"
+#include "PeerName.hpp"
 #include "ControlMessageValidation.hpp"
-#include "ControllerLifecycleValidation.hpp"
 #include "DebugActionValidation.hpp"
 #include "MusicCorpusDiagnostic.hpp"
 #include "SessionController.hpp"
@@ -296,6 +297,7 @@ int runFuzzInput(const QString& target, const QString& inputPath)
     if (target == QStringLiteral("control")) {
         QByteArray buffer = input;
         quint64 sequence = 7;
+        jam2::application::control_wire::Codec codec;
         accepted = !buffer.isEmpty();
         while (accepted && !buffer.isEmpty()) {
             QByteArray body;
@@ -307,17 +309,11 @@ int runFuzzInput(const QString& target, const QString& inputPath)
                 accepted = false;
                 break;
             }
-            jam2::control_protocol::AuthenticatedPayload payload;
-            accepted = jam2::control_protocol::decodeAuthenticated(
-                body, QByteArray(32, 'k'), sequence++, payload, detail);
-            if (accepted && payload.type == jam2::control_protocol::AuthenticatedPayloadType::Json) {
-                QString validation;
-                accepted = jam2::application::validateControlMessage(payload.message, validation);
-                if (!accepted) detail = validation;
-            } else if (accepted) {
-                jam2::application::asset_chunk::Chunk chunk;
-                accepted = jam2::application::asset_chunk::decode(payload.binary, chunk, detail);
-            }
+            using namespace jam2::application::control_wire;
+            Operation operation{}; quint8 flags=0; QByteArray payload; Codec::Decoded decoded;
+            accepted=verify(body,sequence++,QByteArray(32,'k'),operation,flags,payload,detail) &&
+                codec.decode(operation,payload,decoded,detail);
+            if (accepted && !decoded.message.isEmpty()) accepted=jam2::application::validateControlMessage(decoded.message,detail);
         }
     } else if (target == QStringLiteral("udp-pcm16") ||
                target == QStringLiteral("udp-pcm24")) {
@@ -471,7 +467,6 @@ QJsonObject descriptionJson()
             QStringLiteral("local"),
             QStringLiteral("lifecycle.local-network-local"),
             QStringLiteral("validate.boundaries"),
-            QStringLiteral("validate.controller-lifecycle"),
             QStringLiteral("validate.music-full-form-corpus"),
             QStringLiteral("network.create"),
             QStringLiteral("network.join")}},
@@ -729,7 +724,7 @@ ParsedScenario parseScenario(const QString& path, const QJsonObject& source, con
     }
     result.optionArguments << QStringLiteral("--log-stats")
                            << QDir(result.artifactRoot).filePath(QStringLiteral("csv"));
-    // Validate the native runtime/profile layer before adding structured TCP
+    // Validate the native runtime/profile layer before adding structured UDP multiplex
     // bootstrap fields. SessionController owns --wait-ms, --max-peers and
     // explicit session material; they are intentionally not CLI runtime
     // options and must not be fed through the audio option parser.
@@ -742,38 +737,22 @@ ParsedScenario parseScenario(const QString& path, const QJsonObject& source, con
 
     const QJsonObject network = source.value(QStringLiteral("network")).toObject();
     static const std::set<QString> networkFields{
-        QStringLiteral("bind"), QStringLiteral("join_url"), QStringLiteral("no_stun"),
+        QStringLiteral("name"), QStringLiteral("bind"), QStringLiteral("join_url"), QStringLiteral("no_stun"),
         QStringLiteral("stun"), QStringLiteral("stun_timeout_ms"),
         QStringLiteral("stun_retries"), QStringLiteral("wait_ms"),
         QStringLiteral("public_endpoint"), QStringLiteral("session_id"),
         QStringLiteral("session_key"), QStringLiteral("max_peers"),
-        QStringLiteral("peer_token"), QStringLiteral("topology"),
+        QStringLiteral("peer_token"),
         QStringLiteral("heartbeat_interval_ms"), QStringLiteral("heartbeat_miss_limit")};
     for (auto it = network.begin(); it != network.end(); ++it) {
         if (!networkFields.contains(it.key())) {
             throw std::runtime_error("debug scenario network contains an unknown field");
         }
     }
-    if (network.contains(QStringLiteral("topology")) &&
-        !network.value(QStringLiteral("topology")).isObject()) {
-        throw std::runtime_error("debug topology must be an object");
-    }
-    const QJsonObject topology = network.value(QStringLiteral("topology")).toObject();
-    if (topology.size() > 32) {
-        throw std::runtime_error("debug topology contains too many observers");
-    }
-    for (auto observer = topology.begin(); observer != topology.end(); ++observer) {
-        if (!observer.value().isObject() || observer.key().toUtf8().size() > kMaxRunIdBytes ||
-            observer.value().toObject().size() > 32) {
-            throw std::runtime_error("debug topology observer map is invalid");
-        }
-        const QJsonObject peers = observer.value().toObject();
-        for (auto peer = peers.begin(); peer != peers.end(); ++peer) {
-            if (!peer.value().isString() || peer.value().toString().isEmpty() ||
-                peer.value().toString().toUtf8().size() > kMaxStringBytes) {
-                throw std::runtime_error("debug topology endpoint override is invalid");
-            }
-        }
+    if (result.operation.startsWith(QStringLiteral("network."))) {
+        const auto name=jam2::application::PeerName::fromInput(network.value(QStringLiteral("name")).toString());
+        if (!name) throw std::runtime_error(jam2::application::peerNameRequirement().toStdString());
+        result.optionArguments << QStringLiteral("--name") << name->text();
     }
     appendBoundedStringOption(network, QStringLiteral("bind"), QStringLiteral("--bind"), result.optionArguments);
     appendBoundedStringOption(network, QStringLiteral("stun"), QStringLiteral("--stun"), result.optionArguments);
@@ -1182,13 +1161,6 @@ int runFocusedOperation(const ParsedScenario& scenario, QJsonObject& result)
 {
     if (scenario.operation == QStringLiteral("validate.boundaries")) {
         result = jam2RunBoundaryValidation(scenario.fixtures);
-        return result.value(QStringLiteral("ok")).toBool(false) ? 0 : 3;
-    }
-    if (scenario.operation == QStringLiteral("validate.controller-lifecycle")) {
-        const QJsonObject network = scenario.source.value(QStringLiteral("network")).toObject();
-        result = jam2RunControllerLifecycleValidation(
-            network.value(QStringLiteral("heartbeat_interval_ms")).toInt(20),
-            network.value(QStringLiteral("heartbeat_miss_limit")).toInt(3));
         return result.value(QStringLiteral("ok")).toBool(false) ? 0 : 3;
     }
     if (scenario.operation ==

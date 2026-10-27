@@ -1,5 +1,7 @@
 # UDP Multiplex feasibility plan
 
+> Current branch status: Direct, STUN and Jam2 Server share the current typed UDP multiplex. TCP and older multiplex fallback paths have been removed, and create/join requires a validated peer name. Earlier rollout restrictions and TCP-retention choices below are historical. See [REVIEW-WIRE-FORMAT.md](REVIEW-WIRE-FORMAT.md#unified-multiplex-transport-and-mandatory-peer-names) for the implemented behavior, limits and native test evidence.
+
 Status: implemented as an experimental feasibility build on both UDP-Multiplex branches. Windows Release validation completed on 2026-10-25; real-network testing remains. See [implementation and validation notes](UDP-Multiplex-Implementation.md).
 Target Jam2 branch: `UDP-Multiplex`.
 Companion server repository: `Jam2-Server`.

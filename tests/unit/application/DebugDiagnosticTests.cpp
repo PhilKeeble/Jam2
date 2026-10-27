@@ -1,6 +1,7 @@
 #include "TestTiming.hpp"
 #include "AssetChunkProtocol.hpp"
 #include "ControlProtocol.hpp"
+#include "ControlWire.hpp"
 #include "protocol.hpp"
 
 #include <QCoreApplication>
@@ -208,13 +209,10 @@ void testHelpAndFuzzEntrypoints(
 
     if (runAcceptedFuzz) {
       const QByteArray directionKey(32, 'k');
-    const QByteArray control = jam2::control_protocol::encodeAuthenticated(
-        QJsonObject{
-            {QStringLiteral("type"), QStringLiteral("session.heartbeat")},
-            {QStringLiteral("sequence"), 1},
-        },
-        directionKey,
-        7);
+    jam2::application::control_wire::Codec codec;
+    jam2::application::control_wire::Codec::Encoded encoded; QString error;
+    expect(codec.encode({{"type","session.heartbeat"},{"sequence",1}},encoded,error),"encode typed fuzz input");
+    const auto control=jam2::application::control_wire::authenticate(encoded.operation,7,encoded.payload,directionKey);
     std::array<std::uint8_t, 16> udpKey{};
     for (std::size_t index = 0; index < udpKey.size(); ++index) {
         udpKey[index] = static_cast<std::uint8_t>(index);

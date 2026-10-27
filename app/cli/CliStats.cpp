@@ -715,8 +715,7 @@ CsvStatsLog::Context make_csv_context(
     std::string command_line,
     std::string_view mode,
     const Options& options,
-    const jam2::UdpSocket& socket,
-    const jam2::Endpoint& local,
+    const jam2::NetworkTransportInfo& transport,
     const jam2::Endpoint& peer,
     std::string_view endpoint_mode)
 
@@ -725,12 +724,12 @@ CsvStatsLog::Context make_csv_context(
     context.command_line = std::move(command_line);
     context.mode = std::string(mode);
     context.platform = platform_name();
-    context.local_endpoint = jam2::endpoint_to_string(local);
+    context.local_endpoint = jam2::endpoint_to_string(transport.local);
     context.peer_endpoint = jam2::endpoint_to_string(peer);
     context.endpoint_mode = std::string(endpoint_mode);
 
-    context.socket_send_buffer_bytes = socket.send_buffer_size();
-    context.socket_recv_buffer_bytes = socket.recv_buffer_size();
+    context.socket_send_buffer_bytes = transport.send_buffer_bytes;
+    context.socket_recv_buffer_bytes = transport.receive_buffer_bytes;
     context.requested_socket_send_buffer_bytes = options.socket_send_buffer.value_or(0);
     context.requested_socket_recv_buffer_bytes = options.socket_recv_buffer.value_or(0);
     context.requested_sample_rate = options.sample_rate;

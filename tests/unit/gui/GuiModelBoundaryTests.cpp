@@ -277,21 +277,22 @@ void testMixerPresentation()
             static_cast<double>(64 + 32 + 96 + 128) * 1000.0 / 48000.0;
         stats.peers.push_back(peer);
     }
-    const MixerStatsLabels normal = model.present(&stats);
-    expect(normal.latency.contains(QStringLiteral("P1 10.0 ms")) &&
+    const QHash<quint64,QString> names{{1,"Alice"},{2,"Alex"},{3,"Alex"},{4,"Dan"},{5,"Eve"}};
+    const MixerStatsLabels normal = model.present(&stats,names);
+    expect(normal.latency.contains(QStringLiteral("Alice 10.0 ms")) &&
             normal.latency.contains(QStringLiteral("+1")),
         "latency summary shows four peers and overflow count");
     expect(normal.latencyTooltip.count(QLatin1Char('\n')) == 4,
         "latency tooltip retains every peer");
     expect(normal.incomingPill == QStringLiteral("~12-14 ms") &&
             normal.incomingBreakdown.contains(
-                QStringLiteral("Peer 1 incoming: ~11.7 ms")) &&
+                QStringLiteral("Alice incoming: ~11.7 ms")) &&
             normal.incomingBreakdown.contains(
                 QStringLiteral("Jitter buffer 1.3 ms (64 fr)")) &&
             normal.incomingBreakdown.contains(
                 QStringLiteral("Playback ring 2.0 ms (96 fr)")) &&
             normal.incomingBreakdown.contains(
-                QStringLiteral("Peer 2 incoming: measuring")),
+                QStringLiteral("Alex incoming: measuring")),
         "incoming presentation exposes the health-pill range and complete component evidence");
     expect(normal.diagnosis == QStringLiteral("Diagnosis OK"),
         "healthy measurements report an explicit OK diagnosis");

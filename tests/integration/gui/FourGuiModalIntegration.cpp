@@ -1301,7 +1301,7 @@ bool exerciseLoopbackSharing(
     reservations.release();
     QJsonObject created;
     if (!send(coordinator.peer(0), {
-            {"type", "jam.create"}, {"id", "loopback-create"},
+            {"type", "jam.create"}, {QStringLiteral("name"), QStringLiteral("Alex")}, {"id", "loopback-create"},
             {"port", ports[0]}, {"test_input", "silence"},
         }) || !receiveApplied(coordinator.peer(0), "loopback-create", &created)) return false;
     const QString invite = created.value("invite_url").toString();
@@ -1312,7 +1312,7 @@ bool exerciseLoopbackSharing(
     for (std::size_t peer = 1; peer < FourPeerCoordinator::kPeerCount; ++peer) {
         const QString id = QStringLiteral("loopback-join-%1").arg(peer + 1);
         if (!send(coordinator.peer(peer), {
-                {"type", "jam.join"}, {"id", id}, {"port", ports[peer]},
+                {"type", "jam.join"}, {QStringLiteral("name"), QStringLiteral("Alex")}, {"id", id}, {"port", ports[peer]},
                 {"invite_url", invite}, {"test_input", "silence"},
             }) || !receiveApplied(coordinator.peer(peer), id)) return false;
     }
@@ -3328,6 +3328,15 @@ int main(int argc, char* argv[])
     auto& creator = coordinator.peer(0);
     openModal(creator, QStringLiteral("real-create-open"),
         QStringLiteral("session.start"));
+    for (const auto& invalid : {QString{}, QStringLiteral("Bob2"), QStringLiteral("<Alice>"), QStringLiteral("Alexander")}) {
+        (void)invokeAndReceive(creator, QStringLiteral("invalid-create-name"),
+            QStringLiteral("session.dialog.name"), QStringLiteral("set-text"), invalid);
+        const auto state=snapshotControl(creator,QStringLiteral("name-validation"),QStringLiteral("session.start-dialog.accept"));
+        if (controlState(state,QStringLiteral("session.start-dialog.accept")).value(QStringLiteral("enabled")).toBool())
+            fail(QStringLiteral("create accepted an invalid mandatory name"));
+    }
+    (void)invokeAndReceive(creator, QStringLiteral("real-create-name"),
+        QStringLiteral("session.dialog.name"), QStringLiteral("set-text"), QStringLiteral("Alice"));
     (void)invokeAndReceive(creator, QStringLiteral("real-create-no-stun"),
         QStringLiteral("session.dialog.connection-strategy"), QStringLiteral("set-index"), 2);
     (void)invokeAndReceive(creator, QStringLiteral("real-create-bind"),
@@ -3368,6 +3377,9 @@ int main(int argc, char* argv[])
         const QString prefix = QStringLiteral("real-join-%1").arg(peer + 1);
         openModal(joiner, prefix + QStringLiteral("-open"),
             QStringLiteral("session.join"));
+        (void)invokeAndReceive(joiner, prefix + QStringLiteral("-name"),
+            QStringLiteral("session.dialog.name"), QStringLiteral("set-text"),
+            peer==2 ? QStringLiteral("\u00c9lodie") : QStringLiteral("Alex"));
         (void)invokeAndReceive(joiner, prefix + QStringLiteral("-bind"),
             QStringLiteral("session.dialog.bind-host"),
             QStringLiteral("set-text"), QStringLiteral("127.0.0.1"));
@@ -3413,6 +3425,16 @@ int main(int argc, char* argv[])
         return 1;
     }
 
+
+    for (const auto& state : runtimeStates) {
+        const auto bindings=state.value("jam").toObject().value("peers").toArray();
+        QSet<QString> ids; QStringList names;
+        for (const auto& entry : bindings) { const auto peer=entry.toObject(); ids.insert(peer.value("peer_id").toString()); names.append(peer.value("name").toString()); }
+        if (bindings.size()!=4 || ids.size()!=4 || names.count("Alex")!=2 || !names.contains("Alice") || !names.contains(QStringLiteral("\u00c9lodie")))
+            fail(QStringLiteral("four-peer names did not bind to four distinct stable IDs"));
+        const auto incoming=state.value("jam").toObject().value("incoming_audio_breakdown").toString();
+        if (incoming.contains("Peer ")) fail(QStringLiteral("GUI retained a numbered peer fallback"));
+    }
     {
         const QString id = QStringLiteral("active-incoming-delay-presentation");
         QJsonObject applied;

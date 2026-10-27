@@ -706,7 +706,7 @@ void testConnectionGuidance()
     expect(!creator.trimmed().isEmpty(),
         "creator diagnostics provide platform firewall recovery guidance");
 #endif
-    expect(joiner.contains(QStringLiteral("No authenticated TCP")) &&
+    expect(joiner.contains(QStringLiteral("No authenticated UDP")) &&
             joiner.contains(QStringLiteral("invite address")) &&
             joiner.contains(QStringLiteral("both computers")),
         "joiner diagnostics distinguish coordinator and local firewall checks");

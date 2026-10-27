@@ -83,21 +83,6 @@ bool isSameMachine(const QString& host)
     });
 }
 
-bool isPrivateOrLocalIpv4(const QString& host)
-{
-    bool ok = false;
-    const quint32 address = QHostAddress(normalizedHost(host)).toIPv4Address(&ok);
-    if (!ok) {
-        return false;
-    }
-    return (address & 0xff000000U) == 0x0a000000U ||
-        (address & 0xfff00000U) == 0xac100000U ||
-        (address & 0xffff0000U) == 0xc0a80000U ||
-        (address & 0xffff0000U) == 0xa9fe0000U ||
-        (address & 0xffc00000U) == 0x64400000U ||
-        (address & 0xff000000U) == 0x7f000000U;
-}
-
 bool isWildcardEndpoint(const QString& endpoint, int& separator)
 {
     separator = endpoint.lastIndexOf(QLatin1Char(':'));
@@ -158,7 +143,7 @@ SharedSessionController::SharedSessionController(QObject* parent)
         publishTransportEvent(TransportEvent{
             TransportEventType::ReconnectAttempt,
             TransportFailure::None,
-            QStringLiteral("TCP control reconnect attempt"),
+            QStringLiteral("UDP multiplex control reconnect attempt"),
             true}, false);
         connectJoiner();
     });
@@ -182,7 +167,7 @@ SharedSessionController::SharedSessionController(QObject* parent)
         publishTransportEvent(TransportEvent{
             TransportEventType::Disconnected,
             TransportFailure::None,
-            QStringLiteral("TCP asset stream closed after track transfer became idle"),
+            QStringLiteral("UDP multiplex asset stream closed after track transfer became idle"),
             false,
             true,
             true}, false);
@@ -204,44 +189,28 @@ SharedSessionController::SharedSessionController(QObject* parent)
     server_.onEvent = [this](const TransportEvent& event) { handleServerEvent(event); };
     const auto wireDecision = [this](const QJsonObject& message, jam2::application::ControlMessageSource source) {
         using namespace jam2::application;
-        const auto decision = evaluateControlMessage(message, source, true);
+        const auto decision = evaluateControlMessage(message, source);
         if (!decision.accepted) {
             if (decision.rejection == ControlMessageRejection::Authorization) ++authorizationRejections_;
             else ++validationRejections_;
-            return server_wire::DispatchDecision{decision.rejection == ControlMessageRejection::Authorization
-                ? server_wire::Rejection::Unauthorized : server_wire::Rejection::InvalidValue, decision.reason};
+            return control_wire::DispatchDecision{decision.rejection == ControlMessageRejection::Authorization
+                ? control_wire::Rejection::Unauthorized : control_wire::Rejection::InvalidValue, decision.reason};
         }
         if (!matchesContractSampleRate(message, contract_.sampleRate)) {
             ++validationRejections_;
-            return server_wire::DispatchDecision{server_wire::Rejection::InvalidValue, QStringLiteral("WAV sample rate does not match session contract")};
+            return control_wire::DispatchDecision{control_wire::Rejection::InvalidValue, QStringLiteral("WAV sample rate does not match session contract")};
         }
-        return server_wire::DispatchDecision{};
+        return control_wire::DispatchDecision{};
     };
-    server_.validateServerMessage = [wireDecision](const QJsonObject& value) {
+    server_.validateMessage = [wireDecision](const QJsonObject& value) {
         return wireDecision(value, jam2::application::ControlMessageSource::AuthenticatedPeer);
     };
-    client_.validateServerMessage = [wireDecision](const QJsonObject& value) {
+    client_.validateMessage = [wireDecision](const QJsonObject& value) {
         return wireDecision(value, jam2::application::ControlMessageSource::Coordinator);
     };
     server_.onMessage = [this](const QString& token, const QJsonObject& message) {
         const QString type = message.value(QStringLiteral("type")).toString();
-        // Server wire dispatch has just run wireDecision synchronously, including
-        // source and contract checks. Legacy TCP still validates at this boundary.
-        const auto decision = multiplex_ ? jam2::application::ControlMessageDecision{
-            true, jam2::application::ControlMessageRejection::None, {}}
-            : jam2::application::evaluateControlMessage(message, jam2::application::ControlMessageSource::AuthenticatedPeer);
-        if (!decision.accepted) {
-            if (decision.rejection == jam2::application::ControlMessageRejection::Authorization) {
-                ++authorizationRejections_;
-            } else {
-                ++validationRejections_;
-            }
-            return;
-        }
-        if (!multiplex_ && !matchesContractSampleRate(message, contract_.sampleRate)) {
-            ++validationRejections_;
-            return;
-        }
+        // Typed-channel dispatch already applied source and contract validation.
         if (type == QStringLiteral("session.udp.recover")) {
             const auto target = message.value(QStringLiteral("peer")).toString();
             if (multiplex_ && peers_.contains(token) && peers_.contains(target) && token != target)
@@ -358,6 +327,20 @@ bool SharedSessionController::startMultiplex(bool creator)
 {
     using namespace jam2::application;
     multiplex_ = std::make_shared<UdpMultiplexTransport>();
+    multiplex_->onBootstrapFailure = [this](const QString& detail) {
+        if (closing_) return;
+        fail(TransportFailure::TransportError,detail,false);
+        publishTransportEvent(TransportEvent{TransportEventType::Failure,TransportFailure::TransportError,detail},role_==Role::Creator);
+    };
+    multiplex_->onRegistered = [this] {
+        if (closing_ || !multiplex_) return;
+        if (role_==Role::Creator) if (const auto endpoint=multiplex_->bootstrapEndpoint()) {
+            creator_.localEndpoint=QString::fromStdString(jam2::endpoint_to_string(*endpoint));
+            auto local=peers_.find(creator_.localToken);
+            if (local!=peers_.end()) local->endpoint=creator_.localEndpoint;
+        }
+        publishSnapshot();
+    };
     multiplex_->onJoinRequest = [this](const QString& peer) {
         if (closing_ || role_ != Role::Creator) return;
         const int remote = peers_.size() - (peers_.contains(creator_.localToken) ? 1 : 0);
@@ -428,6 +411,14 @@ bool SharedSessionController::startMultiplex(bool creator)
     };
     UdpMultiplexTransport::Config config;
     config.creator = creator;
+    config.strategy = creator ? creator_.strategy : joiner_.strategy;
+    config.bindHost = creator ? creator_.bindHost : joiner_.bindHost;
+    config.bindPort = creator ? creator_.port : joiner_.localPort;
+    config.socketBuffers=creator ? creator_.socketBuffers : joiner_.socketBuffers;
+    if (creator) {
+        config.publicEndpoint=creator_.publicEndpoint; config.stunServer=creator_.stunServer;
+        config.stunTimeoutMs=creator_.stunTimeoutMs; config.stunRetries=creator_.stunRetries;
+    }
     config.sessionHex = creator ? creator_.sessionHex : joiner_.sessionHex;
     config.keyHex = creator ? creator_.keyHex : joiner_.keyHex;
     config.localToken = creator ? creator_.localToken : joiner_.localToken;
@@ -451,7 +442,7 @@ bool SharedSessionController::startMultiplex(bool creator)
 void SharedSessionController::recoverMultiplexPeer(const QString& peer)
 {
     if (!multiplex_ || closing_ || !peers_.contains(peer)) return;
-    if (onSignalerStatus) onSignalerStatus(QStringLiteral("Repairing UDP peer link through rendezvous: %1").arg(peer.left(8)));
+    if (onSignalerStatus) onSignalerStatus(QStringLiteral("Repairing UDP peer link: %1").arg(peerName(peer)));
     if (role_ == Role::Creator) introducePair(creator_.localToken, peer);
     else if (peer == coordinatorToken_) {
         multiplex_->recoverPeer(peer);
@@ -501,11 +492,13 @@ void SharedSessionController::connectionWarning(
     const auto id = first + QLatin1Char('/') + second;
     if (introductionWarnings_.contains(id)) return;
     introductionWarnings_.insert(id);
-    const auto message = detail + QStringLiteral(
-        "\nThe connection between %1 and %2 could not be established. The current jam remains running. "
-        "To try another strategy, leave and restart using STUN after forwarding TCP and UDP port %3 "
-        "(49000 by default) on the routers.").arg(a.left(8), b.left(8))
-        .arg(role_ == Role::Creator ? creator_.port : 49000);
+    const auto aName=peerName(a), bName=peerName(b);
+    const QString connection = aName.isEmpty() || bName.isEmpty()
+        ? QStringLiteral("An incoming peer connection could not be established.")
+        : QStringLiteral("The connection between %1 and %2 could not be established.").arg(aName,bName);
+    const auto message = detail + QLatin1Char('\n') + connection + QStringLiteral(
+        " The current jam remains running. Direct and STUN require the creator UDP port to be forwarded; "
+        "peer-to-peer links require compatible router hole punching.");
     if (broadcast && validToken(a) && validToken(b))
         server_.send(QJsonObject{{QStringLiteral("type"), QStringLiteral("session.connection.failure")},
             {QStringLiteral("a"), a}, {QStringLiteral("b"), b},
@@ -555,8 +548,32 @@ QJsonObject SharedSessionController::multiplexDiagnostics() const
         {QStringLiteral("native_intent_sent"),link.nativeIntentSent}, {QStringLiteral("native_intent_acknowledged"),link.nativeIntentAcknowledged},
         {QStringLiteral("native_intent_receipts_allowed"),link.nativeIntentReceiptsAllowed},
         {QStringLiteral("last_receive_age_ms"), static_cast<qint64>(link.lastReceiveAgeMs)},
+        {QStringLiteral("socket_send_buffer_bytes"),link.sendBufferBytes},
+        {QStringLiteral("socket_receive_buffer_bytes"),link.receiveBufferBytes},
         {QStringLiteral("retained_audio_local"), endpoint(link.retainedAudioLocal)}});
-    QJsonObject result{{QStringLiteral("enabled"), multiplex_ != nullptr}, {QStringLiteral("running"), stats.running},
+    QJsonObject result{{QStringLiteral("bootstrap_repeat_ms"),500}, {QStringLiteral("bootstrap_join_attempt_ms"),3000},
+        {QStringLiteral("bootstrap_join_timeout_ms"),45000}, {QStringLiteral("bootstrap_maximum_attempts"),10},
+        {QStringLiteral("introduction_phase_attempt_ms"),4000}, {QStringLiteral("introduction_completion_timeout_ms"),8000},
+        {QStringLiteral("bootstrap_pending_authentication_limit"),kMaxPendingPeers},
+        {QStringLiteral("bootstrap_authentication_work_window_ms"),kAuthenticationFailureWindowMs},
+        {QStringLiteral("bootstrap_authentication_failure_limit"),kMaxAuthenticationFailuresPerWindow},
+        {QStringLiteral("enabled"), multiplex_ != nullptr}, {QStringLiteral("running"), stats.running},
+        {QStringLiteral("uses_rendezvous"),stats.usesRendezvous},
+        {QStringLiteral("physical_socket_count"),static_cast<qint64>(stats.physicalSocketCount)},
+        {QStringLiteral("socket_send_buffer_requested_bytes"),stats.requestedBuffers.sendBytes.value_or(0)},
+        {QStringLiteral("socket_receive_buffer_requested_bytes"),stats.requestedBuffers.receiveBytes.value_or(0)},
+        {QStringLiteral("bootstrap_socket_send_buffer_bytes"),stats.signalSendBufferBytes},
+        {QStringLiteral("bootstrap_socket_receive_buffer_bytes"),stats.signalReceiveBufferBytes},
+        {QStringLiteral("bootstrap_local"),QString::fromStdString(jam2::endpoint_to_string(stats.bootstrapLocal))},
+        {QStringLiteral("bootstrap_public"),QString::fromStdString(jam2::endpoint_to_string(stats.bootstrapPublic))},
+        {QStringLiteral("bootstrap_rejected"),static_cast<qint64>(stats.bootstrapRejected)},
+        {QStringLiteral("bootstrap_authentication_rejects"),static_cast<qint64>(stats.bootstrapAuthenticationRejects)},
+        {QStringLiteral("bootstrap_attempts"),static_cast<qint64>(stats.bootstrapAttempts)},
+        {QStringLiteral("pending_admission_timeout_ms"),static_cast<qint64>(stats.pendingAdmissionTimeoutMs)},
+        {QStringLiteral("pending_admission_timeouts"),static_cast<qint64>(stats.pendingAdmissionTimeouts)},
+        {QStringLiteral("introduction_pending"),static_cast<qint64>(stats.introductionPending)},
+        {QStringLiteral("stun_requests_sent"),static_cast<qint64>(stats.stunRequestsSent)},
+        {QStringLiteral("stun_responses_rejected"),static_cast<qint64>(stats.stunResponsesRejected)},
         {QStringLiteral("registered"), stats.registered}, {QStringLiteral("admission_paused"), stats.admissionPaused},
         {QStringLiteral("pause_confirmed"), stats.pauseConfirmed},
         {QStringLiteral("signal_packets_sent"), static_cast<qint64>(stats.signalPacketsSent)},
@@ -624,10 +641,10 @@ QJsonObject SharedSessionController::multiplexDiagnostics() const
         {QStringLiteral("same_socket_recovery_attempts"), 2},
         {QStringLiteral("links"), links}};
     if (multiplex_) result.insert(QStringLiteral("binary_control"), QJsonObject{
-        {QStringLiteral("server"), jam2::application::server_wire::diagnostics(server_.stats().serverWire)},
-        {QStringLiteral("peer_channels"), server_.serverWireDiagnostics()},
-        {QStringLiteral("client"), jam2::application::server_wire::diagnostics(client_.stats().serverWire)},
-        {QStringLiteral("asset_client"), jam2::application::server_wire::diagnostics(assetClient_.stats().serverWire)}});
+        {QStringLiteral("server"), jam2::application::control_wire::diagnostics(server_.stats().wire)},
+        {QStringLiteral("peer_channels"), server_.wireDiagnostics()},
+        {QStringLiteral("client"), jam2::application::control_wire::diagnostics(client_.stats().wire)},
+        {QStringLiteral("asset_client"), jam2::application::control_wire::diagnostics(assetClient_.stats().wire)}});
     return result;
 }
 bool SharedSessionController::configureServerReceiveModel(UdpMultiplexTransport::ReceiveModel model)
@@ -659,10 +676,11 @@ bool SharedSessionController::startLocal(const Jam2RuntimeOptions& options)
 
 bool SharedSessionController::startCreator(const CreatorConfig& config)
 {
-    // The headless creator starts UDP first to discover its advertised
-    // endpoint. Preserve that already-running runtime while taking ownership
-    // of its TCP/bootstrap lifecycle.
+    const auto name = jam2::application::PeerName::fromInput(config.name);
+    if (!name) { fail(TransportFailure::InvalidConfiguration, jam2::application::peerNameRequirement(), false); return false; }
+    // Preserve the local engine while the common transport starts discovery.
     reset(false);
+    knownPeerNames_.clear();
     closing_ = false;
     role_ = Role::Creator;
     runtimeAttachmentEnabled_ = false;
@@ -706,23 +724,23 @@ bool SharedSessionController::startCreator(const CreatorConfig& config)
     editorAuthorityToken_ = config.localToken;
     arrangementAuthorityToken_ = config.localToken;
     Peer local;
+    local.name = *name;
     local.endpoint = config.localEndpoint;
     local.peerId = *localPeerId;
     local.edgeState = EdgeState::Active;
     local.proofState = QStringLiteral("local");
     local.streamState = QStringLiteral("local");
     peers_.insert(config.localToken, local);
+    knownPeerNames_.insert(config.localToken, {*localPeerId, *name});
     reconnectEnabled_ = true;
-    const bool serverMode = config.strategy == jam2::ConnectionStrategy::Jam2Server;
-    if (!(serverMode ? server_.listenViaTransport(config.sessionHex, config.keyHex)
-                     : server_.listen(config.port, config.sessionHex, config.keyHex))) {
+    if (!server_.listenViaTransport(config.sessionHex, config.keyHex)) {
         fail(
             failure_ == TransportFailure::None ? TransportFailure::TransportError : failure_,
             server_.errorString(),
             false);
         return false;
     }
-    if (serverMode && !startMultiplex(true)) return false;
+    if (!startMultiplex(true)) return false;
     runtimeAttachmentEnabled_ = true;
     heartbeatTimer_.start();
     setLifecycle(Lifecycle::Listening);
@@ -731,11 +749,17 @@ bool SharedSessionController::startCreator(const CreatorConfig& config)
 
 bool SharedSessionController::startJoiner(const JoinerConfig& config)
 {
+    const auto name = jam2::application::PeerName::fromInput(config.name);
+    if (!name) { fail(TransportFailure::InvalidConfiguration, jam2::application::peerNameRequirement(), false); return false; }
     close();
+    knownPeerNames_.clear();
     closing_ = false;
     role_ = Role::Joiner;
     runtimeAttachmentEnabled_ = true;
     joiner_ = config;
+    joiner_.name = name->text();
+    client_.setPeerName(*name);
+    assetClient_.setPeerName(*name);
     joiner_.reconnectIntervalMs = std::clamp(config.reconnectIntervalMs, 10, 60000);
     joiner_.reconnectAttemptLimit = std::clamp(config.reconnectAttemptLimit, 1, 100);
     heartbeatIntervalMs_ = std::clamp(config.heartbeatIntervalMs, 10, 60000);
@@ -759,9 +783,7 @@ bool SharedSessionController::startJoiner(const JoinerConfig& config)
         return false;
     }
     setLifecycle(Lifecycle::Connecting);
-    if (config.strategy == jam2::ConnectionStrategy::Jam2Server) return startMultiplex(false);
-    connectJoiner();
-    return true;
+    return startMultiplex(false);
 }
 
 bool SharedSessionController::endSession(const QString& detail)
@@ -866,12 +888,12 @@ void SharedSessionController::refresh()
         publishTransportEvent(TransportEvent{
             TransportEventType::RefreshRequested,
             TransportFailure::None,
-            QStringLiteral("TCP control refresh requested")}, true);
+            QStringLiteral("UDP multiplex control refresh requested")}, true);
         if (server_.hasPeer()) {
             publishTransportEvent(TransportEvent{
                 TransportEventType::AlreadyConnected,
                 TransportFailure::None,
-                QStringLiteral("TCP control already connected"),
+                QStringLiteral("UDP multiplex control already connected"),
                 false,
                 true}, true);
         }
@@ -881,7 +903,7 @@ void SharedSessionController::refresh()
         publishTransportEvent(TransportEvent{
             TransportEventType::RefreshRequested,
             TransportFailure::None,
-            QStringLiteral("TCP control refresh requested"),
+            QStringLiteral("UDP multiplex control refresh requested"),
             true}, false);
         reconnectTimer_.stop();
         failure_ = TransportFailure::None;
@@ -962,7 +984,7 @@ bool SharedSessionController::send(const QJsonObject& message)
     const auto source = role_ == Role::Creator
         ? jam2::application::ControlMessageSource::LocalCreator
         : jam2::application::ControlMessageSource::LocalJoiner;
-    const auto decision = jam2::application::evaluateControlMessage(message, source, multiplex_ != nullptr);
+    const auto decision = jam2::application::evaluateControlMessage(message, source);
     if (!decision.accepted) {
         if (decision.rejection == jam2::application::ControlMessageRejection::Authorization) {
             ++authorizationRejections_;
@@ -1014,11 +1036,8 @@ bool SharedSessionController::sendTo(
     bool closeAfterWrite)
 {
     if (role_ == Role::Creator) {
-        const auto source = message.value(QStringLiteral("type")).toString() ==
-                QStringLiteral("debug.lifecycle.disconnect")
-            ? jam2::application::ControlMessageSource::Internal
-            : jam2::application::ControlMessageSource::LocalCreator;
-        const auto decision = jam2::application::evaluateControlMessage(message, source, multiplex_ != nullptr);
+        const auto source = jam2::application::ControlMessageSource::LocalCreator;
+        const auto decision = jam2::application::evaluateControlMessage(message, source);
         if (!decision.accepted) {
             if (decision.rejection == jam2::application::ControlMessageRejection::Authorization) {
                 ++authorizationRejections_;
@@ -1164,9 +1183,22 @@ SharedSessionController::Snapshot SharedSessionController::snapshot() const
     for (auto it = peers_.cbegin(); it != peers_.cend(); ++it) {
         result.peers.push_back(PeerSnapshot{
             it.key(), it->peerId, it->endpoint, it->edgeState,
-            it->proofState, it->streamState, it->sameMachine});
+            it->proofState, it->streamState, it->sameMachine, it->name});
     }
     return result;
+}
+
+QString SharedSessionController::peerName(const QString& token) const
+{
+    const auto peer = knownPeerNames_.constFind(token);
+    return peer == knownPeerNames_.cend() ? QString{} : peer->name.text();
+}
+
+QString SharedSessionController::peerName(quint64 id) const
+{
+    for (const auto& peer : peers_) if (peer.peerId == id) return peer.name.text();
+    for (const auto& peer : knownPeerNames_) if (peer.peerId == id) return peer.name.text();
+    return {};
 }
 
 void SharedSessionController::handleServerEvent(const TransportEvent& event)
@@ -1218,9 +1250,6 @@ void SharedSessionController::handleClientEvent(const TransportEvent& event)
         // connectionless, so an old NAT mapping can be dead while ordinary
         // sends still report success. Force the retained runtime to prove its
         // direct edges again instead of preserving a stale Active state.
-        if (!firstAuthentication && runtime_ != nullptr && !multiplex_) {
-            (void)runtime_->reprobePeers();
-        }
         if (!firstAuthentication && runtime_ != nullptr && multiplex_) {
             // The multiplex retains its proven audio socket. Recover only the
             // grid control state and its applied receipt on logical reconnect.
@@ -1293,6 +1322,8 @@ void SharedSessionController::handleAuthenticatedPeer(
     if (role_ != Role::Creator || token.isEmpty()) {
         return;
     }
+    const auto name = jam2::application::PeerName::fromWire(message.value(QStringLiteral("peer_name")).toString().toUtf8());
+    if (!name) { server_.rejectAuthenticatedPeer(token,jam2::application::peerNameRequirement()); return; }
     const int remotePeers = peers_.size() - (peers_.contains(creator_.localToken) ? 1 : 0);
     if (creator_.sessionPeerLimit > 0 && !peers_.contains(token) &&
         remotePeers >= creator_.sessionPeerLimit) {
@@ -1302,17 +1333,17 @@ void SharedSessionController::handleAuthenticatedPeer(
     }
 
     QString endpoint = message.value(QStringLiteral("udp_endpoint")).toString();
-    const QString tcpHost = normalizedHost(message.value(QStringLiteral("tcp_peer_host")).toString());
+    const QString peerHost = normalizedHost(message.value(QStringLiteral("peer_host")).toString());
     int separator = -1;
     if (isWildcardEndpoint(endpoint, separator)) {
-        if (tcpHost.isEmpty()) {
+        if (peerHost.isEmpty()) {
             server_.sendTo(token, QJsonObject{
                 {QStringLiteral("type"), QStringLiteral("session.error")},
                 {QStringLiteral("message"), QStringLiteral("Wildcard UDP candidate could not be resolved")},
             }, true);
             return;
         }
-        endpoint = tcpHost + endpoint.mid(separator);
+        endpoint = peerHost + endpoint.mid(separator);
     }
     if (endpoint.isEmpty()) {
         server_.sendTo(token, QJsonObject{
@@ -1331,19 +1362,28 @@ void SharedSessionController::handleAuthenticatedPeer(
         return;
     }
 
+    for (auto known=peers_.cbegin(); known!=peers_.cend(); ++known) {
+        if (known.key()!=token && known->peerId==*peerId) {
+            server_.rejectAuthenticatedPeer(token,QStringLiteral("Peer ID collides with an existing member"));
+            if (multiplex_) multiplex_->rejectPeer(token);
+            return;
+        }
+    }
     controlRecoveryDeadlines_.remove(token);
     Peer peer;
+    peer.name = *name;
     peer.endpoint = endpoint;
     peer.peerId = *peerId;
     peer.edgeState = EdgeState::Authenticated;
     peer.proofState = QStringLiteral("authenticated");
     peer.streamState = QStringLiteral("candidate");
-    peer.sameMachine = isSameMachine(tcpHost);
+    peer.sameMachine = isSameMachine(peerHost);
     const bool newPeer = !peers_.contains(token);
     peers_[token] = peer;
+    knownPeerNames_.insert(token, {peer.peerId, peer.name});
     if (multiplex_) {
-        if (newPeer) introduceMeshPeer(token);
         multiplex_->admitPeer(token);
+        if (newPeer) introduceMeshPeer(token);
     }
     if (contractReady_) {
         server_.sendTo(token, contractMessage());
@@ -1377,7 +1417,7 @@ void SharedSessionController::handleDisconnectedPeer(const QString& token)
         // with this token, but the GUI's outstanding request already can.
         if (onAssetDisconnected) onAssetDisconnected(token);
         if (onSignalerStatus) onSignalerStatus(QStringLiteral(
-            "UDP control stream lost; retaining audio socket while peer reconnects: %1").arg(token.left(8)));
+            "UDP control stream lost; retaining audio socket while peer reconnects: %1").arg(peerName(token)));
         return;
     }
     controlRecoveryDeadlines_.remove(token);
@@ -1401,31 +1441,6 @@ void SharedSessionController::handleDisconnectedPeer(const QString& token)
 void SharedSessionController::handleClientMessage(const QJsonObject& message)
 {
     const QString type = message.value(QStringLiteral("type")).toString();
-    const auto decision = multiplex_ ? jam2::application::ControlMessageDecision{
-        true, jam2::application::ControlMessageRejection::None, {}}
-        : jam2::application::evaluateControlMessage(message, jam2::application::ControlMessageSource::Coordinator);
-    if (!decision.accepted) {
-        if (decision.rejection == jam2::application::ControlMessageRejection::Authorization) {
-            ++authorizationRejections_;
-        } else {
-            ++validationRejections_;
-        }
-        publishTransportEvent(TransportEvent{
-            TransportEventType::Failure,
-            TransportFailure::AuthenticatedFrameRejected,
-            decision.reason}, false);
-        publishSnapshot();
-        return;
-    }
-    if (!multiplex_ && !matchesContractSampleRate(message, contract_.sampleRate)) {
-        ++validationRejections_;
-        publishTransportEvent(TransportEvent{
-            TransportEventType::Failure,
-            TransportFailure::AuthenticatedFrameRejected,
-            QStringLiteral("Control message WAV sample rate does not match the session contract")}, false);
-        publishSnapshot();
-        return;
-    }
     if (type == QStringLiteral("session.udp.introduce")) {
         if (multiplex_) multiplex_->prepareIntroduction(message.value(QStringLiteral("nonce")).toString());
         return;
@@ -1473,7 +1488,7 @@ void SharedSessionController::handleClientMessage(const QJsonObject& message)
             });
             reconnectEnabled_ = false;
             const QString detail =
-                QStringLiteral("TCP session contract is invalid or incompatible");
+                QStringLiteral("UDP multiplex session contract is invalid or incompatible");
             fail(TransportFailure::ContractRejected, detail, false);
             publishTransportEvent(TransportEvent{
                 TransportEventType::Failure,
@@ -1486,7 +1501,7 @@ void SharedSessionController::handleClientMessage(const QJsonObject& message)
     if (type == QStringLiteral("session.membership")) {
         if (!acceptMembershipPage(message)) {
             reconnectEnabled_ = false;
-            const QString detail = QStringLiteral("TCP coordinator membership is invalid");
+            const QString detail = QStringLiteral("UDP multiplex coordinator membership is invalid");
             fail(TransportFailure::MembershipRejected, detail, false);
             publishTransportEvent(TransportEvent{
                 TransportEventType::Failure,
@@ -1665,6 +1680,7 @@ bool SharedSessionController::acceptMembershipPage(const QJsonObject& message)
     }
 
     QMap<QString, Peer> next;
+    QSet<quint64> memberIds;
     for (int page = 0; page < pageCount; ++page) {
         const QJsonArray values = membershipAssembly_.pages.value(page)
             .value(QStringLiteral("peers")).toArray();
@@ -1675,31 +1691,22 @@ bool SharedSessionController::acceptMembershipPage(const QJsonObject& message)
             bool idOk = false;
             const quint64 peerId = object.value(QStringLiteral("peer_id")).toString().toULongLong(&idOk);
             const auto derivedPeerId = peerIdFromToken(token);
-            if (!derivedPeerId || *derivedPeerId != peerId ||
+            const auto name = jam2::application::PeerName::fromWire(object.value(QStringLiteral("name")).toString().toUtf8());
+            if (!name || !derivedPeerId || *derivedPeerId != peerId ||
                 endpoint.isEmpty() || endpoint.size() > 255 || !idOk || peerId == 0 ||
-                next.contains(token)) {
+                next.contains(token) || memberIds.contains(peerId)) {
                 membershipAssembly_ = {};
                 return false;
             }
-            const bool coordinatorViaLanInvite = token == coordinator &&
-                isPrivateOrLocalIpv4(joiner_.host) && !multiplex_;
-            if (coordinatorViaLanInvite) {
-                // The TCP invite is the strongest route evidence for a private
-                // LAN join. A creator may also publish a STUN candidate, but
-                // feeding that public address back to a same-LAN peer can fail
-                // on routers without NAT hairpinning and makes valid UDP proof
-                // packets look as though they came from an unknown endpoint.
-                endpoint = QStringLiteral("%1:%2").arg(joiner_.host).arg(joiner_.port);
-            }
+            memberIds.insert(peerId);
             Peer peer;
+            peer.name = *name;
             peer.endpoint = endpoint;
             peer.peerId = peerId;
             peer.edgeState = token == joiner_.localToken ? EdgeState::Active : EdgeState::Candidate;
             peer.proofState = token == joiner_.localToken
                 ? QStringLiteral("local")
-                : coordinatorViaLanInvite
-                    ? QStringLiteral("candidate-lan-invite")
-                    : QStringLiteral("candidate");
+                : QStringLiteral("candidate");
             peer.streamState = token == joiner_.localToken ? QStringLiteral("local") : QStringLiteral("candidate");
             next.insert(token, peer);
         }
@@ -1721,6 +1728,8 @@ bool SharedSessionController::acceptMembershipPage(const QJsonObject& message)
             if (!next.contains(it.key()) && it.key() != joiner_.localToken) multiplex_->removePeer(it.key());
     }
     peers_ = std::move(next);
+    for (auto peer=peers_.cbegin();peer!=peers_.cend();++peer)
+        knownPeerNames_.insert(peer.key(), {peer->peerId,peer->name});
     coordinatorToken_ = coordinator;
     editorAuthorityToken_ = editorAuthority;
     arrangementAuthorityToken_ = arrangementAuthority;
@@ -1752,16 +1761,11 @@ QJsonObject SharedSessionController::membershipPageFor(
                 endpoint = QStringLiteral("127.0.0.1") + endpoint.mid(separator);
             }
         }
-        if (endpointOverride) {
-            const QString overridden = endpointOverride(observerToken, token);
-            if (!overridden.isEmpty()) {
-                endpoint = overridden;
-            }
-        }
         entries.append(QJsonObject{
             {QStringLiteral("token"), token},
             {QStringLiteral("peer_id"), QString::number(peer.peerId)},
             {QStringLiteral("endpoint"), endpoint},
+            {QStringLiteral("name"), peer.name.text()},
         });
     }
     return QJsonObject{
@@ -1812,7 +1816,7 @@ void SharedSessionController::scheduleReconnect()
         return;
     }
     if (!everAuthenticated_ && reconnectAttempts_ >= reconnectAttemptLimit_) {
-        const QString detail = QStringLiteral("TCP control reconnect attempts exhausted");
+        const QString detail = QStringLiteral("UDP multiplex control reconnect attempts exhausted");
         reconnectEnabled_ = false;
         fail(TransportFailure::ReconnectExhausted, detail, false);
         publishTransportEvent(TransportEvent{
@@ -1825,7 +1829,7 @@ void SharedSessionController::scheduleReconnect()
     publishTransportEvent(TransportEvent{
         TransportEventType::ReconnectScheduled,
         TransportFailure::None,
-        QStringLiteral("TCP control reconnect scheduled"),
+        QStringLiteral("UDP multiplex control reconnect scheduled"),
         true}, false);
     reconnectTimer_.start();
 }
@@ -1835,20 +1839,11 @@ void SharedSessionController::connectJoiner()
     if (role_ != Role::Joiner || closing_) {
         return;
     }
-    if (multiplex_) {
-        if (everAuthenticated_ && reconnectAttempts_ > 2) {
-            reconnectAttempts_ = 0;
-            recoverMultiplexPeer(multiplex_->coordinatorToken());
-        } else multiplex_->openStream(multiplex_->coordinatorToken(), jam2::application::UdpMuxChannel::Control);
-        return;
-    }
-    client_.connectToHost(
-        joiner_.host,
-        joiner_.port,
-        joiner_.sessionHex,
-        joiner_.keyHex,
-        joiner_.localToken,
-        joiner_.localEndpoint);
+    if (!multiplex_) return;
+    if (everAuthenticated_ && reconnectAttempts_ > 2) {
+        reconnectAttempts_ = 0;
+        recoverMultiplexPeer(multiplex_->coordinatorToken());
+    } else multiplex_->openStream(multiplex_->coordinatorToken(), jam2::application::UdpMuxChannel::Control);
 }
 
 void SharedSessionController::connectAssetJoiner()
@@ -1858,18 +1853,7 @@ void SharedSessionController::connectAssetJoiner()
         assetClient_.isConnected()) {
         return;
     }
-    if (multiplex_) {
-        multiplex_->openStream(multiplex_->coordinatorToken(), jam2::application::UdpMuxChannel::Asset);
-        return;
-    }
-    assetClient_.connectToHost(
-        joiner_.host,
-        joiner_.port,
-        joiner_.sessionHex,
-        joiner_.keyHex,
-        joiner_.localToken,
-        QString{},
-        ControlClient::Channel::Asset);
+    if (multiplex_) multiplex_->openStream(multiplex_->coordinatorToken(),jam2::application::UdpMuxChannel::Asset);
 }
 
 void SharedSessionController::sendHeartbeat(const QString& targetToken)
@@ -1981,7 +1965,6 @@ void SharedSessionController::publishTransportEvent(
     TransportEvent event,
     bool serverSide)
 {
-    if (multiplex_) event.detail.replace(QStringLiteral("TCP"), QStringLiteral("UDP multiplex"));
     if (onTransportEvent) {
         onTransportEvent(event, serverSide);
     }
@@ -1996,15 +1979,6 @@ void SharedSessionController::reconcileRuntime(const Snapshot& snapshot)
     }
 
     Snapshot runtimeSnapshot = snapshot;
-    if (endpointOverride) {
-        for (PeerSnapshot& peer : runtimeSnapshot.peers) {
-            const QString overridden = endpointOverride(snapshot.localToken, peer.token);
-            if (!overridden.isEmpty()) {
-                peer.endpoint = overridden;
-            }
-        }
-    }
-
     if (multiplex_) {
         for (PeerSnapshot& peer : runtimeSnapshot.peers) {
             if (const auto endpoint = multiplex_->peerEndpoint(peer.peerId))
@@ -2033,7 +2007,6 @@ void SharedSessionController::reconcileRuntime(const Snapshot& snapshot)
         } else if (!runtimeAttachedForSession_) {
             Jam2RuntimeOptions options = networkOptionsFactory_(runtimeSnapshot);
             if (multiplex_) {
-                options.connection_strategy = jam2::ConnectionStrategy::Jam2Server;
                 options.datagram_transport = multiplex_;
                 options.no_stun = true;
                 options.bind.port = 0;

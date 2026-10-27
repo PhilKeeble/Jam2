@@ -2,6 +2,7 @@
 #include "LoopbackPortReservations.hpp"
 #include "TestTiming.hpp"
 #include "UdpImpairmentProxy.hpp"
+#include "UdpCandidateNetwork.hpp"
 #include "UdpSecurityFixtures.hpp"
 
 #include <QCoreApplication>
@@ -1139,9 +1140,10 @@ AttemptResult runAttempt(
             *key, numericSessionId, jam2::NetworkAudioFormat::Pcm16Mono);
     }
 
+    CandidateNetwork candidateNetwork(ports[0], true);
+    candidateNetwork.blockFirst = false;
+    candidateNetwork.impairMultiplex = false;
     std::vector<EdgeProxy> edges;
-    QJsonObject topology;
-    for (const QString& token : tokens) topology.insert(token, QJsonObject{});
     int edgeIndex = 0;
     for (int peerA = 0; peerA < kPeerCount; ++peerA) {
         for (int peerB = peerA + 1; peerB < kPeerCount; ++peerB) {
@@ -1159,17 +1161,30 @@ AttemptResult runAttempt(
                     });
             }
             if (!proxy->start(error)) return die(error, AttemptOutcome::HarnessInvalid);
-            QJsonObject fromA = topology.value(tokens[static_cast<std::size_t>(peerA)]).toObject();
-            QJsonObject fromB = topology.value(tokens[static_cast<std::size_t>(peerB)]).toObject();
-            fromA.insert(tokens[static_cast<std::size_t>(peerB)], proxy->serverPublicEndpoint());
-            fromB.insert(tokens[static_cast<std::size_t>(peerA)], proxy->publicEndpoint());
-            topology.insert(tokens[static_cast<std::size_t>(peerA)], fromA);
-            topology.insert(tokens[static_cast<std::size_t>(peerB)], fromB);
             edges.push_back({peerA, peerB, std::move(proxy)});
             ++edgeIndex;
         }
     }
     if (edges.size() != 6) return die(QStringLiteral("exactly six edge proxies were not created"));
+    candidateNetwork.nativeForwarder = [&](const QString& from, const QString& to,
+                                           const QByteArray& packet, CandidateNetwork::Delivery deliver) {
+        const auto a = std::find(tokens.begin(), tokens.end(), from);
+        const auto b = std::find(tokens.begin(), tokens.end(), to);
+        if (a == tokens.end() || b == tokens.end() || a == b)
+            throw std::runtime_error("native packet has no authenticated candidate identity");
+        const int source = static_cast<int>(a - tokens.begin());
+        const int destination = static_cast<int>(b - tokens.begin());
+        for (auto& edge : edges) {
+            if ((source == edge.peerA && destination == edge.peerB) ||
+                (source == edge.peerB && destination == edge.peerA)) {
+                edge.proxy->forwardDatagram(source == edge.peerB
+                    ? UdpProxyDirection::ClientToServer : UdpProxyDirection::ServerToClient,
+                    packet, std::move(deliver));
+                return;
+            }
+        }
+        throw std::runtime_error("native packet has no mesh impairment edge");
+    };
     std::vector<std::array<std::optional<std::uint64_t>, 2>> burstForwardBaselines(
         edges.size());
     std::vector<std::array<bool, 2>> burstForwardRecovered(edges.size());
@@ -1184,7 +1199,7 @@ AttemptResult runAttempt(
     const std::int64_t shutdownFrames = recordingStopFrames + kSampleRate;
     const QString osPriority = QStringLiteral("off");
     const QString invite = QStringLiteral("jam2://v1?endpoint=127.0.0.1:%1&session=%2&key=%3")
-        .arg(ports[0]).arg(sessionId, sessionKey);
+        .arg(candidateNetwork.port()).arg(sessionId, sessionKey);
     for (int index = 0; index < kPeerCount; ++index) {
         PeerProcess& peer = processes[static_cast<std::size_t>(index)];
         peer.root = QDir(root).filePath(QStringLiteral("peer-%1").arg(index + 1));
@@ -1244,12 +1259,12 @@ AttemptResult runAttempt(
             mode == MetronomeMode::ListenerCompensated
                 ? QStringLiteral("metro-pulse") : QStringLiteral("silence");
         QJsonObject network{
+        {QStringLiteral("name"), QStringLiteral("Alex")},
             {QStringLiteral("bind"), QStringLiteral("127.0.0.1:%1")
                 .arg(ports[static_cast<std::size_t>(index)])},
             {QStringLiteral("no_stun"), true},
             {QStringLiteral("wait_ms"), 120000},
             {QStringLiteral("peer_token"), tokens[static_cast<std::size_t>(index)]},
-            {QStringLiteral("topology"), topology},
         };
         if (index == 0) {
             network.insert(QStringLiteral("session_id"), sessionId);
@@ -1364,7 +1379,7 @@ AttemptResult runAttempt(
         return barrier.open(QIODevice::WriteOnly | QIODevice::NewOnly) &&
             barrier.write("start\n") == 6;
     };
-    // Keep every peer's paired TCP/UDP port owned while the six proxies bind
+    // Keep every peer's UDP port owned while the six proxies bind
     // their ephemeral sockets and all four children reach the pre-operation
     // barrier. Release only at the exact handoff before Jam2 binds, so a proxy
     // cannot reclaim a peer port during parallel CTest startup.
@@ -1408,6 +1423,7 @@ AttemptResult runAttempt(
             ++proxyPumpSamples;
         }
         lastProxyPumpNs = pumpNs;
+        candidateNetwork.pump();
         pumpProxies(edges);
         if (condition == NetworkCondition::BurstLoss) {
             for (std::size_t edgeIndexValue = 0;

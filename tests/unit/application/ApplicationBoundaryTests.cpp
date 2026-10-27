@@ -1,7 +1,6 @@
 #include "ApplicationRuntime.hpp"
 #include "AutomationChannel.hpp"
 #include "ControlProtocol.hpp"
-#include "NativeTcpTransport.hpp"
 
 #include <QCoreApplication>
 #include <QJsonObject>
@@ -283,44 +282,6 @@ void testAutomationChannelStateAndDisconnect()
     disconnected->stop();
 }
 
-void testTcpReservationAndListener()
-{
-    using namespace jam2::application;
-    NativeTcpPortReservation reservation;
-    expect(reservation.localPort() == 0 && reservation.errorString().isEmpty(),
-        "new TCP reservation has no port or error");
-    expect(reservation.bind(QStringLiteral("127.0.0.1"), 0) &&
-            reservation.localPort() != 0,
-        "TCP reservation binds an ephemeral numeric loopback port");
-    const quint16 occupied = reservation.localPort();
-    NativeTcpPortReservation collision;
-    expect(!collision.bind(QStringLiteral("127.0.0.1"), occupied) &&
-            !collision.errorString().isEmpty(),
-        "TCP reservation reports a deterministic loopback bind collision");
-    collision.close();
-    expect(collision.localPort() == 0,
-        "closing a failed TCP reservation retains no port");
-    reservation.close();
-    expect(reservation.localPort() == 0,
-        "closing a live TCP reservation releases its port");
-    expect(!reservation.bind(QStringLiteral("not-a-numeric-host"), 0) &&
-            !reservation.errorString().isEmpty(),
-        "TCP reservation rejects a nonnumeric bind host");
-
-    QObject context;
-    NativeTcpListener listener;
-    QString callbackError;
-    expect(listener.listen(0, &context,
-               [](const NativeTcpConnection::Pointer&) {},
-               [&](const QString& detail) { callbackError = detail; }, 1) &&
-            listener.isListening() && listener.localPort() != 0,
-        "native TCP listener publishes its actual ephemeral port");
-    listener.close();
-    expect(!listener.isListening() && listener.localPort() == 0 &&
-            callbackError.isEmpty(),
-        "native TCP listener closes without manufacturing an error callback");
-}
-
 void testRuntimeCountersAndPeerGain()
 {
     ApplicationRuntime runtime;
@@ -475,7 +436,6 @@ int main(int argc, char** argv)
     QCoreApplication application(argc, argv);
     try {
         testAutomationChannelStateAndDisconnect();
-        testTcpReservationAndListener();
         testRuntimeCountersAndPeerGain();
         testIncomingAudioDelayEstimate();
         testControlToken();

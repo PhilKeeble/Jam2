@@ -32,7 +32,7 @@ QString incomingPill(const ConnectionDiagnosticsSnapshot& stats)
         : QStringLiteral("~%1-%2 ms").arg(roundedMinimum).arg(roundedMaximum);
 }
 
-QString incomingBreakdown(const ConnectionDiagnosticsSnapshot& stats)
+QString incomingBreakdown(const ConnectionDiagnosticsSnapshot& stats, const QHash<quint64,QString>& names)
 {
     if (stats.peers.empty()) {
         return QStringLiteral("Waiting for an authenticated peer audio path.");
@@ -40,9 +40,11 @@ QString incomingBreakdown(const ConnectionDiagnosticsSnapshot& stats)
     QStringList peers;
     for (std::size_t index = 0; index < stats.peers.size(); ++index) {
         const Jam2PeerDiagnostics& peer = stats.peers[index];
+        const auto name = names.value(peer.peer_id);
+        if (name.isEmpty()) continue;
         const Jam2IncomingAudioDelay& incoming = peer.incoming_audio;
         if (!incoming.valid) {
-            peers << QStringLiteral("<b>Peer %1 incoming: measuring</b>").arg(index + 1);
+            peers << QStringLiteral("<b>%1 incoming: measuring</b>").arg(name.toHtmlEscaped());
             continue;
         }
         const double jitterMs = framesToMs(
@@ -57,11 +59,11 @@ QString incomingBreakdown(const ConnectionDiagnosticsSnapshot& stats)
             ? QStringLiteral("reported output path")
             : QStringLiteral("callback fallback");
         peers << QStringLiteral(
-            "<b>Peer %1 incoming: ~%2 ms</b><br>"
+            "<b>%1 incoming: ~%2 ms</b><br>"
             "Network RTT/2 %3 ms (RTT %4 ms)<br>"
             "Jitter buffer %5 ms (%6 fr) | Mixer queue %7 ms (%8 fr)<br>"
             "Playback ring %9 ms (%10 fr) | Output %11 ms (%12 fr, %13)")
-            .arg(index + 1)
+            .arg(name.toHtmlEscaped())
             .arg(incoming.total_ms, 0, 'f', 1)
             .arg(incoming.network_ms, 0, 'f', 1)
             .arg(peer.rtt_ms, 0, 'f', 1)
@@ -117,7 +119,7 @@ QString diagnosis(const ConnectionDiagnosticsSnapshot& stats)
 
 } // namespace
 
-MixerStatsLabels MixerStatsViewModel::present(const ConnectionDiagnosticsSnapshot* stats) const
+MixerStatsLabels MixerStatsViewModel::present(const ConnectionDiagnosticsSnapshot* stats, const QHash<quint64,QString>& names) const
 {
     if (stats == nullptr) {
         return {
@@ -133,9 +135,11 @@ MixerStatsLabels MixerStatsViewModel::present(const ConnectionDiagnosticsSnapsho
     QStringList allPeers;
     for (std::size_t index = 0; index < stats->peers.size(); ++index) {
         const auto& peer = stats->peers[index];
+        const auto name = names.value(peer.peer_id);
+        if (name.isEmpty()) continue;
         const QString value = peer.has_rtt
-            ? QStringLiteral("P%1 %2 ms").arg(index + 1).arg(peer.rtt_ms, 0, 'f', 1)
-            : QStringLiteral("P%1 -").arg(index + 1);
+            ? QStringLiteral("%1 %2 ms").arg(name).arg(peer.rtt_ms, 0, 'f', 1)
+            : QStringLiteral("%1 -").arg(name);
         allPeers.push_back(value);
         if (index < 4) visiblePeers.push_back(value);
     }
@@ -153,7 +157,7 @@ MixerStatsLabels MixerStatsViewModel::present(const ConnectionDiagnosticsSnapsho
         latency,
         allPeers.join(QStringLiteral("\n")),
         incomingPill(*stats),
-        incomingBreakdown(*stats),
+        incomingBreakdown(*stats,names),
         QStringLiteral("Jitter %1 ms").arg(stats->jitter_average_ms, 0, 'f', 1),
         QStringLiteral("Loss %1%").arg(stats->packet_loss_percent, 0, 'f', 2),
         underrun,

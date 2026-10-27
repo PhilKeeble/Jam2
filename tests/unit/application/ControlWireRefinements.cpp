@@ -1,4 +1,4 @@
-#include "ServerControlWire.hpp"
+#include "ControlWire.hpp"
 #include "ControlMessageValidation.hpp"
 #include <QCryptographicHash>
 #include <QElapsedTimer>
@@ -13,7 +13,7 @@
 #include <vector>
 
 namespace {
-namespace wire=jam2::application::server_wire;
+namespace wire=jam2::application::control_wire;
 void check(bool yes,const QString& reason) { if (!yes) throw std::runtime_error(reason.toStdString()); }
 QJsonObject lane(int i)
 {
@@ -60,11 +60,11 @@ void roundTrip(wire::Codec& a,wire::Codec& b,const QJsonObject& message,wire::Co
     wire::Codec::Decoded decoded; QString error;
     check(a.encode(message,encoded,error),"refinement encode: "+error);
     check(b.decode(encoded.operation,encoded.payload,decoded,error) && decoded.message==message,"refinement exact convergence: "+error);
-    check(jam2::application::validateControlMessage(decoded.message,error,true),"refinement domain validity: "+error);
+    check(jam2::application::validateControlMessage(decoded.message,error),"refinement domain validity: "+error);
 }
 }
 
-void serverControlRefinementFixtures()
+void controlWireRefinementFixtures()
 {
     {
         wire::Codec sender,receiver,fresh; wire::Codec::Encoded first,second; wire::Codec::Decoded decoded; QString error;
@@ -124,7 +124,7 @@ void serverControlRefinementFixtures()
     std::cout << "typed_refinements region=atomic splice=insert-delete manifest=typed-and-extension-fallback max_tracks=1536\n";
 }
 
-void serverControlRefinementPerformance()
+void controlWireRefinementPerformance()
 {
     struct Result { qint64 ns; quint64 bytes,fragments,typed; };
     for (const auto& workload : {"manifest-1","manifest-4","manifest-32","manifest-128","region-64-lanes","splice-64-lanes","peer-references"}) {

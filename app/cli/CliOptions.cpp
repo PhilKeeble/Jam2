@@ -47,7 +47,7 @@ const std::string_view kNetworkUsage = R"(Usage:
   jam2 network join <jam2-url> [options]
 
 Subcommands:
-  create    Create the TCP coordinator and direct UDP session
+  create    Create the UDP multiplex session
   join      Join using a jam2:// invitation URL
 Run `jam2 network <subcommand> -h` for its options.
 )";
@@ -177,12 +177,14 @@ void print_network_create_help()
     std::cout << R"(Usage:
   jam2 network create [options]
 
-Creates the TCP coordinator and direct UDP session, using the same local port
-number for both protocols, then prints a jam2:// invitation. STUN discovers
-only the public UDP candidate; audio remains direct UDP.
+Creates a direct full-mesh UDP multiplex session and prints a jam2:// invitation.
+STUN discovers only the creator endpoint; audio remains direct UDP.
 
 Create/bootstrap options:
-  --connection-strategy <server|stun|direct>  Connection strategy (default STUN)\n  --rendezvous <host:port>            Server-mode signaler (default jam2gether.com:40404)\n  --stun <host:port>                  STUN server endpoint
+  --name <letters>                   Required peer name, 1 to 8 Unicode letters
+  --connection-strategy <server|stun|direct>  Connection strategy (default STUN)
+  --rendezvous <host:port>            Server-mode signaler (default jam2gether.com:40404)
+  --stun <host:port>                  STUN server endpoint
   --public-endpoint <host:port>       Explicit advertised UDP candidate
   --no-stun                           Skip STUN discovery
   --stun-timeout-ms <ms>              Timeout for each STUN attempt
@@ -204,6 +206,7 @@ void print_network_join_help()
 Joins the endpoint/session carried by a jam2:// invitation URL.
 
 Join/bootstrap options:
+  --name <letters>                   Required peer name, 1 to 8 Unicode letters
   --wait-ms <ms>                      Coordinator bootstrap timeout; 0 uses the default
 )";
     print_network_options_help();

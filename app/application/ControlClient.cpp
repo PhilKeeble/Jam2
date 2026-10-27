@@ -9,7 +9,6 @@
 
 using namespace jam2::control_protocol;
 using jam2::application::ControlConnection;
-using jam2::application::NativeTcpError;
 
 ControlClient::ControlClient(QObject* parent)
     : QObject(parent)
@@ -21,20 +20,20 @@ ControlClient::ControlClient(QObject* parent)
         if (!isConnected()) {
             ++stats_.authenticationTimeouts;
             reject(
-                QStringLiteral("TCP control authentication timeout"),
+                QStringLiteral("UDP multiplex control authentication timeout"),
                 TransportFailure::AuthenticationTimeout,
                 true,
-                connection_ && connection_->transport() == jam2::application::ControlTransport::ReliableUdp);
+                true);
         }
     });
     QObject::connect(&frameTimer_, &QTimer::timeout, this, [this] {
         if (!buffer_.isEmpty()) {
             ++stats_.frameTimeouts;
             reject(
-                QStringLiteral("TCP control incomplete-frame timeout"),
+                QStringLiteral("UDP multiplex control incomplete-frame timeout"),
                 TransportFailure::FrameTimeout,
                 true,
-                connection_ && connection_->transport() == jam2::application::ControlTransport::ReliableUdp);
+                true);
         }
     });
 }
@@ -78,7 +77,7 @@ void ControlClient::installConnection(
     publishEvent(TransportEvent{
         TransportEventType::Connected,
         TransportFailure::None,
-        QStringLiteral("TCP connected; waiting for bounded auth challenge")});
+        QStringLiteral("UDP multiplex connected; waiting for bounded auth challenge")});
 }
 
 bool ControlClient::prepareConnection(
@@ -90,27 +89,25 @@ bool ControlClient::prepareConnection(
     failureReportedForAttempt_ = false;
     sessionHex_ = sessionHex.toLower();
     masterKey_ = decodeHex(keyHex, 16);
-    meshPeerToken_ = meshPeerToken.isEmpty() ? randomPeerToken() : meshPeerToken.toLower();
+    meshPeerToken_ = meshPeerToken.toLower();
     meshUdpEndpoint_ = meshUdpEndpoint;
     channel_ = channel;
     if (decodeHex(sessionHex_, 8).size() != 8 || masterKey_.size() != 16 ||
-        !peerIdFromToken(meshPeerToken_).has_value() || meshUdpEndpoint_.size() > 255) {
+        !peerIdFromToken(meshPeerToken_).has_value() || !localName_.valid() || meshUdpEndpoint_.size() > 255) {
         reject(
-            QStringLiteral("TCP control session, key, token, or endpoint is invalid"),
+            QStringLiteral("UDP multiplex control session, key, token, or endpoint is invalid"),
             TransportFailure::InvalidConfiguration,
             true);
         return false;
     }
     handshakeState_ = HandshakeState::WaitingForChallenge;
-    receiveSequence_ = 1;
-    sendSequence_ = 1;
     return true;
 }
 
 ControlClient::Stats ControlClient::stats() const
 {
     auto result = stats_;
-    if (serverWire_) jam2::application::server_wire::accumulate(result.serverWire, serverWire_->stats());
+    if (wire_) jam2::application::control_wire::accumulate(result.wire, wire_->stats());
     return result;
 }
 
@@ -124,82 +121,28 @@ void ControlClient::connectViaTransport(
     installConnection(connection, ++connectionGeneration_);
 }
 
-void ControlClient::connectToHost(
-    const QString& host,
-    quint16 port,
-    const QString& sessionHex,
-    const QString& keyHex,
-    const QString& meshPeerToken,
-    const QString& meshUdpEndpoint,
-    Channel channel)
+void ControlClient::retireWire()
 {
-    if (!prepareConnection(sessionHex, keyHex, meshPeerToken, meshUdpEndpoint, channel)) return;
-    const quint64 generation = ++connectionGeneration_;
-    ++stats_.connectionAttempts;
-    publishEvent(TransportEvent{
-        TransportEventType::Connecting,
-        TransportFailure::None,
-        QStringLiteral("TCP control connecting")});
-    connector_.connectToHost(
-        host,
-        port,
-        this,
-        [this, generation](const ControlConnection::Pointer& connection) {
-            installConnection(connection, generation);
-        },
-        [this, generation](const NativeTcpError& error) {
-            if (generation != connectionGeneration_ || manualClose_ || failureReportedForAttempt_) {
-                return;
-            }
-            failureReportedForAttempt_ = true;
-            TransportFailure failure = TransportFailure::TransportError;
-            switch (error.code) {
-            case NativeTcpError::Code::HostNotFound:
-                failure = TransportFailure::HostNotFound;
-                break;
-            case NativeTcpError::Code::ConnectionRefused:
-                failure = TransportFailure::ConnectionRefused;
-                break;
-            case NativeTcpError::Code::NetworkUnavailable:
-                failure = TransportFailure::NetworkUnavailable;
-                break;
-            case NativeTcpError::Code::None:
-            case NativeTcpError::Code::Timeout:
-            case NativeTcpError::Code::Transport:
-                break;
-            }
-            publishEvent(TransportEvent{
-                TransportEventType::Failure,
-                failure,
-                error.message,
-                true});
-        });
-}
-
-void ControlClient::retireServerWire()
-{
-    if (!serverWire_) return;
-    auto value = serverWire_->stats();
+    if (!wire_) return;
+    auto value = wire_->stats();
     value.unresolvedReceipts += value.pendingReceipts;
     value.pendingReceipts = 0; value.queuedBytes = 0;
-    jam2::application::server_wire::accumulate(stats_.serverWire, value);
-    serverWire_.reset();
+    jam2::application::control_wire::accumulate(stats_.wire, value);
+    wire_.reset();
 }
 void ControlClient::close()
 {
-    retireServerWire();
+    retireWire();
     manualClose_ = true;
     ++connectionGeneration_;
     authenticationTimer_.stop();
     frameTimer_.stop();
-    connector_.cancel();
     buffer_.clear();
     serverNonce_.clear();
     clientNonce_.clear();
     transcript_.clear();
     receiveKey_.clear();
     sendKey_.clear();
-    largeJsonReceiver_.reset();
     handshakeState_ = HandshakeState::WaitingForChallenge;
     const ControlConnection::Pointer connection = std::move(connection_);
     if (connection) {
@@ -209,56 +152,16 @@ void ControlClient::close()
 
 bool ControlClient::send(const QJsonObject& message)
 {
-    if (!isConnected()) {
-        return false;
-    }
-    if (serverWire_) return serverWire_->send(message);
-    const AuthenticatedJsonFrames encoded =
-        encodeAuthenticatedJsonFrames(message, sendKey_, sendSequence_);
-    qint64 wireBytes = 0;
-    for (const QByteArray& frame : encoded.frames) {
-        wireBytes += frame.size();
-    }
-    if (encoded.frames.isEmpty() || !canQueue(wireBytes)) {
-        ++stats_.outputHighWaterRejects;
-        return false;
-    }
-    for (const QByteArray& frame : encoded.frames) {
-        if (!writeFrame(frame)) {
-            return false;
-        }
-        ++sendSequence_;
-    }
-    if (encoded.chunked) {
-        ++stats_.largeJsonMessagesSent;
-        stats_.largeJsonRawBytesSent += static_cast<quint64>(encoded.rawBytes);
-        stats_.largeJsonCompressedBytesSent += static_cast<quint64>(encoded.compressedBytes);
-    }
-    return true;
+    return isConnected() && wire_ && wire_->send(message);
 }
-
 bool ControlClient::sendBinary(const QByteArray& payload)
 {
-    if (!isConnected()) {
-        return false;
-    }
-    if (serverWire_) return channel_ == Channel::Asset ? serverWire_->sendAsset(payload) : serverWire_->sendBinary(payload);
-    const QByteArray frame = encodeAuthenticatedBinary(payload, sendKey_, sendSequence_);
-    if (!frame.isEmpty() && writeFrame(frame)) {
-        ++sendSequence_;
-        return true;
-    }
-    return false;
+    return isConnected() && wire_ && (channel_==Channel::Asset
+        ? wire_->sendAsset(payload) : wire_->sendBinary(payload));
 }
-
 bool ControlClient::canQueue(qint64 additionalBytes) const
 {
-    if (serverWire_) return isConnected() && serverWire_->canQueue(additionalBytes);
-    const qint64 queueBound = std::min(
-        kOutputHighWaterBytes,
-        jam2::application::kNativeTcpQueueHighWaterBytes);
-    return isConnected() && additionalBytes >= 0 && additionalBytes <= queueBound &&
-        connection_->bytesToWrite() <= queueBound - additionalBytes;
+    return isConnected() && wire_ && wire_->canQueue(additionalBytes);
 }
 
 bool ControlClient::isConnected() const
@@ -292,14 +195,14 @@ void ControlClient::readConnection(
                 frameTimer_.stop();
             } else {
                 if (frameDeadline_.began < 0) frameDeadline_.received(frameClock_.elapsed());
-                frameTimer_.start(frameDeadline_.remaining(connection->transport(), frameClock_.elapsed()));
+                frameTimer_.start(frameDeadline_.remaining(frameClock_.elapsed()));
             }
             return;
         }
         if (result == TakeFrameResult::Invalid) {
             ++stats_.frameRejects;
             reject(
-                QStringLiteral("TCP control frame rejected: ") + error,
+                QStringLiteral("UDP multiplex control frame rejected: ") + error,
                 TransportFailure::FrameRejected,
                 true);
             return;
@@ -314,7 +217,7 @@ void ControlClient::readConnection(
             if (!decodeHandshake(body, message, error)) {
                 ++stats_.authenticationRejects;
                 reject(
-                    QStringLiteral("TCP control handshake rejected: ") + error,
+                    QStringLiteral("UDP multiplex control handshake rejected: ") + error,
                     TransportFailure::AuthenticationRejected,
                     true);
                 return;
@@ -323,60 +226,14 @@ void ControlClient::readConnection(
             if (!connection_ || connection_ != connection || !connection->isConnected()) {
                 return;
             }
-        } else if (const auto wire = serverWire_) {
+        } else if (const auto wire = wire_) {
             if (!wire->receive(body, error)) {
                 ++stats_.sequenceOrTagRejects;
-                reject(QStringLiteral("Server binary control rejected: ") + error,
+                reject(QStringLiteral("Typed control rejected: ") + error,
                     TransportFailure::AuthenticatedFrameRejected, true);
                 return;
             }
             if (!connection_ || connection_ != connection) return;
-        } else {
-            AuthenticatedPayload payload;
-            if (!decodeAuthenticated(body, receiveKey_, receiveSequence_, payload, error)) {
-                ++stats_.sequenceOrTagRejects;
-                reject(
-                    QStringLiteral("TCP control authenticated frame rejected: ") + error,
-                    TransportFailure::AuthenticatedFrameRejected,
-                    true);
-                return;
-            }
-            ++receiveSequence_;
-            if (payload.type == AuthenticatedPayloadType::Json) {
-                if (largeJsonReceiver_.active()) {
-                    ++stats_.sequenceOrTagRejects;
-                    reject(
-                        QStringLiteral("TCP control large JSON transfer was interleaved"),
-                        TransportFailure::AuthenticatedFrameRejected,
-                        true);
-                    return;
-                }
-                if (onMessage) {
-                    onMessage(payload.message);
-                }
-            } else if (payload.type == AuthenticatedPayloadType::LargeJsonChunk) {
-                QJsonObject completed;
-                bool ready = false;
-                if (!largeJsonReceiver_.accept(payload.binary, completed, ready, error)) {
-                    ++stats_.sequenceOrTagRejects;
-                    reject(
-                        QStringLiteral("TCP control large JSON transfer rejected: ") + error,
-                        TransportFailure::AuthenticatedFrameRejected,
-                        true);
-                    return;
-                }
-                if (ready) {
-                    ++stats_.largeJsonMessagesReceived;
-                    if (onMessage) {
-                        onMessage(completed);
-                    }
-                }
-            } else if (onBinaryMessage) {
-                onBinaryMessage(payload.binary);
-            }
-            if (!connection_ || connection_ != connection) {
-                return;
-            }
         }
     }
 
@@ -399,7 +256,7 @@ void ControlClient::connectionClosed(
     if (!connection || connection_ != connection) {
         return;
     }
-    retireServerWire();
+    retireWire();
     const bool wasAuthenticated = handshakeState_ == HandshakeState::Authenticated;
     stats_.maxBufferedInputBytes = std::max<quint64>(
         stats_.maxBufferedInputBytes,
@@ -424,7 +281,7 @@ void ControlClient::connectionClosed(
         publishEvent(TransportEvent{
             TransportEventType::Disconnected,
             TransportFailure::None,
-            QStringLiteral("TCP control disconnected"),
+            QStringLiteral("UDP multiplex control disconnected"),
             true,
             wasAuthenticated});
     }
@@ -435,23 +292,21 @@ void ControlClient::handleHandshake(const QJsonObject& message)
     const QString type = message.value(QStringLiteral("type")).toString();
     if (type == QStringLiteral("hello.error")) {
         ++stats_.authenticationRejects;
-        reject(QStringLiteral("TCP auth failed: ") +
+        reject(QStringLiteral("UDP multiplex auth failed: ") +
             message.value(QStringLiteral("reason")).toString(QStringLiteral("auth failed")),
             TransportFailure::AuthenticationRejected);
         return;
     }
 
     if (handshakeState_ == HandshakeState::WaitingForChallenge) {
-        const bool binary = connection_ && connection_->transport() == jam2::application::ControlTransport::ReliableUdp;
         serverNonce_ = decodeHex(message.value(QStringLiteral("server_nonce")).toString(), 16);
         if (type != QStringLiteral("hello.challenge") ||
             message.value(QStringLiteral("version")).toInt() != kControlProtocolVersion ||
             message.value(QStringLiteral("session")).toString().toLower() != sessionHex_ ||
-            serverNonce_.size() != 16 ||
-            (binary && message.value(QStringLiteral("server_wire")).toInt() != jam2::application::server_wire::kVersion)) {
+            serverNonce_.size() != 16) {
             ++stats_.authenticationRejects;
             reject(
-                QStringLiteral("TCP control server challenge is invalid"),
+                QStringLiteral("UDP multiplex control server challenge is invalid"),
                 TransportFailure::AuthenticationRejected,
                 true);
             return;
@@ -460,8 +315,7 @@ void ControlClient::handleHandshake(const QJsonObject& message)
         const QString channel = channel_ == Channel::Asset
             ? QStringLiteral("asset") : QStringLiteral("control");
         transcript_ = makeTranscript(
-            sessionHex_, serverNonce_, clientNonce_, meshPeerToken_, meshUdpEndpoint_, channel);
-        if (binary) transcript_ += QByteArrayLiteral("jam2-server-wire-") + QByteArray::number(jam2::application::server_wire::kVersion);
+            sessionHex_, serverNonce_, clientNonce_, meshPeerToken_, meshUdpEndpoint_, channel, localName_.text());
         const QByteArray clientProofDomain = channel_ == Channel::Asset
             ? QByteArrayLiteral("jam2-asset-client-proof")
             : QByteArrayLiteral("jam2-control-client-proof");
@@ -477,7 +331,7 @@ void ControlClient::handleHandshake(const QJsonObject& message)
             {QStringLiteral("channel"), channel},
             {QStringLiteral("proof"), encodeHex(proof)},
         };
-        if (binary) proofMessage.insert(QStringLiteral("server_wire"), jam2::application::server_wire::kVersion);
+        if (channel_ == Channel::Control) proofMessage.insert(QStringLiteral("peer_name"),localName_.text());
         const QByteArray response = encodeHandshake(proofMessage);
         if (!writeFrame(response)) {
             return;
@@ -486,7 +340,7 @@ void ControlClient::handleHandshake(const QJsonObject& message)
         publishEvent(TransportEvent{
             TransportEventType::ProofSent,
             TransportFailure::None,
-            QStringLiteral("TCP connected; sent challenge proof")});
+            QStringLiteral("UDP multiplex connected; sent challenge proof")});
         return;
     }
 
@@ -498,7 +352,7 @@ void ControlClient::handleHandshake(const QJsonObject& message)
             (channel_ == Channel::Asset ? QStringLiteral("asset") : QStringLiteral("control"))) {
         ++stats_.authenticationRejects;
         reject(
-            QStringLiteral("TCP control server proof state is invalid"),
+            QStringLiteral("UDP multiplex control server proof state is invalid"),
             TransportFailure::AuthenticationRejected,
             true);
         return;
@@ -512,7 +366,7 @@ void ControlClient::handleHandshake(const QJsonObject& message)
     if (!constantTimeEqual(receivedProof, expectedProof)) {
         ++stats_.authenticationRejects;
         reject(
-            QStringLiteral("TCP control server proof is invalid"),
+            QStringLiteral("UDP multiplex control server proof is invalid"),
             TransportFailure::AuthenticationRejected,
             true);
         return;
@@ -528,24 +382,24 @@ void ControlClient::handleHandshake(const QJsonObject& message)
         channel_ == Channel::Asset ? QByteArrayLiteral("jam2-asset-c2s")
                                    : QByteArrayLiteral("jam2-control-c2s"),
         transcript_);
-    if (connection_ && connection_->transport() == jam2::application::ControlTransport::ReliableUdp) {
+    if (true) {
         const std::weak_ptr<ControlConnection> weak = connection_;
-        serverWire_ = std::make_shared<jam2::application::server_wire::Channel>(sendKey_, receiveKey_,
+        wire_ = std::make_shared<jam2::application::control_wire::Channel>(sendKey_, receiveKey_,
             [weak](const QByteArray& bytes) { const auto connection = weak.lock(); return connection && connection->isConnected() && connection->write(bytes); },
             [weak] { const auto connection = weak.lock(); return connection ? connection->bytesToWrite() : qint64{256 * 1024}; });
-        serverWire_->onMessage = [this](const QJsonObject& value) { if (onMessage) onMessage(value); };
-        serverWire_->validateMessage = [this](const QJsonObject& value) {
-            return validateServerMessage ? validateServerMessage(value) : jam2::application::server_wire::DispatchDecision{};
+        wire_->onMessage = [this](const QJsonObject& value) { if (onMessage) onMessage(value); };
+        wire_->validateMessage = [this](const QJsonObject& value) {
+            return validateMessage ? validateMessage(value) : jam2::application::control_wire::DispatchDecision{};
         };
-        serverWire_->onAsset = [this](const QByteArray& value) { if (onBinaryMessage) onBinaryMessage(value); };
-        serverWire_->onFailure = [this](const QString& error) {
+        wire_->onAsset = [this](const QByteArray& value) { if (onBinaryMessage) onBinaryMessage(value); };
+        wire_->onFailure = [this](const QString& error) {
             reject(error, TransportFailure::AuthenticatedFrameRejected, true, true);
         };
         if (channel_ == Channel::Control && connection_->hasIndependentControl()) {
-            serverWire_->enableIndependent(
+            wire_->enableIndependent(
                 [weak](const QByteArray& bytes) { const auto c = weak.lock(); return c && c->writeIndependent(bytes); },
                 [weak] { const auto c = weak.lock(); return c ? c->independentBytesToWrite() : qint64{16 * 1024}; });
-            const std::weak_ptr<jam2::application::server_wire::Channel> wire = serverWire_;
+            const std::weak_ptr<jam2::application::control_wire::Channel> wire = wire_;
             connection_->startIndependent(this, [this, wire](const QByteArray& bytes) {
                 if (const auto channel = wire.lock()) { QString error;
                     if (!channel->receiveIndependent(bytes, error)) reject(error, TransportFailure::AuthenticatedFrameRejected, true, true);
@@ -558,7 +412,7 @@ void ControlClient::handleHandshake(const QJsonObject& message)
     publishEvent(TransportEvent{
         TransportEventType::Authenticated,
         TransportFailure::None,
-        QStringLiteral("TCP control authenticated"),
+        QStringLiteral("UDP multiplex control authenticated"),
         false,
         true});
 }
@@ -573,7 +427,7 @@ bool ControlClient::writeFrame(const QByteArray& frame)
     stats_.maxQueuedOutputBytes = std::max<quint64>(stats_.maxQueuedOutputBytes, queued);
     const qint64 queueBound = std::min(
         kOutputHighWaterBytes,
-        jam2::application::kNativeTcpQueueHighWaterBytes);
+        jam2::application::kControlStreamQueueBytes);
     if (queued + frame.size() > queueBound) {
         ++stats_.outputHighWaterRejects;
         // Queue saturation is temporary backpressure.  It must never tear
@@ -582,7 +436,7 @@ bool ControlClient::writeFrame(const QByteArray& frame)
     }
     if (!connection->write(frame)) {
         reject(
-            QStringLiteral("TCP control write failed"),
+            QStringLiteral("UDP multiplex control write failed"),
             TransportFailure::WriteFailed,
             true,
             true);
@@ -612,7 +466,7 @@ void ControlClient::reject(
     if (!connection || connection_ != connection) {
         return;
     }
-    retireServerWire();
+    retireWire();
     connection_.reset();
     connection->close();
 }

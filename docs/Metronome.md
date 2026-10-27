@@ -73,7 +73,7 @@ duration of the timing unit: pending/playing backing and recording transport
 stop and a fresh ordered epoch is established. Meter, written-unit, division,
 mode, click enablement, hit selection, and accents do not reset the epoch. A
 late or rejoining peer maps the current epoch onto its local engine without
-restarting it. TCP carries no competing metronome epoch or settings model.
+restarting it. All connection strategies use the same UDP grid/epoch control; there is no separate TCP settings model.
 
 Grid-aligned lane recording waits for the next safe beat of the existing epoch,
 then performs the configured number of count-in bars. The backing source,

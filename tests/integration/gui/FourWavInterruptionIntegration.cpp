@@ -568,7 +568,7 @@ bool leaveAndRejoin(
         return false;
     }
     if (!apply(coordinator, peer, {
-            {QStringLiteral("type"), QStringLiteral("jam.join")},
+            {QStringLiteral("type"), QStringLiteral("jam.join")}, {QStringLiteral("name"), QStringLiteral("Alex")},
             {QStringLiteral("id"), label + QStringLiteral("-rejoin")},
             {QStringLiteral("port"), port},
             {QStringLiteral("invite_url"), invite},
@@ -667,7 +667,7 @@ int main(int argc, char* argv[])
     reservations.release();
 
     if (!send(coordinator.peer(0), {
-            {QStringLiteral("type"), QStringLiteral("jam.create")},
+            {QStringLiteral("type"), QStringLiteral("jam.create")}, {QStringLiteral("name"), QStringLiteral("Alex")},
             {QStringLiteral("id"), QStringLiteral("create")},
             {QStringLiteral("port"), ports[0]},
         })) return 1;
@@ -680,7 +680,7 @@ int main(int argc, char* argv[])
     }
     for (std::size_t peer = 1; peer < arguments.size(); ++peer) {
         if (!apply(coordinator, peer, {
-                {QStringLiteral("type"), QStringLiteral("jam.join")},
+                {QStringLiteral("type"), QStringLiteral("jam.join")}, {QStringLiteral("name"), QStringLiteral("Alex")},
                 {QStringLiteral("id"), QStringLiteral("join-%1").arg(peer + 1)},
                 {QStringLiteral("port"), ports[peer]},
                 {QStringLiteral("invite_url"), invite},
@@ -1279,7 +1279,7 @@ int main(int argc, char* argv[])
     }
 
     if (!send(coordinator.peer(0), {
-            {QStringLiteral("type"), QStringLiteral("jam.create")},
+            {QStringLiteral("type"), QStringLiteral("jam.create")}, {QStringLiteral("name"), QStringLiteral("Alex")},
             {QStringLiteral("id"), QStringLiteral("new-session-create")},
             {QStringLiteral("port"), ports[0]},
         })) return 1;
@@ -1292,7 +1292,7 @@ int main(int argc, char* argv[])
     }
     for (std::size_t peer = 1; peer < FourPeerCoordinator::kPeerCount; ++peer) {
         if (!apply(coordinator, peer, {
-                {QStringLiteral("type"), QStringLiteral("jam.join")},
+                {QStringLiteral("type"), QStringLiteral("jam.join")}, {QStringLiteral("name"), QStringLiteral("Alex")},
                 {QStringLiteral("id"), QStringLiteral("new-session-join-%1").arg(peer + 1)},
                 {QStringLiteral("port"), ports[peer]},
                 {QStringLiteral("invite_url"), newInvite},
@@ -1469,7 +1469,7 @@ int main(int argc, char* argv[])
             }, handoffState, 90s)) return 1;
 
     if (!apply(coordinator, 1, {
-            {QStringLiteral("type"), QStringLiteral("jam.join")},
+            {QStringLiteral("type"), QStringLiteral("jam.join")}, {QStringLiteral("name"), QStringLiteral("Alex")},
             {QStringLiteral("id"), QStringLiteral("source-handoff-rejoin-a")},
             {QStringLiteral("port"), ports[1]},
             {QStringLiteral("invite_url"), newInvite},

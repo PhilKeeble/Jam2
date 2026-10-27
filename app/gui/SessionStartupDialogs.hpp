@@ -121,6 +121,7 @@ private:
 
     StartJamDialogCallbacks callbacks_;
     CreatePreference createTemplate_;
+    QLineEdit* name_ = nullptr;
     AudioDevicePreference audioTemplate_;
     QLineEdit* bindHost_ = nullptr;
     QSpinBox* port_ = nullptr;
@@ -184,6 +185,7 @@ private:
 
     JoinJamDialogCallbacks callbacks_;
     JoinPreference joinTemplate_;
+    QLineEdit* name_ = nullptr;
     AudioDevicePreference audioTemplate_;
     QLineEdit* inviteUrl_ = nullptr;
     QLineEdit* bindHost_ = nullptr;

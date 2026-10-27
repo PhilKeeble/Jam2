@@ -4,7 +4,7 @@
 
 class SessionController {
 public:
-    // The unified executable owns TCP bootstrap here and delegates every
+    // The unified executable owns UDP multiplex bootstrap here and delegates every
     // connected session to the same private direct-mesh UDP runner.
     static bool handlesNetworkCommand(int argc, char* argv[]);
     static int runNetworkCommand(int argc, char* argv[]);

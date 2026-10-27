@@ -886,7 +886,7 @@ int main(int argc, char* argv[])
     }
     portReservations.release();
     if (sharingOnly) {
-        if (!apply(coordinator, 1, {{"type", "jam.create"}, {"id", "prejoin-local-session"},
+        if (!apply(coordinator, 1, {{"type", "jam.create"}, {QStringLiteral("name"), QStringLiteral("Alex")}, {"id", "prejoin-local-session"},
                 {"strategy", "direct"}, {"port", ports[1]}, {"test_input", "tone-440"}})) return 1;
         if (!apply(coordinator, 1, {{"type", "looper.import"}, {"id", "prejoin-wav"},
                 {"lane", -1}, {"source_path", automaticWavPath}})) return 1;
@@ -899,7 +899,7 @@ int main(int argc, char* argv[])
     }
 
     if (!send(coordinator.peer(0), {
-            {QStringLiteral("type"), QStringLiteral("jam.create")},
+            {QStringLiteral("type"), QStringLiteral("jam.create")}, {QStringLiteral("name"), QStringLiteral("Alex")},
             {QStringLiteral("id"), QStringLiteral("create")},
             {QStringLiteral("strategy"), serverMode ? QStringLiteral("server") : QStringLiteral("direct")},
             {QStringLiteral("rendezvous"), serverMode ? signaler.endpoint : QStringLiteral("jam2gether.com:40404")},
@@ -918,7 +918,7 @@ int main(int argc, char* argv[])
     }
     for (std::size_t index = 1; index < arguments.size(); ++index) {
         if (!send(coordinator.peer(index), {
-                {QStringLiteral("type"), QStringLiteral("jam.join")},
+                {QStringLiteral("type"), QStringLiteral("jam.join")}, {QStringLiteral("name"), QStringLiteral("Alex")},
                 {QStringLiteral("id"), QStringLiteral("join-%1").arg(index + 1)},
                 {QStringLiteral("port"), ports[index]},
                 {QStringLiteral("invite_url"), invite},
@@ -1236,7 +1236,7 @@ int main(int argc, char* argv[])
                     return i == 1 ? jam.value("role") == "inactive" && !jam.value("network_running").toBool()
                         : jam.value("remote_peer_count").toInt() == 2;
                 }, states, false)) return 1;
-            if (!apply(coordinator, 1, {{"type", "jam.join"}, {"id", "same-invitation-rejoin-after-udp-repair"},
+            if (!apply(coordinator, 1, {{"type", "jam.join"}, {QStringLiteral("name"), QStringLiteral("Alex")}, {"id", "same-invitation-rejoin-after-udp-repair"},
                     {"port", ports[1]}, {"invite_url", invite}})) return 1;
             if (!waitForAll(coordinator, "same invitation rejoin after explicit UDP leave",
                 [&](std::size_t i, const QJsonObject& state) {

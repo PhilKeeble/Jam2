@@ -19,10 +19,11 @@
 #include <utility>
 #include <string>
 #include <vector>
+#include "PeerName.hpp"
 
 class ApplicationRuntime;
 
-// Non-UI owner of authenticated TCP bootstrap, membership, admission, and
+// Non-UI owner of authenticated UDP multiplex bootstrap, membership, admission, and
 // authority state. GUI and headless network commands bind presentation and
 // engine lifecycle to this same controller.
 class SharedSessionController final : public QObject {
@@ -63,6 +64,7 @@ public:
         QString proofState;
         QString streamState;
         bool sameMachine = false;
+        jam2::application::PeerName name;
     };
 
     struct SessionContract {
@@ -124,6 +126,12 @@ public:
         int heartbeatMissLimit = kDefaultHeartbeatMissLimit;
         jam2::ConnectionStrategy strategy = jam2::ConnectionStrategy::Stun;
         jam2::Endpoint rendezvousServer{"jam2gether.com", 40404};
+        QString name;
+        QString bindHost = QStringLiteral("0.0.0.0");
+        std::optional<jam2::Endpoint> publicEndpoint;
+        jam2::Endpoint stunServer{"stun.l.google.com",19302};
+        int stunTimeoutMs = 1000, stunRetries = 3;
+        jam2::application::UdpSocketBuffers socketBuffers;
     };
 
     struct JoinerConfig {
@@ -140,6 +148,10 @@ public:
         int heartbeatIntervalMs = kDefaultHeartbeatIntervalMs;
         int heartbeatMissLimit = kDefaultHeartbeatMissLimit;
         jam2::ConnectionStrategy strategy = jam2::ConnectionStrategy::Stun;
+        QString name;
+        QString bindHost = QStringLiteral("0.0.0.0");
+        quint16 localPort = 0;
+        jam2::application::UdpSocketBuffers socketBuffers;
     };
 
     explicit SharedSessionController(QObject* parent = nullptr);
@@ -180,6 +192,8 @@ public:
     bool isServer() const noexcept { return role_ == Role::Creator; }
     QString errorString() const;
     Snapshot snapshot() const;
+    QString peerName(const QString& token) const;
+    QString peerName(quint64 id) const;
     jam2::application::UdpMultiplexTransport::Snapshot multiplexSnapshot() const;
     QJsonObject multiplexDiagnostics() const;
     std::function<void(const QString&)> onConnectionWarning;
@@ -198,11 +212,11 @@ public:
     std::function<void(const QString&, const QJsonObject&)> onPeerAuthenticated;
     std::function<void(const QString&)> onPeerDisconnected;
     std::function<void(const SessionContract&)> onContract;
-    std::function<QString(const QString&, const QString&)> endpointOverride;
 
 private:
     jam2::application::UdpMultiplexTransport::ReceiveModel serverReceiveModel_ = jam2::application::UdpMultiplexTransport::ReceiveModel::Runtime;
     struct Peer {
+        jam2::application::PeerName name;
         QString endpoint;
         quint64 peerId = 0;
         EdgeState edgeState = EdgeState::Candidate;
@@ -267,6 +281,8 @@ private:
     CreatorConfig creator_;
     JoinerConfig joiner_;
     QMap<QString, Peer> peers_;
+    struct PeerNameBinding { quint64 peerId; jam2::application::PeerName name; };
+    QMap<QString, PeerNameBinding> knownPeerNames_;
     MembershipAssembly membershipAssembly_;
     QString coordinatorToken_;
     QString editorAuthorityToken_;

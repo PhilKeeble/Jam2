@@ -4,6 +4,7 @@
 #include "engine.hpp"
 
 #include <QString>
+#include <QHash>
 
 #include <cstdint>
 
@@ -31,7 +32,7 @@ struct MixerMeterLevels {
 
 class MixerStatsViewModel {
 public:
-    MixerStatsLabels present(const ConnectionDiagnosticsSnapshot* stats) const;
+    MixerStatsLabels present(const ConnectionDiagnosticsSnapshot* stats, const QHash<quint64,QString>& names = {}) const;
     MixerMeterLevels consume(
         const jam2::EngineGuiPeakSnapshot& intervalPeaks,
         double sendGain,

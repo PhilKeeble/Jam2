@@ -21,34 +21,53 @@
 #include <stdexcept>
 #include <vector>
 
-QJsonObject ServerSongProposalStaging::base(const QJsonObject& applied,
+QJsonObject SharedSongProposalStaging::base(const QJsonObject& applied,
     quint64 authorityRevision, quint64 validationGeneration) const
 {
     return !song_.isEmpty() && authorityRevision == authorityRevision_ &&
         validationGeneration == validationGeneration_ ? song_ : applied;
 }
 
-void ServerSongProposalStaging::stage(const QJsonObject& composed,
-    quint64 authorityRevision, quint64 validationGeneration, SharedSongScope scope)
+QJsonObject SharedSongProposalStaging::trackProposalBase(const QJsonObject& applied,
+    const QString& source, quint64 authorityRevision, quint64 validationGeneration) const
+{
+    if (!song_.isEmpty() && authorityRevision==authorityRevision_ && validationGeneration==validationGeneration_)
+        for (const auto& proposal : proposals_)
+            if (proposal.source==source) return proposal.song;
+    return applied;
+}
+
+void SharedSongProposalStaging::stage(const QJsonObject& composed,
+    quint64 authorityRevision, quint64 validationGeneration, SharedSongScope scope,
+    const QString& source, const QJsonObject& proposed)
 {
     if (song_.isEmpty() || authorityRevision != authorityRevision_ ||
-        validationGeneration == 0 || validationGeneration - 1 != validationGeneration_) scopes_.clear();
+        validationGeneration == 0 || validationGeneration - 1 != validationGeneration_) {
+        scopes_.clear(); proposals_.clear();
+    }
     if (!scopes_.contains(scope)) scopes_.append(scope);
+    if (scope==SharedSongScope::Tracks && !source.isEmpty() && !proposed.isEmpty()) {
+        auto found=std::find_if(proposals_.begin(),proposals_.end(),[&](const Proposal& item) {
+            return item.source==source;
+        });
+        if (found==proposals_.end()) proposals_.append({source,proposed});
+        else found->song=proposed;
+    }
     song_ = composed;
     authorityRevision_ = authorityRevision;
     validationGeneration_ = validationGeneration;
 }
 
-QVector<SharedSongScope> ServerSongProposalStaging::scopes(quint64 authorityRevision,
+QVector<SharedSongScope> SharedSongProposalStaging::scopes(quint64 authorityRevision,
     quint64 validationGeneration) const
 {
     return !song_.isEmpty() && authorityRevision == authorityRevision_ &&
         validationGeneration == validationGeneration_ ? scopes_ : QVector<SharedSongScope>{};
 }
 
-void ServerSongProposalStaging::reject(quint64 validationGeneration)
+void SharedSongProposalStaging::reject(quint64 validationGeneration)
 {
-    if (validationGeneration == validationGeneration_) song_ = {};
+    if (validationGeneration == validationGeneration_) { song_ = {}; proposals_.clear(); }
 }
 
 TrackReferenceMetadata TrackReferenceMetadata::fromJson(const QJsonObject& object)

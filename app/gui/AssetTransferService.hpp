@@ -20,6 +20,7 @@ public:
     virtual ~AssetTransferContext() = default;
     virtual QObject* dispatchContext() noexcept = 0;
     virtual int sessionSampleRate() const noexcept = 0;
+    virtual QString peerName(const QString&) const { return {}; }
     virtual QString assetPathForSend(const QString& hash) const = 0;
     virtual QString incomingAssetPath(const QString& hash) const = 0;
     virtual bool incomingAssetExpected(

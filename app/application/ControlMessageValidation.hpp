@@ -29,9 +29,9 @@ bool isEditorControlMessageType(const QString& type) noexcept;
 bool isArrangementControlMessageType(const QString& type) noexcept;
 bool isTrackSyncControlMessageType(const QString& type) noexcept;
 bool isManualTrackShareControlMessageType(const QString& type) noexcept;
-bool validateControlMessage(const QJsonObject& message, QString& reason, bool serverBinary = false);
+bool validateControlMessage(const QJsonObject& message, QString& reason);
 ControlMessageDecision evaluateControlMessage(
     const QJsonObject& message,
-    ControlMessageSource source, bool serverBinary = false);
+    ControlMessageSource source);
 
 }

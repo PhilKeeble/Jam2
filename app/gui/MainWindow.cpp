@@ -674,6 +674,7 @@ MainWindow::MainWindow(
             noteTrackAssetProgress(hash, peerToken, receiving);
         },
         [this](bool) { updateAssetChannelRequirement(); },
+        [this](const QString& token) { return sessionController_.peerName(token); },
     });
     jamTaster_ = std::make_unique<JamTasterService>(this);
     JamTasterService::Observer jamTasterObserver;
@@ -799,15 +800,7 @@ MainWindow::MainWindow(
             sessionRuntimeDraft_.configuration.publicHost =
                 QString::fromStdString(startup.public_candidate->host);
         }
-        if (sessionController_.isServer() && sessionRuntimeDraft_.configuration.strategy == jam2::ConnectionStrategy::Jam2Server) {
-            showPendingMeshInviteUrl();
-        } else if (sessionController_.isServer()) {
-            const QString advertised = activePublicEndpoint_.isEmpty() ? local : activePublicEndpoint_;
-
-            meshPeerEndpoints_[meshPeerToken()] = advertised;
-            sessionController_.updateLocalEndpoint(advertised);
-            showPendingMeshInviteUrl();
-        }
+        if (sessionController_.isServer()) showPendingMeshInviteUrl();
         if (startup.stats_csv) {
             appendLog(QStringLiteral("Stats CSV: ") + QString::fromStdString(startup.stats_csv->string()));
         }
@@ -862,9 +855,6 @@ MainWindow::MainWindow(
     sessionController_.onMessage = [this](const QString& sourcePeerToken, const QJsonObject& message) {
         const QString type = message.value(QStringLiteral("type")).toString();
         if (type.startsWith(QStringLiteral("jam.listening."))) {
-            if (type != QStringLiteral("jam.listening.cancel") && type != QStringLiteral("jam.listening.reset") &&
-                sessionRuntimeDraft_.configuration.strategy != jam2::ConnectionStrategy::Jam2Server &&
-                deferIncomingControlForLaneRecording(message, sourcePeerToken)) return;
             if (jamSyncAllowsControlMessage(message)) trackWorkspace_.listeningTools.receive(message, sourcePeerToken);
             return;
         }
@@ -1050,7 +1040,7 @@ MainWindow::MainWindow(
         } else if (type == QStringLiteral("looper.asset.done")) {
             assetTransfer_.receiveDone(message, sourcePeerToken);
         } else {
-            appendLog(QStringLiteral("rejected unexpected TCP asset control message"));
+            appendLog(QStringLiteral("rejected unexpected UDP multiplex asset control message"));
         }
     };
     sessionController_.onAssetBinaryMessage = [this](
@@ -1531,8 +1521,8 @@ void MainWindow::updateMixControls()
     }
     if (performanceLeftTitle_) {
         performanceLeftTitle_->setText(peerSelected
-            ? QStringLiteral("PEER %1 · RECEIVE VOLUME")
-                .arg(peerOrdinals_.value(selectedPeerId_, 0))
+            ? QStringLiteral("%1 · RECEIVE VOLUME")
+                .arg(sessionController_.peerName(selectedPeerId_))
             : QStringLiteral("YOU / LOCAL INPUT"));
     }
     if (performanceRightTitle_) {
@@ -1926,6 +1916,7 @@ QString MainWindow::meshInviteUrl() const
     if (!activePublicEndpoint_.isEmpty()) {
         jam2::SessionInfo info;
         info.endpoint = jam2::parse_endpoint(activePublicEndpoint_.toStdString());
+        info.strategy = sessionRuntimeDraft_.configuration.strategy;
         info.session_id = sessionId_;
         info.key = sessionKey_;
         return QString::fromStdString(jam2::make_jam_url(info));
@@ -1937,6 +1928,7 @@ QString MainWindow::meshInviteUrl() const
             ? configuration.bindHost.trimmed()
             : QStringLiteral("127.0.0.1"));
     jam2::SessionInfo info;
+    info.strategy = sessionRuntimeDraft_.configuration.strategy;
     info.endpoint = {
         host.toStdString(), static_cast<std::uint16_t>(configuration.port)};
     info.session_id = sessionId_;
@@ -1949,6 +1941,8 @@ void MainWindow::showPendingMeshInviteUrl()
     if (!pendingMeshInvitePopup_ || !sessionController_.isServer()) {
         return;
     }
+    if (sessionRuntimeDraft_.configuration.strategy != jam2::ConnectionStrategy::Jam2Server &&
+        !sessionController_.multiplexSnapshot().registered) return;
     pendingMeshInvitePopup_ = false;
     const QString inviteUrl = meshInviteUrl();
     appendLog(QStringLiteral("jam ready; invite URL copied to clipboard"));
@@ -2321,7 +2315,7 @@ void MainWindow::startJam(bool createSession)
         if (createSession) {
             meshPeerEndpoints_.clear();
             meshPeerEndpoints_[meshPeerToken()] = localMeshEndpoint(true);
-            if (!sessionController_.startCreator(SharedSessionController::CreatorConfig{
+            SharedSessionController::CreatorConfig creatorConfig{
                     static_cast<quint16>(configuration.port),
                     sessionHex(),
                     keyHex(),
@@ -2337,7 +2331,15 @@ void MainWindow::startJam(bool createSession)
                     },
                     SharedSessionController::kDefaultHeartbeatIntervalMs,
                     SharedSessionController::kDefaultHeartbeatMissLimit,
-                    configuration.strategy, configuration.rendezvousServer})) {
+                    configuration.strategy, configuration.rendezvousServer, configuration.name};
+            creatorConfig.bindHost=configuration.bindHost;
+            if (configuration.socketSendBuffer>0) creatorConfig.socketBuffers.sendBytes=configuration.socketSendBuffer;
+            if (configuration.socketRecvBuffer>0) creatorConfig.socketBuffers.receiveBytes=configuration.socketRecvBuffer;
+            if (!configuration.publicHost.trimmed().isEmpty())
+                creatorConfig.publicEndpoint=jam2::Endpoint{configuration.publicHost.trimmed().toStdString(),static_cast<std::uint16_t>(configuration.port)};
+            if (!configuration.stunServer.trimmed().isEmpty()) creatorConfig.stunServer=jam2::parse_endpoint(configuration.stunServer.trimmed().toStdString());
+            creatorConfig.stunTimeoutMs=configuration.stunTimeoutMs; creatorConfig.stunRetries=configuration.stunRetries;
+            if (!sessionController_.startCreator(creatorConfig)) {
                 const QString error = QStringLiteral("control server failed: ") + sessionController_.errorString();
                 appendLog(error);
                 showJamFailure(error);
@@ -2367,6 +2369,11 @@ void MainWindow::startJam(bool createSession)
                 SharedSessionController::kDefaultHeartbeatIntervalMs,
                 SharedSessionController::kDefaultHeartbeatMissLimit,
                 info.strategy,
+                sessionRuntimeDraft_.configuration.name,
+                sessionRuntimeDraft_.configuration.bindHost,
+                static_cast<quint16>(sessionRuntimeDraft_.configuration.port),
+                {sessionRuntimeDraft_.configuration.socketSendBuffer>0 ? std::optional{sessionRuntimeDraft_.configuration.socketSendBuffer} : std::nullopt,
+                 sessionRuntimeDraft_.configuration.socketRecvBuffer>0 ? std::optional{sessionRuntimeDraft_.configuration.socketRecvBuffer} : std::nullopt},
             })) {
                 showJamFailure(sessionController_.snapshot().failureDetail.isEmpty()
                     ? QStringLiteral("The join connection could not be started.")
@@ -2393,6 +2400,7 @@ bool MainWindow::startAutomationJam(
     int localPort,
     const QString& inviteUrl,
     Jam2TestInputMode testInput,
+    const QString& name,
     QString& error,
     jam2::ConnectionStrategy strategy,
     jam2::Endpoint rendezvousServer,
@@ -2400,6 +2408,8 @@ bool MainWindow::startAutomationJam(
     jam2::application::UdpMultiplexTransport::ReceiveModel receiveModel)
 {
     error.clear();
+    const auto peerName = jam2::application::PeerName::fromInput(name);
+    if (!peerName) { error = jam2::application::peerNameRequirement(); return false; }
     if (localPort < 1024 || localPort > 65535) {
         error = QStringLiteral("automation jam port is outside its bound");
         return false;
@@ -2422,6 +2432,7 @@ bool MainWindow::startAutomationJam(
     automationTestInput_ = testInput;
     automationSuppressDialogs_ = true;
     CreatePreference& configuration = sessionRuntimeDraft_.configuration;
+    configuration.name = peerName->text();
     configuration.bindHost = QStringLiteral("127.0.0.1");
     configuration.publicHost = QStringLiteral("127.0.0.1");
     configuration.port = localPort;
@@ -2567,6 +2578,11 @@ QJsonObject MainWindow::automationJamSnapshot() const
     if (role == QStringLiteral("creator")) {
         snapshot.insert(QStringLiteral("invite_url"), meshInviteUrl());
     }
+    QJsonArray namedPeers;
+    for (const auto& peer : session.peers) namedPeers.append(QJsonObject{
+        {QStringLiteral("peer_id"),QString::number(peer.peerId)},
+        {QStringLiteral("token"),peer.token},{QStringLiteral("name"),peer.name.text()}});
+    snapshot.insert(QStringLiteral("peers"),namedPeers);
     QJsonArray gridAssignments;
     if (network && network->grid_assignment_reliable) {
         for (const auto& peer : network->peers) gridAssignments.append(QJsonObject{
@@ -3990,6 +4006,7 @@ void MainWindow::applyJoinJamDialogState(
 {
     CreatePreference& configuration = sessionRuntimeDraft_.configuration;
     configuration.bindHost = state.join.bindHost;
+    configuration.name = state.join.name;
     configuration.port = state.join.port;
     configuration.tuning = state.join.tuning;
     configuration.runtime = state.join.runtime;
@@ -4447,7 +4464,9 @@ void MainWindow::appendLog(const QString& line)
 
 void MainWindow::updateStatsDisplay(const ConnectionDiagnosticsSnapshot* stats)
 {
-    const MixerStatsLabels labels = mixerStatsViewModel_.present(stats);
+    QHash<quint64,QString> names;
+    for (const auto& peer : sessionController_.snapshot().peers) names.insert(peer.peerId,peer.name.text());
+    const MixerStatsLabels labels = mixerStatsViewModel_.present(stats,names);
     if (latencyLabel_) {
         latencyLabel_->setText(labels.latency);
         latencyLabel_->setToolTip(labels.latencyTooltip);
@@ -4540,9 +4559,9 @@ void MainWindow::updateStatsDisplay(const ConnectionDiagnosticsSnapshot* stats)
             for (int row = 0; row < static_cast<int>(stats->peers.size()); ++row) {
                 const Jam2PeerDiagnostics& peer = stats->peers.at(
                     static_cast<std::size_t>(row));
-                const int ordinal = peerOrdinals_.value(peer.peer_id, row + 1);
+
                 const QStringList values{
-                    QStringLiteral("Peer %1").arg(ordinal),
+                    sessionController_.peerName(peer.peer_id),
                     peer.has_rtt
                         ? QStringLiteral("%1 ms").arg(peer.rtt_ms, 0, 'f', 1)
                         : QStringLiteral("-"),
@@ -4721,7 +4740,7 @@ void MainWindow::selectPerformancePeer(std::uint64_t peerId)
     if (performanceHome_) {
         performanceHome_->setSelectedPeer(peerId);
     }
-    const int ordinal = peerOrdinals_.value(peerId, 0);
+
     const double gainDb = desiredPeerGainDb_.value(peerId, found->gain_db);
     if (selectedPeerNameLabel_) {
         selectedPeerNameLabel_->setText(QStringLiteral("Volume"));
@@ -4756,8 +4775,8 @@ void MainWindow::applySelectedPeerGain(int db)
         slider->setValue(db);
     }
     if (!jam2_.setPeerGainDb(selectedPeerId_, gainDb)) {
-        appendLog(QStringLiteral("peer gain update unavailable for Peer %1")
-            .arg(peerOrdinals_.value(selectedPeerId_, 0)));
+        appendLog(QStringLiteral("peer gain update unavailable for %1")
+            .arg(sessionController_.peerName(selectedPeerId_)));
     }
     updatePerformancePeers();
 }
@@ -4776,15 +4795,15 @@ void MainWindow::updatePerformancePeers()
     presentation.reserve(operationalPeers_.size());
     membership.reserve(operationalPeers_.size());
     for (const Jam2OperationalPeer& peer : std::as_const(operationalPeers_)) {
-        const int ordinal = peerOrdinals_.value(peer.peer_id);
+
         const double gainDb = desiredPeerGainDb_.value(peer.peer_id, peer.gain_db);
         presentation.push_back({
             peer.peer_id,
-            QStringLiteral("Peer %1").arg(ordinal),
+            sessionController_.peerName(peer.peer_id),
             peer.receiving_audio,
             gainDb,
             peer.peer_id == selectedPeerId_});
-        membership.push_back(QString::number(peer.peer_id));
+        membership.push_back(QString::number(peer.peer_id) + QLatin1Char(':') + sessionController_.peerName(peer.peer_id));
     }
     if (performanceHome_) {
         performanceHome_->setPeers(presentation);
@@ -4889,6 +4908,13 @@ void MainWindow::applySessionSnapshot(const SharedSessionController::Snapshot& s
         snapshot.role != SharedSessionController::Role::Joiner) {
         return;
     }
+    if (snapshot.role==SharedSessionController::Role::Creator && sessionRuntimeDraft_.configuration.strategy!=jam2::ConnectionStrategy::Jam2Server) {
+        const auto transport=sessionController_.multiplexSnapshot();
+        if (transport.registered && transport.bootstrapPublic.port) {
+            activePublicEndpoint_=QString::fromStdString(jam2::endpoint_to_string(transport.bootstrapPublic));
+            showPendingMeshInviteUrl();
+        }
+    }
     QMap<QString, QString> endpoints;
     QSet<QString> sameMachineTokens;
     for (const SharedSessionController::PeerSnapshot& peer : snapshot.peers) {
@@ -4932,7 +4958,7 @@ void MainWindow::applySessionSnapshot(const SharedSessionController::Snapshot& s
                 if (peer.token != snapshot.localToken) {
                     appendLog(QStringLiteral(
                         "session peer token=%1 endpoint=%2 edge=%3 proof=%4")
-                        .arg(peer.token.left(8), peer.endpoint)
+                        .arg(sessionController_.peerName(peer.token), peer.endpoint)
                         .arg(static_cast<int>(peer.edgeState))
                         .arg(peer.proofState));
                 }
@@ -4978,13 +5004,13 @@ void MainWindow::handleControlEvent(
 
     using jam2::control_protocol::TransportEventType;
     if (event.assetChannel) {
-        appendLog(QStringLiteral("asset_tcp: ") + event.detail);
+        appendLog(QStringLiteral("asset_udp: ") + event.detail);
         if (event.type == TransportEventType::Disconnected ||
             event.type == TransportEventType::Failure) {
             if (serverSide) {
                 const ControlServer::Stats stats = sessionController_.serverStats();
                 appendLog(QStringLiteral(
-                    "asset_tcp_stats side=server accepted=%1 active=%2 active_high_water=%3 disconnected=%4")
+                    "asset_udp_stats side=server accepted=%1 active=%2 active_high_water=%3 disconnected=%4")
                     .arg(stats.assetAcceptedConnections)
                     .arg(stats.assetActiveConnections)
                     .arg(stats.assetConnectionHighWater)
@@ -4992,7 +5018,7 @@ void MainWindow::handleControlEvent(
             } else {
                 const ControlClient::Stats stats = sessionController_.assetClientStats();
                 appendLog(QStringLiteral(
-                    "asset_tcp_stats side=client attempts=%1 completed=%2 disconnected=%3 "
+                    "asset_udp_stats side=client attempts=%1 completed=%2 disconnected=%3 "
                     "input_high_water=%4 output_high_water=%5 output_rejects=%6")
                     .arg(stats.connectionAttempts)
                     .arg(stats.completedConnections)
@@ -5021,7 +5047,7 @@ void MainWindow::handleControlEvent(
         (event.type == TransportEventType::ChallengeSent ||
          event.type == TransportEventType::Failure ||
          event.type == TransportEventType::Disconnected)) {
-        appendLog(QStringLiteral("pending_tcp: ") + event.detail);
+        appendLog(QStringLiteral("pending_udp: ") + event.detail);
         if (event.type == TransportEventType::Failure &&
             event.failure == jam2::control_protocol::TransportFailure::PreAuthenticationDisconnect) {
             notePreAuthenticationDisconnect();
@@ -5043,7 +5069,7 @@ void MainWindow::handleControlEvent(
         displayState = QStringLiteral("Connecting");
         break;
     case TransportEventType::Authenticated:
-        displayState = QStringLiteral("TCP peer authenticated");
+        displayState = QStringLiteral("UDP multiplex peer authenticated");
         controlRefreshAvailable_ = false;
         break;
     case TransportEventType::Disconnected:
@@ -5051,7 +5077,7 @@ void MainWindow::handleControlEvent(
         controlRefreshAvailable_ = !serverSide;
         break;
     case TransportEventType::AlreadyConnected:
-        displayState = QStringLiteral("TCP peer authenticated");
+        displayState = QStringLiteral("UDP multiplex peer authenticated");
         controlRefreshAvailable_ = false;
         break;
     case TransportEventType::RefreshRequested:
@@ -5060,7 +5086,7 @@ void MainWindow::handleControlEvent(
         break;
     case TransportEventType::ReconnectScheduled:
     case TransportEventType::ReconnectAttempt:
-        displayState = QStringLiteral("TCP issue");
+        displayState = QStringLiteral("UDP multiplex issue");
         controlRefreshAvailable_ = true;
         break;
     case TransportEventType::SessionEnded:
@@ -5070,7 +5096,7 @@ void MainWindow::handleControlEvent(
     case TransportEventType::Failure:
         controlRefreshAvailable_ = true;
         if (event.retryable) {
-            displayState = QStringLiteral("TCP issue");
+            displayState = QStringLiteral("UDP multiplex issue");
         }
         break;
     }
@@ -5135,8 +5161,8 @@ void MainWindow::handleControlEvent(
                 "session_cap_rejects=%4 auth_rejects=%5 auth_timeouts=%6 frame_rejects=%7 "
                 "frame_timeouts=%8 tag_or_sequence_rejects=%9 output_rejects=%10 input_high_water=%11 output_high_water=%12 "
                 "active_connections=%13 active_connection_high_water=%14 disconnected_connections=%15 "
-                "pre_authentication_disconnects=%16 large_json_sent=%17 large_json_received=%18 "
-                "large_json_raw_bytes_sent=%19 large_json_compressed_bytes_sent=%20")
+                "pre_authentication_disconnects=%16"
+                )
                 .arg(stats.acceptedConnections)
                 .arg(stats.pendingCapRejects)
                 .arg(stats.authenticationRateLimitRejects)
@@ -5154,18 +5180,14 @@ void MainWindow::handleControlEvent(
                 .arg(stats.activeConnectionHighWater)
                 .arg(stats.disconnectedConnections)
                 .arg(stats.preAuthenticationDisconnects)
-                .arg(stats.largeJsonMessagesSent)
-                .arg(stats.largeJsonMessagesReceived)
-                .arg(stats.largeJsonRawBytesSent)
-                .arg(stats.largeJsonCompressedBytesSent));
+                );
         } else {
             const ControlClient::Stats stats = sessionController_.clientStats();
             appendLog(QStringLiteral(
                 "control_stats side=client auth_rejects=%1 auth_timeouts=%2 frame_rejects=%3 frame_timeouts=%4 "
                 "tag_or_sequence_rejects=%5 output_rejects=%6 input_high_water=%7 output_high_water=%8 "
                 "connection_attempts=%9 completed_connections=%10 disconnected_connections=%11 "
-                "large_json_sent=%12 large_json_received=%13 large_json_raw_bytes_sent=%14 "
-                "large_json_compressed_bytes_sent=%15")
+                )
                 .arg(stats.authenticationRejects)
                 .arg(stats.authenticationTimeouts)
                 .arg(stats.frameRejects)
@@ -5178,10 +5200,7 @@ void MainWindow::handleControlEvent(
                 .arg(stats.connectionAttempts)
                 .arg(stats.completedConnections)
                 .arg(stats.disconnectedConnections)
-                .arg(stats.largeJsonMessagesSent)
-                .arg(stats.largeJsonMessagesReceived)
-                .arg(stats.largeJsonRawBytesSent)
-                .arg(stats.largeJsonCompressedBytesSent));
+                );
         }
     }
     if (serverSide && event.type == TransportEventType::Failure &&
@@ -5256,13 +5275,13 @@ void MainWindow::notePreAuthenticationDisconnect()
 void MainWindow::refreshControlConnection()
 {
     if (sessionController_.isServer() && sessionController_.hasPeer()) {
-        appendLog(QStringLiteral("TCP control already connected"));
+        appendLog(QStringLiteral("UDP multiplex control already connected"));
         controlRefreshAvailable_ = false;
         updateJamSessionHeaderStatus(sessionController_.snapshot());
         return;
     }
     if (!sessionController_.isServer() && sessionController_.isConnected()) {
-        appendLog(QStringLiteral("TCP control already connected"));
+        appendLog(QStringLiteral("UDP multiplex control already connected"));
         controlRefreshAvailable_ = false;
         updateJamSessionHeaderStatus(sessionController_.snapshot());
         return;
@@ -5272,7 +5291,7 @@ void MainWindow::refreshControlConnection()
         QStringLiteral("REFRESHING"),
         QStringLiteral("Refreshing connection"),
         {QStringLiteral("Re-establishing the authenticated control connection.")});
-    appendLog(QStringLiteral("refreshing TCP control"));
+    appendLog(QStringLiteral("refreshing UDP multiplex control"));
     sessionController_.setReconnectEnabled(true);
     sessionController_.refresh();
 }
@@ -5649,16 +5668,16 @@ void MainWindow::handleMeshPeerAuthenticated(const QString& token, const QJsonOb
     if (!sessionController_.isServer() || token.isEmpty()) {
         return;
     }
-    const QString tcpPeerHost = normalizedNetworkHost(
-        message.value(QStringLiteral("tcp_peer_host")).toString());
-    const bool localMachinePeer = isLocalMachineAddress(tcpPeerHost);
+    const QString peerHost = normalizedNetworkHost(
+        message.value(QStringLiteral("peer_host")).toString());
+    const bool localMachinePeer = isLocalMachineAddress(peerHost);
     if (localMachinePeer) {
         localMeshPeerTokens_.insert(token);
     } else {
         localMeshPeerTokens_.remove(token);
     }
-    appendLog(QStringLiteral("mesh peer TCP source token=%1 host=%2 same_machine=%3")
-        .arg(token.left(8), tcpPeerHost, localMachinePeer ? QStringLiteral("yes") : QStringLiteral("no")));
+    appendLog(QStringLiteral("mesh peer UDP multiplex source token=%1 host=%2 same_machine=%3")
+        .arg(sessionController_.peerName(token), peerHost, localMachinePeer ? QStringLiteral("yes") : QStringLiteral("no")));
     if (sharedBankLaunch_.active()) {
         cancelSharedBankLaunch(
             true,
@@ -6764,7 +6783,7 @@ void MainWindow::handleSharedBankReady(
     }
     appendLog(QStringLiteral("bank ready on peer: bank=%1 peer=%2 switch=%3 duplicate=%4")
         .arg(QChar(QLatin1Char('A').unicode() + bankIndex))
-        .arg(sourcePeerToken.left(8), switchId.left(8))
+        .arg(sessionController_.peerName(sourcePeerToken), switchId.left(8))
         .arg(result == jam2::gui::SharedBankReadyResult::Duplicate
             ? QStringLiteral("yes") : QStringLiteral("no")));
     maybeCommitSharedBankLaunch();
@@ -6772,9 +6791,7 @@ void MainWindow::handleSharedBankReady(
 
 void MainWindow::maybeCommitSharedBankLaunch()
 {
-    const auto policy = sessionRuntimeDraft_.configuration.strategy == jam2::ConnectionStrategy::Jam2Server
-        ? jam2::gui::BankReadinessPolicy::LocalReady : jam2::gui::BankReadinessPolicy::AllPeers;
-    if (!sessionController_.isServer() || !sharedBankLaunch_.readyToCommit(policy)) return;
+    if (!sessionController_.isServer() || !sharedBankLaunch_.readyToCommit()) return;
 
     const jam2::gui::SharedBankLaunchSnapshot launch = sharedBankLaunch_.take();
     const int bankIndex = launch.bankIndex;
@@ -9471,17 +9488,12 @@ void MainWindow::maybeStartReadyRecordingGroup()
     const SharedSessionController::Snapshot session = sessionController_.snapshot();
     QStringList participants;
     int countInBars = 0;
-    bool hasArmedParticipant = false;
-    bool everyoneReady = true;
     if (trackRecordingWorkflow_.laneArmed() &&
         (localTrackRecordingPhase_ == QStringLiteral("armed") ||
          localTrackRecordingPhase_ == QStringLiteral("ready"))) {
-        hasArmedParticipant = true;
         if (localTrackRecordingPhase_ == QStringLiteral("ready")) {
             participants.append(session.localToken);
             countInBars = qMax(countInBars, localTrackRecordingCountInBars_);
-        } else {
-            everyoneReady = false;
         }
     }
     for (auto it = peerTrackRecordingStates_.cbegin();
@@ -9490,18 +9502,12 @@ void MainWindow::maybeStartReadyRecordingGroup()
             it->phase != QStringLiteral("ready")) {
             continue;
         }
-        hasArmedParticipant = true;
         if (it->phase == QStringLiteral("ready")) {
             participants.append(it.key());
             countInBars = qMax(countInBars, it->countInBars);
-        } else {
-            everyoneReady = false;
         }
     }
-    const auto readinessPolicy = sessionRuntimeDraft_.configuration.strategy == jam2::ConnectionStrategy::Jam2Server
-        ? jam2::gui::RecordingReadinessPolicy::ReadyPeers : jam2::gui::RecordingReadinessPolicy::AllArmedPeers;
-    if (!jam2::gui::recording_group_can_start(hasArmedParticipant, everyoneReady,
-            static_cast<std::size_t>(participants.size()), readinessPolicy)) return;
+    if (participants.isEmpty()) return;
 
     const PlaybackGrid::Position position = metronomeTransport_.grid().position();
     const int beatsPerBar = qMax(1, currentMetronomePattern().beats_per_bar);
@@ -9583,8 +9589,8 @@ void MainWindow::handleRecordingGroupStart(const QJsonObject& message)
     quint64 targetBeat = message.value(
         QStringLiteral("target_abs_beat")).toString().toULongLong(&targetOk);
     const PlaybackGrid::Position position = metronomeTransport_.grid().position();
-    if (countdownOk && targetOk && sessionRuntimeDraft_.configuration.strategy == jam2::ConnectionStrategy::Jam2Server) {
-        const auto recovered = jam2::gui::server_recording_schedule(position, countdownBeat, targetBeat,
+    if (countdownOk && targetOk && jam2_.isNetworkRunning()) {
+        const auto recovered = jam2::gui::shared_recording_schedule(position, countdownBeat, targetBeat,
             qMax(1, currentMetronomePattern().beats_per_bar));
         if (recovered) {
             countdownBeat = recovered->countdownBeat; targetBeat = recovered->targetBeat;
@@ -9819,15 +9825,7 @@ void MainWindow::finishLaneTakeFinalization()
 
 QString MainWindow::recordingPeerLabel(const QString& token) const
 {
-    const SharedSessionController::Snapshot snapshot = sessionController_.snapshot();
-    for (const SharedSessionController::PeerSnapshot& peer : snapshot.peers) {
-        if (peer.token != token) continue;
-        const int ordinal = peerOrdinals_.value(peer.peerId, 0);
-        return ordinal > 0
-            ? QStringLiteral("Peer %1").arg(ordinal)
-            : QStringLiteral("Peer %1").arg(peer.peerId);
-    }
-    return QStringLiteral("Peer %1").arg(token.left(8));
+    return sessionController_.peerName(token);
 }
 
 bool MainWindow::sharedRecordingProtected() const
@@ -12667,7 +12665,7 @@ void MainWindow::handleTrackBatchComplete(
         trackWorkspace_.outgoingTrackShareUnappliedBatches.insert(batchId);
         appendLog(QStringLiteral(
             "Track Sync batch %1 was not applied by peer %2: %3")
-            .arg(batchId.left(8), sourcePeerToken.left(8),
+            .arg(batchId.left(8), sessionController_.peerName(sourcePeerToken),
                 message.value(QStringLiteral("reason")).toString(
                     QStringLiteral("unspecified"))));
     }
@@ -13138,7 +13136,7 @@ void MainWindow::expirePendingTrackBatch(
     }
     if (performanceHome_) performanceHome_->setTrackTransferStatus(QString{});
     appendLog(QStringLiteral("expired incomplete Track Sync batch %1 from peer %2")
-        .arg(batchId.left(8), sourcePeerToken.left(8)));
+        .arg(batchId.left(8), sessionController_.peerName(sourcePeerToken)));
     applyPendingTrackContributions();
     requestNextPendingAsset();
 }
@@ -13535,14 +13533,11 @@ void MainWindow::handleSongSet(
         const quint64 currentRevision = sessionController_.snapshot().arrangementRevision;
         if (proposalBaseRevision != currentRevision) {
             const auto appliedSong = songToJson(true);
-            const auto currentSong = sessionRuntimeDraft_.configuration.strategy == jam2::ConnectionStrategy::Jam2Server
-                ? trackWorkspace_.serverSongProposals.base(appliedSong, currentRevision, songAssetCheckRevision_)
-                : appliedSong;
+            const auto currentSong = trackWorkspace_.sharedSongProposals.base(
+                appliedSong, currentRevision, songAssetCheckRevision_);
             if (trackWorkspace_.authoritativeTrackHistory.contains(proposalBaseRevision) &&
                 (songScope == SongSyncScope::Tracks || canRebaseIdeaOverTrackEdits(
-                    trackWorkspace_.authoritativeTrackHistory.value(proposalBaseRevision), currentSong,
-                    sessionRuntimeDraft_.configuration.strategy == jam2::ConnectionStrategy::Jam2Server
-                        ? LooperConflictPolicy::LatestReceived : LooperConflictPolicy::KeepCurrent))) {
+                    trackWorkspace_.authoritativeTrackHistory.value(proposalBaseRevision), currentSong))) {
                 int mergedChanges = 0;
                 int mergeConflicts = 0;
                 QJsonObject rebased = message;
@@ -13552,17 +13547,15 @@ void MainWindow::handleSongSet(
                     currentSong,
                     message.value(QStringLiteral("song")).toObject(),
                     &mergedChanges,
-                    &mergeConflicts,
-                    sessionRuntimeDraft_.configuration.strategy == jam2::ConnectionStrategy::Jam2Server
-                        ? LooperConflictPolicy::LatestReceived : LooperConflictPolicy::KeepCurrent)
+                    &mergeConflicts)
                     : message.value(QStringLiteral("song")).toObject());
                 rebased.insert(QStringLiteral("base_arrangement_revision"),
                     static_cast<qint64>(currentRevision));
                 appendLog(QStringLiteral(
                     "rebased stale %1 metadata from peer %2: base=%3 current=%4 "
-                    "merged_changes=%5 conflicts_kept_local=%6")
+                    "merged_changes=%5 conflicts_resolved=%6")
                     .arg(songScope == SongSyncScope::Tracks ? QStringLiteral("track") : QStringLiteral("idea"))
-                    .arg(sourcePeerToken.left(8))
+                    .arg(sessionController_.peerName(sourcePeerToken))
                     .arg(proposalBaseRevision)
                     .arg(currentRevision)
                     .arg(mergedChanges)
@@ -13576,7 +13569,7 @@ void MainWindow::handleSongSet(
             }
             appendLog(QStringLiteral(
                 "rejected stale collaborative arrangement from peer %1: base=%2 current=%3")
-                .arg(sourcePeerToken.left(8))
+                .arg(sessionController_.peerName(sourcePeerToken))
                 .arg(proposalBaseRevision)
                 .arg(currentRevision));
             sendSongSnapshot(std::nullopt, songScope);
@@ -13719,16 +13712,18 @@ void MainWindow::handleSongSet(
     QJsonObject normalizedSong = hostAuthoritative &&
         trackWorkspace_.stagedHostSongRevision > lastAppliedHostArrangementRevision_
         ? trackWorkspace_.stagedHostSong : songToJson(true);
-    const bool stageServerProposal = fromPeerProposal &&
-        sessionRuntimeDraft_.configuration.strategy == jam2::ConnectionStrategy::Jam2Server;
-    if (stageServerProposal) {
+    const bool stageSharedProposal = fromPeerProposal;
+    const QJsonObject incomingProposalSong = normalizedIncomingSong;
+    if (stageSharedProposal) {
         const auto appliedSong = normalizedSong;
-        normalizedSong = trackWorkspace_.serverSongProposals.base(appliedSong,
+        normalizedSong = trackWorkspace_.sharedSongProposals.base(appliedSong,
             sessionController_.snapshot().arrangementRevision, songAssetCheckRevision_);
         if (songScope == SongSyncScope::Tracks && normalizedSong != appliedSong) {
-            normalizedIncomingSong = mergeConcurrentLooperMetadata(appliedSong,
-                normalizedSong, normalizedIncomingSong, nullptr, nullptr,
-                LooperConflictPolicy::LatestReceived);
+            const auto proposalBase = trackWorkspace_.sharedSongProposals.trackProposalBase(appliedSong,
+                sourcePeerToken, sessionController_.snapshot().arrangementRevision,
+                songAssetCheckRevision_);
+            normalizedIncomingSong = mergeConcurrentLooperMetadata(proposalBase,
+                normalizedSong, normalizedIncomingSong);
         }
     }
     if (!reconcileSynchronizedSongStructure(normalizedSong, normalizedIncomingSong)) {
@@ -13853,9 +13848,10 @@ void MainWindow::handleSongSet(
     }
     const QJsonObject song = preserveLocalOnlyLanes(normalizedSong);
     const std::uint64_t checkRevision = ++songAssetCheckRevision_;
-    if (stageServerProposal) {
-        trackWorkspace_.serverSongProposals.stage(song,
-            sessionController_.snapshot().arrangementRevision, checkRevision, songScope);
+    if (stageSharedProposal) {
+        trackWorkspace_.sharedSongProposals.stage(song,
+            sessionController_.snapshot().arrangementRevision, checkRevision, songScope,
+            sourcePeerToken, incomingProposalSong);
     }
     if (hostAuthoritative) {
         trackWorkspace_.stagedHostSong = song;
@@ -13936,7 +13932,7 @@ void MainWindow::handleSongSet(
                 return;
             }
             if (!assetFailure->isEmpty()) {
-                trackWorkspace_.serverSongProposals.reject(checkRevision);
+                trackWorkspace_.sharedSongProposals.reject(checkRevision);
                 appendLog(QStringLiteral("rejected arrangement asset: ") + *assetFailure);
                 return;
             }
@@ -14072,8 +14068,8 @@ void MainWindow::handleSongSet(
                 regeneratePreparedMix();
                 if (fromPeerProposal) {
                     appendLog(QStringLiteral("accepted collaborative arrangement edit from peer %1")
-                        .arg(sourcePeerToken.left(8)));
-                    const auto scopes = trackWorkspace_.serverSongProposals.scopes(
+                        .arg(sessionController_.peerName(sourcePeerToken)));
+                    const auto scopes = trackWorkspace_.sharedSongProposals.scopes(
                         proposalBaseRevision, checkRevision);
                     for (const auto scope : scopes) {
                         if (scope != songScope) sendSongSnapshot(restartTrack, scope);
@@ -14148,8 +14144,8 @@ void MainWindow::applyPendingSongIfAssetsReady()
         regeneratePreparedMix();
         if (publishAuthoritative) {
             appendLog(QStringLiteral("accepted collaborative arrangement edit from peer %1 after asset sync")
-                .arg(sourcePeerToken.left(8)));
-            const auto scopes = trackWorkspace_.serverSongProposals.scopes(
+                .arg(sessionController_.peerName(sourcePeerToken)));
+            const auto scopes = trackWorkspace_.sharedSongProposals.scopes(
                 baseRevision, songAssetCheckRevision_);
             for (const auto scope : scopes) {
                 if (scope != SongSyncScope::Tracks) sendSongSnapshot(restartTrack, scope);
@@ -14987,8 +14983,7 @@ Jam2RuntimeOptions MainWindow::runtimeOptions() const
     const LocalTuningPreference& tuning = configuration.tuning;
     const RuntimePreference& runtime = configuration.runtime;
     Jam2RuntimeOptions options;
-    options.bind = configuration.strategy == jam2::ConnectionStrategy::Jam2Server
-        ? jam2::Endpoint{"0.0.0.0", 0} : jam2::parse_bind_endpoint(meshBindEndpoint().toStdString());
+    options.bind = {"0.0.0.0",0};
     if (configuration.strategy == jam2::ConnectionStrategy::Stun && !configuration.stunServer.trimmed().isEmpty()) {
         options.stun_server = jam2::parse_endpoint(
             configuration.stunServer.trimmed().toStdString());
@@ -16202,7 +16197,7 @@ void MainWindow::discardPreparedMix(bool replacementExpected)
     preparedMixLifecycle_.setPlayWhenReady(resumePlayback);
     trackRecordingWorkflow_.cancelPreparedAttach();
     if (jam2_.isRunning()) {
-        if (sessionRuntimeDraft_.configuration.strategy == jam2::ConnectionStrategy::Jam2Server)
+        if (jam2_.isNetworkRunning())
             trackWorkspace_.listeningTools.sourceWillChange();
         jam2::EngineCommand unload;
         unload.type = jam2::EngineCommandType::UnloadPreparedTrack;
@@ -16338,11 +16333,11 @@ void MainWindow::sendSongSnapshot(
             {QStringLiteral("song"), snapshotSong},
         };
         const qsizetype bytes = QJsonDocument(proposal).toJson(QJsonDocument::Compact).size();
-        if (bytes > jam2::control_protocol::kMaxLargeJsonBytes) {
+        if (bytes > jam2::application::control_wire::kMaximumDocumentBytes) {
             appendLog(QStringLiteral(
                 "collaborative arrangement exceeds the authenticated JSON limit: bytes=%1 limit=%2")
                 .arg(bytes)
-                .arg(jam2::control_protocol::kMaxLargeJsonBytes));
+                .arg(jam2::application::control_wire::kMaximumDocumentBytes));
             return;
         }
         if (!sessionController_.send(proposal)) {
@@ -16376,11 +16371,11 @@ void MainWindow::sendSongSnapshot(
     };
     const qsizetype bytes = QJsonDocument(authoritative)
         .toJson(QJsonDocument::Compact).size();
-    if (bytes > jam2::control_protocol::kMaxLargeJsonBytes) {
+    if (bytes > jam2::application::control_wire::kMaximumDocumentBytes) {
         appendLog(QStringLiteral(
             "authoritative arrangement exceeds the authenticated JSON limit: bytes=%1 limit=%2")
             .arg(bytes)
-            .arg(jam2::control_protocol::kMaxLargeJsonBytes));
+            .arg(jam2::application::control_wire::kMaximumDocumentBytes));
         return;
     }
     (void)sessionController_.send(authoritative);
@@ -16678,7 +16673,7 @@ void MainWindow::stopCuratedIdeaPreview()
         preparedMixLifecycle_.active().error.isEmpty()) {
         loadPreparedMixIntoEngine();
     } else {
-        if (sessionRuntimeDraft_.configuration.strategy == jam2::ConnectionStrategy::Jam2Server)
+        if (jam2_.isNetworkRunning())
             trackWorkspace_.listeningTools.sourceWillChange();
         jam2::EngineCommand unload;
         unload.type = jam2::EngineCommandType::UnloadPreparedTrack;

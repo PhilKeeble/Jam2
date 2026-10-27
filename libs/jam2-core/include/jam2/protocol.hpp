@@ -29,7 +29,7 @@ enum class PacketType : std::uint8_t {
     MetronomeState = 6,
     Bye = 7,
     TransportState = 8,
-    // Server UDP-multiplex control only. Other modes retain MetronomeState.
+    // Reliable grid control for the common multiplex session transport.
     GridAssignment = 9,
     GridAssignmentApplied = 10,
     GridAssignmentRequest = 11,

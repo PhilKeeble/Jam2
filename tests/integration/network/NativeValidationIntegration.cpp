@@ -38,11 +38,6 @@ bool writeScenario(
     };
     if (operation == QStringLiteral("validate.boundaries")) {
         scenario.insert(QStringLiteral("fixtures"), QJsonArray{});
-    } else if (operation == QStringLiteral("validate.controller-lifecycle")) {
-        scenario.insert(QStringLiteral("network"), QJsonObject{
-            {QStringLiteral("heartbeat_interval_ms"), 20},
-            {QStringLiteral("heartbeat_miss_limit"), 3},
-        });
     } else {
         error = QStringLiteral("unsupported native validation operation");
         return false;
@@ -73,7 +68,7 @@ bool validateManifest(
     const QJsonObject manifest = document.object();
     const QJsonObject result = manifest.value(QStringLiteral("result")).toObject();
     const QJsonArray cases = result.value(QStringLiteral("cases")).toArray();
-    const int minimumCases = operation == QStringLiteral("validate.boundaries") ? 200 : 25;
+    const int minimumCases = 200;
     if (parseError.error != QJsonParseError::NoError || !document.isObject() ||
         cases.size() < minimumCases) {
         error = QStringLiteral(

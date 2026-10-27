@@ -66,7 +66,6 @@ struct Harness {
         controller.tick();
     }
 };
-QJsonObject readiness(int revision) { return {{QStringLiteral("type"), QStringLiteral("jam.listening.ready")}, {QStringLiteral("revision"), revision}}; }
 void testStableNumericEdit() {
     Harness h;
     ListeningToolsSettings settings;
@@ -90,16 +89,8 @@ void testReadinessAndContinuity() {
     settings.speedPpm = 730000;
     settings.pitchCents = 300;
     h.controller.edit(settings, true);
-    require(h.controller.pending() && h.commands.empty(), "creator waits for all three peers before a musical change");
-    const int revision = h.sent.front().value(QStringLiteral("revision")).toInt();
-    h.controller.receive(readiness(revision), QStringLiteral("outsider"));
-    h.controller.receive(readiness(revision - 1), QStringLiteral("p2"));
-    require(h.commands.empty(), "unknown peers and stale readiness cannot commit");
-    h.controller.receive(readiness(revision), QStringLiteral("p2"));
-    h.controller.receive(readiness(revision), QStringLiteral("p2"));
-    h.controller.receive(readiness(revision), QStringLiteral("p3"));
-    require(h.commands.empty(), "duplicate readiness does not replace another peer");
-    h.controller.receive(readiness(revision), QStringLiteral("p4"));
+    require(h.controller.pending() && !h.commands.empty() && h.sent.size()==1 &&
+        h.sent.front().value("type")=="jam.listening.state", "creator publishes desired state without waiting for peer readiness");
     const auto command = h.commands.back();
     require(command.playback_tempo.rate_ppm == 730000 && command.frame > 96000 && h.applications == 0,
         "fractional tempo is scheduled and does not apply early");
@@ -108,8 +99,7 @@ void testReadinessAndContinuity() {
     h.finish();
     require(h.applications == 1 && !h.controller.pending() && h.controller.appliedSettings() == settings,
         "completed boundary applies exact speed and independent pitch once");
-    h.controller.receive(readiness(revision), QStringLiteral("p4"));
-    require(h.applications == 1, "late duplicate readiness cannot reapply committed state");
+    require(h.applications == 1, "local desired state applied more than once");
 }
 void testLocalOnlyAndDisable() {
     Harness h;
@@ -125,6 +115,7 @@ void testLocalOnlyAndDisable() {
     require(h.controller.appliedSettings().speedPpm == 500000, "local audio settings still apply");
     h.state.sync = true;
     h.controller.policyChanged(false);
+    QCoreApplication::processEvents();
     h.finish();
     require(h.state.engine.playback_tempo.rate_ppm == 500000, "re-enabling sync couples musical tempo to listening speed");
     h.state.sync = false;
@@ -269,9 +260,9 @@ void testValidationAndDialog() {
     require(evaluateControlMessage(message, ControlMessageSource::AuthenticatedPeer).accepted &&
         !evaluateControlMessage(message, ControlMessageSource::Coordinator).accepted,
         "listening proposals are peer commands, not authoritative commits");
-    message = {{QStringLiteral("type"), QStringLiteral("jam.listening.prepare")},
-        {QStringLiteral("revision"), 2}, {QStringLiteral("bank"), 0},
-        {QStringLiteral("settings"), listeningSettingsJson({})}};
+    Harness authority; authority.state.network=true; authority.state.peers={"peer"};
+    ListeningToolsSettings selected; selected.speedPpm=900000; authority.controller.edit(selected,true);
+    message=authority.sent.back();
     require(evaluateControlMessage(message, ControlMessageSource::Coordinator).accepted &&
         !evaluateControlMessage(message, ControlMessageSource::AuthenticatedPeer).accepted &&
         !evaluateControlMessage(message, ControlMessageSource::LocalJoiner).accepted,
@@ -346,24 +337,17 @@ void testFourPeersWithDelayedDuplicateMessages() {
     settings.speedPpm = 730000;
     settings.focusEnabled = true;
     peers[0].controller.edit(settings, true);
-    const auto prepare = peers[0].sent.back();
-    for (std::size_t i = 1; i < peers.size(); ++i) peers[i].controller.receive(prepare, QStringLiteral("p0"));
-    // Deliver out of order, duplicate one response, and withhold the last
-    // peer's response. No peer can commit while that peer remains unready.
-    peers[0].controller.receive(peers[2].sent.back(), QStringLiteral("p2"));
-    peers[0].controller.receive(peers[1].sent.back(), QStringLiteral("p1"));
-    peers[0].controller.receive(peers[1].sent.back(), QStringLiteral("p1"));
-    for (auto& peer : peers) require(peer.commands.empty(), "four-peer commit waits through delayed/duplicate readiness");
-    peers[0].controller.receive(peers[3].sent.back(), QStringLiteral("p3"));
-    const auto commit = peers[0].sent.back();
-    for (std::size_t i = 1; i < peers.size(); ++i) {
-        peers[i].controller.receive(commit, QStringLiteral("p0"));
-        peers[i].controller.receive(commit, QStringLiteral("p0"));
+    const auto selection=peers[0].sent.back();
+    // Deliver the latest authority state twice; no readiness barrier exists.
+    for (std::size_t i=1;i<peers.size();++i) {
+        peers[i].controller.receive(selection,QStringLiteral("p0"));
+        peers[i].controller.receive(selection,QStringLiteral("p0"));
     }
     const auto sharedBoundary = peers[0].commands.back().playback_tempo.anchor_frame;
     for (auto& peer : peers) {
         require(jam2::transport_musical_frame_from_raw(peer.commands.back().frame,
-            peer.state.position.renderOffsetFrames) == sharedBoundary,
+            peer.state.position.renderOffsetFrames) == sharedBoundary &&
+            sharedBoundary==selection.value("target_frame").toString().toULongLong(),
             "different local engine ages translate the same shared listening boundary exactly");
         require(peer.commands.size() == 1 && peer.commands.back().playback_tempo.rate_ppm == 730000,
             "duplicate commits schedule one exact fractional tempo on every peer");
@@ -375,10 +359,10 @@ void testFourPeersWithDelayedDuplicateMessages() {
     const auto newer = peers[0].sent.back();
     peers[1].controller.receive(newer, QStringLiteral("p0"));
     const auto count = peers[1].commands.size();
-    peers[1].controller.receive(commit, QStringLiteral("p0"));
-    peers[1].controller.receive(prepare, QStringLiteral("p0"));
+    peers[1].controller.receive(selection, QStringLiteral("p0"));
+    peers[1].controller.receive(selection, QStringLiteral("p0"));
     require(peers[1].commands.size() == count && peers[1].controller.appliedSettings().speedPpm == 730000,
-        "old prepare and commit cannot overwrite a newer four-peer revision");
+        "old desired state cannot overwrite a newer four-peer revision");
 }
 void testQueueFailureAndPassedBoundary() {
     Harness failed;
@@ -550,11 +534,11 @@ void testStoppedEngineAndDeferredJoin() {
         "late join applies authoritative listening tools after content is ready");
 }
 }
-void testServerLatestMergePartialAndRecordingCatchup()
+void testSharedLatestMergePartialAndRecordingCatchup()
 {
     std::array<Harness, 4> peers;
     for (std::size_t i = 0; i < peers.size(); ++i) {
-        peers[i].state.network = true; peers[i].state.serverBinary = true;
+        peers[i].state.network = true;
         peers[i].state.creator = i == 0;
         peers[i].state.localToken = QStringLiteral("p%1").arg(i);
         for (int j = 0; j < 4; ++j) if (j != static_cast<int>(i)) peers[i].state.peers.insert(QStringLiteral("p%1").arg(j));
@@ -566,13 +550,12 @@ void testServerLatestMergePartialAndRecordingCatchup()
         return QJsonObject{{"type", "jam.listening.request"}, {"settings", listeningSettingsJson(settings)}, {"changed_groups", groups}};
     };
     QString error;
-    require(validateListeningMessage(request(300000, 0, 1), error, true) &&
-        !validateListeningMessage(request(300000, 0, 1), error),
-        "changed-group requests belong exclusively to Server mode");
+    require(validateListeningMessage(request(300000, 0, 1), error),
+        "typed changed-group requests are valid in every network mode");
     creator.controller.receive(request(300000, 0, 1), "p1");
     creator.controller.receive(request(1500000, 0, 1), "p2");
     creator.controller.receive(request(1000000, 300, 2), "p1");
-    require(creator.commands.empty() && creator.sent.size() == 3 && creator.controller.stats().value("server_deferred_state").toBool(),
+    require(creator.commands.empty() && creator.sent.size() == 3 && creator.controller.stats().value("shared_deferred_state").toBool(),
         "a recording creator continues accepting and publishing state without changing its local take");
     auto latest = creator.sent.back();
     require(latest.value("settings").toObject().value("speed_ppm").toInt() == 1500000 &&
@@ -587,7 +570,7 @@ void testServerLatestMergePartialAndRecordingCatchup()
     peers[3].state.position.absoluteBeat = 20;
     peers[3].state.protectedRecording = false; peers[3].controller.tick();
     require(!peers[3].commands.empty() && peers[3].commands.back().frame > 480000 &&
-        peers[3].controller.stats().value("server_late_reschedules").toInteger() == 1,
+        peers[3].controller.stats().value("shared_late_reschedules").toInteger() == 1,
         "recording peer catches up at a future beat rather than executing a stale deadline immediately");
     peers[3].finish(); const auto commands = peers[3].commands.size();
     peers[3].controller.receive(latest, "p0");
@@ -605,7 +588,7 @@ void testServerLatestMergePartialAndRecordingCatchup()
         creator.sent.back().value("settings").toObject().value("pitch_cents").toInt() == 300,
         "explicit speed reset cannot erase independently committed pitch");
     Harness policy;
-    policy.state.serverBinary = true; policy.state.network = true; policy.state.peers = {"p1", "p2", "p3"};
+    policy.state.network = true; policy.state.peers = {"p1", "p2", "p3"};
     ListeningToolsSettings half; half.speedPpm = 500000;
     policy.controller.edit(half, true); policy.finish();
     policy.state.sync = false; policy.controller.policyChanged(true); policy.finish();
@@ -619,12 +602,12 @@ void testServerLatestMergePartialAndRecordingCatchup()
         "Server policy must be published before the listening state it enables");
 }
 
-void testServerContentInvalidationRetry()
+void testSharedContentInvalidationRetry()
 {
     std::array<Harness, 4> peers;
     for (std::size_t i = 0; i < peers.size(); ++i) {
         auto& peer = peers[i];
-        peer.state.serverBinary = peer.state.network = true;
+        peer.state.network = true;
         peer.state.creator = i == 0;
         peer.state.localToken = QStringLiteral("p%1").arg(i);
         for (int j = 0; j < 4; ++j) if (j != static_cast<int>(i))
@@ -648,7 +631,7 @@ void testServerContentInvalidationRetry()
         require(!peer.controller.pending() && peer.applications == 0 &&
             peer.commands.back().type == jam2::EngineCommandType::CancelListeningTools,
             "content invalidation must cancel the obsolete scheduled commit before its boundary");
-        require(peer.controller.stats().value("server_deferred_state").toBool(),
+        require(peer.controller.stats().value("shared_deferred_state").toBool(),
             "Server cancellation stranded the latest authoritative listening selection");
         require(peer.controller.selectedSettings() == selected && peer.visible == selected,
             "a retryable content change must retain the authoritative GUI selection");
@@ -681,7 +664,7 @@ void testServerContentInvalidationRetry()
         peer.finish();
         require(peer.controller.appliedSettings() == selected && peer.applications == 1,
             "every interrupted Server peer must converge after its content/recording settles");
-        require(peer.controller.stats().value("server_applied_revision") == selection.value("revision"),
+        require(peer.controller.stats().value("shared_applied_revision") == selection.value("revision"),
             "Server applied revision must identify actual application rather than initial GUI defaults");
         peer.controller.tick();
         if (i != 0) require(peer.sent.back().value("type") == "jam.listening.applied" &&
@@ -695,13 +678,13 @@ void testServerContentInvalidationRetry()
         "a creator's local content retry must not publish another revision or impose a new peer barrier");
 }
 
-void testServerRetryPreparationOwnershipAndCancellation()
+void testSharedRetryPreparationOwnershipAndCancellation()
 {
     // Engine snapshots are large; keep these independent fixtures off the
     // Windows test thread's stack while exercising their asynchronous lifetimes.
     const auto creatorStorage = std::make_unique<Harness>();
     auto& creator = *creatorStorage;
-    creator.state.serverBinary = creator.state.network = true;
+    creator.state.network = true;
     creator.state.peers = {"p1", "p2", "p3"};
     ListeningToolsSettings selected; selected.speedPpm = 730000;
     creator.controller.edit(selected, true);
@@ -720,7 +703,7 @@ void testServerRetryPreparationOwnershipAndCancellation()
     for (const bool loading : {false, true}) {
         const auto peerStorage = std::make_unique<Harness>();
         auto& peer = *peerStorage;
-        peer.state.serverBinary = peer.state.network = peer.state.hasSources = true;
+        peer.state.network = peer.state.hasSources = true;
         peer.state.creator = false;
         peer.controller.receive(selection, "p0");
         require(!peer.renders.empty(), "the Server selection must start a real owned render before interruption");
@@ -734,8 +717,8 @@ void testServerRetryPreparationOwnershipAndCancellation()
         peer.state.sourceSignature = "new song content";
         peer.state.contentReady = false;
         peer.controller.tick();
-        require(peer.controller.stats().value("server_content_deferrals").toInteger() == 1 &&
-            peer.controller.stats().value("server_deferred_state").toBool() && !peer.controller.pending(),
+        require(peer.controller.stats().value("shared_content_deferrals").toInteger() == 1 &&
+            peer.controller.stats().value("shared_deferred_state").toBool() && !peer.controller.pending(),
             "rendering/loading invalidation must retain one observable deferred selection");
         if (loading) require(!QFile::exists(obsolete.path), "cancelled staged preparation must release its file");
         peer.state.contentReady = true;
@@ -762,7 +745,7 @@ void testServerRetryPreparationOwnershipAndCancellation()
 
     const auto newerStorage = std::make_unique<Harness>();
     auto& newer = *newerStorage;
-    newer.state.serverBinary = newer.state.network = true; newer.state.creator = false;
+    newer.state.network = true; newer.state.creator = false;
     newer.controller.receive(selection, "p0");
     newer.state.contentReady = false; newer.controller.tick(); // Readiness alone can invalidate the old source.
     selected.speedPpm = 610000;
@@ -776,20 +759,20 @@ void testServerRetryPreparationOwnershipAndCancellation()
 
     const auto cancelledStorage = std::make_unique<Harness>();
     auto& cancelled = *cancelledStorage;
-    cancelled.state.serverBinary = cancelled.state.network = true;
+    cancelled.state.network = true;
     cancelled.state.creator = false; cancelled.state.contentReady = false;
     cancelled.controller.receive(latest, "p0");
     cancelled.state.protectedRecording = true;
     cancelled.controller.receive({{"type", "jam.listening.cancel"}, {"revision", latest.value("revision")}, {"reason", "explicit authority cancellation"}}, "p0");
     cancelled.state.protectedRecording = false; cancelled.state.contentReady = true;
     cancelled.controller.receive(latest, "p0"); cancelled.controller.tick();
-    require(!cancelled.controller.stats().value("server_deferred_state").toBool() &&
+    require(!cancelled.controller.stats().value("shared_deferred_state").toBool() &&
         cancelled.commands.empty() && cancelled.applications == 0 && cancelled.visible == cancelled.controller.appliedSettings(),
         "explicit cancellation during recording must discard a deferred retry without resurrection by a duplicate");
 
     const auto disabledStorage = std::make_unique<Harness>();
     auto& disabled = *disabledStorage;
-    disabled.state.serverBinary = disabled.state.network = true; disabled.state.creator = false;
+    disabled.state.network = true; disabled.state.creator = false;
     disabled.controller.receive(selection, "p0"); disabled.state.contentReady = false; disabled.controller.tick();
     const auto beforeDisable = disabled.commands.size();
     disabled.state.sync = false; disabled.controller.policyChanged(true);
@@ -797,27 +780,27 @@ void testServerRetryPreparationOwnershipAndCancellation()
     require(disabled.commands.size() == beforeDisable && disabled.applications == 0,
         "a deferred retry cannot execute while listening sync is disabled");
     disabled.controller.reset(); disabled.state.sync = true; disabled.controller.tick();
-    require(!disabled.controller.pending() && !disabled.controller.stats().value("server_deferred_state").toBool() &&
-        disabled.controller.stats().value("server_content_deferrals").toInteger() == 0,
+    require(!disabled.controller.pending() && !disabled.controller.stats().value("shared_deferred_state").toBool() &&
+        disabled.controller.stats().value("shared_content_deferrals").toInteger() == 0,
         "session reset must discard retries and reset their counters");
 
     const auto failedStorage = std::make_unique<Harness>();
     auto& failed = *failedStorage;
-    failed.state.serverBinary = failed.state.network = failed.state.hasSources = true; failed.state.creator = false;
+    failed.state.network = failed.state.hasSources = true; failed.state.creator = false;
     failed.controller.receive(selection, "p0");
     require(!failed.renders.empty(), "terminal failure fixture must have a pending Server render");
     PreparedMixResult failure; failure.error = "fixture render failed";
     failed.controller.prepared(failed.renders.back(), failure); failed.controller.tick();
     require(failed.renders.size() == 1 && !failed.controller.pending() &&
-        !failed.controller.stats().value("server_deferred_state").toBool() && !failed.sent.empty() && failed.sent.back().value("type") == "jam.listening.failed",
+        !failed.controller.stats().value("shared_deferred_state").toBool() && !failed.sent.empty() && failed.sent.back().value("type") == "jam.listening.failed",
         "a genuine render failure remains reported rather than silently retried forever");
 }
 
-void testServerContentInvalidationAfterBoundary()
+void testSharedContentInvalidationAfterBoundary()
 {
     for (const bool explicitInvalidation : {false,true}) {
     auto creator = std::make_unique<Harness>();
-    creator->state.serverBinary = creator->state.network = true;
+    creator->state.network = true;
     creator->state.peers = {"p1","p2","p3"};
     ListeningToolsSettings settings; settings.speedPpm = 930000;
     creator->controller.edit(settings,true);
@@ -825,12 +808,12 @@ void testServerContentInvalidationAfterBoundary()
     std::array<std::unique_ptr<Harness>,2> healthy;
     for (auto& member : healthy) {
         member = std::make_unique<Harness>();
-        member->state.serverBinary = member->state.network = true; member->state.creator = false;
+        member->state.network = true; member->state.creator = false;
         member->controller.receive(selection,"p0"); member->finish();
     }
     creator->finish();
     auto peer = std::make_unique<Harness>();
-    peer->state.serverBinary = peer->state.network = peer->state.hasSources = true;
+    peer->state.network = peer->state.hasSources = true;
     peer->state.creator = false;
     peer->controller.receive(selection,"p0");
     QTemporaryDir folder;
@@ -848,11 +831,11 @@ void testServerContentInvalidationAfterBoundary()
     peer->state.contentReady = false;
     if (explicitInvalidation) peer->controller.sourceWillChange();
     peer->controller.tick();
-    require(peer->controller.stats().value("server_deferred_state").toBool() && peer->controller.selectedSettings() == settings &&
+    require(peer->controller.stats().value("shared_deferred_state").toBool() && peer->controller.selectedSettings() == settings &&
         peer->controller.stats().value("error").toString().isEmpty(),
         "post-boundary content invalidation stranded the authoritative selection as a terminal audio-swap failure");
-    require(peer->controller.stats().value("server_post_boundary_deferrals").toInteger() == 1 &&
-        peer->controller.stats().value("server_source_invalidations").toInteger() == (explicitInvalidation ? 1 : 0) &&
+    require(peer->controller.stats().value("shared_post_boundary_deferrals").toInteger() == 1 &&
+        peer->controller.stats().value("shared_source_invalidations").toInteger() == (explicitInvalidation ? 1 : 0) &&
         peer->applications == 0 && !QFile::exists(rendered.path), "late invalidation must release old preparation without falsely acknowledging application");
     const auto renderCount = peer->renders.size();
     peer->controller.tick(); require(peer->renders.size() == renderCount,"invalidated content caused a busy retry loop");
@@ -874,10 +857,10 @@ void testServerContentInvalidationAfterBoundary()
     require(creator->applications == 1 && creator->sent.size() == 1,"late retry created a new authority revision or blocked the other three peers");
     }
     for (const bool server : {false,true}) {
-        auto local = std::make_unique<Harness>(); local->state.serverBinary = server; local->state.sync = false;
+        auto local = std::make_unique<Harness>(); local->state.network = server; local->state.sync = false;
         ListeningToolsSettings settings; settings.speedPpm = 820000; local->controller.edit(settings,true);
         const auto commands = local->commands.size(); local->controller.sourceWillChange();
-        require(local->commands.size() == commands && local->controller.pending(),"source invalidation notification changed TCP/private listening behavior");
+        require(local->commands.size() == commands && local->controller.pending(),"source invalidation notification changed private listening behavior");
         local->state.sourceSignature = "private post-boundary source";
         local->finish();
         require(local->applications == 1 && local->controller.appliedSettings() == settings,
@@ -889,10 +872,10 @@ int main(int argc, char** argv) {
     try {
         QApplication application(argc, argv);
         testStableNumericEdit();
-        testServerContentInvalidationRetry();
-        testServerRetryPreparationOwnershipAndCancellation();
-        testServerContentInvalidationAfterBoundary();
-        testServerLatestMergePartialAndRecordingCatchup();
+        testSharedContentInvalidationRetry();
+        testSharedRetryPreparationOwnershipAndCancellation();
+        testSharedContentInvalidationAfterBoundary();
+        testSharedLatestMergePartialAndRecordingCatchup();
         testReadinessAndContinuity(); testLocalOnlyAndDisable(); testPreparationErrorsAndStaleResults();
         testResetRetryJoinAndPendingClock();
         testStagedLoadAndRollback(); testValidationAndDialog();

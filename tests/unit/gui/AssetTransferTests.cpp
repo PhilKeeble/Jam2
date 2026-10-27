@@ -89,6 +89,7 @@ public:
 
     QObject* dispatchContext() noexcept override { return this; }
     int sessionSampleRate() const noexcept override { return 48000; }
+    QString peerName(const QString& token) const override { return token=="peer-b" ? QStringLiteral("Boris") : QString{}; }
     QString assetPathForSend(const QString& hash) const override
     {
         return outgoingPaths.value(hash);
@@ -851,6 +852,8 @@ void test_active_outgoing_rerequest_restarts_from_zero(const QString& folder)
             transfer.automationSnapshot().value(
                 QStringLiteral("outgoing_validation_pending")).toBool(),
         "active same-peer re-request restarts validation from byte zero");
+    expect(!context.logs.isEmpty() && context.logs.constLast().contains("target=Boris") &&
+        !context.logs.constLast().contains("peer-b"), "asset progress labels resolve the authenticated peer name");
     expect(context.runNext() && context.controls.size() == 2 &&
             context.controls.constLast().value(QStringLiteral("type")).toString() ==
                 QStringLiteral("looper.asset.start"),

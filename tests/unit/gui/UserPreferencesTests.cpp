@@ -33,6 +33,8 @@ int main(int argc, char** argv)
         require(UserPreferencesStore::load().create.strategy == jam2::ConnectionStrategy::Jam2Server,
             "new preferences default to Server strategy");
         expected.create.strategy = jam2::ConnectionStrategy::Direct;
+        expected.create.name = QStringLiteral("Alice");
+        expected.join.name = QStringLiteral("\u00c9lodie");
         expected.sync.listeningTools = false;
         expected.recording.preferredMode = QStringLiteral("loopback");
         expected.recording.input.outputFolder = QStringLiteral("input-folder");
@@ -57,6 +59,7 @@ int main(int argc, char** argv)
         const UserPreferences actual = UserPreferencesStore::load();
         require(actual.create.strategy == jam2::ConnectionStrategy::Direct && actual.create.noStun,
             "typed connection strategy round-trips");
+        require(actual.create.name==expected.create.name && actual.join.name==expected.join.name,"create/join names did not round-trip");
         require(!actual.sync.listeningTools, "listening sync preference round-trips disabled state");
         require(actual.recording.preferredMode == expected.recording.preferredMode &&
                 actual.recording.input.outputFolder == expected.recording.input.outputFolder &&

@@ -15,6 +15,7 @@
 #include <memory>
 #include <stdexcept>
 #include <vector>
+#include <functional>
 
 class CandidateNetwork {
     static void require(bool okay, const char* message) { if (!okay) throw std::runtime_error(message); }
@@ -27,6 +28,7 @@ class CandidateNetwork {
     };
     QUdpSocket ingress_;
     quint16 server_;
+    bool distinctHosts_ = false;
     std::map<quint16, std::unique_ptr<Route>> routes_;
     quint64 directCount_ = 0;
     const bool traceMux_ = qEnvironmentVariableIsSet("JAM2_TRACE_CANDIDATE_MUX");
@@ -63,8 +65,14 @@ class CandidateNetwork {
     int suppressCount = 0;
     QString blockedA, blockedB;
     std::set<quint16> blockedPairPorts;
+    std::set<quint16> blockedCreatorPorts;
     std::set<QString> firstMembership;
+    QString creatorPeer_;
 public:
+    using Delivery = std::function<bool(const QByteArray&)>;
+    // Intercept native runtime packets only; discovery and typed streams keep
+    // their own existing fault controls. Deliveries preserve punched endpoints.
+    std::function<void(const QString&, const QString&, const QByteArray&, Delivery)> nativeForwarder;
     struct AuthorityBeaconStats { quint64 forwarded=0,dropped=0; };
     void setAuthorityBeaconsEnabled(bool enabled) { authorityBeaconsEnabled_=enabled; }
     void setAuthorityBeaconInterval(quint64 milliseconds) { authorityBeaconIntervalMs_=milliseconds; authorityBeaconTimes_.clear(); }
@@ -83,7 +91,7 @@ public:
     bool impairMultiplex = true;
     quint64 leavesDropped = 0;
     quint64 dropped = 0, duplicated = 0;
-    explicit CandidateNetwork(quint16 server) : server_(server) {
+    explicit CandidateNetwork(quint16 server,bool distinctHosts=false) : server_(server),distinctHosts_(distinctHosts) {
         require(ingress_.bind(QHostAddress::LocalHost, 0), "bind simulated NAT ingress");
     }
     ~CandidateNetwork() {
@@ -101,6 +109,17 @@ public:
         for (const auto& [local, route] : routes_)
             if (route->peer == a || route->peer == b) blockedPairPorts.insert(local);
     }
+    bool hasFreshCreatorLink(const QString& identity) const {
+        for (const auto& [local,route] : routes_)
+            if (route->peer==identity && route->attempt==0 && !blockedCreatorPorts.contains(local)) return true;
+        return false;
+    }
+    std::size_t blockCreatorLink(const QString& identity) {
+        const auto before=blockedCreatorPorts.size();
+        for (const auto& [local,route] : routes_)
+            if (route->peer==identity && route->attempt==0) blockedCreatorPorts.insert(local);
+        return blockedCreatorPorts.size()-before;
+    }
     void pump() {
         while (ingress_.hasPendingDatagrams()) {
             QHostAddress address; quint16 local = 0;
@@ -109,9 +128,18 @@ public:
             auto& route = routes_[local];
             if (!route) {
                 route = std::make_unique<Route>(); route->local = local;
-                require(route->socket.bind(QHostAddress::LocalHost, 0), "bind simulated NAT mapping");
+                const auto publicAddress=distinctHosts_ ? QHostAddress(QStringLiteral("127.0.0.%1").arg(2+routes_.size()%200)) : QHostAddress(QHostAddress::LocalHost);
+                require(route->socket.bind(publicAddress, 0), "bind simulated NAT mapping");
             }
             auto object = QJsonDocument::fromJson(packet).object();
+            if (packet.size()>=64 && packet.startsWith("J2PB")) {
+                route->peer=QString::fromLatin1(packet.mid(16,16).toHex());
+                route->request=QString::fromLatin1(packet.mid(32,16).toHex());
+                const auto kind=static_cast<quint8>(packet[5]);
+                if (kind==1) route->attempt=0;
+                else if (kind==6 && packet.size()>=79) route->attempt=static_cast<quint8>(packet[56]);
+            }
+            if (blockedCreatorPorts.contains(local)) { ++dropped; continue; }
             if (invalidLan && object.value("type") == "jam_candidate" && object.value("attempt").toInt() == 1) {
                 auto hint = object.value("local_endpoint").toObject(); hint["host"] = "127.0.0.2";
                 object["local_endpoint"] = hint; packet = QJsonDocument(object).toJson(QJsonDocument::Compact);
@@ -125,7 +153,12 @@ public:
                 route->request = object.value("nonce").toString();
                 route->attempt = object.value("attempt").toInt();
             }
-            route->socket.writeDatagram(packet, QHostAddress::LocalHost, server_);
+            const auto deliver = [this, local](const QByteArray& bytes) {
+                return routes_.at(local)->socket.writeDatagram(bytes, QHostAddress::LocalHost, server_) == bytes.size();
+            };
+            if (nativeForwarder && packet.startsWith("JAM2"))
+                nativeForwarder(route->peer, creatorPeer_, packet, deliver);
+            else deliver(packet);
         }
         for (auto& [local, route] : routes_) {
             while (route->socket.hasPendingDatagrams()) {
@@ -133,11 +166,20 @@ public:
                 QByteArray packet(static_cast<int>(route->socket.pendingDatagramSize()), '\0');
                 route->socket.readDatagram(packet.data(), packet.size(), &source, &from);
                 if (from == server_) {
+                    if (blockedCreatorPorts.contains(local)) { ++dropped; continue; }
                     const auto message = QJsonDocument::fromJson(packet).object();
                     const auto kind = message.value("type").toString();
                     if (blockFirst && kind.endsWith("_ack") &&
                         firstMembership.insert(kind + message.value("peer").toString()).second) { ++dropped; continue; }
-                    ingress_.writeDatagram(packet, QHostAddress::LocalHost, local); continue;
+                    if (packet.startsWith("J2PB") && packet.size()>=32)
+                        creatorPeer_=QString::fromLatin1(packet.mid(16,16).toHex());
+                    const auto deliver = [this, local](const QByteArray& bytes) {
+                        return ingress_.writeDatagram(bytes, QHostAddress::LocalHost, local) == bytes.size();
+                    };
+                    if (nativeForwarder && packet.startsWith("JAM2"))
+                        nativeForwarder(creatorPeer_, route->peer, packet, deliver);
+                    else deliver(packet);
+                    continue;
                 }
                 const auto found = routes_.find(from);
                 if (found == routes_.end()) continue;
@@ -212,7 +254,12 @@ public:
                 ++directCount_;
                 if (impairMultiplex && packet.startsWith("J2MX") && directCount_ % 19 == 0) { traceMux(*sender,*route,packet,true); ++dropped; continue; }
                 traceMux(*sender,*route,packet,false);
-                sender->socket.writeDatagram(packet, QHostAddress::LocalHost, local);
+                const auto deliver = [this, senderLocal=sender->local, local](const QByteArray& bytes) {
+                    return routes_.at(senderLocal)->socket.writeDatagram(bytes, QHostAddress::LocalHost, local) == bytes.size();
+                };
+                if (nativeForwarder && packet.startsWith("JAM2"))
+                    nativeForwarder(sender->peer, route->peer, packet, deliver);
+                else deliver(packet);
                 if (impairMultiplex && packet.startsWith("J2MX") && directCount_ % 23 == 0) {
                     sender->socket.writeDatagram(packet, QHostAddress::LocalHost, local); ++duplicated;
                 }
@@ -230,12 +277,12 @@ class ThreadedCandidateNetwork {
     QEventLoop* loop_ = nullptr;
     quint16 port_ = 0;
 public:
-    explicit ThreadedCandidateNetwork(quint16 server) {
+    explicit ThreadedCandidateNetwork(quint16 server,bool distinctHosts=false) {
         std::promise<quint16> ready;
         auto future = ready.get_future();
-        worker_ = std::thread([this, server, ready = std::move(ready)]() mutable {
+        worker_ = std::thread([this, server, distinctHosts, ready = std::move(ready)]() mutable {
             try {
-                CandidateNetwork network(server); network.blockFirst = false;
+                CandidateNetwork network(server,distinctHosts); network.blockFirst = false;
                 QObject context; QEventLoop loop; QTimer timer;
                 context_ = &context; network_ = &network; loop_ = &loop;
                 QObject::connect(&timer, &QTimer::timeout, &context, [&] { network.pump(); });
@@ -255,6 +302,21 @@ public:
     void suppressControlOpens(const QString& peer, int count) {
         QMetaObject::invokeMethod(context_, [this, peer, count] { network_->suppressControlOpens(peer, count); },
             Qt::BlockingQueuedConnection);
+    }
+    std::size_t blockCreatorLink(const QString& identity) {
+        std::size_t count=0;
+        QMetaObject::invokeMethod(context_,[&] { count=network_->blockCreatorLink(identity); },Qt::BlockingQueuedConnection);
+        return count;
+    }
+    bool hasFreshCreatorLink(const QString& identity) const {
+        bool fresh=false;
+        QMetaObject::invokeMethod(context_,[&] { fresh=network_->hasFreshCreatorLink(identity); },Qt::BlockingQueuedConnection);
+        return fresh;
+    }
+    quint64 droppedCount() const {
+        quint64 count=0;
+        QMetaObject::invokeMethod(context_,[&] { count=network_->dropped; },Qt::BlockingQueuedConnection);
+        return count;
     }
     void blockCurrentPair(const QString& a, const QString& b) {
         QMetaObject::invokeMethod(context_, [this, a, b] { network_->blockCurrentPair(a, b); },

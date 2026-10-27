@@ -29,7 +29,6 @@ void MainWindow::initializeListeningTools()
         state.sync = jam2JamSyncAllows(jamSyncPolicy_, JamSyncRoute::ListeningTools);
         state.network = jam2_.isNetworkRunning();
         state.creator = !state.network || sessionController_.isServer();
-        state.serverBinary = sessionRuntimeDraft_.configuration.strategy == jam2::ConnectionStrategy::Jam2Server && state.network;
         state.engineRunning = jam2_.isRunning();
         state.protectedRecording = sharedRecordingProtected();
         state.transportChanging = pendingBankIndex_ >= 0 || sharedBankLaunch_.active();
