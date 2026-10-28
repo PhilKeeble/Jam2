@@ -12,11 +12,20 @@ struct RecordingCalibrationKey {
     QVector<int> inputChannels;
     QVector<int> outputChannels;
     int physicalInput = -1; // Input used to measure this device configuration.
+    QString inputDeviceId;
+    int inputPeriodFrames = 0;
+    int inputMixRate = 0;
+    int outputMixRate = 0;
+    int captureTargetMs = 0;
+    bool lowLatencyShared = false;
     bool operator==(const RecordingCalibrationKey&) const = default;
     bool matchesDeviceConfiguration(const RecordingCalibrationKey& other) const {
         return backend == other.backend && deviceId == other.deviceId &&
             sampleRate == other.sampleRate && bufferFrames == other.bufferFrames &&
-            inputChannels == other.inputChannels && outputChannels == other.outputChannels;
+            inputChannels == other.inputChannels && outputChannels == other.outputChannels &&
+            inputDeviceId == other.inputDeviceId && inputPeriodFrames == other.inputPeriodFrames &&
+            inputMixRate == other.inputMixRate && outputMixRate == other.outputMixRate &&
+            captureTargetMs == other.captureTargetMs && lowLatencyShared == other.lowLatencyShared;
     }
     bool valid() const {
         const auto validChannels = [](const QVector<int>& channels) {

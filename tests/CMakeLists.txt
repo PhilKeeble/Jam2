@@ -233,13 +233,14 @@ add_executable(jam2_audio_flow_interaction_tests EXCLUDE_FROM_ALL
     integration/network/AudioFlowInteractionTests.cpp)
 jam2_configure_test_target(jam2_audio_flow_interaction_tests)
 target_link_libraries(jam2_audio_flow_interaction_tests PRIVATE jam2_core)
-foreach(experiment capture interruption clock)
+foreach(experiment capture interruption clock wasapi)
     add_test(NAME jam2_audio_flow_${experiment}
         COMMAND $<TARGET_FILE:jam2_audio_flow_interaction_tests> ${experiment})
     set_tests_properties(jam2_audio_flow_${experiment} PROPERTIES
         LABELS "integration;core;audio;network;performance"
         TIMEOUT 120)
 endforeach()
+set_property(TEST jam2_audio_flow_wasapi APPEND PROPERTY LABELS "wasapi;four-peer;fake-audio;network-impairment")
 set_property(TEST jam2_audio_flow_interruption jam2_audio_flow_clock
     APPEND PROPERTY LABELS "four-peer")
 
@@ -373,6 +374,13 @@ add_test(NAME jam2_audio_device_processing_units
 set_tests_properties(jam2_audio_device_processing_units PROPERTIES
     LABELS "unit;core;audio;performance;metronome"
     TIMEOUT 30)
+
+add_executable(jam2_wasapi_processing_tests EXCLUDE_FROM_ALL unit/core/WasapiProcessingTests.cpp)
+jam2_configure_test_target(jam2_wasapi_processing_tests)
+target_link_libraries(jam2_wasapi_processing_tests PRIVATE jam2_core)
+add_test(NAME jam2_wasapi_processing_units COMMAND $<TARGET_FILE:jam2_wasapi_processing_tests>)
+set_tests_properties(jam2_wasapi_processing_units PROPERTIES
+    LABELS "unit;core;audio;wasapi;four-peer;fake-audio" TIMEOUT 60)
 
 if(APPLE)
     add_executable(jam2_coreaudio_recording_timing_tests EXCLUDE_FROM_ALL
@@ -2211,4 +2219,59 @@ endforeach()
 if(TARGET jam2_rendezvous_server_wire_tests)
     add_dependencies(jam2_tests_network jam2_rendezvous_server_wire_tests)
     add_dependencies(jam2_tests_all jam2_rendezvous_server_wire_tests)
+endif()
+
+add_dependencies(jam2_tests_unit jam2_wasapi_processing_tests)
+add_dependencies(jam2_tests_all jam2_wasapi_processing_tests)
+
+if(WIN32)
+    add_executable(jam2_wasapi_gui_tests EXCLUDE_FROM_ALL unit/gui/WasapiGuiTests.cpp
+        "${CMAKE_SOURCE_DIR}/app/gui/AudioDeviceUiSupport.cpp"
+        "${CMAKE_SOURCE_DIR}/app/gui/SessionStartupDialogs.cpp"
+        "${CMAKE_SOURCE_DIR}/app/gui/SettingsDialog.cpp"
+        "${CMAKE_SOURCE_DIR}/app/gui/UserPreferences.cpp"
+        "${CMAKE_SOURCE_DIR}/app/gui/GuiControlContract.cpp"
+        "${CMAKE_SOURCE_DIR}/app/gui/GuiPresentation.cpp"
+        "${CMAKE_SOURCE_DIR}/app/gui/MusicTheory.cpp"
+        "${CMAKE_SOURCE_DIR}/app/gui/BeatGridModel.cpp"
+        "${CMAKE_SOURCE_DIR}/app/gui/GenerationRecipe.cpp"
+        "${CMAKE_SOURCE_DIR}/app/gui/PracticeIdeaGenerator.cpp"
+        "${CMAKE_SOURCE_DIR}/app/gui/StyleProfileCatalog.cpp"
+        "${CMAKE_SOURCE_DIR}/app/gui/ResearchDrumEngine.cpp"
+        "${CMAKE_SOURCE_DIR}/app/gui/ResearchDrumKit.cpp")
+    jam2_configure_test_target(jam2_wasapi_gui_tests)
+    target_include_directories(jam2_wasapi_gui_tests PRIVATE "${CMAKE_SOURCE_DIR}/app/gui" "${CMAKE_SOURCE_DIR}/app/application")
+    target_link_libraries(jam2_wasapi_gui_tests PRIVATE jam2_core jam2_daisysp_drums jam2_looper_model Qt6::Core Qt6::Widgets)
+    add_test(NAME jam2_wasapi_gui_units COMMAND $<TARGET_FILE:jam2_wasapi_gui_tests>)
+    set_tests_properties(jam2_wasapi_gui_units PROPERTIES LABELS "unit;gui;audio;wasapi;dialog;persistence"
+        TIMEOUT 45 ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Widgets>")
+    add_dependencies(jam2_tests_unit jam2_wasapi_gui_tests)
+    add_dependencies(jam2_tests_gui jam2_wasapi_gui_tests)
+    add_dependencies(jam2_tests_all jam2_wasapi_gui_tests)
+endif()
+
+if(WIN32)
+    set(JAM2_WASAPI_HARDWARE_PROFILE "" CACHE FILEPATH "Explicit WASAPI/ASIO endpoint hardware-test profile")
+    if(DEFINED ENV{JAM2_WASAPI_HARDWARE_PROFILE})
+        set(JAM2_WASAPI_HARDWARE_PROFILE "$ENV{JAM2_WASAPI_HARDWARE_PROFILE}" CACHE FILEPATH "Explicit WASAPI/ASIO endpoint hardware-test profile" FORCE)
+    endif()
+    add_executable(jam2_wasapi_hardware_tests EXCLUDE_FROM_ALL integration/core/WasapiHardwareIntegration.cpp)
+    jam2_configure_test_target(jam2_wasapi_hardware_tests)
+    target_link_libraries(jam2_wasapi_hardware_tests PRIVATE jam2_core Qt6::Core)
+    add_dependencies(jam2_wasapi_hardware_tests jam2)
+    add_test(NAME jam2_wasapi_hardware_integration COMMAND $<TARGET_FILE:jam2_wasapi_hardware_tests>
+        "${JAM2_TEST_PUBLIC_EXECUTABLE}" "${JAM2_WASAPI_HARDWARE_PROFILE}")
+    set_tests_properties(jam2_wasapi_hardware_integration PROPERTIES LABELS "integration;hardware;audio;wasapi"
+        TIMEOUT 90 RUN_SERIAL TRUE SKIP_RETURN_CODE 77
+        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
+    add_dependencies(jam2_tests_hardware jam2_wasapi_hardware_tests)
+    add_dependencies(jam2_tests_all jam2_wasapi_hardware_tests)
+endif()
+
+if(WIN32)
+    add_custom_target(jam2_tests_wasapi DEPENDS jam2 jam2_wasapi_processing_tests jam2_wasapi_gui_tests
+        jam2_wasapi_hardware_tests jam2_audio_device_processing_tests jam2_gui_widget_boundary_tests
+        jam2_recording_calibration_tests jam2_user_preferences_tests jam2_cli_boundary_tests
+        jam2_audio_flow_interaction_tests)
 endif()

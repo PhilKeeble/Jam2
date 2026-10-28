@@ -1,6 +1,7 @@
 #pragma once
 
 #include "UserPreferences.hpp"
+#include "AudioDeviceUiSupport.hpp"
 
 #include <QDialog>
 #include <QString>
@@ -19,10 +20,7 @@ class QWidget;
 
 namespace jam2::gui {
 
-struct SessionAudioDeviceChoice {
-    QString label;
-    QString id;
-};
+using SessionAudioDeviceChoice = AudioDeviceChoice;
 
 struct SessionAudioDeviceList {
     QVector<SessionAudioDeviceChoice> devices;
@@ -65,6 +63,7 @@ struct LocalEngineDialogState {
     QString inputChannels;
     QString outputChannels;
     bool saveDefaults = false;
+    AudioDevicePreference audio;
 };
 
 struct LocalEngineDialogCallbacks {
@@ -97,6 +96,8 @@ public:
 private:
     LocalEngineDialogCallbacks callbacks_;
     QComboBox* device_ = nullptr;
+    AudioDeviceControls* audioControls_ = nullptr;
+    SessionAudioDeviceList devices_;
     QComboBox* sampleRate_ = nullptr;
     QComboBox* bufferSize_ = nullptr;
     QLineEdit* inputChannels_ = nullptr;
@@ -134,6 +135,8 @@ private:
     QSpinBox* maximumPeers_ = nullptr;
     QComboBox* profile_ = nullptr;
     QComboBox* device_ = nullptr;
+    AudioDeviceControls* audioControls_ = nullptr;
+    SessionAudioDeviceList devices_;
     QLineEdit* inputChannels_ = nullptr;
     QLineEdit* outputChannels_ = nullptr;
     QComboBox* sampleRate_ = nullptr;
@@ -192,6 +195,8 @@ private:
     QSpinBox* port_ = nullptr;
     QComboBox* profile_ = nullptr;
     QComboBox* device_ = nullptr;
+    AudioDeviceControls* audioControls_ = nullptr;
+    SessionAudioDeviceList devices_;
     QLineEdit* inputChannels_ = nullptr;
     QLineEdit* outputChannels_ = nullptr;
     QComboBox* bufferSize_ = nullptr;

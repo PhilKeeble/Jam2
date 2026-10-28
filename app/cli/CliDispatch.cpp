@@ -36,7 +36,11 @@ int run(int argc, char** argv)
             return 0;
         }
         for (const auto& device : devices) {
-            std::cout << "[" << device.id << "] " << device.backend << " " << device.name << "\n";
+            std::cout << "[" << device.id << "] " << device.backend << " " << device.name;
+            if (device.backend == "WASAPI") std::cout << " [" <<
+                (device.direction == jam2::audio::EndpointDirection::Input ? "input" : "output") << "] channels=" <<
+                device.channel_count << " endpoint=" << device.endpoint_id;
+            std::cout << "\n";
         }
         return 0;
     }

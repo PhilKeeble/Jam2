@@ -79,6 +79,8 @@ QComboBox* fixedBufferSizeCombo(QWidget* parent, int value)
     for (const long size : jam2::audio::kTestBufferSizes) {
         combo->addItem(QString::number(size), static_cast<int>(size));
     }
+    if (value >= 0 && combo->findData(value) < 0)
+        combo->addItem(value == 0 ? QStringLiteral("Automatic") : QString::number(value), value);
     const int index = combo->findData(value);
     combo->setCurrentIndex(index >= 0 ? index : combo->findData(64));
     return combo;
@@ -253,6 +255,11 @@ LocalEngineDialog::LocalEngineDialog(
     form->addRow(QStringLiteral("Buffer size"), bufferSize_);
     form->addRow(QStringLiteral("Input channels"), inputChannels_);
     form->addRow(QStringLiteral("Output channels"), outputChannels_);
+    auto localPreference = initial.audio;
+    localPreference.inputChannels = initial.inputChannels;
+    localPreference.outputChannels = initial.outputChannels;
+    audioControls_ = new AudioDeviceControls(form, device_, inputChannels_, outputChannels_,
+        devices.devices, localPreference, initial.selectedDeviceId, QStringLiteral("application.local-engine"), bufferSize_);
     form->addRow(QString(), testDevice);
     form->addRow(QString(), saveDefaults_);
 
@@ -291,6 +298,7 @@ LocalEngineDialogState LocalEngineDialog::state() const
         inputChannels_->text().trimmed(),
         outputChannels_->text().trimmed(),
         saveDefaults_->isChecked(),
+        audioControls_->preference({}),
     };
 }
 
@@ -379,6 +387,8 @@ StartJamDialog::StartJamDialog(
     audioForm->addRow(QStringLiteral("Output channels"), outputChannels_);
     audioForm->addRow(QStringLiteral("Sample rate"), sampleRate_);
     audioForm->addRow(QStringLiteral("Audio buffer size"), bufferSize_);
+    audioControls_ = new AudioDeviceControls(audioForm, device_, inputChannels_, outputChannels_,
+        devices_.devices, initial.audio, devices_.selectedId, QStringLiteral("session.dialog"), bufferSize_);
     audioForm->addRow(QString(), testDevice);
     audioForm->addRow(QStringLiteral("Frame size"), frameSize_);
     audioForm->addRow(QStringLiteral("Audio quality"), audioFormat_);
@@ -636,7 +646,7 @@ StartJamDialogState StartJamDialog::state() const
     result.create.runtime.waitMs = waitMs_->value();
     result.create.runtime.streamMs = streamMs_->value();
     result.create.runtime.streamLingerMs = streamLingerMs_->value();
-    result.audio = audioTemplate_;
+    result.audio = audioControls_ ? audioControls_->preference(audioTemplate_) : audioTemplate_;
     result.audio.inputChannels = inputChannels_->text().trimmed();
     result.audio.outputChannels = outputChannels_->text().trimmed();
     result.audio.sampleRate = result.create.sampleRate;
@@ -663,6 +673,8 @@ void StartJamDialog::applyCreateProfile(const QString& name)
 
 void StartJamDialog::setDeviceList(SessionAudioDeviceList devices)
 {
+    devices_ = devices;
+    if (audioControls_) { audioControls_->setDevices(devices.devices, devices.selectedId); return; }
     const QSignalBlocker blocker(device_);
     device_->clear();
     for (const SessionAudioDeviceChoice& choice : devices.devices) {
@@ -743,6 +755,8 @@ JoinJamDialog::JoinJamDialog(
     audioForm->addRow(QStringLiteral("Input channels"), inputChannels_);
     audioForm->addRow(QStringLiteral("Output channels"), outputChannels_);
     audioForm->addRow(QStringLiteral("Audio buffer size"), bufferSize_);
+    audioControls_ = new AudioDeviceControls(audioForm, device_, inputChannels_, outputChannels_,
+        devices_.devices, initial.audio, devices_.selectedId, QStringLiteral("session.dialog"), bufferSize_);
     audioForm->addRow(QString(), new QLabel(
         QStringLiteral("The creator supplies the session sample rate and frame size."),
         content));
@@ -956,7 +970,7 @@ JoinJamDialogState JoinJamDialog::state() const
     result.join.runtime.waitMs = waitMs_->value();
     result.join.runtime.streamMs = streamMs_->value();
     result.join.runtime.streamLingerMs = streamLingerMs_->value();
-    result.audio = audioTemplate_;
+    result.audio = audioControls_ ? audioControls_->preference(audioTemplate_) : audioTemplate_;
     result.audio.inputChannels = inputChannels_->text().trimmed();
     result.audio.outputChannels = outputChannels_->text().trimmed();
     result.audio.bufferSize = result.join.tuning.bufferSize;
@@ -980,6 +994,8 @@ void JoinJamDialog::applyJoinProfile(const QString& name)
 
 void JoinJamDialog::setDeviceList(SessionAudioDeviceList devices)
 {
+    devices_ = devices;
+    if (audioControls_) { audioControls_->setDevices(devices.devices, devices.selectedId); return; }
     const QSignalBlocker blocker(device_);
     device_->clear();
     for (const SessionAudioDeviceChoice& choice : devices.devices) {

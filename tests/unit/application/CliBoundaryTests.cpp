@@ -426,6 +426,15 @@ void testOptionAndStatsContracts()
     audio.callback_timing.processor_overloads = 2;
     audio.callback_timing.cycle_jitter_max_ns = 125000;
     audio.callback_timing.cycle_jitter_samples = 9;
+    audio.device_status.capture_queued_frames = 111;
+    audio.device_status.render_padding_frames = 222;
+    audio.device_status.capture_correction_ppm = -333;
+    audio.device_status.capture_underrun_frames = 444;
+    audio.device_status.capture_overrun_frames = 555;
+    audio.device_status.capture_discontinuities = 6;
+    audio.device_status.capture_resets = 7;
+    audio.device_status.invalid_timestamps = 8;
+    audio.device_status.error = -9;
     QTemporaryDir statsRoot;
     expect(statsRoot.isValid(), "CLI stats test creates a temporary artifact root");
     std::filesystem::path statsCsvPath;
@@ -464,9 +473,9 @@ void testOptionAndStatsContracts()
         const bool schemaMatches = opened && lines.size() == 3 &&
                 csvFieldCount(header) == csvFieldCount(finalRow) &&
                 csvFieldCount(header) == csvFieldCount(periodicRow) &&
-                header.endsWith("mix_live_tail_rounding_tolerance_frames,mix_adaptive_release_alignment_margin_frames,mix_partial_release_events,mix_partial_release_frames,mix_lookahead_hold_events,mix_lookahead_hold_frames,mix_lookahead_hold_max_fraction_ppm,mix_isolated_recovery_events,mix_worker_service_gap_us,mix_worker_runway_frames,mix_playback_stopping_frames,mix_release_worker_guard_active") &&
-                periodicRow.endsWith(",17,256,yes,18,19,20,21,22,128,256,320,64,64,23,63,31,32,33,34,35,36,37,yes") &&
-                finalRow.endsWith(",17,256,yes,18,19,20,21,22,128,256,320,64,64,23,63,31,32,33,34,35,36,37,yes");
+                header.endsWith("mix_live_tail_rounding_tolerance_frames,mix_adaptive_release_alignment_margin_frames,mix_partial_release_events,mix_partial_release_frames,mix_lookahead_hold_events,mix_lookahead_hold_frames,mix_lookahead_hold_max_fraction_ppm,mix_isolated_recovery_events,mix_worker_service_gap_us,mix_worker_runway_frames,mix_playback_stopping_frames,mix_release_worker_guard_active,wasapi_capture_depth_frames,wasapi_render_padding_frames,wasapi_capture_correction_ppm,wasapi_capture_underrun_frames,wasapi_capture_overrun_frames,wasapi_capture_discontinuities,wasapi_capture_resets,wasapi_invalid_timestamps,audio_device_error") &&
+                periodicRow.endsWith(",17,256,yes,18,19,20,21,22,128,256,320,64,64,23,63,31,32,33,34,35,36,37,yes,111,222,-333,444,555,6,7,8,-9") &&
+                finalRow.endsWith(",17,256,yes,18,19,20,21,22,128,256,320,64,64,23,63,31,32,33,34,35,36,37,yes,111,222,-333,444,555,6,7,8,-9");
         expect(schemaMatches,
             "final CSV preserves the capture-clock pacing field and schema width");
     }

@@ -970,6 +970,7 @@ bool engine_restart_required(
 {
     return active.backend != requested.backend ||
         active.audio_device_id != requested.audio_device_id ||
+        active.wasapi != requested.wasapi ||
         active.sample_rate != requested.sample_rate ||
         active.audio_buffer_frames != requested.audio_buffer_frames ||
         active.headless_clock_drift_ppm != requested.headless_clock_drift_ppm ||
@@ -993,6 +994,7 @@ jam2::EngineConfig make_engine_config_impl(const Options& options, bool leader_a
         ? jam2::EngineAudioBackend::Headless
         : jam2::EngineAudioBackend::Device;
     config.audio_device_id = options.audio_device_id.value_or(-1);
+    config.wasapi = options.wasapi;
     config.sample_rate = options.sample_rate;
     config.audio_buffer_frames = options.headless_audio && options.audio_buffer_size <= 0
         ? static_cast<long>(options.frame_size)
@@ -1339,6 +1341,26 @@ void print_optional_audio_stats(const OptionalAudioStream& audio, const Options&
     std::cout << "Requested audio channels: " << channel_selection_text(options.channel_selection) << "\n";
     std::cout << "Active audio channels: " << channel_selection_text(stream_info.channels) << "\n";
     std::cout << "Backend sample format: " << stream_info.sample_format << "\n";
+    if (stream_info.device.backend == "WASAPI") {
+        const auto& device = engine_snapshot.device_status;
+        std::cout << "WASAPI capture queued frames: " << device.capture_queued_frames << "\n"
+            << "WASAPI capture correction ppm: " << device.capture_correction_ppm << "\n"
+            << "WASAPI capture underrun frames: " << device.capture_underrun_frames << "\n"
+            << "WASAPI capture overrun frames: " << device.capture_overrun_frames << "\n"
+            << "WASAPI capture discontinuities: " << device.capture_discontinuities << "\n"
+            << "WASAPI render padding frames: " << device.render_padding_frames << "\n"
+            << "WASAPI invalid timestamps: " << device.invalid_timestamps << "\n"
+            << "WASAPI device error: " << device.error << "\n";
+        std::cout << "WASAPI input: " << stream_info.input_device_name << "\n"
+            << "WASAPI shared low-period active: " << stream_info.low_latency_shared << "\n"
+            << "WASAPI compatibility reason HRESULT: " << stream_info.shared_fallback_error << "\n"
+            << "WASAPI input/output mix rates: " << stream_info.input_mix_sample_rate << "/" << stream_info.output_mix_sample_rate << "\n"
+            << "WASAPI input/output periods frames: " << stream_info.input_period_frames << "/" << stream_info.output_period_frames << "\n"
+            << "WASAPI input/output endpoint buffers frames: " << stream_info.input_buffer_frames << "/" << stream_info.output_buffer_frames << "\n"
+            << "WASAPI capture target/capacity ms: " << stream_info.wasapi.capture_target_ms << "/" << stream_info.wasapi.capture_capacity_ms << "\n"
+            << "WASAPI capture correction limit ppm: " << stream_info.wasapi.capture_max_correction_ppm << "\n"
+            << "WASAPI MMCSS active/error: " << stream_info.realtime_scheduling_active << "/" << stream_info.realtime_scheduling_error << "\n";
+    }
     std::cout << "Output channels: duplicated mono to selected output channels\n";
     std::cout << "Capture ring capacity frames: " << engine_snapshot.capture_ring_capacity_frames << "\n";
     std::cout << "Playback ring capacity frames: " << engine_snapshot.playback_ring_capacity_frames << "\n";
@@ -1473,8 +1495,11 @@ int run_local(int argc, char** argv)
     while (!commands.state.quit.load(std::memory_order_relaxed) &&
            (options.stream_ms <= 0 ||
             jam2::monotonic_us() - started_us < static_cast<std::uint64_t>(options.stream_ms) * 1000ULL)) {
+        if (audio.engine->snapshot().lifecycle == jam2::EngineLifecycle::Failed)
+            throw std::runtime_error("local audio stream failed during playback");
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
+    if (options.stats_enabled) print_optional_audio_stats(audio, options);
     commands.recording.finalize(
         audio.engine.get(),
         make_recording_sidecar_context(options, commands.state));

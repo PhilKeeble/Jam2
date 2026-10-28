@@ -60,6 +60,8 @@ QComboBox* fixedBufferSizeCombo(QWidget* parent, int value)
     for (const long size : jam2::audio::kTestBufferSizes) {
         combo->addItem(QString::number(size), static_cast<int>(size));
     }
+    if (value >= 0 && combo->findData(value) < 0)
+        combo->addItem(value == 0 ? QStringLiteral("Automatic") : QString::number(value), value);
     const int index = combo->findData(value);
     combo->setCurrentIndex(index >= 0 ? index : combo->findData(64));
     return combo;
@@ -73,7 +75,7 @@ int preferredDeviceIndex(
     if (combo == nullptr) return -1;
     for (const auto& device : devices) {
         const QString stable = QString::fromStdString(
-            device.clsid.empty() ? device.name : device.clsid);
+            jam2::audio::stable_device_id(device));
         if (QString::fromStdString(device.backend) == preference.backend &&
             stable == preference.stableId) {
             return combo->findData(QString::number(device.id));
@@ -182,6 +184,8 @@ std::optional<SettingsDialogResult> SettingsDialog::run(
     localForm->addRow(QStringLiteral("Buffer size"), localBufferSize);
     localForm->addRow(QStringLiteral("Input channels"), localInput);
     localForm->addRow(QStringLiteral("Output channels"), localOutput);
+    auto* localControls = new jam2::gui::AudioDeviceControls(localForm, localDevice, localInput, localOutput,
+        jam2::gui::audioDeviceChoices(availableDevices_), localInitial, {}, QStringLiteral("application.settings-dialog.audio.local"), localBufferSize);
     localForm->addRow(QString(), localActions);
     auto* localBox = new QGroupBox(QStringLiteral("Local Audio"), &dialog);
     localBox->setLayout(localForm);
@@ -192,6 +196,7 @@ std::optional<SettingsDialogResult> SettingsDialog::run(
         QLineEdit* output = nullptr;
         QPushButton* test = nullptr;
         QGroupBox* box = nullptr;
+        jam2::gui::AudioDeviceControls* controls = nullptr;
     };
     auto makeNetworkAudioEditors = [&](const QString& title, const AudioDevicePreference& preference) {
         NetworkAudioEditors editors;
@@ -203,6 +208,11 @@ std::optional<SettingsDialogResult> SettingsDialog::run(
         form->addRow(QStringLiteral("Device"), editors.device);
         form->addRow(QStringLiteral("Input channels"), editors.input);
         form->addRow(QStringLiteral("Output channels"), editors.output);
+        editors.controls = new jam2::gui::AudioDeviceControls(form, editors.device, editors.input, editors.output,
+            jam2::gui::audioDeviceChoices(availableDevices_), preference, {},
+            QStringLiteral("application.settings-dialog.audio.") +
+                (title.startsWith(QStringLiteral("Create")) ? QStringLiteral("create") :
+                 title.startsWith(QStringLiteral("Join")) ? QStringLiteral("join") : QStringLiteral("network")));
         form->addRow(QString(), editors.test);
         editors.box = new QGroupBox(title, &dialog);
         editors.box->setLayout(form);
@@ -230,7 +240,7 @@ std::optional<SettingsDialogResult> SettingsDialog::run(
         const AudioDevicePreference& original,
         const NetworkAudioEditors& editors)
     {
-        AudioDevicePreference value = original;
+        AudioDevicePreference value = editors.controls->preference(original);
         value.inputChannels = editors.input->text().trimmed();
         value.outputChannels = editors.output->text().trimmed();
         jam2::gui::storeSelectedDevicePreference(
@@ -241,7 +251,7 @@ std::optional<SettingsDialogResult> SettingsDialog::run(
         const AudioDevicePreference& value,
         const NetworkAudioEditors& editors)
     {
-        selectPreferredDevice(editors.device, availableDevices_, value);
+        editors.controls->applyPreference(value);
         editors.input->setText(value.inputChannels);
         editors.output->setText(value.outputChannels);
     };
@@ -303,6 +313,7 @@ std::optional<SettingsDialogResult> SettingsDialog::run(
     updateDiscoveryControls();
 
     struct TuningEditors {
+        QFormLayout* form = nullptr;
         QComboBox* profile = nullptr;
         QComboBox* buffer = nullptr;
         QSpinBox* frame = nullptr;
@@ -335,6 +346,7 @@ std::optional<SettingsDialogResult> SettingsDialog::run(
     };
     auto addTuning = [&](QFormLayout* form, const LocalTuningPreference& p, bool creator) {
         TuningEditors e;
+        e.form = form;
         e.profile = new QComboBox(&dialog);
         if (creator) {
             for (const jam2::CreateProfile& profile : jam2::create_profiles()) {
@@ -440,6 +452,24 @@ std::optional<SettingsDialogResult> SettingsDialog::run(
     TuningEditors joinTuning = addTuning(joinForm, preferences_.join.tuning, false);
     RuntimeEditors joinRuntime = addRuntime(joinForm, preferences_.join.runtime);
 
+    const auto bindAudioBuffers = [=] {
+        // A buffer editor belongs either to the shared network selection or its
+        // role selection. Rebinding is done when the role split changes below.
+        if (splitNetworkAudio->isChecked()) {
+            createJamAudio.controls->addBufferControl(createTuning.buffer, createTuning.form);
+            joinJamAudio.controls->addBufferControl(joinTuning.buffer, joinTuning.form);
+        } else {
+            networkAudio.controls->addBufferControl(createTuning.buffer, createTuning.form);
+            networkAudio.controls->addBufferControl(joinTuning.buffer, joinTuning.form);
+        }
+    };
+    bindAudioBuffers();
+    QObject::connect(splitNetworkAudio, &QCheckBox::toggled, &dialog, [=] {
+        networkAudio.controls->clearBufferControls();
+        createJamAudio.controls->clearBufferControls();
+        joinJamAudio.controls->clearBufferControls();
+        bindAudioBuffers();
+    });
     auto applyJoinProfile = [](TuningEditors& e, const jam2::JoinProfile& p) {
         e.buffer->setCurrentIndex(qMax(0, e.buffer->findData(static_cast<int>(p.audio_buffer_size))));
         e.prefill->setValue(static_cast<int>(p.playback_prefill_frames));
@@ -1412,7 +1442,7 @@ std::optional<SettingsDialogResult> SettingsDialog::run(
                     QStringLiteral("Select a local audio device first."));
                 return;
             }
-            AudioDevicePreference desired = preferences_.localAudio;
+            AudioDevicePreference desired = localControls->preference(preferences_.localAudio);
             desired.sampleRate = localSampleRate->currentData().toInt();
             desired.bufferSize = localBufferSize->currentData().toInt();
             desired.inputChannels = localInput->text().trimmed();
@@ -1461,6 +1491,7 @@ std::optional<SettingsDialogResult> SettingsDialog::run(
     if (dialog.exec() != QDialog::Accepted) return std::nullopt;
 
     UserPreferences updated = preferences_;
+    updated.localAudio = localControls->preference(updated.localAudio);
     updated.localAudio.sampleRate = localSampleRate->currentData().toInt();
     updated.localAudio.bufferSize = localBufferSize->currentData().toInt();
     updated.localAudio.inputChannels = localInput->text().trimmed();

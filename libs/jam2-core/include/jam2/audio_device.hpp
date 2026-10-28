@@ -304,12 +304,35 @@ private:
     int targetPpm_ = 1000000;
 };
 
+enum class EndpointDirection : std::uint8_t { Duplex, Input, Output };
+
 struct DeviceInfo {
     int id = 0;
     std::string backend;
     std::string name;
     std::string clsid;
     std::string driver_path;
+    std::string endpoint_id;
+    EndpointDirection direction = EndpointDirection::Duplex;
+    std::size_t channel_count = 0;
+    long minimum_period_frames = 0;
+    long default_period_frames = 0;
+};
+
+inline const std::string& stable_device_id(const DeviceInfo& device) noexcept
+{
+    return !device.endpoint_id.empty() ? device.endpoint_id :
+        (!device.clsid.empty() ? device.clsid : device.name);
+}
+
+struct WasapiConfig {
+    // Empty input selects playback-only. IDs are opaque MMDevice endpoint IDs.
+    std::string input_endpoint_id;
+    std::string output_endpoint_id;
+    int capture_target_ms = 20;
+    int capture_capacity_ms = 200;
+    int capture_max_correction_ppm = 2000;
+    bool operator==(const WasapiConfig&) const = default;
 };
 
 struct DeviceTestResult {
@@ -317,6 +340,10 @@ struct DeviceTestResult {
     double current_sample_rate = 0.0;
     std::array<bool, 2> sample_rate_supported{};
     std::array<bool, 4> buffer_size_supported{};
+    std::vector<long> shared_period_frames;
+    long minimum_period_frames = 0;
+    long default_period_frames = 0;
+    double mix_sample_rate = 0;
 };
 
 inline constexpr std::array<int, 2> kTestSampleRates{44100, 48000};
@@ -633,6 +660,8 @@ struct ChannelSelection {
     std::vector<int> output{0, 1};
 };
 
+ChannelSelection automatic_wasapi_channels(const WasapiConfig& config, std::span<const DeviceInfo> devices);
+
 struct StreamInfo {
     DeviceInfo device;
     double sample_rate = 0.0;
@@ -656,6 +685,31 @@ struct StreamInfo {
     InputChannels input_channels = InputChannels::Mono;
     ChannelSelection channels;
     std::string sample_format;
+    WasapiConfig wasapi;
+    std::string input_device_name;
+    double input_mix_sample_rate = 0;
+    double output_mix_sample_rate = 0;
+    long input_period_frames = 0;
+    long output_period_frames = 0;
+    long input_buffer_frames = 0;
+    long output_buffer_frames = 0;
+    bool low_latency_shared = false;
+    long shared_fallback_error = 0;
+    bool realtime_scheduling_active = false;
+    long realtime_scheduling_error = 0;
+};
+
+struct DeviceStreamStatus {
+    bool failed = false;
+    long error = 0;
+    std::uint64_t capture_discontinuities = 0;
+    std::uint64_t invalid_timestamps = 0;
+    std::uint64_t capture_underrun_frames = 0;
+    std::uint64_t capture_overrun_frames = 0;
+    std::uint64_t capture_resets = 0;
+    std::size_t capture_queued_frames = 0;
+    std::size_t render_padding_frames = 0;
+    int capture_correction_ppm = 0;
 };
 
 struct CallbackTimingStats {
@@ -706,6 +760,7 @@ public:
     virtual bool playback_prefilled() const = 0;
     virtual StreamInfo info() const = 0;
     virtual CallbackTimingStats callback_timing_stats() const = 0;
+    virtual DeviceStreamStatus status() const noexcept { return {}; }
 
 protected:
     DeviceStream() = default;
@@ -725,7 +780,8 @@ std::unique_ptr<DeviceStream> start_duplex_stream(
     std::size_t playback_prefill_frames,
     StreamControl& control,
     OutputRecorder* recorder,
-    TrackTakeRecorder* track_take_recorder = nullptr);
+    TrackTakeRecorder* track_take_recorder = nullptr,
+    const WasapiConfig& wasapi = {});
 
 // Called once per device callback before capture is pushed. This is fixed-work,
 // allocation-free, lock-free, and is shared by real and headless devices.

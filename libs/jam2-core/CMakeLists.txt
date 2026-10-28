@@ -41,6 +41,8 @@ endif()
 add_library(jam2_core STATIC
     src/audio_clock.cpp
     src/audio_device_processing.cpp
+    src/duplex_processing.cpp
+    src/wasapi_processing.cpp
     src/audio_ring.cpp
     src/common.cpp
     src/input_source.cpp
@@ -114,9 +116,10 @@ if(WIN32)
     endif()
     target_sources(jam2_core PRIVATE
         src/audio_device_windows.cpp
+        src/audio_device_wasapi.cpp
         src/midi_device_windows.cpp)
     target_compile_definitions(jam2_core PUBLIC JAM2_PLATFORM_WINDOWS=1)
-    target_link_libraries(jam2_core PUBLIC ws2_32 advapi32 ole32 bcrypt winmm)
+    target_link_libraries(jam2_core PUBLIC ws2_32 advapi32 ole32 bcrypt winmm avrt uuid)
 elseif(APPLE)
     target_sources(jam2_core PRIVATE
         src/audio_device_macos.cpp

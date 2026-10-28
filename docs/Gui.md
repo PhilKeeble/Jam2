@@ -69,10 +69,22 @@ creator still owns session-wide values such as session sample rate, frame size,
 and audio quality. Discovery and public endpoint defaults apply only when
 creating a jam.
 
-Local, Start, and Join setup use fixed 44100/48000 sample-rate and
-32/64/128/256 buffer-size choices. **Test Device** reports the device's current
-rate and which of those combinations can open, using an in-app silent result
-dialog. Changing active Local Audio settings restarts the local engine; if the
+On Windows, **Driver** defaults to **ASIO** and can be changed to **WASAPI**.
+ASIO keeps its device and input/output channel selectors. WASAPI uses shared
+mode with separate **Output device** and **Input device** selectors; choose
+**None** for playback without opening a microphone. Input channels are automatic.
+The mono Jam2 mix plays through both front stereo channels, or the single mono
+channel; other surround channels remain silent. These choices are available in
+Local, Start Jam, Join Jam, and Settings, including independent Local/Network
+and optional Create/Join preferences. Saved choices are remembered.
+
+Setup offers 44100/48000 jam rates. ASIO keeps the 32/64/128/256 frame presets;
+WASAPI always uses the automatic minimum period and has no buffer-size selector.
+Windows converts the jam rate when it differs from the endpoint mix
+rate, using conventional event-driven shared mode when needed. The actual period
+and compatibility reason appear in diagnostics; the jam's packet size is
+independent of the device period. **Test Device** reports capabilities in a
+silent in-app dialog. Changing active Local Audio settings restarts the local engine; if the
 new configuration cannot start, Jam2 attempts to restore the previous one.
 Audio hardware controls are disabled while a jam is active.
 
@@ -82,6 +94,16 @@ separate output folders and a preferred recording mode. Finite recording limits
 are entered as bars and use the current BPM and beats-per-bar setting.
 
 ## Stats
+
+WASAPI's incoming-audio diagnostic area also shows the selected endpoints,
+Windows mix rates, capture/render periods and capacities, capture queue depth,
+input-clock correction, render padding, discontinuities and dropped/underrun
+frames. The output device drives the engine timeline. A bounded capture queue
+adapts an independent input clock; it does not change the network protocol.
+Windows-reported maximum latency, queue/timestamp estimates and physical
+round-trip calibration are different measurements. A reported zero from Windows
+does not mean that the render queue has zero latency.
+
 
 Every two seconds the GUI displays a deliberately small diagnostic set: RTT per
 peer, weighted average jitter, interval packet loss, local output underruns,

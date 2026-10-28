@@ -516,6 +516,7 @@ public:
         std::uint64_t playback_drop_max_batch_frames = 0;
         std::size_t playback_ring_readable = 0;
         jam2::audio::CallbackTimingStats callback_timing;
+        jam2::audio::DeviceStreamStatus device_status;
         double input_peak = 0.0;
         double send_peak = 0.0;
         double monitor_peak = 0.0;
@@ -731,7 +732,7 @@ public:
                 "adaptive_delivery_gap_required_frames,"
                 "adaptive_delivery_gap_required_max_frames,mix_live_tail_batch_tolerance_frames,"
                 "mix_normal_output_limit_frames,mix_normal_path_limit_frames,"
-                "mix_live_tail_rounding_tolerance_frames,mix_adaptive_release_alignment_margin_frames,mix_partial_release_events,mix_partial_release_frames,mix_lookahead_hold_events,mix_lookahead_hold_frames,mix_lookahead_hold_max_fraction_ppm,mix_isolated_recovery_events,mix_worker_service_gap_us,mix_worker_runway_frames,mix_playback_stopping_frames,mix_release_worker_guard_active\n";
+                "mix_live_tail_rounding_tolerance_frames,mix_adaptive_release_alignment_margin_frames,mix_partial_release_events,mix_partial_release_frames,mix_lookahead_hold_events,mix_lookahead_hold_frames,mix_lookahead_hold_max_fraction_ppm,mix_isolated_recovery_events,mix_worker_service_gap_us,mix_worker_runway_frames,mix_playback_stopping_frames,mix_release_worker_guard_active,wasapi_capture_depth_frames,wasapi_render_padding_frames,wasapi_capture_correction_ppm,wasapi_capture_underrun_frames,wasapi_capture_overrun_frames,wasapi_capture_discontinuities,wasapi_capture_resets,wasapi_invalid_timestamps,audio_device_error\n";
     }
 
     explicit operator bool() const { return out_.is_open(); }
@@ -1300,7 +1301,16 @@ public:
              << ',' << stats.mix_worker_service_gap_us
              << ',' << stats.mix_worker_runway_frames
              << ',' << stats.mix_playback_stopping_frames
-             << ',' << (stats.mix_release_worker_guard_active ? "yes" : "no");
+             << ',' << (stats.mix_release_worker_guard_active ? "yes" : "no")
+             << ',' << audio.device_status.capture_queued_frames
+             << ',' << audio.device_status.render_padding_frames
+             << ',' << audio.device_status.capture_correction_ppm
+             << ',' << audio.device_status.capture_underrun_frames
+             << ',' << audio.device_status.capture_overrun_frames
+             << ',' << audio.device_status.capture_discontinuities
+             << ',' << audio.device_status.capture_resets
+             << ',' << audio.device_status.invalid_timestamps
+             << ',' << audio.device_status.error;
         out_ << '\n';
         if (row_type == "final") {
             out_.flush();
@@ -1316,7 +1326,7 @@ public:
         if (!out_) {
             return;
         }
-        std::vector<std::string> fields(517);
+        std::vector<std::string> fields(526);
         auto set = [&](std::size_t index, auto value) {
             std::ostringstream text;
             text << value;
@@ -1815,6 +1825,15 @@ public:
         set(515, stats.mix_playback_stopping_frames);
         set(516, (stats.mix_release_worker_guard_active ? "yes" : "no"));
 
+        set(517, audio.device_status.capture_queued_frames);
+        set(518, audio.device_status.render_padding_frames);
+        set(519, audio.device_status.capture_correction_ppm);
+        set(520, audio.device_status.capture_underrun_frames);
+        set(521, audio.device_status.capture_overrun_frames);
+        set(522, audio.device_status.capture_discontinuities);
+        set(523, audio.device_status.capture_resets);
+        set(524, audio.device_status.invalid_timestamps);
+        set(525, audio.device_status.error);
         for (std::size_t i = 0; i < fields.size(); ++i) {
             if (i != 0) {
                 out_ << ',';

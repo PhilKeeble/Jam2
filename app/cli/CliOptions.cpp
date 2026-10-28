@@ -93,6 +93,10 @@ void print_audio_options_help()
 Audio and engine options:
   --profile <fast|moderate|safe>       Apply a tuning profile; later flags override it
   --audio-device <id>                  Use a real audio device
+  --wasapi-input <endpoint-id|none>     WASAPI input (default: none); output selected by --audio-device
+  --wasapi-capture-target-ms <ms>       Capture queue target, default 20
+  --wasapi-capture-capacity-ms <ms>     Capture queue capacity, default 200
+  --wasapi-capture-max-ppm <ppm>        Independent input-clock correction limit, default 2000
   --headless-audio <on|off>            Use the synthetic test device
   --headless-clock-drift-ppm <-5000..5000>
                                        Test-only synthetic clock offset
@@ -770,6 +774,15 @@ Options parse_options(
             if (*options.audio_device_id < 0) {
                 throw std::runtime_error("--audio-device must be non-negative");
             }
+        } else if (arg == "--wasapi-input") {
+            options.wasapi.input_endpoint_id = std::string(require_value(argc, argv, i, arg));
+            if (options.wasapi.input_endpoint_id == "none") options.wasapi.input_endpoint_id.clear();
+        } else if (arg == "--wasapi-capture-target-ms") {
+            options.wasapi.capture_target_ms = std::stoi(std::string(require_value(argc, argv, i, arg)));
+        } else if (arg == "--wasapi-capture-capacity-ms") {
+            options.wasapi.capture_capacity_ms = std::stoi(std::string(require_value(argc, argv, i, arg)));
+        } else if (arg == "--wasapi-capture-max-ppm") {
+            options.wasapi.capture_max_correction_ppm = std::stoi(std::string(require_value(argc, argv, i, arg)));
         } else if (arg == "--headless-audio") {
             const std::string value{require_value(argc, argv, i, arg)};
             if (value == "on" || value == "true" || value == "1") {
@@ -787,8 +800,8 @@ Options parse_options(
         } else if (arg == "--audio-buffer-size") {
 
             options.audio_buffer_size = std::stol(std::string(require_value(argc, argv, i, arg)));
-            if (options.audio_buffer_size <= 0) {
-                throw std::runtime_error("--audio-buffer-size must be positive");
+            if (options.audio_buffer_size < 0) {
+                throw std::runtime_error("--audio-buffer-size must be non-negative (0 selects the device default/minimum)");
             }
         } else if (arg == "--input-channels") {
             const std::string value{require_value(argc, argv, i, arg)};
@@ -832,6 +845,36 @@ Options parse_options(
     if (options.headless_audio && options.audio_device_id) {
         throw std::runtime_error("--headless-audio cannot be used with --audio-device");
     }
+    if (options.audio_device_id) {
+        const auto devices = jam2::audio::list_devices();
+        const auto selected = std::find_if(devices.begin(), devices.end(), [&](const auto& device) {
+            return device.id == *options.audio_device_id;
+        });
+        if (selected == devices.end()) throw std::runtime_error("selected audio device is unavailable");
+        if (selected->backend == "WASAPI") {
+            if (selected->direction != jam2::audio::EndpointDirection::Output)
+                throw std::runtime_error("--audio-device must select a WASAPI output endpoint");
+            options.wasapi.output_endpoint_id = selected->endpoint_id;
+            options.channel_selection.input.clear();
+            if (!options.wasapi.input_endpoint_id.empty()) {
+                const auto input = std::find_if(devices.begin(), devices.end(), [&](const auto& device) {
+                    return device.backend == "WASAPI" && device.direction == jam2::audio::EndpointDirection::Input &&
+                        (device.endpoint_id == options.wasapi.input_endpoint_id ||
+                         std::to_string(device.id) == options.wasapi.input_endpoint_id);
+                });
+                if (input == devices.end()) throw std::runtime_error("selected WASAPI input is unavailable");
+                options.wasapi.input_endpoint_id = input->endpoint_id;
+            }
+            options.channel_selection = jam2::audio::automatic_wasapi_channels(options.wasapi, devices);
+        } else if (!options.wasapi.input_endpoint_id.empty())
+            throw std::runtime_error("--wasapi-input requires a WASAPI output");
+    } else if (!options.wasapi.input_endpoint_id.empty())
+        throw std::runtime_error("--wasapi-input requires --audio-device");
+    if (options.wasapi.capture_target_ms < 1 || options.wasapi.capture_target_ms > 500 ||
+        options.wasapi.capture_capacity_ms < options.wasapi.capture_target_ms * 2 ||
+        options.wasapi.capture_capacity_ms > 2000 || options.wasapi.capture_max_correction_ppm < 0 ||
+        options.wasapi.capture_max_correction_ppm > 5000)
+        throw std::runtime_error("invalid WASAPI capture tuning (target 1..500 ms; capacity >= 2*target and <=2000 ms; correction 0..5000 ppm)");
     if (!options.headless_audio && options.headless_clock_drift_ppm != 0) {
         throw std::runtime_error("--headless-clock-drift-ppm requires --headless-audio on");
     }

@@ -2113,7 +2113,7 @@ void MainWindow::showLocalPerformSetup()
     refreshDevices();
     QString preferredDeviceId;
     for (const auto& info : availableDevices_) {
-        const QString stable = QString::fromStdString(info.clsid.empty() ? info.name : info.clsid);
+        const QString stable = QString::fromStdString(jam2::audio::stable_device_id(info));
         if (QString::fromStdString(info.backend) == preferences_.localAudio.backend &&
             stable == preferences_.localAudio.stableId) {
             preferredDeviceId = QString::number(info.id);
@@ -2133,6 +2133,7 @@ void MainWindow::showLocalPerformSetup()
         preferences_.localAudio.inputChannels,
         preferences_.localAudio.outputChannels,
         false,
+        preferences_.localAudio,
     };
     jam2::gui::LocalEngineDialogCallbacks callbacks;
     callbacks.testDevice = [this](
@@ -2166,6 +2167,7 @@ void MainWindow::showLocalPerformSetup()
     sessionRuntimeDraft_.selectedDeviceId = state.selectedDeviceId;
     sessionRuntimeDraft_.configuration.sampleRate = state.sampleRate;
     sessionRuntimeDraft_.configuration.tuning.bufferSize = state.bufferSize;
+    sessionRuntimeDraft_.audio = state.audio;
     sessionRuntimeDraft_.audio.inputChannels = state.inputChannels;
     sessionRuntimeDraft_.audio.outputChannels = state.outputChannels;
     if (state.saveDefaults) {
@@ -3097,6 +3099,15 @@ QJsonObject MainWindow::automationPerformanceSnapshot() const
         {QStringLiteral("callbacks"), static_cast<qint64>(engine.callbacks)},
         {QStringLiteral("sample_rate"), engine.sample_rate},
         {QStringLiteral("audio_buffer_frames"), static_cast<qint64>(engine.audio_buffer_frames)},
+        {QStringLiteral("wasapi_capture_depth_frames"), static_cast<qint64>(engine.device_status.capture_queued_frames)},
+        {QStringLiteral("wasapi_render_padding_frames"), static_cast<qint64>(engine.device_status.render_padding_frames)},
+        {QStringLiteral("wasapi_capture_correction_ppm"), engine.device_status.capture_correction_ppm},
+        {QStringLiteral("wasapi_capture_discontinuities"), static_cast<qint64>(engine.device_status.capture_discontinuities)},
+        {QStringLiteral("wasapi_capture_underrun_frames"), static_cast<qint64>(engine.device_status.capture_underrun_frames)},
+        {QStringLiteral("wasapi_capture_overrun_frames"), static_cast<qint64>(engine.device_status.capture_overrun_frames)},
+        {QStringLiteral("wasapi_invalid_timestamps"), static_cast<qint64>(engine.device_status.invalid_timestamps)},
+        {QStringLiteral("audio_device_failed"), engine.device_status.failed},
+        {QStringLiteral("audio_device_error"), static_cast<qint64>(engine.device_status.error)},
         {QStringLiteral("network_capture_enabled"), engine.network_capture_enabled},
         {QStringLiteral("network_capture_ready"), engine.network_capture_ready},
         {QStringLiteral("network_playback_enabled"), engine.network_playback_enabled},
@@ -3959,15 +3970,7 @@ jam2::gui::SessionAudioDeviceList MainWindow::sessionDialogDevices(
 {
     jam2::gui::SessionAudioDeviceList result;
     result.devices.reserve(static_cast<qsizetype>(availableDevices_.size()));
-    for (const jam2::audio::DeviceInfo& device : availableDevices_) {
-        result.devices.push_back({
-            QStringLiteral("[%1] %2 %3")
-                .arg(device.id)
-                .arg(QString::fromStdString(device.backend),
-                     QString::fromStdString(device.name)),
-            QString::number(device.id),
-        });
-    }
+    result.devices = jam2::gui::audioDeviceChoices(availableDevices_);
 
     if (!requestedDeviceId.isEmpty()) {
         const auto requested = std::find_if(
@@ -3982,7 +3985,7 @@ jam2::gui::SessionAudioDeviceList MainWindow::sessionDialogDevices(
     }
     for (const jam2::audio::DeviceInfo& device : availableDevices_) {
         const QString stable = QString::fromStdString(
-            device.clsid.empty() ? device.name : device.clsid);
+            jam2::audio::stable_device_id(device));
         if (QString::fromStdString(device.backend) == preference.backend &&
             stable == preference.stableId) {
             result.selectedId = QString::number(device.id);
@@ -4235,6 +4238,7 @@ void MainWindow::showSettingsDialog()
     const bool localChanged = !networkActive && (
         localInitial.backend != updated.localAudio.backend ||
         localInitial.stableId != updated.localAudio.stableId ||
+        localInitial.wasapiInputId != updated.localAudio.wasapiInputId ||
         localInitial.sampleRate != updated.localAudio.sampleRate ||
         localInitial.bufferSize != updated.localAudio.bufferSize ||
         localInitial.inputChannels != updated.localAudio.inputChannels ||
@@ -4414,7 +4418,7 @@ void MainWindow::refreshDevices()
         sessionRuntimeDraft_.selectedDeviceId.clear();
         for (const auto& device : availableDevices_) {
             const QString stable = QString::fromStdString(
-                device.clsid.empty() ? device.name : device.clsid);
+                jam2::audio::stable_device_id(device));
             if (QString::fromStdString(device.backend) ==
                     preferences_.networkAudio.backend &&
                 stable == preferences_.networkAudio.stableId) {
@@ -4476,7 +4480,10 @@ void MainWindow::updateStatsDisplay(const ConnectionDiagnosticsSnapshot* stats)
     if (underrunLabel_) underrunLabel_->setText(labels.underrun);
     diagnosisLabel_->setText(labels.diagnosis);
     if (diagnosticIncomingAudioValue_) {
-        diagnosticIncomingAudioValue_->setText(labels.incomingBreakdown);
+        const auto device = jam2::gui::audioDeviceRuntimeText(
+            jam2_.engineColdSnapshot().stream, jam2_.engineSnapshot().device_status);
+        diagnosticIncomingAudioValue_->setText(labels.incomingBreakdown +
+            (device.isEmpty() ? QString{} : QStringLiteral("<br><br>") + device));
     }
     QString measuredRtt;
     if (stats != nullptr) {
@@ -15086,11 +15093,17 @@ Jam2RuntimeOptions MainWindow::runtimeOptions() const
     }
     options.profile_name = tuning.profile.toStdString();
     options.session_profile_name = options.profile_name;
+    if (!automationHeadlessAudio_ && sessionRuntimeDraft_.audio.backend == QStringLiteral("WASAPI")) {
+        options.wasapi.output_endpoint_id = sessionRuntimeDraft_.audio.stableId.toStdString();
+        options.wasapi.input_endpoint_id = sessionRuntimeDraft_.audio.wasapiInputId.toStdString();
+    }
     options.input_channels = jam2::audio::InputChannels::Mono;
-    options.channel_selection.input = parseUiChannels(
-        sessionRuntimeDraft_.audio.inputChannels, "input");
-    options.channel_selection.output = parseUiChannels(
-        sessionRuntimeDraft_.audio.outputChannels, "output");
+    if (!options.wasapi.output_endpoint_id.empty()) {
+        options.channel_selection = jam2::audio::automatic_wasapi_channels(options.wasapi, availableDevices_);
+    } else {
+        options.channel_selection.input = parseUiChannels(sessionRuntimeDraft_.audio.inputChannels, "input");
+        options.channel_selection.output = parseUiChannels(sessionRuntimeDraft_.audio.outputChannels, "output");
+    }
     options.capture_ring_frames =
         static_cast<std::size_t>(tuning.captureRingFrames);
     options.playback_ring_frames =

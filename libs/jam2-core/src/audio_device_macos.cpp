@@ -1420,8 +1420,10 @@ std::unique_ptr<DeviceStream> start_duplex_stream(
     std::size_t playback_prefill_frames,
     StreamControl& control,
     OutputRecorder* recorder,
-    TrackTakeRecorder* track_take_recorder)
+    TrackTakeRecorder* track_take_recorder,
+    const WasapiConfig& wasapi)
 {
+    if (!wasapi.output_endpoint_id.empty()) throw std::runtime_error("WASAPI is only available on Windows");
     auto selected = select_device(id);
     const UInt32 input_channels = device_channels(selected.object, kAudioDevicePropertyScopeInput);
     const UInt32 output_channels = device_channels(selected.object, kAudioDevicePropertyScopeOutput);

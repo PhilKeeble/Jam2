@@ -177,7 +177,7 @@ constexpr std::array kRuntimeFields{
         jam2::limits::kMinimumSampleRate,
         jam2::limits::kMaximumSampleRate,
         ""},
-    RuntimeField{"audio_buffer_size", "--audio-buffer-size", FieldKind::Integer, 1, 1048576, ""},
+    RuntimeField{"audio_buffer_size", "--audio-buffer-size", FieldKind::Integer, 0, 1048576, ""},
     RuntimeField{"frame_size", "--frame-size", FieldKind::Integer, 32, 256, "32|64|128|256"},
     RuntimeField{"network_audio_format", "--network-audio-format", FieldKind::String, 0, 0, "pcm16|pcm24"},
     RuntimeField{"capture_ring_frames", "--capture-ring-frames", FieldKind::Integer, 1, 1073741824, ""},

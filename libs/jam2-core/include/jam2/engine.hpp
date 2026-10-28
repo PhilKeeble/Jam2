@@ -82,6 +82,7 @@ inline constexpr bool transport_sync_enabled(
 struct EngineConfig {
     EngineAudioBackend backend = EngineAudioBackend::Device;
     int audio_device_id = -1;
+    audio::WasapiConfig wasapi;
     int sample_rate = 48000;
     long audio_buffer_frames = 0;
     int headless_clock_drift_ppm = 0;
@@ -302,6 +303,7 @@ struct EngineSnapshot {
     audio::RingStats capture_ring;
     audio::RingStats playback_ring;
     audio::CallbackTimingStats callback_timing;
+    audio::DeviceStreamStatus device_status;
     bool network_capture_enabled = false;
     bool network_capture_ready = false;
     std::uint64_t network_capture_generation = 0;

@@ -1092,6 +1092,11 @@ struct Engine::Impl {
     {
         try {
             while (!stop_requested.load(std::memory_order_acquire)) {
+                if (stream) {
+                    const auto status = stream->status();
+                    if (status.failed) throw std::runtime_error(
+                        "audio device stopped (platform error " + std::to_string(status.error) + ")");
+                }
                 EngineCommand incoming;
                 std::size_t processed = 0;
                 while (processed < 32 && commands.pop(incoming)) {
@@ -1203,7 +1208,7 @@ void Engine::start(const EngineConfig& requested)
     if (requested.playback_ratio_ramp_ms < 0 || requested.playback_ratio_ramp_ms > 60000) {
         throw std::runtime_error("engine playback-ratio ramp must be 0..60000 ms");
     }
-    if (requested.backend == EngineAudioBackend::Device && requested.channels.input.empty()) {
+    if (requested.backend == EngineAudioBackend::Device && requested.wasapi.output_endpoint_id.empty() && requested.channels.input.empty()) {
         throw std::runtime_error("device engine requires at least one input channel");
     }
     const std::size_t maximum_prepared_track_frames =
@@ -1339,7 +1344,8 @@ void Engine::start(const EngineConfig& requested)
                 impl_->config.playback_prefill_frames,
                 control,
                 impl_->recorder.get(),
-                impl_->track_take_recorder.get());
+                impl_->track_take_recorder.get(),
+                impl_->config.wasapi);
         }
         impl_->stream_info = impl_->stream != nullptr ? impl_->stream->info() : audio::StreamInfo{};
         const double active_rate = impl_->stream_info.sample_rate;
@@ -1636,6 +1642,7 @@ EngineSnapshot Engine::snapshot() const noexcept
         result.callbacks = impl_->stream->callbacks();
         result.playback_prefilled = impl_->stream->playback_prefilled();
         result.callback_timing = impl_->stream->callback_timing_stats();
+        result.device_status = impl_->stream->status();
     }
     if (impl_->recorder != nullptr) {
         const auto recording = impl_->recorder->snapshot();

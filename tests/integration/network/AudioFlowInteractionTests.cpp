@@ -2,6 +2,8 @@
 #define NOMINMAX
 #endif
 #include "audio_device_processing.hpp"
+#include "duplex_processing.hpp"
+#include "wasapi_processing.hpp"
 #include "engine.hpp"
 #include "input_source.hpp"
 #include "network_session.hpp"
@@ -554,6 +556,133 @@ void clockExperiments()
             "equal sender and receiver clock skew requires no sustained peer rate correction");
     }
 }
+// Full production capture bridge -> duplex graph -> authenticated peer streams
+// -> mixer -> duplex render, with exactly four independent endpoint pairs.
+class WasapiSink final : public jam2::PeerStreamPlayback {
+public:
+    jam2::audio::MonoRingBuffer captured{8192, true}, pitch{8192}, rendered{8192};
+    jam2::audio::StreamControl control;
+    jam2::audio::device_processing::DuplexProcessingState processing;
+    jam2::audio::wasapi::CaptureBuffer bridge;
+    std::array<std::int32_t, 480> input{};
+    std::size_t period;
+    std::uint64_t signalFrames = 0;
+    explicit WasapiSink(std::size_t frames) : period(frames) {
+        control.network_capture_requested_enabled.store(true);
+        control.network_capture_generation_requested.store(1);
+        control.network_playback_enabled.store(true);
+        control.playback_ratio_ramp_frames.store(rate / 4);
+        processing.capture = &captured; processing.pitch = &pitch;
+        processing.playback = &rendered; processing.control = &control;
+        processing.playback_prefill_frames = 960;
+        jam2::audio::device_processing::prepare_duplex_processing(processing, 480, 1, rate);
+        bridge.configure(1, rate, {});
+    }
+    std::size_t depthFrames() const noexcept override { return rendered.available_read(); }
+    std::size_t callbackFrames() const noexcept override { return period; }
+    std::uint64_t underrunFrames() const noexcept override { return rendered.underrun_frames(); }
+    jam2::audio::PlaybackRecoveryState playbackRecoveryState() const noexcept override {
+        return jam2::audio::device_processing::read_playback_recovery_state(control);
+    }
+    jam2::audio::DeviceClockSample deviceClockSample() const noexcept override {
+        return jam2::audio::device_processing::read_device_clock(control);
+    }
+    std::size_t pushFrames(std::span<const std::int32_t> frames) noexcept override { return rendered.push(frames); }
+    void requestDropFrames(std::size_t frames) noexcept override { rendered.request_drop_oldest(frames); }
+    void setResamplerRatio(double ratio) noexcept override { control.playback_ratio_ppm.store(static_cast<int>(std::llround(ratio * 1000000))); }
+    void callback(std::uint64_t now) {
+        const std::array<std::int32_t*, 1> writable{input.data()};
+        const std::array<const std::int32_t*, 1> readable{input.data()};
+        bridge.pull(writable, period);
+        jam2::audio::device_processing::process_duplex_block(processing, readable, period,
+            true, {processing.engine_frame_counter, now});
+        for (std::size_t i = 0; i < period; ++i) signalFrames += processing.playback_scratch[i] != 0;
+    }
+};
+
+void wasapiMesh()
+{
+    constexpr std::array<std::size_t, 4> periods{128, 192, 480, 96};
+    constexpr std::array<double, 4> inputPpm{-350, 100, 450, -100}, outputPpm{100, -100, 200, 0};
+    std::array<std::unique_ptr<WasapiSink>, 4> sinks;
+    std::array<std::unique_ptr<jam2::NetworkSession>, 4> sessions;
+    std::array<double, 4> captureDue{}, renderDue{};
+    std::array<std::uint32_t, 4> sequence{};
+    auto config = streamConfig(*jam2::find_join_profile("moderate"));
+    config.playback_queue_capacity_frames = 8192;
+    config.playout_delay_frames = 960;
+    config.playback_max_frames = 4096;
+    config.jitter_buffer_frames = 960;
+    config.jitter_buffer_max_frames = 2048;
+    config.adaptive_playback_cushion = false;
+    for (std::size_t i = 0; i < participants; ++i) {
+        sinks[i] = std::make_unique<WasapiSink>(periods[i]);
+        std::vector<jam2::NetworkPeerDescriptor> peers;
+        for (std::size_t other = 0; other < participants; ++other) if (other != i)
+            peers.push_back({{other + 1}, jam2::resolve_udp_endpoint({"127.0.0.1", static_cast<std::uint16_t>(32100 + other)}),
+                jam2::PeerEndpointState::Active});
+        jam2::UdpSocket socket; socket.bind({"127.0.0.1", 0});
+        jam2::NetworkSessionContract contract; contract.frames_per_packet = packetFrames;
+        sessions[i] = std::make_unique<jam2::NetworkSession>(std::move(socket), sessionInfo(), contract,
+            i == 0 ? jam2::SessionBootstrapRole::Creator : jam2::SessionBootstrapRole::Joiner,
+            jam2::PeerId{i + 1}, peers, config, sinks[i].get());
+    }
+    struct Pending {
+        std::size_t sender;
+        std::uint32_t sequence;
+        std::uint64_t frame, due;
+        std::array<std::int32_t, packetFrames> samples;
+    };
+    std::vector<Pending> pending;
+    const auto base = jam2::monotonic_us() + 1000;
+    std::uint64_t accepted = 0, duplicates = 0;
+    for (std::uint64_t tick = 0; tick < 30000; ++tick) {
+        const auto now = base + tick * 32 * 1000000 / rate;
+        for (std::size_t i = 0; i < participants; ++i) {
+            auto& sink = *sinks[i];
+            captureDue[i] += 32 * (1. + inputPpm[i] / 1000000.);
+            if (captureDue[i] >= periods[i]) {
+                captureDue[i] -= periods[i];
+                std::array<float, 480> source{}; source.fill(static_cast<float>(i + 1) * .02f);
+                sink.bridge.push({reinterpret_cast<const std::uint8_t*>(source.data()), periods[i] * sizeof(float)},
+                    periods[i], {jam2::audio::wasapi::SampleEncoding::Float32, 1, 32, 0}, false, false);
+            }
+            renderDue[i] += 32 * (1. + outputPpm[i] / 1000000.);
+            if (renderDue[i] >= periods[i]) { renderDue[i] -= periods[i]; sink.callback(now); }
+            while (sink.captured.available_read() >= packetFrames) {
+                Pending packet{i, ++sequence[i], 0, now + 2000, {}};
+                expect(sink.captured.pop_exact_timed(packet.samples, packet.frame) == packetFrames,
+                    "WASAPI render-paced capture must packetize contiguous device-time audio");
+                if (packet.sequence % 43 == 0) continue; // Deterministic loss.
+                packet.due += packet.sequence % 7 == 0 ? 4000 : packet.sequence % 3 * 333; // Jitter/reordering.
+                pending.push_back(packet);
+                if (packet.sequence % 19 == 0) { packet.due += 333; pending.push_back(packet); }
+            }
+        }
+        for (auto it = pending.begin(); it != pending.end();) {
+            if (it->due > now) { ++it; continue; }
+            for (std::size_t receiver = 0; receiver < participants; ++receiver) if (receiver != it->sender) {
+                const auto result = deliver(sessions[receiver]->peerStream({it->sender + 1}),
+                    it->sequence, it->frame, now, it->samples);
+                accepted += result == jam2::PeerAudioResult::Accepted;
+                duplicates += result == jam2::PeerAudioResult::Duplicate;
+            }
+            it = pending.erase(it);
+        }
+        for (auto& session : sessions) { session->advance(now); session->finishReceiveBatch(false); }
+    }
+    expect(accepted > 10000 && duplicates > 0, "four WASAPI-shaped peers must exchange authenticated audio under impairment");
+    for (std::size_t i = 0; i < participants; ++i) {
+        expect(sessions[i]->peerCount() == 3 && sinks[i]->signalFrames > rate * 10,
+            "every WASAPI-shaped listener must retain its three peers and render received audio");
+        expect(sinks[i]->processing.engine_frame_counter > rate * 19 &&
+            sinks[i]->bridge.status().capture_overrun_frames == 0,
+            "independent capture/render periods must preserve bounded capture and the advancing output timeline");
+        expect(sinks[i]->captured.stats().overruns == 0 && sinks[i]->rendered.stats().overruns == 0,
+            "WASAPI-shaped callbacks and network packet sizes must compose without ring overflows");
+    }
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -562,7 +691,8 @@ int main(int argc, char** argv)
         jam2::NetworkRuntime runtime;
         if (argc != 2) throw std::runtime_error("expected capture, interruption, or clock");
         const std::string_view experiment = argv[1];
-        if (experiment == "capture") captureOverflow();
+        if (experiment == "wasapi") wasapiMesh();
+        else if (experiment == "capture") captureOverflow();
         else if (experiment == "interruption") {
             for (const char* profile : {"fast", "moderate"}) {
                 interruptionCase(0, false, profile);

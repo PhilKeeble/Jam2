@@ -104,3 +104,33 @@ analysis, connectivity diagnostics, and bounded fuzz orchestration. Its former
 `validate` and `stress` command families were retired after their product
 contracts moved into C++/CTest. Python unit tests continue to validate the
 retained Python tools themselves; they do not validate Jam2 product behavior.
+
+## Windows WASAPI checks
+
+Run `compile.cmd --in-dev-shell --tests wasapi` from the repository root in the
+normal elevated build environment. This builds optimized Release and runs only
+the WASAPI-labelled native CTests: conversion/clock/duplex units, real startup
+and Settings dialog actions/persistence, and an exactly-four-peer audio-flow
+integration with different device periods, independent clocks, loss, jitter,
+reordering and duplication. Existing audio/CLI/calibration tests remain relevant
+when changing the shared processing path.
+
+Hardware validation is opt-in. Set `JAM2_WASAPI_HARDWARE_PROFILE` to the absolute
+path of a local JSON profile before configuring/building:
+
+```json
+{
+  "schema": "jam2-wasapi-hardware-v1",
+  "output_endpoint_id": "<opaque WASAPI output ID from list-devices>",
+  "input_endpoint_id": "<optional opaque WASAPI input ID>",
+  "asio_clsid": "<optional ASIO driver CLSID>"
+}
+```
+
+The hardware CTest uses `release/jam2.exe` for 48/44.1 kHz output, a 15-second
+split-device capture run, and optional ASIO regression. It checks advancing
+callbacks, recording frame counts, queue bounds and errors, retains transcripts
+and WAVs, and checks cleanup after a partially failed device start. With no
+profile it skips. These checks require no speakers; they do not measure acoustic
+or cable round-trip latency. Mono/surround routing is verified deterministically
+in the native conversion tests.

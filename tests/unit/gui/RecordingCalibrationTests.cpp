@@ -66,7 +66,7 @@ jam2::audio::RecordingCalibrationCapture::Result measured() {
 }
 void testPersistenceAndConfiguration(const QString& file) {
     QString error;require(UserPreferencesStore::setFilePathForTesting(file,error),"isolated settings accepted");
-    for (const char* backend : {"CoreAudio","ASIO"}) {
+    for (const char* backend : {"CoreAudio","ASIO","WASAPI"}) {
         Fake f(backend);RecordingCalibrationController c(f.preferences,f.backend());
         const auto key=c.key(0);
         require(c.save(key,RecordingCalibrationMethod::Cable,measured(),error),"valid measured profile saves");
@@ -85,6 +85,13 @@ void testPersistenceAndConfiguration(const QString& file) {
             restarted.stream=config;restored.update();require(restarted.commands.back().enabled,"returning to matching configuration restores calibration");
         };
         restarted.stream.device.clsid="different-device";mismatch();
+        if (std::string(backend) == "WASAPI") {
+            restarted.stream.wasapi.input_endpoint_id="different-input";mismatch();
+            restarted.stream.input_period_frames=240;mismatch();
+            restarted.stream.input_mix_sample_rate=44100;mismatch();
+            restarted.stream.wasapi.capture_target_ms=30;mismatch();
+            restarted.stream.low_latency_shared=true;mismatch();
+        }
         restarted.stream.device.backend="different-backend";mismatch();
         restarted.stream.sample_rate=44100;mismatch();restarted.stream.buffer_size=128;mismatch();
         restarted.stream.channels.input={1,0};mismatch();restarted.stream.channels.output={2,3};mismatch();

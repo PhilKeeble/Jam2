@@ -53,6 +53,8 @@ bool ApplicationRuntime::ensureEngine(
         return true;
     }
     jam2::EngineConfig requested = jam2_make_engine_config(options, leaderAudioLocalClick);
+    if (!requested.wasapi.output_endpoint_id.empty())
+        requested.channels = jam2::audio::automatic_wasapi_channels(requested.wasapi, jam2::audio::list_devices());
     if (engine_ != nullptr) {
         const jam2::EngineConfig* active = engine_->config();
         if (active != nullptr && !jam2_engine_restart_required(*active, requested)) {

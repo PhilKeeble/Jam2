@@ -12,6 +12,8 @@ struct AudioDevicePreference {
     QString outputChannels = QStringLiteral("1,2");
     int sampleRate = 48000;
     int bufferSize = 64;
+    QString wasapiInputId;
+    QString wasapiInputName;
 };
 
 struct LocalTuningPreference {

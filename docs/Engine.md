@@ -35,6 +35,39 @@ device's current sample rate and support for 44100/48000 Hz and
 32/64/128/256-frame buffers. The GUI's **Test Device** buttons call the same
 core operation.
 
+## Windows WASAPI
+
+`list-devices` lists ASIO drivers first, then WASAPI output and input endpoints,
+including their channel counts and opaque stable IDs. Select a WASAPI **output**
+with `--audio-device <id>`. `--wasapi-input <input-id-or-endpoint-id>` selects a
+separate capture endpoint; omitting it or using `none` starts playback only.
+WASAPI opens all capture channels and routes mono to front stereo/mono output.
+Exclusive mode is not used.
+
+```text
+jam2 local --audio-device <wasapi-output-id> --wasapi-input none --audio-buffer-size 0 --stream-ms 3000 --stats enabled
+jam2 network join <jam2-url> --name Alex --audio-device <wasapi-output-id> --wasapi-input <wasapi-input-id>
+```
+
+WASAPI always requests the automatic minimum device period; use diagnostics for
+the actual period. `--audio-buffer-size` only limits its internal processing block
+(0 uses 128 frames), without changing the device period. Windows shared-mode
+sample-rate conversion keeps the engine/network rate unchanged when an endpoint
+uses another mix rate. The output clock paces the engine. Independent input-clock
+correction uses a bounded preallocated queue with numeric controls:
+
+- `--wasapi-capture-target-ms` (default 20, range 1..500).
+- `--wasapi-capture-capacity-ms` (default 200, at least twice the target, maximum 2000).
+- `--wasapi-capture-max-ppm` (default 2000, range 0..5000; 0 disables correction).
+
+Queue depth, correction ppm, capture underruns/overruns, discontinuities, invalid
+timestamps and render padding appear in structured stats and CSV. `local --stats
+enabled` prints the final device/queue measurements. Capture timestamps and
+render padding contribute to recording-alignment estimates; Windows' reported
+stream maximum is retained separately. Use physical calibration for actual
+round-trip latency. Endpoint loss stops the stream with an error; Jam2 does not
+silently select another microphone or output.
+
 ## CLI Help
 
 Use `-h` or `--help` for the command menu, then apply it to a command or network/debug subcommand for its accepted options and ranges:

@@ -10,7 +10,15 @@ RecordingCalibrationKey RecordingCalibrationController::key(std::size_t channel)
 {
     const auto s = backend_.stream(); RecordingCalibrationKey k;
     k.backend = QString::fromStdString(s.device.backend);
-    k.deviceId = QString::fromStdString(s.device.clsid);
+    k.deviceId = QString::fromStdString(jam2::audio::stable_device_id(s.device));
+    if (s.device.backend == "WASAPI") {
+        k.inputDeviceId = QString::fromStdString(s.wasapi.input_endpoint_id);
+        k.inputPeriodFrames = static_cast<int>(s.input_period_frames);
+        k.inputMixRate = static_cast<int>(s.input_mix_sample_rate);
+        k.outputMixRate = static_cast<int>(s.output_mix_sample_rate);
+        k.captureTargetMs = s.wasapi.capture_target_ms;
+        k.lowLatencyShared = s.low_latency_shared;
+    }
     if (std::isfinite(s.sample_rate) && s.sample_rate >= 8000 && s.sample_rate <= 384000)
         k.sampleRate = static_cast<int>(std::llround(s.sample_rate));
     if (s.buffer_size <= 65536) k.bufferFrames = static_cast<int>(s.buffer_size);

@@ -646,6 +646,8 @@ CsvStatsLog::AudioSnapshot make_audio_snapshot(
     if (!engine_snapshot.frame_clock_active) return snapshot;
     snapshot.has_audio = true;
     snapshot.stream = engine->coldSnapshot().stream;
+    snapshot.stream.input_latency_frames = engine_snapshot.input_latency_frames;
+    snapshot.stream.output_latency_frames = engine_snapshot.output_latency_frames;
     snapshot.driver_output_ready_status =
         engine_snapshot.driver_output_ready_status;
     snapshot.driver_output_ready_error =
@@ -654,6 +656,7 @@ CsvStatsLog::AudioSnapshot make_audio_snapshot(
         engine_snapshot.driver_output_ready_latency_reduction_frames;
     snapshot.callbacks = engine_snapshot.callbacks;
     snapshot.callback_timing = engine_snapshot.callback_timing;
+    snapshot.device_status = engine_snapshot.device_status;
     snapshot.playback_prefilled = engine_snapshot.playback_prefilled;
     const auto& capture = engine_snapshot.capture_ring;
     snapshot.capture_ring_overruns = capture.overruns;
@@ -880,6 +883,15 @@ void print_periodic_stream_stats(
               << audio.stream.input_latency_frames
               << " driver_output_latency_frames="
               << audio.stream.output_latency_frames
+              << " wasapi_capture_depth_frames=" << audio.device_status.capture_queued_frames
+              << " wasapi_render_padding_frames=" << audio.device_status.render_padding_frames
+              << " wasapi_capture_correction_ppm=" << audio.device_status.capture_correction_ppm
+              << " wasapi_capture_underrun_frames=" << audio.device_status.capture_underrun_frames
+              << " wasapi_capture_overrun_frames=" << audio.device_status.capture_overrun_frames
+              << " wasapi_capture_discontinuities=" << audio.device_status.capture_discontinuities
+              << " wasapi_capture_resets=" << audio.device_status.capture_resets
+              << " wasapi_invalid_timestamps=" << audio.device_status.invalid_timestamps
+              << " audio_device_error=" << audio.device_status.error
               << " driver_output_ready="
               << jam2::audio::driver_output_ready_status_text(
                      audio.driver_output_ready_status)

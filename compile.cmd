@@ -63,11 +63,14 @@ if /I "%~1"=="--hardware-profile" (
     goto parse_arguments
 )
 echo ERROR: Unknown compile option: %~1
-echo Supported options: --tests unit, --tests plugin, --tests hardware, --tests gui, --tests jam-sync, --tests shared-content, --tests performance, --tests network, --tests full, --tests-full, --test-name NAME, --show-gui, --hardware-profile PATH
+echo Supported options: --tests wasapi, --tests unit, --tests plugin, --tests hardware, --tests gui, --tests jam-sync, --tests shared-content, --tests performance, --tests network, --tests full, --tests-full, --test-name NAME, --show-gui, --hardware-profile PATH
 exit /b 2
 
 :arguments_ready
-if /I "%JAM2_TEST_SUITE%"=="unit" (
+if /I "%JAM2_TEST_SUITE%"=="wasapi" (
+    set "JAM2_TEST_TARGET=jam2_tests_wasapi"
+    set "JAM2_TEST_LABEL=wasapi"
+) else if /I "%JAM2_TEST_SUITE%"=="unit" (
     set "JAM2_TEST_TARGET=jam2_tests_unit"
     set "JAM2_TEST_LABEL=unit"
 ) else if /I "%JAM2_TEST_SUITE%"=="plugin" (

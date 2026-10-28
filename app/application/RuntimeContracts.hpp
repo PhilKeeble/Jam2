@@ -109,6 +109,7 @@ struct Jam2RuntimeOptions {
     std::optional<std::uint64_t> bootstrap_coordinator_peer_id;
     jam2::SessionBootstrapRole bootstrap_role = jam2::SessionBootstrapRole::Creator;
     std::optional<int> audio_device_id;
+    jam2::audio::WasapiConfig wasapi;
     bool headless_audio = false;
     int headless_clock_drift_ppm = 0;
     // Local tuning can differ from the creator-owned session profile.

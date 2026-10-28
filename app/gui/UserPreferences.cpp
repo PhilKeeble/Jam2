@@ -40,6 +40,12 @@ QVector<RecordingCalibrationProfile> loadCalibrations(QSettings& s)
     for (int i = 0; i < count; ++i) {
         s.setArrayIndex(i); RecordingCalibrationProfile p;
         p.key.backend = s.value("backend").toString(); p.key.deviceId = s.value("device_id").toString();
+        p.key.inputDeviceId = s.value("input_device_id").toString();
+        p.key.inputPeriodFrames = s.value("input_period_frames", 0).toInt();
+        p.key.inputMixRate = s.value("input_mix_rate", 0).toInt();
+        p.key.outputMixRate = s.value("output_mix_rate", 0).toInt();
+        p.key.captureTargetMs = s.value("capture_target_ms", 0).toInt();
+        p.key.lowLatencyShared = s.value("low_latency_shared", false).toBool();
         p.key.sampleRate = s.value("sample_rate").toInt(); p.key.bufferFrames = s.value("buffer_frames").toInt();
         p.key.inputChannels = calibrationChannels(s.value("inputs")); p.key.outputChannels = calibrationChannels(s.value("outputs"));
         p.key.physicalInput = s.value("physical_input", -1).toInt();
@@ -77,6 +83,10 @@ void saveCalibrations(QSettings& s, const QVector<RecordingCalibrationProfile>& 
         if (!p.valid() || index >= 128) continue;
         s.setArrayIndex(index++);
         s.setValue("backend", p.key.backend); s.setValue("device_id", p.key.deviceId);
+        s.setValue("input_device_id", p.key.inputDeviceId);
+        s.setValue("input_period_frames", p.key.inputPeriodFrames);
+        s.setValue("input_mix_rate", p.key.inputMixRate); s.setValue("output_mix_rate", p.key.outputMixRate);
+        s.setValue("capture_target_ms", p.key.captureTargetMs); s.setValue("low_latency_shared", p.key.lowLatencyShared);
         s.setValue("sample_rate", p.key.sampleRate); s.setValue("buffer_frames", p.key.bufferFrames);
         s.setValue("inputs", calibrationChannels(p.key.inputChannels)); s.setValue("outputs", calibrationChannels(p.key.outputChannels));
         s.setValue("physical_input", p.key.physicalInput); s.setValue("method", static_cast<int>(p.method));
@@ -92,6 +102,8 @@ void loadAudio(QSettings& settings, AudioDevicePreference& value)
     value.backend = settings.value(QStringLiteral("backend"), value.backend).toString();
     value.stableId = settings.value(QStringLiteral("stable_id"), value.stableId).toString();
     value.name = settings.value(QStringLiteral("name"), value.name).toString();
+    value.wasapiInputId = settings.value(QStringLiteral("wasapi_input_id"), value.wasapiInputId).toString();
+    value.wasapiInputName = settings.value(QStringLiteral("wasapi_input_name"), value.wasapiInputName).toString();
     value.inputChannels = settings.value(QStringLiteral("input_channels"), value.inputChannels).toString();
     value.outputChannels = settings.value(QStringLiteral("output_channels"), value.outputChannels).toString();
     value.sampleRate = settings.value(QStringLiteral("sample_rate"), value.sampleRate).toInt();
@@ -103,6 +115,8 @@ void saveAudio(QSettings& settings, const AudioDevicePreference& value)
     settings.setValue(QStringLiteral("backend"), value.backend);
     settings.setValue(QStringLiteral("stable_id"), value.stableId);
     settings.setValue(QStringLiteral("name"), value.name);
+    settings.setValue(QStringLiteral("wasapi_input_id"), value.wasapiInputId);
+    settings.setValue(QStringLiteral("wasapi_input_name"), value.wasapiInputName);
     settings.setValue(QStringLiteral("input_channels"), value.inputChannels);
     settings.setValue(QStringLiteral("output_channels"), value.outputChannels);
     settings.setValue(QStringLiteral("sample_rate"), value.sampleRate);
