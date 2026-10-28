@@ -1557,6 +1557,10 @@ jam2_configure_test_target(jam2_udp_candidate_network_tests)
 target_link_libraries(jam2_udp_candidate_network_tests PRIVATE jam2_test_network_support)
 add_test(NAME jam2_udp_candidate_network_units COMMAND $<TARGET_FILE:jam2_udp_candidate_network_tests>)
 set_tests_properties(jam2_udp_candidate_network_units PROPERTIES LABELS "unit;support;network;udp-multiplex" TIMEOUT 15)
+if(WIN32)
+    set_tests_properties(jam2_udp_candidate_network_units PROPERTIES
+        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
+endif()
 
 add_executable(jam2_four_gui_agent_smoke EXCLUDE_FROM_ALL
     integration/gui/FourGuiAgentSmoke.cpp)
@@ -2015,7 +2019,8 @@ endif()
 if(JAM2_RENDEZVOUS_TEST_SERVER)
     add_executable(jam2_server_grid_beacon_tests EXCLUDE_FROM_ALL integration/network/ServerGridBeaconIntegration.cpp)
     jam2_configure_test_target(jam2_server_grid_beacon_tests)
-    target_link_libraries(jam2_server_grid_beacon_tests PRIVATE jam2_test_process_support Qt6::Core Qt6::Network)
+    target_link_libraries(jam2_server_grid_beacon_tests PRIVATE
+        jam2_test_process_support jam2_test_network_support Qt6::Core Qt6::Network)
     add_test(NAME jam2_udp_four_grid_beacon_integration COMMAND $<TARGET_FILE:jam2_server_grid_beacon_tests>
         "${JAM2_TEST_PUBLIC_EXECUTABLE}" "${JAM2_RENDEZVOUS_TEST_SERVER}")
     add_test(NAME jam2_udp_four_grid_assignment_integration COMMAND $<TARGET_FILE:jam2_server_grid_beacon_tests>

@@ -51,7 +51,7 @@ int main(int argc, char** argv)
             expect(box != nullptr, "real confirmation is modal");
             if (!box) return;
             expect(box->informativeText().contains(QStringLiteral("permanently delete")) &&
-                box->informativeText().contains(wav), "confirmation explains disk deletion and exact file");
+                box->informativeText().contains(QDir::toNativeSeparators(wav)), "confirmation explains disk deletion and exact file");
             expect(box->buttons().size() == 2, "confirmation has one removal operation plus Cancel");
             expect(box->defaultButton() == box->button(QMessageBox::Cancel), "Cancel is the safe default");
             for (auto* button : box->buttons()) {

@@ -70,3 +70,7 @@ https://www.youtube.com/watch?v=_ertZZTaN3k - 4 mins in - trap
 
 Naming peers in a jam 
 friends type system 
+
+## Recovery bug
+
+One of the metronome cases failed in the full suite sometimes because recovery was sustained and just couldnt recover. Happens in the fast profile and can lead to a situation where some peers are ok and some arent.
