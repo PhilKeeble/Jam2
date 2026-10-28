@@ -1396,6 +1396,9 @@ int main(int argc, char* argv[])
             {QStringLiteral("type"), QStringLiteral("looper.transfer.pause")},
             {QStringLiteral("id"), QStringLiteral("source-handoff-offer-pause")},
             {QStringLiteral("point"), QStringLiteral("offer")},
+        }) || !apply(coordinator, 0, {
+            {QStringLiteral("type"), QStringLiteral("looper.transfer.expire-request-start")},
+            {QStringLiteral("id"), QStringLiteral("source-handoff-expire-3")},
         }) || !send(coordinator.peer(2), {
             {QStringLiteral("type"), QStringLiteral("looper.import")},
             {QStringLiteral("id"), QStringLiteral("source-handoff-import-b")},
@@ -1428,11 +1431,7 @@ int main(int argc, char* argv[])
                 return transfer.value(QStringLiteral("pause_active")).toString() ==
                         QStringLiteral("offer") &&
                     pendingSourcesForHash(state, hashes[6]) >= 2;
-            }, handoffState) || !apply(coordinator, 0, {
-            {QStringLiteral("type"),
-                QStringLiteral("looper.transfer.expire-request-start")},
-            {QStringLiteral("id"), QStringLiteral("source-handoff-expire-3")},
-        }) || !waitForPeer(coordinator, 0, QStringLiteral("three source-A start failures"),
+            }, handoffState) || !waitForPeer(coordinator, 0, QStringLiteral("three source-A start failures"),
             [sourceHandoffTimeoutsBefore](const QJsonObject& state) {
                 const QJsonObject content = state.value(QStringLiteral("content")).toObject();
                 return content.value(QStringLiteral(

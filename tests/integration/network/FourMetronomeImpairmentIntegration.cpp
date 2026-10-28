@@ -645,6 +645,16 @@ FittedGrid fitEventGrid(
     return best;
 }
 
+bool stoppedByCreator(const QJsonObject& result, int peerIndex)
+{
+    // Audio clocks start independently. A creator close can reach a joiner
+    // before that joiner's own frame-scheduled shutdown, after its evidence
+    // snapshot. Both are valid clean session lifecycles.
+    return peerIndex != 0 && result.value(QStringLiteral("return_code")).toInt(-1) == 0 &&
+        result.value(QStringLiteral("control_end_reason")).toString() ==
+            QStringLiteral("The jam creator left the session");
+}
+
 bool eventContractValid(
     const QJsonObject& result,
     int peerIndex,
@@ -669,8 +679,9 @@ bool eventContractValid(
         QStringLiteral("record-start-%1").arg(peerIndex),
         QStringLiteral("record-stop-%1").arg(peerIndex),
         QStringLiteral("snapshot-%1").arg(peerIndex),
-        QStringLiteral("shutdown-%1").arg(peerIndex),
     };
+    if (!stoppedByCreator(result, peerIndex))
+        required.push_back(QStringLiteral("shutdown-%1").arg(peerIndex));
     if (peerIndex == kPeerCount - 1 && mode == MetronomeMode::LeaderAudio) {
         required.push_back(QStringLiteral("leader-release"));
         required.push_back(QStringLiteral("leader-claim"));
@@ -1140,7 +1151,7 @@ AttemptResult runAttempt(
             *key, numericSessionId, jam2::NetworkAudioFormat::Pcm16Mono);
     }
 
-    CandidateNetwork candidateNetwork(ports[0], true);
+    CandidateNetwork candidateNetwork(ports[0], CandidateNetwork::IsolatedHosts{sessionId.toULongLong(nullptr, 16), QByteArray::fromHex(sessionKey.toLatin1())});
     candidateNetwork.blockFirst = false;
     candidateNetwork.impairMultiplex = false;
     std::vector<EdgeProxy> edges;
@@ -1610,7 +1621,9 @@ AttemptResult runAttempt(
             result.value(QStringLiteral("event_rejects")).toDouble(-1) != 0.0 ||
             result.value(QStringLiteral("event_trace_drops")).toDouble(-1) != 0.0 ||
             result.value(QStringLiteral("pending_static_actions")).toInt(-1) != 0 ||
-            result.value(QStringLiteral("pending_controller_actions")).toDouble(-1) != 0.0) {
+            (result.value(QStringLiteral("pending_controller_actions")).toInt(-1) != 0 &&
+             !(stoppedByCreator(result, index) &&
+               result.value(QStringLiteral("pending_controller_actions")).toInt(-1) == 1))) {
             return die(QStringLiteral("peer %1 manifest lifecycle/action contract failed")
                 .arg(index + 1));
         }
@@ -1871,17 +1884,26 @@ AttemptResult runAttempt(
             sumFinal(QStringLiteral("sequence_late"));
         const double budgetYields = sumFinal(QStringLiteral("udp_work_budget_yields"));
         const double receiveBatchMaximum = maxFinal(QStringLiteral("udp_receive_batch_max"));
-        if (shortPackets < static_cast<double>(injectionEvidence.floodInjected + 2) ||
-            wrongMagic < 2.0 || wrongVersion < 2.0 ||
+        double multiplexRejected = 0.0;
+        for (const auto& peer : evidence)
+            multiplexRejected += peer.manifest.value(QStringLiteral("result")).toObject()
+                .value(QStringLiteral("udp_multiplex")).toObject()
+                .value(QStringLiteral("runtime_invalid_packets")).toDouble();
+        // Non-JAM2 packets are rejected by the shared socket classifier before
+        // the native audio parser. Header-shaped packets still reach its
+        // precise version/type/session/payload/authentication checks.
+        if (shortPackets < 2.0 ||
+            multiplexRejected < static_cast<double>(injectionEvidence.floodInjected + 2) ||
+            wrongVersion < 2.0 ||
             unknownType < 2.0 || wrongSession < 2.0 || invalidPayload < 2.0 ||
             authenticationFailed < 2.0 || replayRejected < 2.0 ||
             receiveBatchMaximum <= 0.0 || receiveBatchMaximum > 64.0) {
             return die(QStringLiteral(
                 "UDP security counters failed: short=%1 magic=%2 version=%3 type=%4 "
-                "session=%5 payload=%6 auth=%7 replay=%8 yields=%9 batch_max=%10")
+                "session=%5 payload=%6 auth=%7 replay=%8 yields=%9 batch_max=%10 mux_rejected=%11")
                 .arg(shortPackets).arg(wrongMagic).arg(wrongVersion).arg(unknownType)
                 .arg(wrongSession).arg(invalidPayload).arg(authenticationFailed)
-                .arg(replayRejected).arg(budgetYields).arg(receiveBatchMaximum));
+                .arg(replayRejected).arg(budgetYields).arg(receiveBatchMaximum).arg(multiplexRejected));
         }
     }
     if (condition == NetworkCondition::SequenceSecurity) {

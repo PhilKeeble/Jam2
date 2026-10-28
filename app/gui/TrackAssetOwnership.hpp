@@ -19,6 +19,7 @@ struct Claim {
 struct SupersessionPlan {
     QStringList removedKeys;
     QSet<QString> removedHashes;
+    QSet<QString> obsoleteRetryHashes;
     QMap<QString, int> batchSizes;
     bool preserveActiveTransfer = false;
 

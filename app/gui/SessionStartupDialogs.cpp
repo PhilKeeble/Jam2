@@ -283,7 +283,7 @@ LocalEngineDialog::LocalEngineDialog(
     QObject::connect(testDevice, &QPushButton::clicked, this,
         [this, testDevice] {
             if (callbacks_.testDevice) {
-                callbacks_.testDevice(device_, testDevice, this);
+                callbacks_.testDevice(audioControls_->testRequest(), testDevice, this);
             }
         });
     adjustSize();
@@ -581,7 +581,7 @@ StartJamDialog::StartJamDialog(
         if (callbacks_.generateSession) callbacks_.generateSession();
     });
     connect(testDevice, &QPushButton::clicked, this, [this, testDevice] {
-        if (callbacks_.testDevice) callbacks_.testDevice(device_, testDevice, this);
+        if (callbacks_.testDevice) callbacks_.testDevice(audioControls_->testRequest(), testDevice, this);
     });
     connect(saveDefaults, &QPushButton::clicked, this, [this] {
         if (callbacks_.saveDefaults) callbacks_.saveDefaults(state());
@@ -917,7 +917,7 @@ JoinJamDialog::JoinJamDialog(
         }
     });
     connect(testDevice, &QPushButton::clicked, this, [this, testDevice] {
-        if (callbacks_.testDevice) callbacks_.testDevice(device_, testDevice, this);
+        if (callbacks_.testDevice) callbacks_.testDevice(audioControls_->testRequest(), testDevice, this);
     });
     connect(saveDefaults, &QPushButton::clicked, this, [this] {
         if (callbacks_.saveDefaults) callbacks_.saveDefaults(state());

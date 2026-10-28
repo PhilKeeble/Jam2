@@ -3,6 +3,7 @@
 #include "FileSystem.hpp"
 #include "Hash.hpp"
 #include "Json.hpp"
+#include "ModelFiles.hpp"
 #include "Pipeline.hpp"
 #include "Postprocess.hpp"
 #include "Wav.hpp"
@@ -94,15 +95,21 @@ std::filesystem::path absolutePath(const std::filesystem::path& path)
 
 std::filesystem::path modelsRoot(const std::filesystem::path& executable)
 {
+    const auto complete = [](const std::filesystem::path& path) {
+        for (const char* name : jamtaster::native::kRequiredModelFiles)
+            if (!std::filesystem::is_regular_file(jamtaster::native::filesystemIoPath(path / name))) return false;
+        return true;
+    };
+    // macOS updates keep model weights outside the replaceable app bundle.
+    const auto contents = executable.parent_path().parent_path();
+    if (executable.parent_path().filename() == "Helpers" && contents.filename() == "Contents") {
+        const auto external = contents.parent_path().parent_path() / "components" / "jamtaster" / "models";
+        if (complete(external)) return external;
+    }
     const auto besideWorker = executable.parent_path() / "models";
-    if (std::filesystem::is_directory(jamtaster::native::filesystemIoPath(besideWorker))) {
-        return besideWorker;
-    }
-    const auto appResources = executable.parent_path().parent_path() /
-        "Resources" / "jamtaster" / "models";
-    if (std::filesystem::is_directory(jamtaster::native::filesystemIoPath(appResources))) {
-        return appResources;
-    }
+    if (complete(besideWorker)) return besideWorker;
+    const auto appResources = contents / "Resources" / "jamtaster" / "models";
+    if (complete(appResources)) return appResources;
     throw std::runtime_error("the bundled JamTaster models folder is missing");
 }
 

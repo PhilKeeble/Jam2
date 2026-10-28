@@ -1,4 +1,5 @@
 #include "JamTasterService.hpp"
+#include "ModelFiles.hpp"
 #include "../application/ApplicationPaths.hpp"
 
 #include <QCoreApplication>
@@ -11,10 +12,11 @@
 #include <QTimer>
 #include <QUuid>
 
-#include <array>
 #include <utility>
 
 namespace {
+
+using jamtaster::native::kRequiredModelFiles;
 
 QString cleanLine(QString value)
 {
@@ -129,12 +131,25 @@ QString JamTasterService::workerPath() const
 #endif
 }
 
+QString JamTasterService::resolveModelsPath(const QString& externalModels, const QString& bundledModels)
+{
+    const auto complete = [](const QString& path) {
+        for (const char* name : kRequiredModelFiles)
+            if (!QFileInfo(QDir(path).filePath(QString::fromLatin1(name))).isFile()) return false;
+        return true;
+    };
+    // Downloads and updater installs use the external directory. Older macOS
+    // bundles may carry a complete model set inside their Resources directory.
+    if (complete(externalModels) || !complete(bundledModels)) return externalModels;
+    return bundledModels;
+}
+
 QString JamTasterService::modelsPath() const
 {
-    if (bundleRootOverride_.isEmpty()) {
-        return appReleaseFolderPath(QStringLiteral("components/jamtaster/models"));
-    }
-    return QDir(bundleRoot()).absoluteFilePath(QStringLiteral("models"));
+    const QString bundled = QDir(bundleRoot()).absoluteFilePath(QStringLiteral("models"));
+    if (!bundleRootOverride_.isEmpty()) return bundled;
+    return resolveModelsPath(QDir(appReleaseDir()).absoluteFilePath(
+        QStringLiteral("components/jamtaster/models")), bundled);
 }
 
 bool JamTasterService::validateBundle(QString& error) const
@@ -143,18 +158,9 @@ bool JamTasterService::validateBundle(QString& error) const
         error = QStringLiteral("The bundled JamTaster worker is missing. Reinstall this Jam2 build.");
         return false;
     }
-    static constexpr std::array<const char*, 8> models{
-        "beat_this.onnx",
-        "basic_pitch.onnx",
-        "chordmini_btc.onnx",
-        "adtof.onnx",
-        "htdemucs_ft_0.onnx",
-        "htdemucs_ft_1.onnx",
-        "htdemucs_ft_2.onnx",
-        "htdemucs_ft_3.onnx",
-    };
-    for (const char* name : models) {
-        if (!QFileInfo(QDir(modelsPath()).absoluteFilePath(QString::fromLatin1(name))).isFile()) {
+    const QDir models(modelsPath());
+    for (const char* name : kRequiredModelFiles) {
+        if (!QFileInfo(models.absoluteFilePath(QString::fromLatin1(name))).isFile()) {
             error = QStringLiteral("The JamTaster model %1 is missing. Open JamTaster to download the models.")
                 .arg(QString::fromLatin1(name));
             return false;

@@ -167,6 +167,8 @@ struct Jam2OperationalPeer {
     std::uint64_t last_authenticated_receive_age_ms = 0;
     std::uint64_t grid_assignment_revision = 0, grid_assignment_attempts = 0;
     bool grid_assignment_applied = false;
+    std::uint64_t transport_grid_deferrals = 0;
+    std::uint64_t transport_countdown_missed_packets = 0;
 };
 
 struct Jam2NetworkOperationalSnapshot {
@@ -179,6 +181,9 @@ struct Jam2NetworkOperationalSnapshot {
     // True only when a quantized shared-grid action can be placed against the
     // currently mapped authority clock within two audio callbacks.
     bool transport_grid_ready = false;
+    bool transport_recovery_pending = false;
+    std::uint64_t transport_recoveries = 0, transport_recovery_source_frame = 0;
+    std::uint64_t transport_recovery_retry_us = 0;
     std::int64_t grid_mapping_error_frames = 0;
     std::uint64_t grid_authority_beacon_interval_us = 0;
     std::uint64_t grid_authority_beacon_batches = 0, grid_authority_beacon_packets = 0;
@@ -280,6 +285,9 @@ struct Jam2RuntimeHost {
     // never consult it.  Headless runtimes accept shared track transport by
     // default.
     std::atomic<bool> track_sync_enabled{true};
+    // Scheduling readiness supplied by the non-real-time clock owner. Accepted
+    // intents remain owned while the clock is unavailable; Stop still works.
+    std::atomic<bool> transport_clock_available{true};
     // RecordStart uses the shared track transport packet shape, but may be
     // kept local even while ordinary play/stop transport remains shared.
     std::atomic<bool> recording_sync_enabled{true};

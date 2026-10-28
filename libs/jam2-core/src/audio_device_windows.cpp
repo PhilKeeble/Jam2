@@ -628,6 +628,8 @@ DeviceTestResult test_device(int id)
     long input_channels = 0;
     long output_channels = 0;
     require_asio_ok(driver.get()->getChannels(&input_channels, &output_channels), "ASIO getChannels");
+    capabilities.device.input_channel_count = static_cast<std::size_t>((std::max)(0L, input_channels));
+    capabilities.device.output_channel_count = static_cast<std::size_t>((std::max)(0L, output_channels));
     long min_buffer_size = 0;
     long max_buffer_size = 0;
     long preferred_buffer_size = 0;

@@ -1825,9 +1825,9 @@ int main(int argc, char* argv[])
         beforeDeletePaths[peer] = states[peer].value(QStringLiteral("content")).toObject()
             .value(QStringLiteral("lane_paths")).toArray().at(index).toString();
     }
-    if (!invokeLane(QStringLiteral("delete-wav-open-cancel"), manualLaneControl + QStringLiteral(".remove"),
+    if (!invokeLane(QStringLiteral("delete-wav-open-cancel"), manualLaneControl + QStringLiteral(".wav.remove"),
             QStringLiteral("click-async")) ||
-        !invokeLane(QStringLiteral("delete-wav-cancel"), QStringLiteral("looper.lane-remove-dialog.cancel"),
+        !invokeLane(QStringLiteral("delete-wav-cancel"), QStringLiteral("looper.wav-remove-dialog.cancel"),
             QStringLiteral("click")) ||
         !waitForAll(coordinator, QStringLiteral("cancelled disk deletion preserves WAV and lane"),
             [&manualWavHash, &beforeRemoveLaneIds](std::size_t, const QJsonObject& state) {
@@ -1835,15 +1835,15 @@ int main(int argc, char* argv[])
                     state.value(QStringLiteral("content")).toObject()
                         .value(QStringLiteral("lane_ids")).toArray() == beforeRemoveLaneIds;
             }, states) || !verifyAssetFiles(states, manualWavHash)) return 1;
-    if (!invokeLane(QStringLiteral("delete-wav-open"), manualLaneControl + QStringLiteral(".remove"),
+    if (!invokeLane(QStringLiteral("delete-wav-open"), manualLaneControl + QStringLiteral(".wav.remove"),
             QStringLiteral("click-async"))) return 1;
     const auto deleteButton = controlState(coordinator.peer(2),
-        QStringLiteral("looper.lane-remove-dialog.delete-wav"), QStringLiteral("delete-wav-action"));
+        QStringLiteral("looper.wav-remove-dialog.accept"), QStringLiteral("delete-wav-action"));
     if (!deleteButton || !deleteButton->value(QStringLiteral("enabled")).toBool()) {
         fail(QStringLiteral("Delete WAV from disk must be enabled for the attached test WAV"));
         return 1;
     }
-    if (!invokeLane(QStringLiteral("delete-wav-confirm"), QStringLiteral("looper.lane-remove-dialog.delete-wav"),
+    if (!invokeLane(QStringLiteral("delete-wav-confirm"), QStringLiteral("looper.wav-remove-dialog.accept"),
             QStringLiteral("click"))) return 1;
     const auto deletedState = snapshot(coordinator.peer(2), 3, 0);
     if (!deletedState || deletedState->value(QStringLiteral("content")).toObject()

@@ -18,6 +18,10 @@ SupersessionPlan planPeerSupersession(
         result.batchSizes[claim.batchId] = qMax(
             result.batchSizes.value(claim.batchId), claim.batchSize);
     }
+    result.obsoleteRetryHashes = result.removedHashes;
+    result.obsoleteRetryHashes.subtract(replacementArrangementHashes);
+    for (const Claim& claim : claims)
+        if (claim.sourcePeerToken != supersededSourcePeerToken) result.obsoleteRetryHashes.remove(claim.assetHash);
     // A sender may already be streaming the one requested WAV. Let that bounded
     // transfer finish so its hash-addressed result can satisfy the replacement
     // arrangement; discarding it makes the remaining sender frames look

@@ -1,3 +1,4 @@
+#include "ReceivedTransportRecovery.hpp"
 #include <exception>
 #include <algorithm>
 #include <array>
@@ -573,13 +574,7 @@ MetronomePayload decode_metronome_payload(std::span<const std::uint8_t> payload)
     return decoded;
 }
 
-struct TransportPayload {
-    jam2::EngineTransportAction action = jam2::EngineTransportAction::None;
-    std::uint32_t event_counter = 0;
-    std::uint32_t grid_revision = 0;
-    std::uint64_t target_sender_frame = 0;
-    std::uint64_t countdown_start_sender_frame = 0;
-};
+using TransportPayload = jam2::cli::TransportIntent;
 
 std::array<std::uint8_t, jam2::protocol::kTransportStatePayloadSize> encode_transport_payload(
     const TransportPayload& value)
@@ -1846,6 +1841,11 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
     };
 
     std::map<std::uint64_t, MeshPeerState> peers;
+    using PendingTransport = jam2::cli::ReceivedTransportRecovery::Pending;
+    jam2::cli::ReceivedTransportRecovery pending_transport;
+    std::uint64_t recovered_transports = 0, recovered_source_frame = 0;
+    constexpr auto transport_recovery_retry_us = jam2::cli::ReceivedTransportRecovery::retry_us;
+
     for (std::size_t peer_index = 0; peer_index < options.mesh_peers.size(); ++peer_index) {
         const std::uint64_t configured_id = options.mesh_peer_ids[peer_index];
         const auto inserted = peers.emplace(
@@ -2088,6 +2088,7 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
             : 0LL;
     };
     auto transport_grid_ready = [&]() noexcept {
+        if (!runtime_host.transport_clock_available.load(std::memory_order_acquire)) return false;
         if (!commands.state.metronome_epoch_valid.load(
                 std::memory_order_relaxed)) {
             return false;
@@ -2619,6 +2620,10 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
         };
         snapshot.transport_grid_ready = transport_grid_ready();
         snapshot.grid_mapping_error_frames = grid_mapping_error_frames();
+        snapshot.transport_recovery_pending = (pending_transport.pending() != nullptr);
+        snapshot.transport_recoveries = recovered_transports;
+        snapshot.transport_recovery_source_frame = recovered_source_frame;
+        snapshot.transport_recovery_retry_us = transport_recovery_retry_us;
         snapshot.grid_authority_beacon_interval_us = authority_beacons.intervalUs();
         snapshot.grid_authority_beacon_batches = mesh_grid_authority_states_sent;
         snapshot.grid_authority_beacon_packets = mesh_grid_authority_packets_sent;
@@ -2689,6 +2694,8 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
             snapshot.peers.back().grid_assignment_revision = peer.grid_delivery.revision();
             snapshot.peers.back().grid_assignment_attempts = peer.grid_delivery.attempts();
             snapshot.peers.back().grid_assignment_applied = peer.grid_delivery.applied();
+            snapshot.peers.back().transport_grid_deferrals = peer.transport_grid_deferrals;
+            snapshot.peers.back().transport_countdown_missed_packets = peer.transport_countdown_missed_packets;
         }
         runtime_host.network_snapshot(snapshot);
     };
@@ -2964,6 +2971,189 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
             std::to_string(reset);
         std::cout << line << '\n';
         if (runtime_host.log) runtime_host.log(line);
+    };
+
+    auto apply_pending_transport = [&](const PendingTransport& pending, MeshPeerState& peer) {
+        const auto& transport = pending.transport;
+        auto& peer_stream = network_session.peerStream(peer.peer_id);
+        const bool track_transport =
+            jam2::is_track_sync_transport_action(transport.action);
+        const bool accept_track_transport = jam2::transport_sync_enabled(
+            transport.action,
+            runtime_host.track_sync_enabled.load(std::memory_order_acquire),
+            runtime_host.recording_sync_enabled.load(std::memory_order_acquire));
+        const bool recording_isolated =
+            runtime_host.lane_recording_isolation_enabled.load(
+                std::memory_order_acquire);
+        const bool accept_during_recording = !recording_isolated;
+        if (track_transport && (!accept_track_transport || !accept_during_recording)) return true;
+        const bool quantized_shared_grid_action =
+            commands.state.metronome_mode.load(
+                std::memory_order_relaxed) ==
+                    metronome_mode_id(MetronomeMode::SharedGrid) &&
+            (transport.action ==
+                    jam2::EngineTransportAction::TrackRestart ||
+             transport.action ==
+                    jam2::EngineTransportAction::RecordStart);
+        const bool grid_mapping_ready =
+            !quantized_shared_grid_action ||
+            transport_grid_ready();
+        std::optional<QuantizedSchedule> translated_schedule;
+        std::uint64_t source_frame = 0;
+        if (track_transport && accept_track_transport &&
+            peer.recv_pongs > 0 &&
+            peer_stream.stats().rtt_min_us > 0 &&
+            audio.engine != nullptr &&
+            grid_mapping_ready) {
+            const std::uint64_t one_way_frames =
+                peer_stream.stats().rtt_min_us *
+                static_cast<std::uint64_t>(options.sample_rate) /
+                2000000ULL;
+            const std::uint64_t receiver_now =
+                current_engine_frame(audio.engine.get());
+            const auto translated_sender_frame =
+                [&](std::uint64_t sender_frame) noexcept {
+                    if (sender_frame >= pending.sender_frame) {
+                        const auto lead = sender_frame - pending.sender_frame;
+                        if (lead >= one_way_frames) {
+                            const auto remaining = lead - one_way_frames;
+                            const auto maximum = (std::numeric_limits<std::uint64_t>::max)();
+                            return remaining > maximum - pending.receiver_frame ? maximum : pending.receiver_frame + remaining;
+                        }
+                        const auto elapsed = one_way_frames - lead;
+                        return pending.receiver_frame > elapsed ? pending.receiver_frame - elapsed : 0ULL;
+                    }
+                    const auto delta = pending.sender_frame - sender_frame;
+                    if (delta > (std::numeric_limits<std::uint64_t>::max)() - one_way_frames) return 0ULL;
+                    const auto elapsed = delta + one_way_frames;
+                    return pending.receiver_frame > elapsed ? pending.receiver_frame - elapsed : 0ULL;
+                };
+            const std::uint64_t estimated_target_raw =
+                translated_sender_frame(
+                    transport.target_sender_frame);
+            if (quantized_shared_grid_action &&
+                transport.target_sender_frame >=
+                    transport.countdown_start_sender_frame) {
+                const auto grid_snapshot = audio.engine->snapshot();
+                if (transport.action == jam2::EngineTransportAction::TrackRestart) {
+                    const auto recovery = jam2::recover_received_restart(
+                        options.sample_rate, metronome_pattern_from_runtime(commands.state),
+                        receiver_now, commands.state.metronome_render_offset_frames.load(),
+                        commands.state.metronome_epoch_valid.load(), commands.state.metronome_epoch_sample_time.load(),
+                        estimated_target_raw, transport.target_sender_frame - transport.countdown_start_sender_frame,
+                        2ULL * static_cast<std::uint64_t>(std::max<long>(options.audio_buffer_size, options.frame_size)),
+                        grid_snapshot.playback_tempo, grid_snapshot.metronome_epoch_source_position);
+                    if (recovery) { translated_schedule = recovery->schedule; source_frame = recovery->source_frame; }
+                } else {
+                    translated_schedule = jam2::align_received_transport_to_grid(
+                        options.sample_rate, metronome_pattern_from_runtime(commands.state),
+                        receiver_now, commands.state.metronome_render_offset_frames.load(),
+                        commands.state.metronome_epoch_valid.load(), commands.state.metronome_epoch_sample_time.load(),
+                        estimated_target_raw, transport.target_sender_frame - transport.countdown_start_sender_frame,
+                        grid_snapshot.playback_tempo, grid_snapshot.metronome_epoch_source_position, jam2::TransportBoundary::Beat);
+                }
+            } else if (transport.action == jam2::EngineTransportAction::TrackRestart) {
+                const auto recovery = jam2::recover_transport_position(receiver_now,
+                    commands.state.metronome_render_offset_frames.load(), estimated_target_raw,
+                    transport.target_sender_frame >= transport.countdown_start_sender_frame
+                        ? transport.target_sender_frame - transport.countdown_start_sender_frame : 0,
+                    2ULL * static_cast<std::uint64_t>(std::max<long>(options.audio_buffer_size, options.frame_size)));
+                if (recovery) { translated_schedule = recovery->schedule; source_frame = recovery->source_frame; }
+            } else if (!quantized_shared_grid_action) {
+                const std::uint64_t countdown_start_raw = std::min(
+                    estimated_target_raw,
+                    translated_sender_frame(
+                        transport.countdown_start_sender_frame));
+                translated_schedule = QuantizedSchedule{
+                    countdown_start_raw,
+                    estimated_target_raw,
+                    jam2::transport_musical_frame_from_raw(
+                        estimated_target_raw,
+                        commands.state
+                            .metronome_render_offset_frames.load(
+                                std::memory_order_relaxed)),
+                };
+            }
+        }
+        const bool track_transport_ready =
+            !track_transport || !accept_track_transport ||
+            (peer.recv_pongs > 0 &&
+             peer_stream.stats().rtt_min_us > 0 &&
+             audio.engine != nullptr &&
+             grid_mapping_ready &&
+             translated_schedule.has_value());
+        if (!track_transport_ready) {
+            // The authenticated event is already owned. Keep the bounded
+            // pending intent until readiness returns or a newer action cancels it.
+            if (!grid_mapping_ready) {
+                ++peer.transport_grid_deferrals;
+            } else if (quantized_shared_grid_action &&
+                       !translated_schedule.has_value()) {
+                ++peer.transport_countdown_missed_packets;
+            }
+            return false;
+        }
+        mesh_transport_source_peer_id = peer.peer_id.value;
+        mesh_transport_event_counter = transport.event_counter;
+        mesh_transport_grid_revision = transport.grid_revision;
+        mesh_transport_action = transport.action;
+        mesh_transport_source_frame = pending.sender_frame;
+        mesh_transport_requested_target_frame = transport.target_sender_frame;
+        bool receipt_ready = !track_transport;
+        if (track_transport && translated_schedule) {
+            const QuantizedSchedule schedule = *translated_schedule;
+            mesh_transport_applied_target_frame =
+                schedule.target_raw_frame;
+            bool scheduled = false;
+            if (transport.action == jam2::EngineTransportAction::TrackRestart ||
+                transport.action == jam2::EngineTransportAction::RecordStart) {
+                scheduled = jam2::cli::restart_prepared_source(audio.engine.get(), schedule.target_raw_frame, source_frame);
+            } else {
+                if (transport.action == jam2::EngineTransportAction::TrackStop) {
+                    jam2::EngineCommand cancel;
+                    cancel.type = jam2::EngineCommandType::CancelTransport;
+                    scheduled = audio.engine->submit(cancel);
+                } else {
+                    scheduled = true;
+                }
+                jam2::EngineCommand command;
+                command.type = transport.action == jam2::EngineTransportAction::TrackPlay
+                    ? jam2::EngineCommandType::PreparedPlay
+                    : jam2::EngineCommandType::PreparedStop;
+                command.frame = schedule.target_raw_frame;
+                scheduled = scheduled && audio.engine->submit(command);
+            }
+            if (scheduled) {
+                // The source command makes the remote audio obey
+                // the shared action. Mirror the same schedule into
+                // the local engine's transport state so GUI clients
+                // observe pending/committed play and stop state as
+                // well. This direct engine submission deliberately
+                // bypasses the runtime command queue, so it cannot
+                // echo the received action back onto the mesh.
+                jam2::EngineCommand local_transport;
+                local_transport.type =
+                    jam2::EngineCommandType::ScheduleTransport;
+                local_transport.transport_action = transport.action;
+                local_transport.transport_target_frame =
+                    schedule.target_raw_frame;
+                local_transport.transport_musical_frame =
+                    schedule.target_musical_frame;
+                local_transport.transport_countdown_start_frame =
+                    schedule.countdown_start_raw_frame;
+                scheduled = audio.engine->submit(local_transport);
+            }
+            if (scheduled) {
+                publish_transport_schedule(
+                    commands.state,
+                    transport.action,
+                    schedule,
+                    false);
+                receipt_ready=true;
+                if (source_frame > 0) { ++recovered_transports; recovered_source_frame = source_frame; }
+            }
+        }
+        return receipt_ready;
     };
 
     while (jam2::monotonic_us() < receive_deadline &&
@@ -3635,6 +3825,7 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
         const std::uint64_t transport_countdown_start = cached_transport_countdown_start;
         const int transport_action = cached_transport_action;
         if (network_transport_revision != sending_transport_revision) {
+            pending_transport.clear(); // A local Stop/restart supersedes deferred remote work.
             sending_transport_revision = network_transport_revision;
             next_transport_send = 0;
             // A command can cross from the GUI thread after its quantized
@@ -4230,201 +4421,20 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                         options.datagram_transport->transportIntentAccepted(peer.peer_id.value,payload);
                         continue; // Recover a lost receipt without executing the action twice.
                     }
-                    const bool track_transport =
-                        jam2::is_track_sync_transport_action(transport.action);
-                    const bool accept_track_transport = jam2::transport_sync_enabled(
-                        transport.action,
-                        runtime_host.track_sync_enabled.load(std::memory_order_acquire),
-                        runtime_host.recording_sync_enabled.load(std::memory_order_acquire));
-                    const bool recording_isolated =
-                        runtime_host.lane_recording_isolation_enabled.load(
-                            std::memory_order_acquire);
-                    const bool accept_during_recording = !recording_isolated;
-                    const bool quantized_shared_grid_action =
-                        commands.state.metronome_mode.load(
-                            std::memory_order_relaxed) ==
-                                metronome_mode_id(MetronomeMode::SharedGrid) &&
-                        (transport.action ==
-                                jam2::EngineTransportAction::TrackRestart ||
-                         transport.action ==
-                                jam2::EngineTransportAction::RecordStart);
-                    const bool grid_mapping_ready =
-                        !quantized_shared_grid_action ||
-                        transport_grid_ready();
-                    std::optional<QuantizedSchedule> translated_schedule;
-                    if (track_transport && accept_track_transport &&
-                        peer.recv_pongs > 0 &&
-                        peer_stream.stats().rtt_min_us > 0 &&
-                        audio.engine != nullptr &&
-                        grid_mapping_ready) {
-                        const std::uint64_t one_way_frames =
-                            peer_stream.stats().rtt_min_us *
-                            static_cast<std::uint64_t>(options.sample_rate) /
-                            2000000ULL;
-                        const std::uint64_t receiver_now =
-                            current_engine_frame(audio.engine.get());
-                        const auto translated_sender_frame =
-                            [&](std::uint64_t sender_frame) noexcept {
-                                const std::uint64_t sender_lead =
-                                    sender_frame > header.timing_value
-                                    ? sender_frame - header.timing_value
-                                    : 0ULL;
-                                const std::uint64_t remaining =
-                                    sender_lead > one_way_frames
-                                    ? sender_lead - one_way_frames
-                                    : 0ULL;
-                                return receiver_now >
-                                    (std::numeric_limits<std::uint64_t>::max)() -
-                                        remaining
-                                    ? (std::numeric_limits<std::uint64_t>::max)()
-                                    : receiver_now + remaining;
-                            };
-                        const std::uint64_t estimated_target_raw =
-                            translated_sender_frame(
-                                transport.target_sender_frame);
-                        if (quantized_shared_grid_action &&
-                            transport.target_sender_frame >=
-                                transport.countdown_start_sender_frame) {
-                            const auto grid_snapshot = audio.engine->snapshot();
-                            translated_schedule =
-                                jam2::align_received_transport_to_grid(
-                                    static_cast<double>(options.sample_rate),
-                                    metronome_pattern_from_runtime(
-                                        commands.state),
-                                    receiver_now,
-                                    commands.state
-                                        .metronome_render_offset_frames.load(
-                                            std::memory_order_relaxed),
-                                    commands.state.metronome_epoch_valid.load(
-                                        std::memory_order_relaxed),
-                                    commands.state
-                                        .metronome_epoch_sample_time.load(
-                                            std::memory_order_relaxed),
-                                    estimated_target_raw,
-                                    transport.target_sender_frame -
-                                        transport.countdown_start_sender_frame,
-                                    grid_snapshot.playback_tempo,
-                                    grid_snapshot.metronome_epoch_source_position,
-                                    jam2::TransportBoundary::Beat);
-                        } else if (!quantized_shared_grid_action) {
-                            const std::uint64_t countdown_start_raw = std::min(
-                                estimated_target_raw,
-                                translated_sender_frame(
-                                    transport.countdown_start_sender_frame));
-                            translated_schedule = QuantizedSchedule{
-                                countdown_start_raw,
-                                estimated_target_raw,
-                                jam2::transport_musical_frame_from_raw(
-                                    estimated_target_raw,
-                                    commands.state
-                                        .metronome_render_offset_frames.load(
-                                            std::memory_order_relaxed)),
-                            };
-                        }
-                    }
-                    const bool track_transport_ready =
-                        !track_transport || !accept_track_transport ||
-                        (peer.recv_pongs > 0 &&
-                         peer_stream.stats().rtt_min_us > 0 &&
-                         audio.engine != nullptr &&
-                         grid_mapping_ready &&
-                         translated_schedule.has_value());
-                    if (!track_transport_ready) {
-                        // Transport packets are repeated until their target.
-                        // Do not consume this source event counter before the
-                        // rejoined edge has the clock mapping needed to apply
-                        // it; a later repeat can then schedule the same action.
-                        if (!grid_mapping_ready) {
-                            ++peer.transport_grid_deferrals;
-                        } else if (quantized_shared_grid_action &&
-                                   !translated_schedule.has_value()) {
-                            ++peer.transport_countdown_missed_packets;
-                        }
-                        ++peer.ignored_packets;
-                        continue;
-                    }
-                    const bool accepted_transport = authority.acceptTransportEvent(
-                        peer.peer_id.value,
-                        transport.event_counter,
-                        transport.grid_revision,
-                        !track_transport);
-                    bool receipt_ready=accepted_transport && (!track_transport || !accept_track_transport || !accept_during_recording);
-                    if (accepted_transport) {
-                        mesh_transport_source_peer_id = peer.peer_id.value;
-                        mesh_transport_event_counter = transport.event_counter;
-                        mesh_transport_grid_revision = transport.grid_revision;
-                        mesh_transport_action = transport.action;
-                        mesh_transport_source_frame = header.timing_value;
-                        mesh_transport_requested_target_frame = transport.target_sender_frame;
-                    }
-                    if (track_transport && accepted_transport &&
-                        (!accept_track_transport || !accept_during_recording)) {
-                        ++peer.ignored_packets;
-                    }
-                    if (track_transport && accept_track_transport &&
-                        accept_during_recording &&
-                        accepted_transport &&
-                        peer.recv_pongs > 0 &&
-                        peer_stream.stats().rtt_min_us > 0 &&
-                        audio.engine != nullptr &&
-                        translated_schedule.has_value()) {
-                        const QuantizedSchedule schedule = *translated_schedule;
-                        mesh_transport_applied_target_frame =
-                            schedule.target_raw_frame;
-                        bool scheduled = false;
-                        if (transport.action == jam2::EngineTransportAction::TrackRestart ||
-                            transport.action == jam2::EngineTransportAction::RecordStart) {
-                            scheduled = jam2::cli::restart_prepared_source(audio.engine.get(), schedule.target_raw_frame);
-                        } else {
-                            if (transport.action == jam2::EngineTransportAction::TrackStop) {
-                                jam2::EngineCommand cancel;
-                                cancel.type = jam2::EngineCommandType::CancelTransport;
-                                scheduled = audio.engine->submit(cancel);
-                            } else {
-                                scheduled = true;
-                            }
-                            jam2::EngineCommand command;
-                            command.type = transport.action == jam2::EngineTransportAction::TrackPlay
-                                ? jam2::EngineCommandType::PreparedPlay
-                                : jam2::EngineCommandType::PreparedStop;
-                            command.frame = schedule.target_raw_frame;
-                            scheduled = scheduled && audio.engine->submit(command);
-                        }
-                        if (scheduled) {
-                            // The source command makes the remote audio obey
-                            // the shared action. Mirror the same schedule into
-                            // the local engine's transport state so GUI clients
-                            // observe pending/committed play and stop state as
-                            // well. This direct engine submission deliberately
-                            // bypasses the runtime command queue, so it cannot
-                            // echo the received action back onto the mesh.
-                            jam2::EngineCommand local_transport;
-                            local_transport.type =
-                                jam2::EngineCommandType::ScheduleTransport;
-                            local_transport.transport_action = transport.action;
-                            local_transport.transport_target_frame =
-                                schedule.target_raw_frame;
-                            local_transport.transport_musical_frame =
-                                schedule.target_musical_frame;
-                            local_transport.transport_countdown_start_frame =
-                                schedule.countdown_start_raw_frame;
-                            scheduled = audio.engine->submit(local_transport);
-                        }
-                        if (scheduled) {
-                            publish_transport_schedule(
-                                commands.state,
-                                transport.action,
-                                schedule,
-                                false);
-                            receipt_ready=true;
-                        }
-                    }
-                    if (options.datagram_transport && receipt_ready) {
-                        std::copy(payload.begin(),payload.end(),peer.accepted_transport_intent.begin());
-                        peer.has_accepted_transport_intent=true;
-                        options.datagram_transport->transportIntentAccepted(peer.peer_id.value,payload);
-                    }
+                    const bool track = jam2::is_track_sync_transport_action(transport.action);
+                    if (!authority.acceptTransportEvent(peer.peer_id.value, transport.event_counter,
+                            transport.grid_revision, !track)) continue;
+                    // Accept ownership once, before deferring. Retransmission of an
+                    // older event cannot replace a later Stop from another peer.
+                    pending_transport.retain(PendingTransport{transport, peer.peer_id.value,
+                        header.timing_value, current_engine_frame(audio.engine.get())});
+                    std::copy(payload.begin(), payload.end(), peer.accepted_transport_intent.begin());
+                    peer.has_accepted_transport_intent = true;
+                    if (options.datagram_transport)
+                        options.datagram_transport->transportIntentAccepted(peer.peer_id.value, payload);
                 } else if (header.type == jam2::protocol::PacketType::Bye) {
+                    if (const auto* pending = pending_transport.pending(); pending && pending->peer_id == peer.peer_id.value)
+                        pending_transport.clear();
                     (void)peer_stream.acceptReplay(
                         jam2::PeerReplayChannel::Bye,
                         header.sequence);
@@ -4444,6 +4454,13 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                     ++attributed_peer->ignored_packets;
                 }
             }
+        }
+        if (const auto* pending = pending_transport.takeDue(jam2::monotonic_us())) {
+            const auto source = peers.find(pending->peer_id);
+            const auto* descriptor = source != peers.end() ? network_session.peer(source->second.peer_id) : nullptr;
+            if (!descriptor || descriptor->endpoint_state != jam2::PeerEndpointState::Active ||
+                pending->transport.grid_revision != authority.grid().revision ||
+                apply_pending_transport(*pending, source->second)) pending_transport.clear();
         }
         mesh_receive_batch_max = std::max<std::uint64_t>(
             mesh_receive_batch_max,

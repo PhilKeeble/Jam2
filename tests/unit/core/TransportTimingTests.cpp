@@ -28,6 +28,31 @@ jam2::metronome::PatternSnapshot normalPattern()
     return pattern;
 }
 
+void testRestartRecovery()
+{
+    const auto unquantized = jam2::recover_transport_position(144000, 300, 24000, 0, 256);
+    expect(unquantized && unquantized->source_frame == 120256 &&
+        unquantized->schedule.target_musical_frame == 144556,
+        "leader-audio and listener-compensation restarts retain elapsed time without beat quantization");
+    const auto onTime = jam2::recover_received_restart(48000, normalPattern(), 1000, 0, true, 0, 24020, 0, 256);
+    expect(onTime && onTime->schedule.target_raw_frame == 24000 && onTime->source_frame == 0,
+        "an on-time restart retains the original beat and starts at source zero");
+    const auto late = jam2::recover_received_restart(48000, normalPattern(), 144000, 0, true, 0, 24020, 0, 256);
+    expect(late && late->schedule.target_raw_frame == 144256 && late->source_frame == 120256,
+        "a receiver delayed over two seconds seeks to the current shared position");
+    const auto countIn = jam2::recover_received_restart(48000, normalPattern(), 1000, 0, true, 0, 96000, 96000, 256);
+    expect(countIn && countIn->schedule.target_raw_frame == 96000 && countIn->source_frame == 0,
+        "missing the countdown does not postpone a future playback origin");
+    const jam2::PlaybackTempo half{500000, 0, 0};
+    const auto slowed = jam2::recover_received_restart(48000, normalPattern(), 144000, 0, true, 0, 48020, 0, 256, half);
+    expect(slowed && slowed->source_frame == 96256,
+        "recovery seeks elapsed rendered audio frames at a slowed shared tempo");
+    expect(!jam2::recover_received_restart(48000, normalPattern(), 1000, 0, false, 0, 24000, 0, 256),
+        "restart recovery requires a valid epoch");
+    expect(!jam2::recover_received_restart(48000, normalPattern(), UINT64_MAX, 0, true, 0, 24000, 0, 256),
+        "restart recovery rejects frame overflow");
+}
+
 void testFrameConversions()
 {
     using limits = std::numeric_limits<std::uint64_t>;
@@ -245,6 +270,7 @@ void testInvalidAndExhaustedSchedules()
 
 int main()
 {
+    testRestartRecovery();
     const jam2::PlaybackTempo half{500000, 48000, 48000.0};
     expect(half.position(48000) == 48000.0 && half.position(96000) == 72000.0 && half.frame(72000.0) == 96000,
         "playback tempo preserves its anchor and maps source frames in both directions");

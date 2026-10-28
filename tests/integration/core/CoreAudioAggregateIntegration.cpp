@@ -62,14 +62,28 @@ int main() {
         const auto output = std::find_if(devices.begin(), devices.end(), [&](const auto& device) { return stable_device_id(device) == outputUid; });
         require(output != devices.end(), "profiled output must be available");
         require(output->output_channel_count > 0, "profiled device must support output");
+        for (const auto* uid : {outputUid, inputUid}) {
+            const auto device = std::find_if(devices.begin(), devices.end(), [&](const auto& item) { return stable_device_id(item) == uid; });
+            require(device != devices.end(), "profiled capability device must be available");
+            const auto capabilities = test_device(device->id);
+            require(capabilities.device.input_channel_count == device->input_channel_count &&
+                capabilities.device.output_channel_count == device->output_channel_count,
+                "Test Device must retain both physical CoreAudio channel counts");
+            std::cout << "Test Device: " << device->name << " input_channels=" << capabilities.device.input_channel_count
+                << " output_channels=" << capabilities.device.output_channel_count << '\n';
+        }
         CoreAudioConfig config; config.setup = AudioDeviceSetup::SeparateInputOutput;
         config.output_device_uid = outputUid; config.input_device_uid = inputUid;
         ChannelSelection channels{{0}, output->output_channel_count == 1 ? std::vector<int>{0} : std::vector<int>{0, 1}};
         const auto initialCount = privateAggregates();
         const bool split = config.input_device_uid != config.output_device_uid;
-        for (bool input : {true, false}) {
+        for (bool input : {true, false, true}) {
             MonoRingBuffer capture(8192), pitch(8192), playback(8192); StreamControl control;
-            if (!input) config.input_device_uid.clear();
+            control.network_capture_enabled.store(true);
+            control.network_playback_enabled.store(true);
+            config.input_device_uid = input ? inputUid : "";
+            const std::vector<std::int32_t> silence(playback.capacity(), 0);
+            require(playback.push(silence) == silence.size(), "prefill hardware playback ring");
             auto stream = start_duplex_stream(output->id, 48000, 0, InputChannels::Mono, channels,
                 capture, pitch, playback, 0, control, nullptr, nullptr, {}, config);
             const auto info = stream->info();
@@ -83,6 +97,11 @@ int main() {
             while (stream->callbacks() < 10 && std::chrono::steady_clock::now() < deadline)
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
             require(stream->callbacks() >= 10, "CoreAudio callbacks must advance");
+            require(playback.available_read() < silence.size(), "CoreAudio output must consume playback frames");
+            require(!input || capture.available_read() > 0, "selected CoreAudio input must publish capture frames");
+            std::cout << "input=" << input << " aggregate=" << info.private_aggregate
+                << " callbacks=" << stream->callbacks() << " capture_frames=" << capture.available_read()
+                << " playback_remaining=" << playback.available_read() << '\n';
             stream.reset(); released(initialCount);
         }
         config.input_device_uid = inputUid;

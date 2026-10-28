@@ -92,6 +92,20 @@ int main(int argc, char** argv)
             require(!peer.multiplexSnapshot().usesRendezvous,"Direct controller used a server");
         }
         until([&] { return peers[1].snapshot().heartbeatsReceived>0 && peers[0].snapshot().heartbeatAcksReceived>0; },"typed heartbeat did not acknowledge");
+        std::array<bool,4> bankSwitchDelivered{};
+        for (int i=1;i<4;++i) peers[i].onMessage = [&,i](const QString&, const QJsonObject& message) {
+            if (message.value("type") == "bank.switch") {
+                require(message.value("bank").toInt() == 1 && message.value("arrangement_revision").toInteger() > 0 &&
+                    message.value("authority_token").toString() == token(0),
+                    "bank switch lost its coordinator arrangement authority");
+                bankSwitchDelivered[i] = true;
+            }
+        };
+        require(peers[0].send({{"type","bank.switch"},{"bank",1},
+            {"switch_id","12345678-1234-1234-1234-123456789abc"},{"target_abs_beat","8"}}),
+            "creator bank switch failed to queue");
+        until([&] { return bankSwitchDelivered[1] && bankSwitchDelivered[2] && bankSwitchDelivered[3]; },
+            "authoritative bank switch failed to reach all three joiners");
         const auto revision=peers[1].snapshot().membershipRevision;
         require(peers[1].reconnectControlStream(),"control refresh not accepted");
         until([&] { return peers[1].snapshot().lifecycle==Controller::Lifecycle::Active && peers[1].snapshot().membershipRevision>revision; },"logical stream did not reauthenticate and recover snapshot");

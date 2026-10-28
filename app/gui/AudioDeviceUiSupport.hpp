@@ -9,6 +9,8 @@
 #include <QVector>
 
 #include <vector>
+#include <optional>
+#include <functional>
 
 class QComboBox;
 class QWidget;
@@ -34,6 +36,19 @@ bool audioDeviceUsesInput(const AudioDevicePreference& preference);
 QString preferredAudioDeviceId(const QVector<AudioDeviceChoice>& choices,
     const AudioDevicePreference& preference, const QString& requestedId = {});
 
+struct AudioDeviceTestRequest {
+    int outputDeviceId = -1;
+    std::optional<int> inputDeviceId;
+    bool separate = false;
+};
+struct AudioDeviceTestReport {
+    QString text;
+    std::vector<jam2::audio::DeviceTestResult> devices;
+};
+using AudioDeviceProbe = std::function<jam2::audio::DeviceTestResult(int)>;
+AudioDeviceTestReport testAudioDeviceSelection(const AudioDeviceTestRequest& request,
+    const AudioDeviceProbe& probe = jam2::audio::test_device);
+
 // One implementation of driver/endpoint selection shared by Settings and the
 // local/create/join dialogs. Existing device/channel controls retain their IDs.
 class AudioDeviceControls final : public QObject {
@@ -42,6 +57,7 @@ public:
         QLineEdit* outputChannels, QVector<AudioDeviceChoice> choices,
         const AudioDevicePreference& preference, const QString& selectedId, const QString& controlPrefix,
         QComboBox* bufferSize = nullptr);
+    AudioDeviceTestRequest testRequest() const;
     void setDevices(QVector<AudioDeviceChoice> choices, const QString& selectedId);
     void applyPreference(const AudioDevicePreference& preference, const QString& selectedId = {});
     void addBufferControl(QComboBox* buffer, QFormLayout* form);
@@ -58,6 +74,7 @@ private:
     QLineEdit* inputChannels_;
     QLineEdit* outputChannels_;
     QLabel* channels_;
+    QLabel* noDuplexDevice_;
     struct BufferControl {
         QComboBox* editor;
         QFormLayout* form;

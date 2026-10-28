@@ -1,3 +1,4 @@
+#include "TrackLaneRemoval.hpp"
 #include "MainWindow.hpp"
 #include "MainWindowPages.hpp"
 #include "ArrangementEditorDialog.hpp"
@@ -2137,8 +2138,8 @@ void MainWindow::showLocalPerformSetup()
     };
     jam2::gui::LocalEngineDialogCallbacks callbacks;
     callbacks.testDevice = [this](
-        QComboBox* device, QPushButton* button, QWidget* parent) {
-        testDeviceSelection(device, button, parent);
+        const jam2::gui::AudioDeviceTestRequest& request, QPushButton* button, QWidget* parent) {
+        testDeviceSelection(request, button, parent);
     };
     jam2::gui::LocalEngineDialog dialog(
         initial, devices, std::move(callbacks), this);
@@ -2594,6 +2595,16 @@ QJsonObject MainWindow::automationJamSnapshot() const
             {QStringLiteral("applied"), peer.grid_assignment_applied}});
     }
     snapshot.insert(QStringLiteral("grid_assignment_peers"), gridAssignments);
+    QJsonArray transportPeers;
+    if (network) for (const auto& peer : network->peers) transportPeers.append(QJsonObject{
+        {QStringLiteral("peer_id"), QString::number(peer.peer_id)},
+        {QStringLiteral("grid_deferrals"), static_cast<qint64>(peer.transport_grid_deferrals)},
+        {QStringLiteral("countdown_missed_packets"), static_cast<qint64>(peer.transport_countdown_missed_packets)}});
+    snapshot.insert(QStringLiteral("transport_peers"), transportPeers);
+    snapshot.insert(QStringLiteral("transport_recovery_pending"), network && network->transport_recovery_pending);
+    snapshot.insert(QStringLiteral("transport_recoveries"), static_cast<qint64>(network ? network->transport_recoveries : 0));
+    snapshot.insert(QStringLiteral("transport_recovery_source_frame"), static_cast<qint64>(network ? network->transport_recovery_source_frame : 0));
+    snapshot.insert(QStringLiteral("transport_recovery_retry_us"), static_cast<qint64>(network ? network->transport_recovery_retry_us : 0));
     return snapshot;
 }
 
@@ -3129,6 +3140,7 @@ QJsonObject MainWindow::automationPerformanceSnapshot() const
         {QStringLiteral("metronome_mode"), metronomeModeText()},
         {QStringLiteral("metronome_epoch_frame"), static_cast<qint64>(
             engine.metronome_epoch_frame)},
+        {QStringLiteral("metronome_render_offset_frames"), static_cast<qint64>(engine.metronome_render_offset_frames)},
         {QStringLiteral("metronome_epoch_valid"), engine.metronome_epoch_valid},
         {QStringLiteral("metronome_compensation_runtime_available"),
             network.has_value()},
@@ -4023,8 +4035,8 @@ void MainWindow::showStartJamDialog()
             preferences_.createAudio(), requestedDeviceId);
     };
     callbacks.testDevice = [this](
-        QComboBox* device, QPushButton* button, QWidget* parent) {
-        testDeviceSelection(device, button, parent);
+        const jam2::gui::AudioDeviceTestRequest& request, QPushButton* button, QWidget* parent) {
+        testDeviceSelection(request, button, parent);
     };
     callbacks.saveDefaults = [this](
         const jam2::gui::StartJamDialogState& state) {
@@ -4067,8 +4079,8 @@ void MainWindow::showJoinJamDialog()
             preferences_.joinAudio(), requestedDeviceId);
     };
     callbacks.testDevice = [this](
-        QComboBox* device, QPushButton* button, QWidget* parent) {
-        testDeviceSelection(device, button, parent);
+        const jam2::gui::AudioDeviceTestRequest& request, QPushButton* button, QWidget* parent) {
+        testDeviceSelection(request, button, parent);
     };
     callbacks.saveDefaults = [this](
         const jam2::gui::JoinJamDialogState& state) {
@@ -4184,8 +4196,8 @@ void MainWindow::showSettingsDialog()
 
     jam2::gui::SettingsDialogCallbacks callbacks;
     callbacks.testDevice =
-        [this](QComboBox* device, QPushButton* button, QWidget* parent) {
-            testDeviceSelection(device, button, parent);
+        [this](const jam2::gui::AudioDeviceTestRequest& request, QPushButton* button, QWidget* parent) {
+            testDeviceSelection(request, button, parent);
         };
     callbacks.applyLocalAudio =
         [this, &localInitial](
@@ -5559,49 +5571,37 @@ bool MainWindow::selectedDeviceSupportsSampleRate(int sampleRate)
 }
 
 void MainWindow::testDeviceSelection(
-    QComboBox* device,
+    const jam2::gui::AudioDeviceTestRequest& request,
     QPushButton* button,
     QWidget* dialogParent)
 {
-    if (device == nullptr || device->currentData().toString().isEmpty()) {
-        jam2::gui::showAudioDeviceTestMessage(
-            dialogParent, QStringLiteral("Select a low-latency audio device first."));
-        return;
-    }
-    bool ok = false;
-    const int deviceId = device->currentData().toInt(&ok);
-    if (!ok) {
-        jam2::gui::showAudioDeviceTestMessage(
-            dialogParent, QStringLiteral("The selected device id is invalid."));
-        return;
-    }
-    const auto info = std::find_if(availableDevices_.begin(), availableDevices_.end(),
-        [deviceId](const auto& item) { return item.id == deviceId; });
-    const QString key = info != availableDevices_.end()
-        ? jam2::gui::audioDevicePreferenceKey(*info)
-        : QString::number(deviceId);
-    if ((jam2_.isRunning() || jam2_.isNetworkRunning()) &&
-        deviceCapabilitiesCache_.contains(key)) {
-        jam2::gui::showAudioDeviceTestMessage(
-            dialogParent,
-            jam2::gui::audioDeviceCapabilitiesText(
-                deviceCapabilitiesCache_.value(key)));
-        return;
+    QMap<int, jam2::audio::DeviceTestResult> cached;
+    if (jam2_.isRunning() || jam2_.isNetworkRunning()) {
+        for (const auto& device : availableDevices_) {
+            const auto found = deviceCapabilitiesCache_.constFind(jam2::gui::audioDevicePreferenceKey(device));
+            if (found != deviceCapabilitiesCache_.cend()) cached.insert(device.id, found.value());
+        }
     }
     if (button != nullptr) button->setEnabled(false);
-    auto result = std::make_shared<std::optional<jam2::audio::DeviceTestResult>>();
+    auto result = std::make_shared<std::optional<jam2::gui::AudioDeviceTestReport>>();
     const QPointer<QWidget> parentGuard(dialogParent);
     const QPointer<QPushButton> buttonGuard(button);
     const bool started = startFileWorkerTask(
-        [deviceId, result] { *result = jam2::audio::test_device(deviceId); },
-        [this, result, key, parentGuard, buttonGuard] {
+        [request, cached, result] {
+            *result = jam2::gui::testAudioDeviceSelection(request, [cached](int id) {
+                const auto found = cached.constFind(id);
+                return found != cached.cend() ? found.value() : jam2::audio::test_device(id);
+            });
+        },
+        [this, result, parentGuard, buttonGuard] {
             if (buttonGuard) buttonGuard->setEnabled(true);
             if (!*result) return;
-            deviceCapabilitiesCache_.insert(key, **result);
+            for (const auto& device : (*result)->devices)
+                deviceCapabilitiesCache_.insert(jam2::gui::audioDevicePreferenceKey(device.device), device);
             if (parentGuard) {
                 jam2::gui::showAudioDeviceTestMessage(
                     parentGuard,
-                    jam2::gui::audioDeviceCapabilitiesText(**result));
+                    (*result)->text);
             }
         },
         [parentGuard, buttonGuard](const QString& error) {
@@ -10268,86 +10268,20 @@ void MainWindow::renameSelectedLooperLane()
 void MainWindow::removeSelectedLooperLane()
 {
     if (sharedRecordingProtected()) return;
-    if (selectedLooperLane_ < 0) {
-        return;
+    const auto request = jam2::gui::describeTrackLaneRemoval(looperProject_, projectPersistence_, viewedBankIndex_, selectedLooperLane_);
+    if (!request || !jam2::gui::confirmTrackLaneRemoval(*request, this)) return;
+    if (sharedRecordingProtected()) return;
+    // Resolve stable identities after the modal event loop, which can process
+    // remote arrangement updates and reorder lanes or sections.
+    int bankIndex = -1, row = -1;
+    for (int bank = 0; bank < looperProject_.banks().size(); ++bank) {
+        if (looperProject_.banks().at(bank).id != request->bankId) continue;
+        bankIndex = bank;
+        for (int index = 0; index < looperProject_.banks().at(bank).lanes.size(); ++index)
+            if (looperProject_.banks().at(bank).lanes.at(index).id == request->laneId) row = index;
     }
-    const int bankIndex = viewedBankIndex_;
-    const int row = selectedLooperLane_;
-    const LooperLane lane = looperProject_.banks().at(bankIndex).lanes.at(row);
-    const QString assetPath = looperAssetAbsolutePath(lane);
-    const QFileInfo assetInfo(assetPath);
-    int references = 0;
-    for (const LooperBank& bank : looperProject_.banks()) {
-        for (const LooperLane& candidate : bank.lanes) {
-            if ((!lane.assetHash.isEmpty() && candidate.assetHash == lane.assetHash) ||
-                (!assetPath.isEmpty() && QDir::cleanPath(looperAssetAbsolutePath(candidate)) == QDir::cleanPath(assetPath))) {
-                ++references;
-            }
-        }
-    }
-    QMessageBox dialog(QMessageBox::Question, QStringLiteral("Remove lane"),
-        QStringLiteral("Remove the lane or delete the WAV for '%1'?").arg(lane.name), QMessageBox::Cancel, this);
-    QPushButton* removeOnly = dialog.addButton(QStringLiteral("Remove lane only"), QMessageBox::AcceptRole);
-    QPushButton* deleteAsset = dialog.addButton(QStringLiteral("Delete WAV from disk"), QMessageBox::DestructiveRole);
-    jam2::gui::registerGuiControl(
-        *removeOnly,
-        QStringLiteral("looper.lane-remove-dialog.remove-only"),
-        QStringLiteral("looper.lane-remove"),
-        jam2::gui::GuiControlAvailability::Modal,
-        QStringLiteral("looper.lane-remove-dialog"));
-    jam2::gui::registerGuiControl(
-        *deleteAsset,
-        QStringLiteral("looper.lane-remove-dialog.delete-wav"),
-        QStringLiteral("looper.lane-remove-delete-wav"),
-        jam2::gui::GuiControlAvailability::Modal,
-        QStringLiteral("looper.lane-remove-dialog"));
-    if (QAbstractButton* cancel = dialog.button(QMessageBox::Cancel)) {
-        jam2::gui::registerGuiControl(
-            *cancel,
-            QStringLiteral("looper.lane-remove-dialog.cancel"),
-            QStringLiteral("looper.lane-remove-cancel"),
-            jam2::gui::GuiControlAvailability::Modal,
-            QStringLiteral("looper.lane-remove-dialog"));
-    }
-    const bool hasWav = assetInfo.exists() && assetInfo.isFile() &&
-        assetInfo.suffix().compare(QStringLiteral("wav"), Qt::CaseInsensitive) == 0;
-    if (!hasWav) {
-        deleteAsset->setEnabled(false);
-        dialog.setInformativeText(QStringLiteral("The lane does not reference an existing WAV file."));
-    } else if (references > 1) {
-
-        dialog.setInformativeText(QStringLiteral(
-            "Deleting the WAV keeps this lane, its name and mixer settings. "
-            "This WAV is referenced by %1 lanes. Deleting it from disk will leave the other references without audio.")
-            .arg(references));
-    } else {
-        dialog.setInformativeText(QStringLiteral(
-            "Deleting the WAV keeps this lane, its name and mixer settings."));
-    }
-    dialog.exec();
-    if (dialog.clickedButton() != removeOnly && dialog.clickedButton() != deleteAsset) {
-        return;
-    }
-    if (dialog.clickedButton() == deleteAsset) {
-        const bool deleted = hasWav && (
-            projectPersistence_.ownsTransientWav(assetPath)
-                ? projectPersistence_.discardTransientWav(assetPath)
-                : QFile::remove(assetPath));
-        if (!deleted) {
-            QMessageBox::warning(this, QStringLiteral("Remove lane"), QStringLiteral("Could not delete the WAV file."));
-            return;
-        }
-        validatedTrackAssetHashes_.remove(lane.assetHash);
-        if (!looperProject_.clearLaneAsset(bankIndex, row)) return;
-        cancelUnreferencedLooperAssetTransfer(lane.assetHash);
-        looperWaveformCache_.remove(assetPath);
-        projectPersistence_.pruneEmptyWorkspaceDirectories();
-        selectedLooperLane_ = row;
-        refreshLooperLanes();
-        regeneratePreparedMix();
-        syncLooperArrangement();
-        return;
-    }
+    if (bankIndex < 0 || row < 0) return;
+    const QString assetPath = request->wavPath;
     const bool armedInBank = trackRecordingWorkflow_.laneArmed() &&
         trackRecordingWorkflow_.armedBank() == bankIndex;
     const int armedLaneIndex = trackRecordingWorkflow_.armedLane();
@@ -10362,7 +10296,17 @@ void MainWindow::removeSelectedLooperLane()
         trackRecordingWorkflow_.includePreparedInTake();
     const bool armedIncludeMetronome =
         trackRecordingWorkflow_.includeMetronomeInTake();
-    looperProject_.removeLane(bankIndex, row);
+    const auto removal = jam2::gui::removeTrackLaneAndWav(looperProject_, projectPersistence_, *request);
+    if (!removal.removed) {
+        QMessageBox::warning(this, QStringLiteral("Remove lane"), removal.error);
+        return;
+    }
+    validatedTrackAssetHashes_.remove(request->assetHash);
+    assetTransfer_.discardOutgoingHash(request->assetHash);
+    cancelUnreferencedLooperAssetTransfer(request->assetHash);
+    projectPersistence_.pruneEmptyWorkspaceDirectories();
+    appendLog(QStringLiteral("removed looper lane: bank=%1 lane=%2 wav=%3")
+        .arg(request->bankId, request->laneId, assetPath));
     looperWaveformCache_.remove(assetPath);
     if (armedInBank && row == armedLaneIndex) {
         trackRecordingWorkflow_.disarmLane();
@@ -12731,7 +12675,7 @@ void MainWindow::supersedePendingTrackBatches(
         }
         if (!stillExpectedByTrack) {
             pendingTrackAssetSources_.remove(hash);
-            if (!pendingLooperAssetHashes_.contains(hash)) {
+            if (plan.obsoleteRetryHashes.contains(hash)) {
                 trackWorkspace_.incomingAssetRetryAttempts.remove(hash);
                 trackWorkspace_.incomingAssetRetrySources.remove(hash);
             }
@@ -12860,7 +12804,7 @@ void MainWindow::requestNextPendingAsset()
 {
     refreshLooperLanes();
     updateTrackTransferPresentation();
-    if (automationOfferPauseActive_) return;
+    if (automationOfferPauseArmed_ || automationOfferPauseActive_) return;
     if (incomingAssetWorkflow_ != IncomingAssetWorkflow::None) {
         return;
     }
@@ -16383,8 +16327,11 @@ void MainWindow::sendSongSnapshot(
     (void)sessionController_.send(authoritative);
     const SharedSessionController::Snapshot after = sessionController_.snapshot();
     looperArrangementRevision_ = revision;
+    // Session routing also assigns revisions to section switches. Retain
+    // snapshots under the revision peers actually received, not the local
+    // count of song publications, so later edits can rebase after a switch.
     trackWorkspace_.authoritativeTrackHistory.insert(
-        static_cast<quint64>(revision), snapshotSong);
+        after.arrangementRevision, snapshotSong);
     while (trackWorkspace_.authoritativeTrackHistory.size() > 16) {
         trackWorkspace_.authoritativeTrackHistory.erase(
             trackWorkspace_.authoritativeTrackHistory.begin());

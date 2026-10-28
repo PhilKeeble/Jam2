@@ -37,6 +37,7 @@ public:
     QString installationRoot() const;
     QString workerPath() const;
     QString modelsPath() const;
+    static QString resolveModelsPath(const QString& externalModels, const QString& bundledModels);
     QString bundleStatus() const;
     QString storageSummary() const;
     bool isAvailable() const;

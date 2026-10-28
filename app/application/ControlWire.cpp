@@ -90,7 +90,9 @@ const std::vector<Schema>& schemas()
             if (schema.operation >= ListeningRequest && schema.operation <= ListeningReset) {
                 schema.fields = {{"settings",Settings},{"bank",U8},{"tempo",Tempo},{"target_frame",FrameText},{"epoch_frame",FrameText},{"epoch_position",F64},{"source_seconds",F64},{"playing",Bool},{"reason",Text},{"changed_groups",U8}};
             }
-            schema.fields.push_back({"revision",I64});
+            // Bank switches share the arrangement authority sequence. Keep
+            // the existing 64-bit wire slot, but expose its owner's field name.
+            schema.fields.push_back({schema.operation == BankSwitch ? "arrangement_revision" : "revision",I64});
             schema.fields.push_back({"authority_token",Hex16});
             schema.allowed.insert(QStringLiteral("type"));
             for (const auto& field : schema.fields) schema.allowed.insert(QLatin1String(field.name));

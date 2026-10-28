@@ -1,6 +1,7 @@
 #pragma once
 
 #include "UserPreferences.hpp"
+#include "AudioDeviceUiSupport.hpp"
 
 #include "audio_device.hpp"
 
@@ -31,7 +32,7 @@ struct SettingsDialogInput {
 };
 
 struct SettingsDialogCallbacks {
-    std::function<void(QComboBox*, QPushButton*, QWidget*)> testDevice;
+    std::function<void(const AudioDeviceTestRequest&, QPushButton*, QWidget*)> testDevice;
     std::function<bool(
         const AudioDevicePreference&,
         const QString& selectedDeviceId,

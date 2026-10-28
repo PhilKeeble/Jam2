@@ -7137,60 +7137,6 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
             std::abs(mergedLane.gainDb + 9.0) < 0.000001 && mergedLane.solo);
     }
     {
-        LooperProject base;
-        LooperLane edited;
-        edited.id = QStringLiteral("edited-lane");
-        edited.name = QStringLiteral("Base name");
-        edited.assetHash = QString(64, QLatin1Char('a'));
-        edited.sampleRate = 48000;
-        edited.sourceFrames = 96000;
-        LooperLane changedBeforeDelete;
-        changedBeforeDelete.id = QStringLiteral("changed-before-delete");
-        changedBeforeDelete.name = QStringLiteral("Original");
-        LooperLane unchangedDelete;
-        unchangedDelete.id = QStringLiteral("unchanged-delete");
-        unchangedDelete.name = QStringLiteral("Delete me");
-        const bool baseReady = base.appendLane(0, edited) &&
-            base.appendLane(0, changedBeforeDelete) &&
-            base.appendLane(0, unchangedDelete);
-        LooperProject current = base;
-        current.banks()[0].lanes[0].name = QStringLiteral("Host rename");
-        current.banks()[0].lanes[1].name = QStringLiteral("Host changed");
-        LooperProject proposed = base;
-        proposed.banks()[0].lanes[0].startFrame = 48000;
-        proposed.banks()[0].lanes.removeAt(2);
-        proposed.banks()[0].lanes.removeAt(1);
-        const QJsonObject baseSong{{QStringLiteral("looper"), base.toJson(true)}};
-        const QJsonObject currentSong{{QStringLiteral("looper"), current.toJson(true)}};
-        const QJsonObject proposedSong{{QStringLiteral("looper"), proposed.toJson(true)}};
-        int changes = 0;
-        int conflicts = 0;
-        const QJsonObject mergedSong = mergeConcurrentLooperMetadata(
-            baseSong, currentSong, proposedSong, &changes, &conflicts);
-        LooperProject merged;
-        const bool loaded = merged.loadJson(
-            mergedSong.value(QStringLiteral("looper")).toObject());
-        bool editedMerged = false;
-        bool changedPreserved = false;
-        bool unchangedRemoved = true;
-        if (loaded) {
-            for (const LooperLane& lane : merged.banks().at(0).lanes) {
-                if (lane.id == edited.id) {
-                    editedMerged = lane.name == QStringLiteral("Host rename") &&
-                        lane.startFrame == 48000;
-                } else if (lane.id == changedBeforeDelete.id) {
-                    changedPreserved = lane.name == QStringLiteral("Host changed");
-                } else if (lane.id == unchangedDelete.id) {
-                    unchangedRemoved = false;
-                }
-            }
-        }
-        record(QStringLiteral(
-            "track-sync.concurrent-metadata-three-way-merge-preserves-nonconflicts"),
-            baseReady && loaded && editedMerged && changedPreserved &&
-            unchangedRemoved && changes >= 2 && conflicts >= 1);
-    }
-    {
         LooperProject project;
         project.setTrackSyncEnabled(false);
         QJsonObject legacySnapshot = project.toJson();

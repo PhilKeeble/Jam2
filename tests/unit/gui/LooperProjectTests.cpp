@@ -377,9 +377,33 @@ void testSectionLaneCropping()
 
 } // namespace
 
+void testConcurrentMetadataMergeDeletionWins()
+{
+    LooperProject base;
+    LooperLane edited; edited.id = "edited-lane"; edited.name = "Base name";
+    edited.assetHash = QString(64, 'a'); edited.sampleRate = 48000; edited.sourceFrames = 96000;
+    LooperLane changed; changed.id = "changed-before-delete"; changed.name = "Original";
+    LooperLane unchanged; unchanged.id = "unchanged-delete"; unchanged.name = "Delete me";
+    expect(base.appendLane(0, edited) && base.appendLane(0, changed) && base.appendLane(0, unchanged), "merge fixture lanes");
+    auto current = base, proposed = base;
+    current.banks()[0].lanes[0].name = "Host rename";
+    current.banks()[0].lanes[1].name = "Host changed";
+    proposed.banks()[0].lanes[0].startFrame = 48000;
+    proposed.banks()[0].lanes.removeAt(2); proposed.banks()[0].lanes.removeAt(1);
+    int changes = 0, conflicts = 0;
+    const auto mergedJson = mergeConcurrentLooperMetadata({{"looper",base.toJson(true)}},
+        {{"looper",current.toJson(true)}}, {{"looper",proposed.toJson(true)}}, &changes, &conflicts);
+    LooperProject merged;
+    expect(merged.loadJson(mergedJson.value("looper").toObject()) && merged.banks()[0].lanes.size() == 1 &&
+        merged.banks()[0].lanes[0].name == "Host rename" && merged.banks()[0].lanes[0].startFrame == 48000 &&
+        changes >= 3 && conflicts == 0,
+        "three-way merge retains independent rename/placement edits while deletion wins over an empty-track rename");
+}
+
 int main(int argc, char* argv[])
 {
     QCoreApplication application(argc, argv);
+    testConcurrentMetadataMergeDeletionWins();
 
     testBankAndArrangementOwnership();
     testValidatedLaneMutations();

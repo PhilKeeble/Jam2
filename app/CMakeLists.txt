@@ -633,6 +633,8 @@ add_executable(jam2 MACOSX_BUNDLE
     gui/TrackWidgets.hpp
     gui/TrackRecordingWorkflow.cpp
     gui/TrackRecordingWorkflow.hpp
+    gui/TrackLaneRemoval.cpp
+    gui/TrackLaneRemoval.hpp
     gui/TrackWorkspaceController.cpp
     gui/TrackWorkspaceController.hpp
     gui/TrackWorkspaceSupport.cpp

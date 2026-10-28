@@ -98,6 +98,20 @@ int main(int argc, char** argv)
         require(QFile::copy(sourceWorker, expectedWorker),
             "test service worker must be copied into the injected bundle");
 
+        const QString external = QDir(root).filePath(QStringLiteral("external-models"));
+        require(QDir().mkpath(external), "external model fixture directory");
+        require(JamTasterService::resolveModelsPath(external, models) == models,
+            "a complete bundled set is a fallback when external models are missing");
+        writeFile(QDir(external).filePath(QStringLiteral("basic_pitch.onnx")), "partial");
+        require(JamTasterService::resolveModelsPath(external, models) == models,
+            "a partial external download must not hide a complete bundled set");
+        for (const char* name : modelNames) writeFile(QDir(external).filePath(QString::fromLatin1(name)), "model");
+        require(JamTasterService::resolveModelsPath(external, models) == external,
+            "a complete external model set takes precedence over the bundle");
+        require(QFile::remove(QDir(external).filePath(QStringLiteral("adtof.onnx"))), "remove external fixture model");
+        require(JamTasterService::resolveModelsPath(external, QDir(root).filePath(QStringLiteral("absent"))) == external,
+            "missing model sets report the normal external download destination without mixing sets");
+
         JamTasterService missingWorker(bundle, QDir(root).absoluteFilePath(
             QStringLiteral("missing-worker")));
         require(!missingWorker.isAvailable() &&

@@ -235,6 +235,11 @@ bool ApplicationRuntime::setMetronomeCompensation(
     return isNetworkRunning() && host_.submitMetronomeCompensation(settings);
 }
 
+void ApplicationRuntime::setTransportClockAvailable(bool available) noexcept
+{
+    host_.transport_clock_available.store(available, std::memory_order_release);
+}
+
 void ApplicationRuntime::setTrackSyncEnabled(bool enabled) noexcept
 {
     track_sync_enabled_.store(enabled, std::memory_order_release);

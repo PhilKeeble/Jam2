@@ -1,6 +1,9 @@
 #pragma once
 #include <QJsonDocument>
 #include "../../app/application/RendezvousWire.hpp"
+#include "../../app/application/PeerBootstrap.hpp"
+#include <mutex>
+#include <optional>
 #include <QJsonObject>
 #include <QFile>
 #include <QDir>
@@ -29,7 +32,10 @@ class CandidateNetwork {
     };
     QUdpSocket ingress_;
     quint16 server_;
-    bool distinctHosts_ = false;
+public:
+    struct IsolatedHosts { quint64 session; QByteArray key; };
+private:
+    std::optional<IsolatedHosts> isolatedHosts_;
     std::map<quint16, std::unique_ptr<Route>> routes_;
     quint64 directCount_ = 0;
     const bool traceMux_ = qEnvironmentVariableIsSet("JAM2_TRACE_CANDIDATE_MUX");
@@ -70,6 +76,7 @@ class CandidateNetwork {
     std::set<QString> firstMembership;
     QString creatorPeer_;
 public:
+    quint64 isolatedCandidates = 0;
     using Delivery = std::function<bool(const QByteArray&)>;
     // Intercept native runtime packets only; discovery and typed streams keep
     // their own existing fault controls. Deliveries preserve punched endpoints.
@@ -92,7 +99,7 @@ public:
     bool impairMultiplex = true;
     quint64 leavesDropped = 0;
     quint64 dropped = 0, duplicated = 0;
-    explicit CandidateNetwork(quint16 server,bool distinctHosts=false) : server_(server),distinctHosts_(distinctHosts) {
+    explicit CandidateNetwork(quint16 server, std::optional<IsolatedHosts> isolatedHosts = {}) : server_(server), isolatedHosts_(std::move(isolatedHosts)) {
         require(ingress_.bind(QHostAddress::LocalHost, 0), "bind simulated NAT ingress");
     }
     ~CandidateNetwork() {
@@ -129,8 +136,7 @@ public:
             auto& route = routes_[local];
             if (!route) {
                 route = std::make_unique<Route>(); route->local = local;
-                const auto publicAddress=distinctHosts_ ? QHostAddress(QStringLiteral("127.0.0.%1").arg(2+routes_.size()%200)) : QHostAddress(QHostAddress::LocalHost);
-                require(route->socket.bind(publicAddress, 0), "bind simulated NAT mapping");
+                require(route->socket.bind(QHostAddress::LocalHost, 0), "bind simulated NAT mapping");
             }
             namespace rv = jam2::application::rendezvous_wire;
             auto object = rv::decode(packet);
@@ -155,6 +161,20 @@ public:
                 if (kind == rv::Kind::Candidate) {
                     route->request = object->nonce;
                     route->attempt = object->attempt;
+                }
+            }
+            if (isolatedHosts_ && packet.startsWith("J2PB")) {
+                auto message = jam2::application::decodePeerBootstrap(
+                    std::span(reinterpret_cast<const std::uint8_t*>(packet.constData()), packet.size()),
+                    isolatedHosts_->session, isolatedHosts_->key);
+                require(bool(message), "isolated-host proxy received an invalid authenticated bootstrap");
+                if (message->kind == jam2::application::PeerBootstrapKind::Candidate) {
+                    // Model separate LANs explicitly rather than requiring OS
+                    // aliases for unassigned 127.0.0.x addresses.
+                    message->local = {};
+                    packet = jam2::application::encodePeerBootstrap(*message, isolatedHosts_->key);
+                    require(!packet.isEmpty(), "encode isolated-host bootstrap candidate");
+                    ++isolatedCandidates;
                 }
             }
             const auto deliver = [this, local](const QByteArray& bytes) {
@@ -284,16 +304,29 @@ class ThreadedCandidateNetwork {
     CandidateNetwork* network_ = nullptr;
     QEventLoop* loop_ = nullptr;
     quint16 port_ = 0;
+    mutable std::mutex failureMutex_;
+    std::exception_ptr failure_;
+    void checkFailure() const {
+        std::lock_guard lock(failureMutex_);
+        if (failure_) std::rethrow_exception(failure_);
+    }
 public:
-    explicit ThreadedCandidateNetwork(quint16 server,bool distinctHosts=false) {
+    explicit ThreadedCandidateNetwork(quint16 server, std::optional<CandidateNetwork::IsolatedHosts> isolatedHosts = {}) {
         std::promise<quint16> ready;
         auto future = ready.get_future();
-        worker_ = std::thread([this, server, distinctHosts, ready = std::move(ready)]() mutable {
+        worker_ = std::thread([this, server, isolatedHosts, ready = std::move(ready)]() mutable {
             try {
-                CandidateNetwork network(server,distinctHosts); network.blockFirst = false;
+                CandidateNetwork network(server,isolatedHosts); network.blockFirst = false;
                 QObject context; QEventLoop loop; QTimer timer;
                 context_ = &context; network_ = &network; loop_ = &loop;
-                QObject::connect(&timer, &QTimer::timeout, &context, [&] { network.pump(); });
+                QObject::connect(&timer, &QTimer::timeout, &context, [&] {
+                    try { network.pump(); }
+                    catch (...) {
+                        std::lock_guard lock(failureMutex_);
+                        failure_ = std::current_exception();
+                        timer.stop();
+                    }
+                });
                 timer.start(1); ready.set_value(network.port()); loop.exec();
             } catch (...) { ready.set_exception(std::current_exception()); }
         });
@@ -306,38 +339,46 @@ public:
             worker_.join();
         }
     }
-    quint16 port() const { return port_; }
+    quint16 port() const { checkFailure(); return port_; }
     void suppressControlOpens(const QString& peer, int count) {
+        checkFailure();
         QMetaObject::invokeMethod(context_, [this, peer, count] { network_->suppressControlOpens(peer, count); },
             Qt::BlockingQueuedConnection);
     }
     std::size_t blockCreatorLink(const QString& identity) {
+        checkFailure();
         std::size_t count=0;
         QMetaObject::invokeMethod(context_,[&] { count=network_->blockCreatorLink(identity); },Qt::BlockingQueuedConnection);
         return count;
     }
     bool hasFreshCreatorLink(const QString& identity) const {
+        checkFailure();
         bool fresh=false;
         QMetaObject::invokeMethod(context_,[&] { fresh=network_->hasFreshCreatorLink(identity); },Qt::BlockingQueuedConnection);
         return fresh;
     }
     quint64 droppedCount() const {
+        checkFailure();
         quint64 count=0;
         QMetaObject::invokeMethod(context_,[&] { count=network_->dropped; },Qt::BlockingQueuedConnection);
         return count;
     }
     void blockCurrentPair(const QString& a, const QString& b) {
+        checkFailure();
         QMetaObject::invokeMethod(context_, [this, a, b] { network_->blockCurrentPair(a, b); },
             Qt::BlockingQueuedConnection);
     }
     void setMultiplexImpairment(bool enabled) {
+        checkFailure();
         QMetaObject::invokeMethod(context_, [this, enabled] { network_->impairMultiplex = enabled; },
             Qt::BlockingQueuedConnection);
     }
     void setAuthorityBeaconsEnabled(bool enabled) {
+        checkFailure();
         QMetaObject::invokeMethod(context_, [this,enabled] { network_->setAuthorityBeaconsEnabled(enabled); }, Qt::BlockingQueuedConnection);
     }
     void setAuthorityBeaconInterval(quint64 milliseconds) {
+        checkFailure();
         QMetaObject::invokeMethod(context_, [this,milliseconds] { network_->setAuthorityBeaconInterval(milliseconds); }, Qt::BlockingQueuedConnection);
     }
     CandidateNetwork::AuthorityBeaconStats authorityBeaconStats() const {
@@ -346,9 +387,11 @@ public:
         return result;
     }
     void setGridAssignmentsEnabled(bool enabled) {
+        checkFailure();
         QMetaObject::invokeMethod(context_, [this,enabled] { network_->setGridAssignmentsEnabled(enabled); }, Qt::BlockingQueuedConnection);
     }
     void setGridAssignmentInterval(quint64 milliseconds) {
+        checkFailure();
         QMetaObject::invokeMethod(context_, [this,milliseconds] { network_->setGridAssignmentInterval(milliseconds); }, Qt::BlockingQueuedConnection);
     }
     CandidateNetwork::AuthorityBeaconStats gridAssignmentStats() const {
@@ -357,6 +400,7 @@ public:
         return result;
     }
     void setGridAssignmentAcksEnabled(bool enabled) {
+        checkFailure();
         QMetaObject::invokeMethod(context_, [this,enabled] { network_->setGridAssignmentAcksEnabled(enabled); }, Qt::BlockingQueuedConnection);
     }
     CandidateNetwork::AuthorityBeaconStats gridAssignmentAckStats() const {
@@ -365,19 +409,24 @@ public:
         return result;
     }
     void dropGridAssignments(quint64 count) {
+        checkFailure();
         QMetaObject::invokeMethod(context_, [this,count] { network_->dropGridAssignments(count); }, Qt::BlockingQueuedConnection);
     }
     void blockGridAssignmentsTo(const QString& peer) {
+        checkFailure();
         QMetaObject::invokeMethod(context_, [this,peer] { network_->blockGridAssignmentsTo(peer); }, Qt::BlockingQueuedConnection);
     }
     void dropGridRecoveryRequests(quint64 count) {
+        checkFailure();
         QMetaObject::invokeMethod(context_, [this,count] { network_->dropGridRecoveryRequests(count); }, Qt::BlockingQueuedConnection);
     }
     void delayMediaProof(int milliseconds) {
+        checkFailure();
         QMetaObject::invokeMethod(context_, [this, milliseconds] { network_->delayMediaProof(milliseconds); },
             Qt::BlockingQueuedConnection);
     }
     quint64 delayedMediaProofs() const {
+        checkFailure();
         quint64 result = 0;
         QMetaObject::invokeMethod(context_, [&] { result = network_->delayedMediaProofs(); }, Qt::BlockingQueuedConnection);
         return result;

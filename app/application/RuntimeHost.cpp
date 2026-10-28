@@ -266,6 +266,7 @@ std::uint64_t Jam2RuntimeHost::nextTransportEventId() noexcept
 
 void Jam2RuntimeHost::reset() noexcept
 {
+    transport_clock_available.store(true, std::memory_order_release);
     stop_requested.store(false, std::memory_order_release);
     peer_reprobe_requested_.store(false, std::memory_order_release);
     grid_assignment_recovery_requested_.store(false, std::memory_order_release);

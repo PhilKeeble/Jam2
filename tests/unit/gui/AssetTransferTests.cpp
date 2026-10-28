@@ -1083,6 +1083,7 @@ void test_arrangement_supersession_preserves_the_active_wav()
             plan.batchSizes.value(QStringLiteral("batch-a")) == 2 &&
             plan.preserveActiveTransfer,
         "newer arrangement supersedes batch metadata but preserves its active WAV receive");
+    expect(plan.obsoleteRetryHashes == QSet<QString>{QString(64, QLatin1Char('c'))}, "replacement arrangement retains retry ownership for its referenced WAV");
     const auto unrelated = planPeerSupersession(
         claims, QStringLiteral("peer-b"), true, hash, QStringLiteral("peer-a"),
         QSet<QString>{hash});
@@ -1090,6 +1091,11 @@ void test_arrangement_supersession_preserves_the_active_wav()
         "supersession never preserves a transfer owned by another source");
     const auto removed = planPeerSupersession(
         claims, QStringLiteral("peer-a"), true, hash, QStringLiteral("peer-a"), {});
+    expect(!removed.obsoleteRetryHashes.contains(hash), "another source still owns retries for shared bytes");
+    const auto soleSourceRemoved = planPeerSupersession(claims.mid(0, 2), QStringLiteral("peer-a"), true,
+        hash, QStringLiteral("peer-a"), {});
+    expect(soleSourceRemoved.obsoleteRetryHashes.contains(hash),
+        "WAV removal retires retry ownership against the replacement arrangement, not its old pending snapshot");
     expect(removed.found() && !removed.preserveActiveTransfer,
         "supersession cancels an active WAV omitted by the replacement arrangement");
 }

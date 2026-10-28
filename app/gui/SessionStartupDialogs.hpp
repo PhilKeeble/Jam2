@@ -54,7 +54,7 @@ struct SessionRuntimeDraft {
 using SessionDeviceRefresh =
     std::function<SessionAudioDeviceList(const QString& currentDeviceId)>;
 using SessionDeviceTest =
-    std::function<void(QComboBox* device, QPushButton* button, QWidget* parent)>;
+    std::function<void(const AudioDeviceTestRequest& request, QPushButton* button, QWidget* parent)>;
 
 struct LocalEngineDialogState {
     QString selectedDeviceId;

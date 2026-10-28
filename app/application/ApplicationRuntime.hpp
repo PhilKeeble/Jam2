@@ -34,6 +34,7 @@ public:
     bool setMetronomeCompensation(
         const Jam2MetronomeCompensationSettings& settings) noexcept;
     void setTrackSyncEnabled(bool enabled) noexcept;
+    void setTransportClockAvailable(bool available) noexcept;
     void setRecordingSyncEnabled(bool enabled) noexcept;
     void setLaneRecordingIsolationEnabled(bool enabled) noexcept;
 

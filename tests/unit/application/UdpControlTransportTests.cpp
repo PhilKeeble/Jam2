@@ -3,6 +3,7 @@
 #include "AssetChunkProtocol.hpp"
 #include "ControlServer.hpp"
 #include "UdpStreamConnection.hpp"
+#include "UdpMultiplexTransport.hpp"
 
 #include <QCoreApplication>
 #include <QElapsedTimer>
@@ -37,6 +38,42 @@ template<class Condition> void until(Condition condition)
 
 using jam2::test::Bytes;
 using jam2::test::endpoints;
+
+
+void emptyRoutingSnapshotBoundary()
+{
+    using namespace jam2::application;
+    UdpMultiplexTransport::Config config;
+    config.creator = true;
+    config.strategy = jam2::ConnectionStrategy::Direct;
+    config.bindHost = "127.0.0.1";
+    config.localToken = QString(32, '1');
+    config.sessionHex = "0123456789abcdef";
+    config.keyHex = "0123456789abcdef0123456789abcdef";
+    UdpMultiplexTransport transport;
+    std::array<std::uint8_t, jam2::NetworkDatagramTransport::kReceiveBufferBytes> buffer{};
+    const std::array<std::uint8_t, 28> intent{};
+    for (int restart = 0; restart < 2; ++restart) {
+        QString error;
+        require(transport.start(config, error), "start transport with empty routing snapshot");
+        transport.receiverAttached();
+        require(transport.snapshot().runtimeReceiverAttached && transport.snapshot().links.empty(),
+            "empty snapshot prevented receiver handover");
+        require(transport.sendToPeer(2, {}, intent).outcome == jam2::UdpSendOutcome::WouldBlock,
+            "empty routing snapshot sent to an unknown peer");
+        require(!transport.receiveFor(buffer, 0, nullptr) && !transport.receiveFor(buffer, 1000, nullptr),
+            "empty routing snapshot produced native audio");
+        transport.transportIntentAccepted(2, intent);
+        require(transport.snapshot().nativeIntentAcksSent == 0, "unknown route received an intent receipt");
+        transport.receiverDetached();
+        until([&] { return !transport.snapshot().runtimeReceiverAttached; });
+        require(transport.snapshot().receiverDetachments == 1, "empty receiver did not release ownership");
+        transport.stop();
+        require(!transport.snapshot().running && !transport.receiveFor(buffer, 0, nullptr) &&
+            transport.sendToPeer(2, {}, intent).outcome == jam2::UdpSendOutcome::WouldBlock,
+            "stopped routing snapshot still accepted native work");
+    }
+}
 
 
 void framingProgressDeadline()
@@ -355,6 +392,7 @@ int main(int argc, char** argv)
 {
     QCoreApplication app(argc, argv);
     try {
+        emptyRoutingSnapshotBoundary();
         framingProgressDeadline();
         aggregatedAcknowledgementsAndBorrowedPayload();
         udpEfficiencyFixtures();

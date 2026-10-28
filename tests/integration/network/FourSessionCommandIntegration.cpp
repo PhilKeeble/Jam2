@@ -367,7 +367,7 @@ int main(int argc, char* argv[])
     for (std::size_t index = 0; index < kPeerCount; ++index) {
         peerTokens[index] = deterministicHex(31 + static_cast<int>(index), 16);
     }
-    ThreadedCandidateNetwork endpointProxy(ports[0],true);
+    ThreadedCandidateNetwork endpointProxy(ports[0], CandidateNetwork::IsolatedHosts{sessionId.toULongLong(nullptr, 16), QByteArray::fromHex(sessionKey.toLatin1())});
     endpointProxy.setMultiplexImpairment(false);
     std::array<QString, kPeerCount> scenarioPaths{};
     std::array<QString, kPeerCount> manifestPaths{};

@@ -60,8 +60,16 @@ void startup() {
     initial.selectedDeviceId = QStringLiteral("1"); initial.audio = wasapiPreference();
     initial.inputChannels = QStringLiteral("1"); initial.outputChannels = QStringLiteral("1,2");
     int tests = 0;
-    LocalEngineDialog dialog(initial, list, {[&](QComboBox* output, QPushButton*, QWidget*) {
-        require(output->currentData().toString() == QStringLiteral("2"), "Test Device must receive chosen WASAPI output");
+    LocalEngineDialog dialog(initial, list, {[&](const AudioDeviceTestRequest& request, QPushButton*, QWidget*) {
+        require(request.outputDeviceId == 2 && request.separate &&
+            request.inputDeviceId == (tests == 0 ? std::optional<int>{3} : std::nullopt),
+            "Test Device must receive both WASAPI endpoint selections, including None input");
+        const auto report = testAudioDeviceSelection(request, [](int id) {
+            jam2::audio::DeviceTestResult result; result.device = devices().at(id); return result;
+        });
+        require(report.devices.size() == (tests == 0 ? 2 : 1) && report.text.contains(QStringLiteral("Surround")) &&
+            report.text.contains(tests == 0 ? QStringLiteral("USB microphone") : QStringLiteral("Input device: None")),
+            "WASAPI test results must describe every selected physical endpoint");
         ++tests;
     }});
     dialog.show(); QApplication::processEvents();
@@ -80,12 +88,14 @@ void startup() {
     require(form && form->labelForField(period)->isHidden(), "the unused WASAPI period caption must also be hidden");
     auto* summary = control<QLabel>(&dialog, QStringLiteral("application.local-engine.channel-summary"));
     channelTextFits(*summary, QStringLiteral("Input: 2 channels\nOutput: Stereo"));
-    input->setCurrentIndex(0); output->setCurrentIndex(1);
+    output->setCurrentIndex(1);
+    control<QPushButton>(&dialog, QStringLiteral("application.local-engine.test-device"))->click();
+    input->setCurrentIndex(0);
     require(period->isHidden() && period->currentData().toInt() == 0,
         "changing WASAPI endpoints must keep the automatic period without exposing a selector");
     channelTextFits(*summary, QStringLiteral("Input: None\nOutput: Stereo"));
     control<QPushButton>(&dialog, QStringLiteral("application.local-engine.test-device"))->click();
-    require(tests == 1 && dialog.state().audio.wasapiInputId.isEmpty() &&
+    require(tests == 2 && dialog.state().audio.wasapiInputId.isEmpty() &&
         dialog.state().audio.stableId == QStringLiteral("surround-id"), "optional input and edited output must reach typed startup state");
     driver->setCurrentIndex(driver->findData(QStringLiteral("ASIO")));
     require(!input->isVisible() && channels->isVisible() && output->count() == 1,
@@ -138,8 +148,8 @@ void settings_and_persistence() {
             "Settings Apply Audio must dispatch typed output and optional input");
         ++applied; return true;
     };
-    callbacks.testDevice = [&](QComboBox* output, QPushButton* button, QWidget* parent) {
-        require(output->currentData() == QStringLiteral("2"), "Settings Test Device must select the displayed output");
+    callbacks.testDevice = [&](const AudioDeviceTestRequest& request, QPushButton* button, QWidget* parent) {
+        require(request.outputDeviceId == 2 && !request.inputDeviceId && request.separate, "Settings Test Device must select the displayed output");
         button->setEnabled(false);
         QTimer::singleShot(0, parent, [button] { button->setEnabled(true); });
         ++tested;

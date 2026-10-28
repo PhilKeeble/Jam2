@@ -144,7 +144,7 @@ void CliRecordingSupervisor::write_sidecar(
 
 bool restart_prepared_source(
     jam2::Engine* engine,
-    std::uint64_t target_frame)
+    std::uint64_t target_frame, std::uint64_t source_frame)
 {
     if (engine == nullptr) {
         return false;
@@ -152,6 +152,7 @@ bool restart_prepared_source(
     jam2::EngineCommand seek;
     seek.type = jam2::EngineCommandType::PreparedSeek;
     seek.frame = target_frame;
+    seek.frame_end = source_frame;
     jam2::EngineCommand play;
     play.type = jam2::EngineCommandType::PreparedPlay;
     play.frame = target_frame;

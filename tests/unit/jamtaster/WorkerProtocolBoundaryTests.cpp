@@ -1,4 +1,5 @@
 #include "Hash.hpp"
+#include "ModelFiles.hpp"
 #include "TestTiming.hpp"
 #include "Wav.hpp"
 
@@ -164,6 +165,47 @@ int main(int argc, char** argv)
                     .value(QStringLiteral("message")).toString().contains(
                         QStringLiteral("unsupported JamTaster protocol")),
             "worker rejects an incompatible request protocol with a structured event");
+
+#ifdef Q_OS_MACOS
+        const QString fixture = QDir(root).filePath(QStringLiteral("model-layout"));
+        const QString contents = QDir(fixture).filePath(QStringLiteral("Jam2.app/Contents"));
+        const QString fixtureWorker = QDir(contents).filePath(QStringLiteral("Helpers/jamtaster-worker"));
+        const QString bundledModels = QDir(contents).filePath(QStringLiteral("Resources/jamtaster/models"));
+        const QString externalModels = QDir(fixture).filePath(QStringLiteral("components/jamtaster/models"));
+        require(QDir().mkpath(QFileInfo(fixtureWorker).absolutePath()) &&
+                QDir().mkpath(bundledModels) && QDir().mkpath(externalModels) &&
+                QFile::link(worker, fixtureWorker) &&
+                QFile::link(QDir(QFileInfo(worker).absolutePath()).absoluteFilePath(QStringLiteral("../Frameworks")),
+                    QDir(contents).filePath(QStringLiteral("Frameworks"))),
+            "worker model lookup fixture must preserve the native runtime libraries");
+        const auto populateModels = [](const QString& directory) {
+            for (const char* name : jamtaster::native::kRequiredModelFiles) {
+                QFile file(QDir(directory).filePath(QString::fromLatin1(name)));
+                require(file.open(QIODevice::WriteOnly), "model lookup fixture file must be creatable");
+            }
+        };
+        populateModels(bundledModels);
+        {
+            QFile partial(QDir(externalModels).filePath(QStringLiteral("basic_pitch.onnx")));
+            require(partial.open(QIODevice::WriteOnly), "partial external download fixture");
+        }
+        const QString layoutRequest = writeRequest(root, QStringLiteral("layout-protocol"), wrongProtocol);
+        const auto expectModelLookup = [&](const QString& expected) {
+            const WorkerRun result = runWorker(fixtureWorker, layoutRequest, root);
+            require(result.exitStatus == QProcess::NormalExit && result.exitCode == 1 &&
+                    finalEvent(result, QStringLiteral("error")).value(QStringLiteral("message"))
+                        .toString().contains(expected),
+                "worker must select a complete model directory before validating the request");
+        };
+        expectModelLookup(QStringLiteral("unsupported JamTaster protocol"));
+        populateModels(externalModels);
+        require(QFile::remove(QDir(bundledModels).filePath(QStringLiteral("adtof.onnx"))),
+            "bundled model fixture must be removable");
+        expectModelLookup(QStringLiteral("unsupported JamTaster protocol"));
+        require(QFile::remove(QDir(externalModels).filePath(QStringLiteral("adtof.onnx"))),
+            "external model fixture must be removable");
+        expectModelLookup(QStringLiteral("models folder is missing"));
+#endif
 
         QJsonObject unsupported = base;
         unsupported.insert(QStringLiteral("action"), QStringLiteral("unknown"));

@@ -146,7 +146,9 @@ int PreparedTrackSource::mix(
                 } else if (command.type == CommandType::Stop) {
                     playing_ = false;
                 } else if (command.type == CommandType::Seek) {
-                    sourcePos_ = command.sourceFrame;
+                    sourcePos_ = active_ >= 0 ? command.sourceFrame : 0;
+                    if (loopEnd_ > loopStart_ && sourcePos_ >= loopEnd_)
+                        sourcePos_ = loopStart_ + (sourcePos_ - loopStart_) % (loopEnd_ - loopStart_);
                 } else if (command.type == CommandType::NudgeSource && active_ >= 0) {
                     const std::int64_t delta = command.levelPpm;
                     const std::uint64_t slotFrames = slots_[active_].frames;

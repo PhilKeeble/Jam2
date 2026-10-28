@@ -234,7 +234,7 @@ private:
     QString localMeshEndpoint(bool createSession) const;
     QString meshPeerToken();
     bool selectedDeviceSupportsSampleRate(int sampleRate);
-    void testDeviceSelection(QComboBox* device, QPushButton* button, QWidget* dialogParent);
+    void testDeviceSelection(const jam2::gui::AudioDeviceTestRequest& request, QPushButton* button, QWidget* dialogParent);
     jam2::gui::SessionAudioDeviceList sessionDialogDevices(
         const AudioDevicePreference& preference,
         const QString& requestedDeviceId) const;

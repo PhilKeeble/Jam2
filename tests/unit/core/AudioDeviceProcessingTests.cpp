@@ -853,6 +853,22 @@ void testSectionTailAndEpochReset()
     expect(source.playing() && source.sourceFrame() == 10 && source.actualStartFrame() == 0,
         "changing section length preserves playback and source position without another Play");
 
+    const std::array recovery{Command{Type::Seek, 0, 26, 53}, Command{Type::Play, 0, 26}};
+    expect(source.enqueueBatch(recovery), "late recovery queues an elapsed seek and Play");
+    std::array<std::int32_t, 1> recovered{};
+    source.mix(recovered.data(), 1, 26);
+    expect(source.playing() && source.sourceFrame() == 6 && recovered[0] != 0,
+        "a late seek wraps multiple musical loops while retaining the fractional-loop position");
+    expect(source.enqueue({Type::SetLoop, 0, 27, 0, 0}) &&
+        source.enqueue({Type::Seek, 0, 27, 53}) && source.enqueue({Type::Play, 0, 27}),
+        "finished non-looping recovery commands queue");
+    source.mix(recovered.data(), 1, 27);
+    expect(!source.playing(), "recovery past the end of a non-looping WAV remains finished");
+    expect(source.enqueue({Type::Clear, 0, 28}) && source.enqueue({Type::Seek, 0, 28, 53}),
+        "empty-bank recovery commands queue");
+    source.mix(recovered.data(), 1, 28);
+    expect(source.sourceFrame() == 0 && !source.playing(), "empty-bank recovery cannot seek or revive an old WAV");
+
     jam2::audio::StreamControl control;
     control.metronome_enabled.store(true);
     control.metronome_epoch_valid.store(true);

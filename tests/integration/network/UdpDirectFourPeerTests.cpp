@@ -98,7 +98,11 @@ int main(int argc,char** argv)
         QElapsedTimer ready; ready.start();
         while (!peers[0]->bootstrapEndpoint() && ready.elapsed()<3000) { QCoreApplication::processEvents(); QThread::msleep(1); }
         const auto actual=peers[0]->bootstrapEndpoint(); require(bool(actual),"forwarded creator port not ready");
-        CandidateNetwork network(actual->port,true); network.impairMultiplex=false;
+        // macOS only binds assigned loopback addresses. Model peers without
+        // a shared LAN explicitly, keeping every public path inside the proxy
+        // on all platforms instead of relying on unassigned 127.0.0.x aliases.
+        CandidateNetwork network(actual->port, CandidateNetwork::IsolatedHosts{0x0123456789abcdefULL, keyBytes});
+        network.impairMultiplex=false;
         std::set<std::pair<int,int>> audioPaths;
         auto pump=[&] {
             network.pump(); QCoreApplication::processEvents(QEventLoop::AllEvents,5);
@@ -156,6 +160,7 @@ int main(int argc,char** argv)
             for (int i=0;i<4;++i) for (int j=0;j<4;++j) if (i!=j && !peers[i]->peerEndpoint(id(j))) return false;
             return true;
         },"direct four-peer mesh failed to converge after socket rotation");
+        require(network.isolatedCandidates>0, "isolated public candidate path was not exercised");
         require(network.dropped>0 && failures==0,"first failed socket attempts were not recovered");
         std::array<std::map<QString,std::string>,4> original;
         for (int i=0;i<4;++i) {
@@ -165,6 +170,7 @@ int main(int argc,char** argv)
             require(!state.usesRendezvous,"direct transport used an external rendezvous");
             for (const auto& link : state.links) {
                 require(link.sendBufferBytes>=32768 && link.receiveBufferBytes>=65536,"rotatable peer socket ignored explicit buffer tuning");
+                require(link.route == QStringLiteral("public"), "isolated peers bypassed the impaired public path through LAN");
                 original[i][link.peer]=jam2::endpoint_to_string(link.local);
                 if (i && link.peer!=token(0)) require(link.attempt>=2,"failed peer socket pair was not rotated");
             }

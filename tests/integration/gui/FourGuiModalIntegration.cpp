@@ -1547,8 +1547,10 @@ bool exerciseLocalFakeAudioWorkflow(AutomationProcess& peer)
         }
         if (action == QStringLiteral("incoming-delay-presentation")) {
             const QJsonObject jam = applied.value(QStringLiteral("jam")).toObject();
-            if (!jam.value(QStringLiteral("incoming_audio_breakdown")).toString().contains(
-                    QStringLiteral("Playback ring 69.7 ms (3072 fr)"))) {
+            const QString breakdown = jam.value(QStringLiteral("incoming_audio_breakdown")).toString();
+            const bool hasRemotePeer = jam.value(QStringLiteral("remote_peer_count")).toInt() > 0;
+            if (hasRemotePeer ? !breakdown.contains(QStringLiteral("Playback ring 69.7 ms (3072 fr)"))
+                              : breakdown.contains(QStringLiteral("Playback ring"))) {
                 fail(QStringLiteral(
                     "Data drawer omitted the incoming-delay evidence"));
             }
@@ -2051,7 +2053,7 @@ int main(int argc, char* argv[])
             "application.settings-dialog.audio.network.input-channels",
             "application.settings-dialog.audio.create.input-channels",
             "application.settings-dialog.create-connection.bind-host",
-            "application.settings-dialog.create-connection.manual-endpoint",
+            "application.settings-dialog.create-connection.connection-strategy",
             "application.settings-dialog.create-connection.public-host",
             "application.settings-dialog.create-connection.stun-server",
             "application.settings-dialog.create.audio-quality",
@@ -2275,31 +2277,24 @@ int main(int argc, char* argv[])
             QStringLiteral("set-checked"),
             originalSplitAudio);
 
-        const QString manualEndpoint = QStringLiteral(
-            "application.settings-dialog.create-connection.manual-endpoint");
-        const bool originalManualEndpoint = checked(settings, manualEndpoint);
-        (void)invokeAndReceive(
-            peer,
-            peerPrefix + QStringLiteral("settings-manual-endpoint"),
-            manualEndpoint,
-            QStringLiteral("set-checked"),
-            !originalManualEndpoint);
-        dependencies = snapshotAll(
-            peer, peerPrefix + QStringLiteral("settings-discovery-state"));
-        if (enabled(dependencies, QStringLiteral(
-                "application.settings-dialog.create-connection.public-host")) !=
-                !originalManualEndpoint ||
-            enabled(dependencies, QStringLiteral(
-                "application.settings-dialog.create-connection.stun-server")) ==
-                !originalManualEndpoint) {
-            fail(QStringLiteral("Settings STUN/manual-endpoint dependency did not switch"));
+        const QString navigation = QStringLiteral("application.settings-dialog.navigation");
+        const int originalPage = controlState(settings, navigation).value(QStringLiteral("current_row")).toInt();
+        (void)invokeAndReceive(peer, peerPrefix + QStringLiteral("settings-create-connection-page"),
+            navigation, QStringLiteral("set-current-row"), 1);
+        const QString strategyControl = QStringLiteral("application.settings-dialog.create-connection.connection-strategy");
+        const int originalStrategy = controlState(settings, strategyControl).value(QStringLiteral("index")).toInt();
+        for (int strategy : {1, 2}) {
+            (void)invokeAndReceive(peer, peerPrefix + QStringLiteral("settings-strategy-%1").arg(strategy),
+                strategyControl, QStringLiteral("set-index"), strategy);
+            dependencies = snapshotAll(peer, peerPrefix + QStringLiteral("settings-discovery-%1").arg(strategy));
+            if (visible(dependencies, QStringLiteral("application.settings-dialog.create-connection.public-host")) != (strategy == 2) ||
+                visible(dependencies, QStringLiteral("application.settings-dialog.create-connection.stun-server")) != (strategy == 1))
+                fail(QStringLiteral("Settings connection strategy did not switch public/STUN fields"));
         }
-        (void)invokeAndReceive(
-            peer,
-            peerPrefix + QStringLiteral("settings-restore-manual-endpoint"),
-            manualEndpoint,
-            QStringLiteral("set-checked"),
-            originalManualEndpoint);
+        (void)invokeAndReceive(peer, peerPrefix + QStringLiteral("settings-restore-strategy"),
+            strategyControl, QStringLiteral("set-index"), originalStrategy);
+        (void)invokeAndReceive(peer, peerPrefix + QStringLiteral("settings-restore-page"),
+            navigation, QStringLiteral("set-current-row"), originalPage);
 
         const QString inputUntilStopped = QStringLiteral(
             "application.settings-dialog.recording.input-until-stopped");
@@ -3291,18 +3286,13 @@ int main(int argc, char* argv[])
         Snapshot removeLane = snapshotAll(
             peer, peerPrefix + QStringLiteral("remove-recording-lane"));
         requireControls(removeLane, QStringLiteral("Remove lane"), {
-            "looper.lane-remove-dialog.remove-only",
-            "looper.lane-remove-dialog.delete-wav",
+            "looper.lane-remove-dialog.accept",
             "looper.lane-remove-dialog.cancel",
         });
-        if (controlState(removeLane, QStringLiteral("looper.lane-remove-dialog.delete-wav"))
-                .value(QStringLiteral("enabled")).toBool()) {
-            fail(QStringLiteral("Delete WAV was enabled for an empty lane"));
-        }
         closeModal(
             peer,
             peerPrefix + QStringLiteral("remove-recording-lane-only"),
-            QStringLiteral("looper.lane-remove-dialog.remove-only"));
+            QStringLiteral("looper.lane-remove-dialog.accept"));
     }
     }
 

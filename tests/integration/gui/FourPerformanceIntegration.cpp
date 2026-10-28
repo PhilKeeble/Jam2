@@ -148,6 +148,7 @@ void printState(std::size_t peer, const QJsonObject& state)
                     QStringLiteral("transport_grid_ready")).toBool()
               << " grid_error=" << jam.value(
                     QStringLiteral("grid_mapping_error_frames")).toInteger()
+              << " transport_peers=" << QJsonDocument(jam.value(QStringLiteral("transport_peers")).toArray()).toJson(QJsonDocument::Compact).toStdString()
               << " frame=" << performance.value(QStringLiteral("engine_frame")).toInteger()
               << " callbacks=" << performance.value(QStringLiteral("callbacks")).toInteger()
               << " input_peak=" << performance.value(QStringLiteral("input_peak_ppm")).toInt()
@@ -257,6 +258,14 @@ bool fullMeshWithAudio(std::size_t, const QJsonObject& state)
 {
     const QJsonObject jam = state.value(QStringLiteral("jam")).toObject();
     const QJsonObject performance = state.value(QStringLiteral("performance")).toObject();
+    const QJsonArray transportPeers = jam.value(QStringLiteral("transport_peers")).toArray();
+    if (transportPeers.size() != 3) return false;
+    for (const auto& peer : transportPeers) {
+        const QJsonObject counters = peer.toObject();
+        if (counters.value(QStringLiteral("peer_id")).toString().isEmpty() ||
+            counters.value(QStringLiteral("grid_deferrals")).toInteger(-1) < 0 ||
+            counters.value(QStringLiteral("countdown_missed_packets")).toInteger(-1) < 0) return false;
+    }
     return jam.value(QStringLiteral("remote_peer_count")).toInt() == 3 &&
         jam.value(QStringLiteral("active_remote_peer_count")).toInt() == 3 &&
         jam.value(QStringLiteral("network_attachment_ready")).toBool() &&
@@ -368,8 +377,9 @@ bool shutdown(FourPeerCoordinator& coordinator)
 int main(int argc, char* argv[])
 {
     QCoreApplication application(argc, argv);
-    if (argc != 2) {
-        std::cerr << "usage: jam2_four_performance_integration <release-jam2>\n";
+    const bool recoveryOnly = argc == 3 && QString::fromLocal8Bit(argv[2]) == QStringLiteral("--transport-recovery-only");
+    if (argc != 2 && !recoveryOnly) {
+        std::cerr << "usage: jam2_four_performance_integration <release-jam2> [--transport-recovery-only]\n";
         return 2;
     }
     LoopbackPortReservations portReservations;
@@ -408,6 +418,7 @@ int main(int argc, char* argv[])
             {QStringLiteral("id"), QStringLiteral("create")},
             {QStringLiteral("port"), ports[0]},
             {QStringLiteral("test_input"), QStringLiteral("tone-440")},
+            {QStringLiteral("diagnostics"), qEnvironmentVariableIsSet("JAM2_TEST_TRANSPORT_DIAGNOSTICS")},
         })) return 1;
     const auto created = receive(coordinator.peer(0), QStringLiteral("command_applied"));
     if (!created) return 1;
@@ -423,6 +434,7 @@ int main(int argc, char* argv[])
                 {QStringLiteral("port"), ports[peer]},
                 {QStringLiteral("invite_url"), invite},
                 {QStringLiteral("test_input"), QStringLiteral("tone-440")},
+                {QStringLiteral("diagnostics"), qEnvironmentVariableIsSet("JAM2_TEST_TRANSPORT_DIAGNOSTICS")},
             }) || !receive(coordinator.peer(peer), QStringLiteral("command_applied"))) {
             return 1;
         }
@@ -563,7 +575,7 @@ int main(int argc, char* argv[])
             QStringLiteral("click-async")) ||
         !invoke(recordingDialogProcess,
             QStringLiteral("recording-dialog-remove-lane"),
-            QStringLiteral("looper.lane-remove-dialog.remove-only"),
+            QStringLiteral("looper.lane-remove-dialog.accept"),
             QStringLiteral("click"))) return 1;
     if (!waitForAll(coordinator, QStringLiteral("recording dialog lane removal convergence"),
         [baselineLaneCount, baselineActiveBankLaneCount, baselineActiveBankLaneIds](
@@ -1185,6 +1197,99 @@ int main(int argc, char* argv[])
                         .toInteger() == 0 &&
                     content.value(QStringLiteral("prepared_mix_failures")).toInteger() == 0;
             }, states)) return 1;
+    // Hold a real receiver's clock readiness beyond the old one-second retry
+    // window, then verify actual WAV phase rather than only the Play indicator.
+    const auto clockAvailable = [&](bool available, const QString& id) {
+        return send(coordinator.peer(3), {{QStringLiteral("type"), QStringLiteral("transport.clock")},
+            {QStringLiteral("id"), id}, {QStringLiteral("available"), available}}) &&
+            receive(coordinator.peer(3), QStringLiteral("command_applied")).has_value();
+    };
+    const auto clickTransport = [&](std::size_t peer, const QString& id) {
+        return invoke(coordinator.peer(peer), id, QStringLiteral("performance.track-toggle"), QStringLiteral("click"));
+    };
+    const auto stopped = [](std::size_t, const QJsonObject& state) {
+        const auto performance = state.value(QStringLiteral("performance")).toObject();
+        return !performance.value(QStringLiteral("global_transport_playing")).toBool() &&
+            !performance.value(QStringLiteral("global_transport_requested_playing")).toBool() &&
+            !state.value(QStringLiteral("jam")).toObject().value(QStringLiteral("transport_recovery_pending")).toBool();
+    };
+    if (!clickTransport(0, QStringLiteral("recovery-stop")) ||
+        !waitForAll(coordinator, QStringLiteral("stopped before recovery"), stopped, states) ||
+        !clockAvailable(false, QStringLiteral("clock-unavailable")) ||
+        !clickTransport(0, QStringLiteral("recovery-start")) ||
+        !waitForAll(coordinator, QStringLiteral("one deferred restart and three playing peers"),
+            [](std::size_t peer, const QJsonObject& state) {
+                const auto performance = state.value(QStringLiteral("performance")).toObject();
+                const auto jam = state.value(QStringLiteral("jam")).toObject();
+                return peer == 3 ? jam.value(QStringLiteral("transport_recovery_pending")).toBool() &&
+                        !performance.value(QStringLiteral("global_transport_playing")).toBool()
+                    : performance.value(QStringLiteral("prepared_source_playing")).toBool();
+            }, states, 15s)) return 1;
+    const qint64 heldAt = states[3].value(QStringLiteral("performance")).toObject().value(QStringLiteral("engine_frame")).toInteger();
+    if (!waitForAll(coordinator, QStringLiteral("restart remains pending beyond two seconds"),
+            [heldAt](std::size_t peer, const QJsonObject& state) {
+                return peer != 3 || (state.value(QStringLiteral("jam")).toObject()
+                    .value(QStringLiteral("transport_recovery_pending")).toBool() &&
+                    state.value(QStringLiteral("performance")).toObject().value(QStringLiteral("engine_frame")).toInteger() >= heldAt + 96000);
+            }, states, 10s) || !clockAvailable(true, QStringLiteral("clock-restored"))) return 1;
+    qint64 referencePhase = 0;
+    if (!waitForAll(coordinator, QStringLiteral("late receiver catches the actual shared WAV position"),
+            [&](std::size_t peer, const QJsonObject& state) {
+                const auto performance = state.value(QStringLiteral("performance")).toObject();
+                const auto jam = state.value(QStringLiteral("jam")).toObject();
+                if (!performance.value(QStringLiteral("prepared_source_playing")).toBool() ||
+                    jam.value(QStringLiteral("transport_recovery_pending")).toBool()) return false;
+                const qint64 phase = performance.value(QStringLiteral("engine_frame")).toInteger() +
+                    performance.value(QStringLiteral("metronome_render_offset_frames")).toInteger() -
+                    performance.value(QStringLiteral("metronome_epoch_frame")).toInteger() -
+                    performance.value(QStringLiteral("prepared_source_frame")).toInteger();
+                if (peer == 0) referencePhase = phase;
+                const qint64 length = normalFrames[peer];
+                const qint64 difference = std::llabs(phase - referencePhase) % length;
+                return std::min(difference, length - difference) <= 1024 &&
+                    (peer != 3 || jam.value(QStringLiteral("transport_recovery_source_frame")).toInteger() >= 96000);
+            }, states, 15s)) return 1;
+    for (std::size_t peer = 0; peer < states.size(); ++peer) {
+        const auto performance = states[peer].value(QStringLiteral("performance")).toObject();
+        const auto jam = states[peer].value(QStringLiteral("jam")).toObject();
+        const qint64 origin = performance.value(QStringLiteral("engine_frame")).toInteger() +
+            performance.value(QStringLiteral("metronome_render_offset_frames")).toInteger() -
+            performance.value(QStringLiteral("metronome_epoch_frame")).toInteger() -
+            performance.value(QStringLiteral("prepared_source_frame")).toInteger();
+        const qint64 delta = std::llabs(origin - referencePhase) % normalFrames[peer];
+        std::cout << "METRIC recovery_peer=" << peer + 1 << " phase_error_frames="
+            << std::min(delta, normalFrames[peer] - delta) << " recovered_source_frame="
+            << jam.value(QStringLiteral("transport_recovery_source_frame")).toInteger() << '\n';
+    }
+    if (!clickTransport(0, QStringLiteral("cancel-recovery-stop")) ||
+        !waitForAll(coordinator, QStringLiteral("stopped before cancellation"), stopped, states) ||
+        !clockAvailable(false, QStringLiteral("cancel-clock-unavailable")) ||
+        !clickTransport(0, QStringLiteral("cancel-recovery-start")) ||
+        !waitForAll(coordinator, QStringLiteral("restart deferred before Stop"),
+            [](std::size_t peer, const QJsonObject& state) {
+                return peer == 3 ? state.value(QStringLiteral("jam")).toObject().value(QStringLiteral("transport_recovery_pending")).toBool()
+                    : state.value(QStringLiteral("performance")).toObject().value(QStringLiteral("global_transport_playing")).toBool();
+            }, states, 15s) ||
+        !clickTransport(1, QStringLiteral("another-peer-cancels-restart")) ||
+        !waitForAll(coordinator, QStringLiteral("Stop cancels deferred restart on all four peers"), stopped, states) ||
+        !clockAvailable(true, QStringLiteral("cancel-clock-restored"))) return 1;
+    const auto cancelledAt = states[3].value(QStringLiteral("performance")).toObject().value(QStringLiteral("engine_frame")).toInteger();
+    if (!waitForAll(coordinator, QStringLiteral("clock recovery cannot resurrect cancelled playback"),
+            [&](std::size_t peer, const QJsonObject& state) {
+                return stopped(peer, state) && (peer != 3 || state.value(QStringLiteral("performance")).toObject()
+                    .value(QStringLiteral("engine_frame")).toInteger() >= cancelledAt + 96000);
+            }, states, 10s) ||
+        !clickTransport(0, QStringLiteral("restore-playing-after-recovery")) ||
+        !waitForAll(coordinator, QStringLiteral("playing after recovery regression"),
+            [](std::size_t, const QJsonObject& state) { return state.value(QStringLiteral("performance")).toObject()
+                .value(QStringLiteral("prepared_source_playing")).toBool(); }, states, 15s)) return 1;
+
+    if (recoveryOnly) {
+        if (!shutdown(coordinator) || failures != 0) return 1;
+        coordinator.markSuccessful();
+        std::cout << "four-peer deferred transport recovery and cancellation passed\n";
+        return 0;
+    }
     // A populated Section A must not remain loaded when empty B becomes active.
     // Cover both quantized and stopped switches through the real GUI controls,
     // then restart from every peer: received transport must not revive A's WAV.
@@ -1241,6 +1346,13 @@ int main(int argc, char* argv[])
                         [&](std::size_t, const QJsonObject& state) {
                             return emptySectionState(state, false);
                         }, states, 15s)) return 1;
+            }
+            if (qEnvironmentVariableIsSet("JAM2_TEST_TRANSPORT_DIAGNOSTICS")) {
+                for (std::size_t peer = 0; peer < states.size(); ++peer)
+                    std::cerr << "TRANSPORT_BASELINE mode=" << mode.toStdString()
+                        << " initiator=" << initiator + 1 << " peer=" << peer + 1
+                        << " counters=" << QJsonDocument(states[peer].value(QStringLiteral("jam")).toObject()
+                            .value(QStringLiteral("transport_peers")).toArray()).toJson(QJsonDocument::Compact).toStdString() << '\n';
             }
             if (!toggleSectionTransport(initiator,
                     mode + QStringLiteral("-empty-play-%1").arg(initiator)) ||
@@ -1386,14 +1498,49 @@ int main(int argc, char* argv[])
                     content.value(QStringLiteral("track_loop_end_seconds"))
                         .toDouble(-2.0) == -1.0;
             }, states)) return 1;
+    if (!invoke(sharedRecorder, QStringLiteral("cleanup-view-recorded-section"),
+            QStringLiteral("looper.section.select.0"), QStringLiteral("click"))) return 1;
+    // Concurrent arrangement merges and section restoration can relocate the
+    // lane. Resolve the recorded lane's stable identity at the actual click.
+    const int recordedLaneRow = jsonStringIndex(states[sharedRecordingPeer]
+        .value(QStringLiteral("content")).toObject()
+        .value(QStringLiteral("active_bank_lane_ids")).toArray(), sharedRecordingLaneId);
+    if (recordedLaneRow < 0) {
+        fail(QStringLiteral("recorded lane disappeared before fixture cleanup"));
+        return 1;
+    }
+    const auto cleanupContent = states[sharedRecordingPeer].value(QStringLiteral("content")).toObject();
+    const auto sharedRevision = cleanupContent.value(QStringLiteral("arrangement_revision")).toInteger();
+    const auto appliedRevision = cleanupContent.value(QStringLiteral("track_sync_last_applied_host_arrangement_revision")).toInteger();
+    if (sharedRevision <= appliedRevision) {
+        fail(QStringLiteral("section-switch deletion regression needs a newer shared revision than its applied track snapshot"));
+        return 1;
+    }
+    std::cout << "METRIC lane_removal_base_revision=" << appliedRevision << " shared_revision=" << sharedRevision << '\n';
+    const int cleanupAssetRow = jsonStringIndex(cleanupContent.value(QStringLiteral("lane_ids")).toArray(), sharedRecordingLaneId);
+    if (cleanupAssetRow < 0 || cleanupAssetRow >= cleanupContent.value(QStringLiteral("lane_paths")).toArray().size()) {
+        fail(QStringLiteral("recorded lane path is missing before cleanup"));
+        return 1;
+    }
+    const QString cleanupWavPath = cleanupContent.value(QStringLiteral("lane_paths")).toArray().at(cleanupAssetRow).toString();
+    if (cleanupWavPath.isEmpty() || !QFileInfo::exists(cleanupWavPath)) {
+        fail(QStringLiteral("recorded lane has no existing WAV before removal"));
+        return 1;
+    }
     if (failures != 0 || !invoke(sharedRecorder,
             QStringLiteral("shared-recording-remove-open"),
-            sharedRecordingLane + QStringLiteral(".remove"),
+            QStringLiteral("looper.lane.%1.remove").arg(recordedLaneRow),
             QStringLiteral("click-async")) ||
         !invoke(sharedRecorder,
             QStringLiteral("shared-recording-remove"),
-            QStringLiteral("looper.lane-remove-dialog.remove-only"),
+            QStringLiteral("looper.lane-remove-dialog.accept"),
             QStringLiteral("click"))) return 1;
+    const auto removedLocally = snapshot(sharedRecorder, sharedRecordingPeer + 1, 0);
+    if (!removedLocally || jsonStringIndex(removedLocally->value(QStringLiteral("content")).toObject()
+            .value(QStringLiteral("lane_ids")).toArray(), sharedRecordingLaneId) >= 0 || QFileInfo::exists(cleanupWavPath)) {
+        fail(QStringLiteral("confirmed lane removal must immediately remove the recorded lane and its WAV locally"));
+        return 1;
+    }
     if (!waitForAll(coordinator, QStringLiteral("shared recording fixture restoration"),
         [baselineLaneCount, baselineActiveBankLaneCount, baselineActiveBankLaneIds](
             std::size_t, const QJsonObject& state) {

@@ -285,6 +285,9 @@ endforeach()
 add_executable(jam2_udp_control_transport_tests EXCLUDE_FROM_ALL
     unit/application/UdpControlTransportTests.cpp
     unit/application/UdpEfficiencyTests.cpp
+    "${CMAKE_SOURCE_DIR}/app/application/PeerBootstrap.cpp"
+    "${CMAKE_SOURCE_DIR}/app/application/PeerIntroductionCoordinator.cpp"
+    "${CMAKE_SOURCE_DIR}/app/application/UdpMultiplexTransport.cpp"
     "${CMAKE_SOURCE_DIR}/app/application/UdpStreamConnection.cpp"
     "${CMAKE_SOURCE_DIR}/app/application/ControlClient.cpp"
     "${CMAKE_SOURCE_DIR}/app/application/ControlServer.cpp"
@@ -661,6 +664,19 @@ if(WIN32)
     set_tests_properties(jam2_prepared_mix_renderer_units PROPERTIES
         ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
+endif()
+
+add_executable(jam2_track_lane_removal_tests EXCLUDE_FROM_ALL
+    unit/gui/TrackLaneRemovalTests.cpp
+    "${CMAKE_SOURCE_DIR}/app/gui/TrackLaneRemoval.cpp"
+    "${CMAKE_SOURCE_DIR}/app/gui/ProjectPersistenceCoordinator.cpp"
+    "${CMAKE_SOURCE_DIR}/app/gui/GuiControlContract.cpp")
+jam2_configure_test_target(jam2_track_lane_removal_tests)
+target_link_libraries(jam2_track_lane_removal_tests PRIVATE jam2_looper_model Qt6::Widgets)
+add_test(NAME jam2_track_lane_removal_units COMMAND $<TARGET_FILE:jam2_track_lane_removal_tests>)
+set_tests_properties(jam2_track_lane_removal_units PROPERTIES LABELS "unit;gui;shared-content;wav" TIMEOUT 30 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+if(WIN32)
+    set_tests_properties(jam2_track_lane_removal_units PROPERTIES ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Widgets>")
 endif()
 
 add_executable(jam2_project_persistence_tests EXCLUDE_FROM_ALL
@@ -1066,7 +1082,7 @@ get_filename_component(
     DIRECTORY)
 if(APPLE)
     set(JAM2_TEST_JAMTASTER_MODELS_DIR
-        "${JAM2_RELEASE_DIR}/Jam2.app/Contents/Resources/jamtaster/models")
+        "${JAM2_RELEASE_DIR}/components/jamtaster/models")
     set(JAM2_TEST_JAMTASTER_WORKER
         "${JAM2_RELEASE_DIR}/Jam2.app/Contents/Helpers/jamtaster-worker")
 else()
@@ -1518,6 +1534,8 @@ if(WIN32)
 endif()
 
 add_library(jam2_test_network_support STATIC EXCLUDE_FROM_ALL
+    "${CMAKE_SOURCE_DIR}/app/application/PeerBootstrap.cpp"
+    "${CMAKE_SOURCE_DIR}/app/application/ControlProtocol.cpp"
     support/ArtifactReader.cpp
     support/ArtifactReader.hpp
     support/UdpImpairmentProxy.cpp
@@ -1533,6 +1551,12 @@ if(MSVC)
 else()
     target_compile_options(jam2_test_network_support PRIVATE -Wall -Wextra -Wpedantic)
 endif()
+
+add_executable(jam2_udp_candidate_network_tests EXCLUDE_FROM_ALL unit/support/UdpCandidateNetworkTests.cpp)
+jam2_configure_test_target(jam2_udp_candidate_network_tests)
+target_link_libraries(jam2_udp_candidate_network_tests PRIVATE jam2_test_network_support)
+add_test(NAME jam2_udp_candidate_network_units COMMAND $<TARGET_FILE:jam2_udp_candidate_network_tests>)
+set_tests_properties(jam2_udp_candidate_network_units PROPERTIES LABELS "unit;support;network;udp-multiplex" TIMEOUT 15)
 
 add_executable(jam2_four_gui_agent_smoke EXCLUDE_FROM_ALL
     integration/gui/FourGuiAgentSmoke.cpp)
@@ -1565,7 +1589,7 @@ add_executable(jam2_four_listening_tools_integration EXCLUDE_FROM_ALL
     integration/gui/FourListeningToolsIntegration.cpp)
 jam2_configure_test_target(jam2_four_listening_tools_integration)
 target_link_libraries(jam2_four_listening_tools_integration PRIVATE
-    jam2_test_process_support Qt6::Core Qt6::Network)
+    jam2_test_process_support jam2_test_network_support Qt6::Core Qt6::Network)
 add_test(NAME jam2_four_listening_tools_integration
     COMMAND $<TARGET_FILE:jam2_four_listening_tools_integration>
         "${JAM2_TEST_PUBLIC_EXECUTABLE}")
@@ -1581,7 +1605,7 @@ add_executable(jam2_four_shared_content_integration EXCLUDE_FROM_ALL
     integration/gui/FourSharedContentIntegration.cpp)
 jam2_configure_test_target(jam2_four_shared_content_integration)
 target_link_libraries(jam2_four_shared_content_integration PRIVATE
-    jam2_test_process_support Qt6::Core Qt6::Network)
+    jam2_test_process_support jam2_test_network_support Qt6::Core Qt6::Network)
 add_test(NAME jam2_four_shared_content_integration
     COMMAND $<TARGET_FILE:jam2_four_shared_content_integration>
         "${JAM2_TEST_PUBLIC_EXECUTABLE}")
@@ -1619,11 +1643,16 @@ target_link_libraries(jam2_four_performance_integration PRIVATE
 add_test(NAME jam2_four_performance_integration
     COMMAND $<TARGET_FILE:jam2_four_performance_integration>
         "${JAM2_TEST_PUBLIC_EXECUTABLE}")
+add_test(NAME jam2_four_transport_recovery_integration
+    COMMAND $<TARGET_FILE:jam2_four_performance_integration>
+        "${JAM2_TEST_PUBLIC_EXECUTABLE}" --transport-recovery-only)
+set_tests_properties(jam2_four_transport_recovery_integration PROPERTIES
+    LABELS "integration;gui;network;four-peer;transport;fake-audio" TIMEOUT 240)
 set_tests_properties(jam2_four_performance_integration PROPERTIES
     LABELS "integration;gui;four-peer;performance;fake-audio"
     TIMEOUT 180)
 if(WIN32)
-    set_tests_properties(jam2_four_performance_integration PROPERTIES
+    set_tests_properties(jam2_four_performance_integration jam2_four_transport_recovery_integration PROPERTIES
         ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
 endif()
@@ -2308,3 +2337,21 @@ if(APPLE)
     set_property(TEST jam2_coreaudio_recording_timing_units APPEND PROPERTY LABELS coreaudio)
     set_property(TEST jam2_audio_device_processing_units APPEND PROPERTY LABELS coreaudio)
 endif()
+
+add_dependencies(jam2_tests_unit jam2_udp_candidate_network_tests)
+add_dependencies(jam2_tests_network jam2_udp_candidate_network_tests)
+add_dependencies(jam2_tests_all jam2_udp_candidate_network_tests)
+
+add_executable(jam2_transport_recovery_tests EXCLUDE_FROM_ALL unit/application/TransportRecoveryTests.cpp)
+jam2_configure_test_target(jam2_transport_recovery_tests)
+target_include_directories(jam2_transport_recovery_tests PRIVATE "${CMAKE_SOURCE_DIR}/app/cli")
+target_link_libraries(jam2_transport_recovery_tests PRIVATE jam2_core)
+add_test(NAME jam2_transport_recovery_units COMMAND $<TARGET_FILE:jam2_transport_recovery_tests>)
+set_tests_properties(jam2_transport_recovery_units PROPERTIES LABELS "unit;application;transport;network" TIMEOUT 15)
+add_dependencies(jam2_tests_unit jam2_transport_recovery_tests)
+add_dependencies(jam2_tests_network jam2_transport_recovery_tests)
+add_dependencies(jam2_tests_all jam2_transport_recovery_tests)
+
+add_dependencies(jam2_tests_unit jam2_track_lane_removal_tests)
+add_dependencies(jam2_tests_gui jam2_track_lane_removal_tests)
+add_dependencies(jam2_tests_all jam2_track_lane_removal_tests)

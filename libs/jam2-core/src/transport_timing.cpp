@@ -332,4 +332,41 @@ std::optional<QuantizedTransportSchedule> align_received_transport_to_grid(
     };
 }
 
+std::optional<RecoveredTransportSchedule> recover_transport_position(
+    std::uint64_t now, std::int64_t renderOffset,
+    std::uint64_t originalTarget, std::uint64_t countInFrames,
+    std::uint64_t minimumLeadFrames) noexcept
+{
+    if (now > kMaximumFrame - minimumLeadFrames || originalTarget == kMaximumFrame) return std::nullopt;
+    const auto target = std::max(originalTarget, now + minimumLeadFrames);
+    const auto countdown = originalTarget >= countInFrames && originalTarget - countInFrames > now
+        ? originalTarget - countInFrames : target;
+    return RecoveredTransportSchedule{
+        {countdown, target, transport_musical_frame_from_raw(target, renderOffset)}, target - originalTarget};
+}
+
+std::optional<RecoveredTransportSchedule> recover_received_restart(
+    double sampleRate, metronome::PatternSnapshot pattern,
+    std::uint64_t now, std::int64_t renderOffset, bool epochValid,
+    std::uint64_t epoch, std::uint64_t estimatedOriginalTarget,
+    std::uint64_t countInFrames, std::uint64_t minimumLeadFrames,
+    PlaybackTempo tempo, double epochSourcePosition) noexcept
+{
+    if (!epochValid || !std::isfinite(sampleRate) ||
+        sampleRate < limits::kMinimumSampleRate || sampleRate > limits::kMaximumSampleRate ||
+        now > kMaximumFrame - minimumLeadFrames) return std::nullopt;
+    pattern = metronome::sanitize(pattern);
+    const auto beatFrames = metronome::step_interval_samples(sampleRate, pattern.bpm,
+        pattern.division, pattern.tempo_pulse_units) * static_cast<std::uint64_t>(pattern.division);
+    if (beatFrames == 0) return std::nullopt;
+    const double sourceEpoch = epochSourcePosition >= 0.0 ? epochSourcePosition : static_cast<double>(epoch);
+    const auto estimatedMusical = transport_musical_frame_from_raw(estimatedOriginalTarget, renderOffset);
+    const double beats = (tempo.position(estimatedMusical) - sourceEpoch) / beatFrames;
+    if (!std::isfinite(beats) || beats < -0.5) return std::nullopt;
+    const auto originalMusical = tempo.frame(sourceEpoch + std::floor(std::max(0.0, beats) + 0.5) * beatFrames);
+    if (originalMusical == kMaximumFrame) return std::nullopt;
+    const auto originalRaw = transport_raw_frame_from_musical(originalMusical, renderOffset);
+    return recover_transport_position(now, renderOffset, originalRaw, countInFrames, minimumLeadFrames);
+}
+
 } // namespace jam2

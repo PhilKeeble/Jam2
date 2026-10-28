@@ -234,7 +234,7 @@ void testActionTileRow()
         QObject::connect(button, &QPushButton::clicked, &header, [&, i] { ++clicks[i]; });
         buttons.push_back(button);
     }
-    for (int width : {1440, 1100, 900, 760, 1100, 1440}) {
+    for (int width : {1440, 1100, 900, 761, 760, 759, 1100, 1440}) {
         header.resize(width, 42);
         processPaint(header);
         expect(header.width() == width, "action row does not force a wide parent minimum");
@@ -251,6 +251,11 @@ void testActionTileRow()
                 "compact tiles retain readable fonts and full accessible labels");
             const int textWidth = bounds.width() - 2 *
                 jam2::gui::layoutActionTiles(row->rect(), actions).padding - 2;
+            if (QFontMetrics(button->font()).horizontalAdvance(button->text()) > textWidth)
+                std::cerr << "tile header=" << width << " row=" << row->width() << " index=" << i
+                    << " text=" << button->text().toStdString() << " available=" << textWidth
+                    << " measured=" << QFontMetrics(button->font()).horizontalAdvance(button->text())
+                    << " font=" << button->font().toString().toStdString() << '\n';
             expect(QFontMetrics(button->font()).horizontalAdvance(button->text()) <= textWidth,
                 "displayed tile labels fit the actual selected platform font");
             button->click();
@@ -274,7 +279,7 @@ void testActionTileRow()
                 "requested single-row header preview is written");
         }
     }
-    for (int count : clicks) expect(count == 6, "responsive Qt buttons retain their original actions");
+    for (int count : clicks) expect(count == 8, "responsive Qt buttons retain their original actions");
 
     QFont widerFallback = jam2::gui::actionTileFont();
     widerFallback.setFamily(QStringLiteral("Arial"));
@@ -485,9 +490,8 @@ void testLocalEngineDialogState()
             false,
         },
         devices,
-        {[&deviceTestCalls](QComboBox* device, QPushButton*, QWidget*) {
-            if (device != nullptr &&
-                device->currentData().toString() == QStringLiteral("17")) {
+        {[&deviceTestCalls](const jam2::gui::AudioDeviceTestRequest& request, QPushButton*, QWidget*) {
+            if (request.outputDeviceId == 17) {
                 ++deviceTestCalls;
             }
         }});
@@ -676,16 +680,46 @@ void testAudioDeviceUiSupport()
 
     jam2::audio::DeviceTestResult capabilities;
     capabilities.device = devices[0];
+    capabilities.device.input_channel_count = 4;
+    capabilities.device.output_channel_count = 8;
     capabilities.current_sample_rate = 48000.0;
     capabilities.sample_rate_supported = {true, false};
     capabilities.buffer_size_supported = {true, true, false, false};
     const QString text = jam2::gui::audioDeviceCapabilitiesText(capabilities);
     expect(text.contains(QStringLiteral("Device: ASIO First Device")) &&
+            text.contains(QStringLiteral("Input channels: 1,2,3,4\n")) &&
+            text.contains(QStringLiteral("Output channels: 1,2,3,4,5,6,7,8\n")) &&
             text.contains(QStringLiteral("44100 Hz: supported")) &&
             text.contains(QStringLiteral("48000 Hz: not supported")) &&
             text.contains(QStringLiteral("32 frames: supported")) &&
             text.contains(QStringLiteral("256 frames: not supported")),
         "audio device capability text reports every exact probed result");
+
+    for (const auto direction : {jam2::audio::EndpointDirection::Input, jam2::audio::EndpointDirection::Output}) {
+        auto endpoint = capabilities;
+        endpoint.device.backend = "WASAPI";
+        endpoint.device.direction = direction;
+        endpoint.device.channel_count = 6;
+        const auto endpointText = jam2::gui::audioDeviceCapabilitiesText(endpoint);
+        expect(endpointText.contains(direction == jam2::audio::EndpointDirection::Input
+                   ? QStringLiteral("Input channels: 1,2,3,4,5,6\nOutput channels: None\n")
+                   : QStringLiteral("Input channels: None\nOutput channels: 1,2,3,4,5,6\n")),
+            "WASAPI capability counts follow the tested endpoint direction");
+    }
+    struct ChannelCase { unsigned inputs, outputs; QString expected; };
+    for (const auto& entry : {
+             ChannelCase{0, 2, QStringLiteral("Input channels: None\nOutput channels: 1,2\n")},
+             ChannelCase{1, 0, QStringLiteral("Input channels: 1\nOutput channels: None\n")},
+             ChannelCase{12, 24, QStringLiteral("Input channels: 1,2,3,4,5,6,7,8,9,10,11,12\n"
+                 "Output channels: 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24\n")}}) {
+        auto coreaudio = capabilities;
+        coreaudio.device.backend = "CoreAudio";
+        coreaudio.device.input_channel_count = entry.inputs;
+        coreaudio.device.output_channel_count = entry.outputs;
+        const auto coreText = jam2::gui::audioDeviceCapabilitiesText(coreaudio);
+        expect(coreText.contains(entry.expected),
+            "CoreAudio results enumerate one-based channels without truncation and identify unsupported directions");
+    }
 
     bool inspected = false;
     QTimer::singleShot(0, [&inspected, &text] {

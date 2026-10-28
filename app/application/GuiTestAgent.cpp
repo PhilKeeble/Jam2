@@ -907,6 +907,16 @@ void GuiTestAgent::handle(const QJsonObject& command)
         });
         return;
     }
+    if (type == QStringLiteral("transport.clock")) {
+        if (!onlyFields(command, {"format", "type", "id", "available"}) ||
+            !command.value(QStringLiteral("available")).isBool()) {
+            reject(command, QStringLiteral("transport clock availability must be boolean"));
+            return;
+        }
+        window_.jam2_.setTransportClockAvailable(command.value(QStringLiteral("available")).toBool());
+        emitEvent(QStringLiteral("command_applied"), {{QStringLiteral("id"), command.value(QStringLiteral("id"))}});
+        return;
+    }
     if (type == QStringLiteral("application.boundary")) {
         const QString action = command.value(QStringLiteral("action")).toString();
         if (!onlyFields(command, {"format", "type", "id", "action"}) ||

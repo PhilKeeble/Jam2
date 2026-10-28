@@ -125,7 +125,6 @@ void ActionTileRow::updateButtons()
     updating_ = true;
     const auto sizing = layoutActionTiles(rect(), actions_, actionTileFont(), this);
     layout_->setSpacing(sizing.spacing);
-    const QFontMetrics metrics(sizing.font, this);
     for (qsizetype i = 0; i < buttons_.size(); ++i) {
         auto* button = buttons_[i];
         button->setFont(sizing.font);
@@ -136,8 +135,15 @@ void ActionTileRow::updateButtons()
             .arg(sizing.font.family());
         if (button->styleSheet() != style) button->setStyleSheet(style);
         button->setFixedSize(sizing.bounds[i].width(), sizing.height);
-        button->setText(metrics.elidedText(actions_[i].label, Qt::ElideRight,
-            qMax(0, sizing.bounds[i].width() - 2 * sizing.padding - 2)));
+        const QFontMetrics metrics(button->font(), button);
+        const int textWidth = qMax(0, sizing.bounds[i].width() - 2 * sizing.padding - 2);
+        int elideWidth = textWidth;
+        QString text = metrics.elidedText(actions_[i].label, Qt::ElideRight, elideWidth);
+        // Fallback-font shaping can round an elided label one pixel wider
+        // than its budget. Check the displayed text with the applied font.
+        while (elideWidth > 0 && metrics.horizontalAdvance(text) > textWidth)
+            text = metrics.elidedText(actions_[i].label, Qt::ElideRight, --elideWidth);
+        button->setText(text);
     }
     setFixedHeight(sizing.height);
     updating_ = false;

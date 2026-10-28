@@ -1429,7 +1429,7 @@ std::optional<SettingsDialogResult> SettingsDialog::run(
     if (callbacks.testDevice) {
         QObject::connect(localTest, &QPushButton::clicked, &dialog,
             [=, &callbacks, &dialog] {
-                callbacks.testDevice(localDevice, localTest, &dialog);
+                callbacks.testDevice(localControls->testRequest(), localTest, &dialog);
             });
     }
     QObject::connect(localApply, &QPushButton::clicked, &dialog,
@@ -1465,7 +1465,7 @@ std::optional<SettingsDialogResult> SettingsDialog::run(
             const NetworkAudioEditors& editors) {
             QObject::connect(editors.test, &QPushButton::clicked, &dialog,
                 [editors, &callbacks, &dialog] {
-                    callbacks.testDevice(editors.device, editors.test, &dialog);
+                    callbacks.testDevice(editors.controls->testRequest(), editors.test, &dialog);
                 });
         };
         connectDeviceTest(networkAudio);

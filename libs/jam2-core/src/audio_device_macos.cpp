@@ -547,12 +547,23 @@ public:
                     for (std::size_t i = 0; i < active.size(); ++i) {
                         const auto expected = i == 0 ? stable_device_id(plan.output) : stable_device_id(plan.input);
                         if (get_cf_string_property(active[i], kAudioDevicePropertyDeviceUID) != expected) { ready = false; break; }
-                        UInt32 drift = i == 0 ? 0 : 1;
-                        auto property = address(kAudioSubDevicePropertyDriftCompensation);
-                        require_ok(AudioObjectSetPropertyData(active[i], &property, 0, nullptr, sizeof(drift), &drift), "Set aggregate input clock correction");
-                        if (get_property<UInt32>(active[i], property, "Verify aggregate clock correction") != drift)
-                            throw std::runtime_error("CoreAudio aggregate drift correction was not applied");
                     }
+                    // ActiveSubDeviceList contains physical AudioDevices. Drift
+                    // belongs to the aggregate's owned AudioSubDevice objects.
+                    const auto owned = get_object_ids(result->object, kAudioObjectPropertyOwnedObjects, kAudioObjectPropertyScopeGlobal);
+                    std::size_t configured = 0;
+                    for (const auto subdevice : owned) {
+                        if (get_property<AudioClassID>(subdevice, address(kAudioObjectPropertyClass), "Read aggregate child class") != kAudioSubDeviceClassID) continue;
+                        const auto subUid = get_cf_string_property(subdevice, kAudioDevicePropertyDeviceUID);
+                        if (subUid != stable_device_id(plan.output) && subUid != stable_device_id(plan.input)) continue;
+                        UInt32 drift = subUid == stable_device_id(plan.input) ? 1 : 0;
+                        const auto property = address(kAudioSubDevicePropertyDriftCompensation);
+                        require_ok(AudioObjectSetPropertyData(subdevice, &property, 0, nullptr, sizeof(drift), &drift), "Set aggregate input clock correction");
+                        if (get_property<UInt32>(subdevice, property, "Verify aggregate clock correction") != drift)
+                            throw std::runtime_error("CoreAudio aggregate drift correction was not applied");
+                        ++configured;
+                    }
+                    ready = ready && configured == 2;
                     if (ready) break;
                 }
             }

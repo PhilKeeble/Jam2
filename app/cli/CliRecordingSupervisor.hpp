@@ -52,7 +52,7 @@ private:
 
 bool restart_prepared_source(
     jam2::Engine* engine,
-    std::uint64_t target_frame);
+    std::uint64_t target_frame, std::uint64_t source_frame = 0);
 
 } // namespace jam2::cli
 

@@ -801,6 +801,8 @@ void testUdpStunAndSessionBoundaries()
                simultaneousWakeTarget, simultaneousWakePacket).outcome ==
                jam2::UdpSendOutcome::Sent,
         "simultaneous UDP/capture-wake fixture queues its datagram");
+    const std::array<const jam2::UdpSocket*, 1> wakeSockets{&movedTo};
+    jam2::UdpSocket::waitForDatagrams(wakeSockets, 250000, nullptr);
     captureReadyWake.signal(300);
     const auto simultaneousWakeDatagram = movedTo.recv_from_for(
         wakeBuffer, 250000, &captureReadyWake);
@@ -831,9 +833,11 @@ void testUdpStunAndSessionBoundaries()
     const auto burstFirst = movedTo.recv_from_for(burstBuffer, 500000);
     const bool firstMatches = burstFirst && burstFirst->size == 1 &&
         burstBuffer[0] == 1;
+    jam2::UdpSocket::waitForDatagrams(wakeSockets, 250000, nullptr);
     const auto burstSecond = movedTo.recv_from_for(burstBuffer, 0);
     const bool secondMatches = burstSecond && burstSecond->size == 1 &&
         burstBuffer[0] == 2;
+    jam2::UdpSocket::waitForDatagrams(wakeSockets, 250000, nullptr);
     const auto burstThird = movedTo.recv_from_for(burstBuffer, 0);
     const bool thirdMatches = burstThird && burstThird->size == 1 &&
         burstBuffer[0] == 3;

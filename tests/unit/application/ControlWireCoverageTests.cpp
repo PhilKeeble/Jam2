@@ -70,7 +70,7 @@ std::vector<Fixture> fixtures()
     add(BankRequest,"bank.request",{{"bank",0},{"target_abs_beat","4"}});
     add(BankPrepare,"bank.prepare",{{"bank",0},{"switch_id",uuid},{"target_abs_beat","4"}});
     add(BankReady,"bank.ready",{{"bank",0},{"switch_id",uuid}}); add(BankCancel,"bank.cancel",{{"bank",0},{"switch_id",uuid}});
-    add(BankSwitch,"bank.switch",{{"bank",0},{"switch_id",uuid},{"target_abs_beat","4"}});
+    add(BankSwitch,"bank.switch",{{"bank",0},{"switch_id",uuid},{"target_abs_beat","4"},{"arrangement_revision",7},{"authority_token",peer}});
     add(ShareRequest,"looper.track.share.request",{{"batch_id",uuid}});
     add(ShareOffer,"looper.track.batch.offer",{{"batch_id",uuid},{"tracks",QJsonArray{track}}});
     add(ShareComplete,"looper.track.batch.complete",{{"batch_id",uuid},{"tracks",1},{"applied",true},{"reason",""}});
@@ -139,7 +139,7 @@ void controlWireCoverageFixtures()
         // Cover common optional slots and every fixture field's absence/type.
         // Wire representability is intentionally tested separately from the
         // narrower owner rules (e.g. a listening request cannot assign a revision).
-        auto complete=f.message; complete["revision"]=2147483647; complete["authority_token"]=peer;
+        auto complete=f.message; complete[f.operation == wire::Operation::BankSwitch ? "arrangement_revision" : "revision"]=2147483647; complete["authority_token"]=peer;
         wire::Codec completeA,completeB; bind(completeA,completeB);
         check(completeA.encode(complete,encoded,error) && completeB.decode(encoded.operation,encoded.payload,decoded,error) &&
             decoded.message==complete,name+" common optional fields changed");

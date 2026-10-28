@@ -131,7 +131,8 @@ struct UdpMultiplexTransport::Impl {
     std::condition_variable receiverChanged;
     bool receiverRequested = false;
     std::atomic<bool> receiverOwned{false};
-    std::atomic<std::shared_ptr<const ReadRoutes>> readRoutes{std::make_shared<ReadRoutes>()};
+    // Apple libc++ requires the shared_ptr atomic free functions.
+    std::shared_ptr<const ReadRoutes> readRoutes{std::make_shared<ReadRoutes>()};
     IngressQueue controlIngress, assetIngress;
     quint64 ingressDrops = 0, ingressHighWater = 0;
     std::atomic<quint64> nativeSent{0}, nativeReceived{0}, nativeDelivered{0}, bootstrapDiscarded{0};
@@ -230,7 +231,7 @@ struct UdpMultiplexTransport::Impl {
     }
     void publishReadRoutes()
     {
-        const auto previous = readRoutes.load(std::memory_order_acquire);
+        const auto previous = std::atomic_load_explicit(&readRoutes, std::memory_order_acquire);
         std::size_t count = 0; bool same = true;
         const auto inspect = [&](const auto& collection) {
             for (const auto& [peer, link] : collection) {
@@ -256,7 +257,7 @@ struct UdpMultiplexTransport::Impl {
         for (const auto& route : previous->routes)
             if (std::none_of(next->routes.begin(), next->routes.end(), [&](const auto& current) { return current.link == route.link; }))
                 route.link->readable.store(false, std::memory_order_release);
-        readRoutes.store(std::move(next), std::memory_order_release);
+        std::atomic_store_explicit(&readRoutes, std::shared_ptr<const ReadRoutes>(std::move(next)), std::memory_order_release);
         audioWake.signal(jam2::monotonic_us());
     }
     void updateReceiverOwnership()
@@ -289,7 +290,7 @@ struct UdpMultiplexTransport::Impl {
     bool signalRuntimeOwned() const
     {
         if (!receiverOwned.load(std::memory_order_acquire)) return false;
-        const auto routes=readRoutes.load(std::memory_order_acquire);
+        const auto routes=std::atomic_load_explicit(&readRoutes, std::memory_order_acquire);
         return std::any_of(routes->routes.begin(),routes->routes.end(),[&](const ReadRoute& route) { return route.socket==signalSocket; });
     }
     void activateLink(const std::shared_ptr<Link>& link,quint64 now)
@@ -518,7 +519,7 @@ struct UdpMultiplexTransport::Impl {
             throw std::invalid_argument("UDP multiplex receiver requires a 1500-byte buffer");
         std::lock_guard reader(receiverMutex);
         if (stopping || !receiverOwned.load(std::memory_order_acquire)) return {};
-        const auto routes = readRoutes.load(std::memory_order_acquire);
+        const auto routes = std::atomic_load_explicit(&readRoutes, std::memory_order_acquire);
         const auto deadline = jam2::monotonic_us() + (std::min)(timeoutUs, kRuntimeWaitMaximumUs);
         std::size_t work = 0; bool waited = false;
         for (;;) {
@@ -1014,7 +1015,7 @@ struct UdpMultiplexTransport::Impl {
         auto read=[&](const std::shared_ptr<jam2::UdpSocket>& socket) {
             if (!socket || std::find(seen.begin(),seen.end(),socket.get())!=seen.end()) return;
             seen.push_back(socket.get());
-            const auto routes=readRoutes.load(std::memory_order_acquire);
+            const auto routes=std::atomic_load_explicit(&readRoutes, std::memory_order_acquire);
             const bool activeSocket=std::any_of(routes->routes.begin(),routes->routes.end(),[&](const ReadRoute& route) { return route.socket==socket; });
             if (activeSocket && ((!draining && receiverOwned.load(std::memory_order_acquire)) || !reader.owns_lock())) return;
             for (int count=0;count<32;++count) {
@@ -1580,7 +1581,7 @@ jam2::UdpSendResult UdpMultiplexTransport::sendToPeer(
 {
     if (!impl_ || impl_->stopping) return {jam2::UdpSendOutcome::WouldBlock, 0};
     if (impl_->config.receiveModel == ReceiveModel::Runtime) {
-        const auto routes = impl_->readRoutes.load(std::memory_order_acquire);
+        const auto routes = std::atomic_load_explicit(&impl_->readRoutes, std::memory_order_acquire);
         for (const auto& route : routes->routes) if (route.peer == id && route.link->readable.load(std::memory_order_acquire)) {
             return impl_->sendNative(route.link,route.socket,route.endpoint,packet);
         }
@@ -1609,7 +1610,7 @@ void UdpMultiplexTransport::transportIntentAccepted(std::uint64_t id,std::span<c
         impl_->commandWake->notify();
     };
     try {
-        const auto routes=impl_->readRoutes.load(std::memory_order_acquire);
+        const auto routes=std::atomic_load_explicit(&impl_->readRoutes, std::memory_order_acquire);
         for (const auto& route : routes->routes) if (route.peer==id && route.link->readable.load(std::memory_order_acquire)) { accepted(route.link); return; }
         if (impl_->config.receiveModel==ReceiveModel::QueuedWorker) {
             std::lock_guard lock(impl_->mutex);
