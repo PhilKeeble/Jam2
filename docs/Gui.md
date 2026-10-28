@@ -78,6 +78,17 @@ channel; other surround channels remain silent. These choices are available in
 Local, Start Jam, Join Jam, and Settings, including independent Local/Network
 and optional Create/Join preferences. Saved choices are remembered.
 
+On macOS, **Device setup** defaults to **One device for input and output**.
+Choose **Separate input and output devices** to select an output and optional
+input independently, with channel selections relative to each physical device.
+Choosing **None** for input hides input channels and does not request microphone
+permission. Different devices use a private CoreAudio aggregate owned by the
+running engine; selecting the same device twice uses it directly. The output
+device supplies the aggregate clock and CoreAudio corrects input clock drift.
+The aggregate is removed when the engine stops and is not saved as a system
+audio device. Diagnostics show the physical device names, aggregate state,
+clock source, drift-correction state, buffer size and reported latency.
+
 Setup offers 44100/48000 jam rates. ASIO keeps the 32/64/128/256 frame presets;
 WASAPI always uses the automatic minimum period and has no buffer-size selector.
 Windows converts the jam rate when it differs from the endpoint mix

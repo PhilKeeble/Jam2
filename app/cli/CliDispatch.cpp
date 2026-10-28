@@ -40,6 +40,8 @@ int run(int argc, char** argv)
             if (device.backend == "WASAPI") std::cout << " [" <<
                 (device.direction == jam2::audio::EndpointDirection::Input ? "input" : "output") << "] channels=" <<
                 device.channel_count << " endpoint=" << device.endpoint_id;
+            if (device.backend == "CoreAudio") std::cout << " inputs=" << device.input_channel_count <<
+                " outputs=" << device.output_channel_count << " uid=" << jam2::audio::stable_device_id(device);
             std::cout << "\n";
         }
         return 0;

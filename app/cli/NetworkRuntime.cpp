@@ -971,6 +971,7 @@ bool engine_restart_required(
     return active.backend != requested.backend ||
         active.audio_device_id != requested.audio_device_id ||
         active.wasapi != requested.wasapi ||
+        active.coreaudio != requested.coreaudio ||
         active.sample_rate != requested.sample_rate ||
         active.audio_buffer_frames != requested.audio_buffer_frames ||
         active.headless_clock_drift_ppm != requested.headless_clock_drift_ppm ||
@@ -995,6 +996,7 @@ jam2::EngineConfig make_engine_config_impl(const Options& options, bool leader_a
         : jam2::EngineAudioBackend::Device;
     config.audio_device_id = options.audio_device_id.value_or(-1);
     config.wasapi = options.wasapi;
+    config.coreaudio = options.coreaudio;
     config.sample_rate = options.sample_rate;
     config.audio_buffer_frames = options.headless_audio && options.audio_buffer_size <= 0
         ? static_cast<long>(options.frame_size)
@@ -1341,6 +1343,13 @@ void print_optional_audio_stats(const OptionalAudioStream& audio, const Options&
     std::cout << "Requested audio channels: " << channel_selection_text(options.channel_selection) << "\n";
     std::cout << "Active audio channels: " << channel_selection_text(stream_info.channels) << "\n";
     std::cout << "Backend sample format: " << stream_info.sample_format << "\n";
+    if (stream_info.device.backend == "CoreAudio") {
+        std::cout << "CoreAudio input device: " << stream_info.input_device_name << "\n"
+            << "CoreAudio input UID: " << stream_info.coreaudio.input_device_uid << "\n"
+            << "CoreAudio output UID: " << stream_info.coreaudio.output_device_uid << "\n"
+            << "CoreAudio private aggregate: " << stream_info.private_aggregate << "\n"
+            << "CoreAudio input drift correction: " << stream_info.input_drift_compensation << "\n";
+    }
     if (stream_info.device.backend == "WASAPI") {
         const auto& device = engine_snapshot.device_status;
         std::cout << "WASAPI capture queued frames: " << device.capture_queued_frames << "\n"

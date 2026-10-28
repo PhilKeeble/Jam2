@@ -1208,7 +1208,7 @@ void Engine::start(const EngineConfig& requested)
     if (requested.playback_ratio_ramp_ms < 0 || requested.playback_ratio_ramp_ms > 60000) {
         throw std::runtime_error("engine playback-ratio ramp must be 0..60000 ms");
     }
-    if (requested.backend == EngineAudioBackend::Device && requested.wasapi.output_endpoint_id.empty() && requested.channels.input.empty()) {
+    if (requested.backend == EngineAudioBackend::Device && requested.wasapi.output_endpoint_id.empty() && requested.coreaudio.output_device_uid.empty() && requested.channels.input.empty()) {
         throw std::runtime_error("device engine requires at least one input channel");
     }
     const std::size_t maximum_prepared_track_frames =
@@ -1345,7 +1345,8 @@ void Engine::start(const EngineConfig& requested)
                 control,
                 impl_->recorder.get(),
                 impl_->track_take_recorder.get(),
-                impl_->config.wasapi);
+                impl_->config.wasapi,
+                impl_->config.coreaudio);
         }
         impl_->stream_info = impl_->stream != nullptr ? impl_->stream->info() : audio::StreamInfo{};
         const double active_rate = impl_->stream_info.sample_rate;

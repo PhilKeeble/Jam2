@@ -1,4 +1,7 @@
 #include "SharedSessionController.hpp"
+#include "RuntimeContracts.hpp"
+#include "ApplicationRuntime.hpp"
+#include "engine.hpp"
 #include <QCoreApplication>
 #include <QElapsedTimer>
 #include <QThread>
@@ -25,6 +28,27 @@ int main(int argc, char** argv)
 {
     QCoreApplication app(argc,argv);
     try {
+        Jam2RuntimeOptions options;
+        options.coreaudio.setup = jam2::audio::AudioDeviceSetup::SeparateInputOutput;
+        options.coreaudio.output_device_uid = "speakers";
+        options.coreaudio.input_device_uid = "microphone";
+        const auto config = jam2_make_engine_config(options, true);
+        require(config.coreaudio == options.coreaudio, "runtime must forward typed CoreAudio device setup to the engine");
+        require(!jam2_engine_restart_required(config, config), "unchanged CoreAudio configuration must reuse the engine");
+        auto changed = config; changed.coreaudio.input_device_uid = "another-microphone";
+        require(jam2_engine_restart_required(config, changed), "changing a CoreAudio input must restart the engine");
+        changed = config; changed.coreaudio.setup = jam2::audio::AudioDeviceSetup::SingleDevice;
+        require(jam2_engine_restart_required(config, changed), "changing device setup must restart the engine");
+        changed = config; changed.coreaudio.output_device_uid = "another-speaker";
+        require(jam2_engine_restart_required(config, changed), "changing a CoreAudio output must restart the engine");
+        ApplicationRuntime runtime;
+        int audioErrors = 0;
+        runtime.onError = [&](const QString&) { ++audioErrors; };
+        auto unavailable = options;
+        unavailable.audio_device_id = 0;
+        unavailable.coreaudio.output_device_uid = "jam2-intentionally-unavailable-output";
+        require(!runtime.startLocal(unavailable) && audioErrors == 1 && runtime.engineStarts() == 0,
+            "missing CoreAudio devices must report a recoverable startup error before opening an engine");
         std::array<Controller,4> peers;
         Controller::CreatorConfig creator;
         creator.sessionHex="0123456789abcdef"; creator.keyHex="0123456789abcdef0123456789abcdef";

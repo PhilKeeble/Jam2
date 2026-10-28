@@ -25,9 +25,14 @@ struct AudioDeviceChoice {
     QString stableId;
     jam2::audio::EndpointDirection direction = jam2::audio::EndpointDirection::Duplex;
     std::size_t channels = 0;
+    std::size_t inputChannels = 0;
+    std::size_t outputChannels = 0;
 };
 
 QVector<AudioDeviceChoice> audioDeviceChoices(const std::vector<jam2::audio::DeviceInfo>& devices);
+bool audioDeviceUsesInput(const AudioDevicePreference& preference);
+QString preferredAudioDeviceId(const QVector<AudioDeviceChoice>& choices,
+    const AudioDevicePreference& preference, const QString& requestedId = {});
 
 // One implementation of driver/endpoint selection shared by Settings and the
 // local/create/join dialogs. Existing device/channel controls retain their IDs.
@@ -48,6 +53,7 @@ private:
     QFormLayout* form_;
     QComboBox* device_;
     QComboBox* driver_;
+    QComboBox* deviceSetup_;
     QComboBox* input_;
     QLineEdit* inputChannels_;
     QLineEdit* outputChannels_;
@@ -61,6 +67,7 @@ private:
     QVector<BufferControl> buffers_;
     QVector<AudioDeviceChoice> choices_;
     QString nativeId_, wasapiId_, inputId_;
+    QString coreOutputId_, coreInputId_;
 };
 
 QString audioDevicePreferenceKey(const jam2::audio::DeviceInfo& device);

@@ -60,7 +60,7 @@ while (( $# > 0 )); do
             ;;
         *)
             print_error "Unknown compile option: $1"
-            printf 'Supported options: --tests unit, --tests plugin, --tests hardware, --tests gui, --tests jam-sync, --tests shared-content, --tests performance, --tests network, --tests full, --tests-full, --test-name NAME, --show-gui, --hardware-profile PATH\n' >&2
+            printf 'Supported options: --tests coreaudio, --tests unit, --tests plugin, --tests hardware, --tests gui, --tests jam-sync, --tests shared-content, --tests performance, --tests network, --tests full, --tests-full, --test-name NAME, --show-gui, --hardware-profile PATH\n' >&2
             exit 2
             ;;
     esac
@@ -75,6 +75,10 @@ case "$TEST_SUITE" in
     plugin)
         TEST_TARGET="jam2_tests_plugin"
         TEST_LABEL="plugin"
+        ;;
+    coreaudio)
+        TEST_TARGET="jam2_tests_coreaudio"
+        TEST_LABEL="coreaudio"
         ;;
     hardware)
         TEST_TARGET="jam2_tests_hardware"
@@ -105,7 +109,7 @@ case "$TEST_SUITE" in
         ;;
     *)
         print_error "Test suite '$TEST_SUITE' is not implemented yet."
-        printf 'Available suites: unit, plugin, hardware, gui, jam-sync, shared-content, performance, network, full\n' >&2
+        printf 'Available suites: coreaudio, unit, plugin, hardware, gui, jam-sync, shared-content, performance, network, full\n' >&2
         exit 2
         ;;
 esac

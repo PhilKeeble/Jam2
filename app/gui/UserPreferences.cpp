@@ -104,6 +104,10 @@ void loadAudio(QSettings& settings, AudioDevicePreference& value)
     value.name = settings.value(QStringLiteral("name"), value.name).toString();
     value.wasapiInputId = settings.value(QStringLiteral("wasapi_input_id"), value.wasapiInputId).toString();
     value.wasapiInputName = settings.value(QStringLiteral("wasapi_input_name"), value.wasapiInputName).toString();
+    value.deviceSetup = settings.value(QStringLiteral("separate_devices"), false).toBool()
+        ? jam2::audio::AudioDeviceSetup::SeparateInputOutput : jam2::audio::AudioDeviceSetup::SingleDevice;
+    value.coreAudioInputId = settings.value(QStringLiteral("coreaudio_input_id"), value.coreAudioInputId).toString();
+    value.coreAudioInputName = settings.value(QStringLiteral("coreaudio_input_name"), value.coreAudioInputName).toString();
     value.inputChannels = settings.value(QStringLiteral("input_channels"), value.inputChannels).toString();
     value.outputChannels = settings.value(QStringLiteral("output_channels"), value.outputChannels).toString();
     value.sampleRate = settings.value(QStringLiteral("sample_rate"), value.sampleRate).toInt();
@@ -117,6 +121,9 @@ void saveAudio(QSettings& settings, const AudioDevicePreference& value)
     settings.setValue(QStringLiteral("name"), value.name);
     settings.setValue(QStringLiteral("wasapi_input_id"), value.wasapiInputId);
     settings.setValue(QStringLiteral("wasapi_input_name"), value.wasapiInputName);
+    settings.setValue(QStringLiteral("separate_devices"), value.deviceSetup == jam2::audio::AudioDeviceSetup::SeparateInputOutput);
+    settings.setValue(QStringLiteral("coreaudio_input_id"), value.coreAudioInputId);
+    settings.setValue(QStringLiteral("coreaudio_input_name"), value.coreAudioInputName);
     settings.setValue(QStringLiteral("input_channels"), value.inputChannels);
     settings.setValue(QStringLiteral("output_channels"), value.outputChannels);
     settings.setValue(QStringLiteral("sample_rate"), value.sampleRate);

@@ -85,6 +85,10 @@ void testPersistenceAndConfiguration(const QString& file) {
             restarted.stream=config;restored.update();require(restarted.commands.back().enabled,"returning to matching configuration restores calibration");
         };
         restarted.stream.device.clsid="different-device";mismatch();
+        if (std::string_view(backend)=="CoreAudio") {
+            restarted.stream.coreaudio.setup=jam2::audio::AudioDeviceSetup::SeparateInputOutput;
+            restarted.stream.coreaudio.input_device_uid="different-input";mismatch();
+        }
         if (std::string(backend) == "WASAPI") {
             restarted.stream.wasapi.input_endpoint_id="different-input";mismatch();
             restarted.stream.input_period_frames=240;mismatch();

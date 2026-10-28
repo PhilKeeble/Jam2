@@ -679,8 +679,10 @@ std::unique_ptr<DeviceStream> start_duplex_stream(
     StreamControl& control,
     OutputRecorder* recorder,
     TrackTakeRecorder* track_take_recorder,
-    const WasapiConfig& wasapi)
+    const WasapiConfig& wasapi,
+    const CoreAudioConfig& coreaudio)
 {
+    if (!coreaudio.output_device_uid.empty()) throw std::runtime_error("CoreAudio is only available on macOS");
     if (!wasapi.output_endpoint_id.empty()) return start_wasapi_stream(
         id, requested_sample_rate, buffer_size, wasapi, capture_ring, pitch_ring,
         playback_ring, playback_prefill_frames, control, recorder, track_take_recorder);

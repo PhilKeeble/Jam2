@@ -463,6 +463,16 @@ void testLocalEngineDialogState()
         {QStringLiteral("[17] ASIO First"), QStringLiteral("17")},
         {QStringLiteral("[19] ASIO Second"), QStringLiteral("19")},
     };
+    for (auto& device : devices.devices) {
+#ifdef Q_OS_MACOS
+        device.backend = QStringLiteral("CoreAudio");
+#else
+        device.backend = QStringLiteral("ASIO");
+#endif
+        device.stableId = device.id;
+        device.inputChannels = 8;
+        device.outputChannels = 8;
+    }
     devices.selectedId = QStringLiteral("19");
     int deviceTestCalls = 0;
     jam2::gui::LocalEngineDialog dialog(

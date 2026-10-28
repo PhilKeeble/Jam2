@@ -43,6 +43,7 @@ add_library(jam2_core STATIC
     src/audio_device_processing.cpp
     src/duplex_processing.cpp
     src/wasapi_processing.cpp
+    src/coreaudio_device_setup.cpp
     src/audio_ring.cpp
     src/common.cpp
     src/input_source.cpp

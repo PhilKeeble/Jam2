@@ -17,13 +17,30 @@
 
 namespace jam2::gui {
 
+bool audioDeviceUsesInput(const AudioDevicePreference& preference)
+{
+    if (preference.backend == QStringLiteral("WASAPI")) return !preference.wasapiInputId.isEmpty();
+    return preference.backend != QStringLiteral("CoreAudio") ||
+        preference.deviceSetup == jam2::audio::AudioDeviceSetup::SingleDevice || !preference.coreAudioInputId.isEmpty();
+}
+
+QString preferredAudioDeviceId(const QVector<AudioDeviceChoice>& choices,
+    const AudioDevicePreference& preference, const QString& requestedId)
+{
+    for (const auto& choice : choices) if (!requestedId.isEmpty() && choice.id == requestedId) return choice.id;
+    for (const auto& choice : choices)
+        if (!preference.stableId.isEmpty() && choice.backend == preference.backend && choice.stableId == preference.stableId) return choice.id;
+    // A disconnected saved device must stay visibly unselected.
+    return preference.stableId.isEmpty() && !choices.isEmpty() ? choices.front().id : QString{};
+}
+
 QVector<AudioDeviceChoice> audioDeviceChoices(const std::vector<jam2::audio::DeviceInfo>& devices)
 {
     QVector<AudioDeviceChoice> result;
     for (const auto& device : devices) result.push_back({
         QString::fromStdString(device.name), QString::number(device.id),
         QString::fromStdString(device.backend), QString::fromStdString(jam2::audio::stable_device_id(device)),
-        device.direction, device.channel_count});
+        device.direction, device.channel_count, device.input_channel_count, device.output_channel_count});
     return result;
 }
 
@@ -31,21 +48,31 @@ AudioDeviceControls::AudioDeviceControls(QFormLayout* form, QComboBox* device,
     QLineEdit* inputChannels, QLineEdit* outputChannels, QVector<AudioDeviceChoice> choices,
     const AudioDevicePreference& preference, const QString& selectedId, const QString& prefix, QComboBox* bufferSize)
     : QObject(device), form_(form), device_(device), driver_(new QComboBox(device->parentWidget())),
-      input_(new QComboBox(device->parentWidget())), inputChannels_(inputChannels),
+      deviceSetup_(new QComboBox(device->parentWidget())), input_(new QComboBox(device->parentWidget())), inputChannels_(inputChannels),
       outputChannels_(outputChannels), channels_(new QLabel(device->parentWidget())), choices_(std::move(choices))
 {
-#ifdef Q_OS_WIN
-    driver_->addItem(QStringLiteral("ASIO"), QStringLiteral("ASIO"));
-    driver_->addItem(QStringLiteral("WASAPI"), QStringLiteral("WASAPI"));
+    // Use enumerated backend metadata so the same controls can be exercised with
+    // native test fixtures on either host platform.
+#ifdef Q_OS_MACOS
+    const bool coreAudioHost = true;
 #else
-    driver_->addItem(QStringLiteral("CoreAudio"), QStringLiteral("CoreAudio"));
+    const bool coreAudioHost = std::any_of(choices_.begin(), choices_.end(),
+        [](const auto& choice) { return choice.backend == QStringLiteral("CoreAudio"); });
 #endif
+    if (coreAudioHost) driver_->addItem(QStringLiteral("CoreAudio"), QStringLiteral("CoreAudio"));
+    else {
+        driver_->addItem(QStringLiteral("ASIO"), QStringLiteral("ASIO"));
+        driver_->addItem(QStringLiteral("WASAPI"), QStringLiteral("WASAPI"));
+    }
+    deviceSetup_->addItem(QStringLiteral("One device for input and output"), static_cast<int>(jam2::audio::AudioDeviceSetup::SingleDevice));
+    deviceSetup_->addItem(QStringLiteral("Separate input and output devices"), static_cast<int>(jam2::audio::AudioDeviceSetup::SeparateInputOutput));
     int row = 0; QFormLayout::ItemRole role{}; form_->getWidgetPosition(device_, &row, &role);
     form_->insertRow(row, QStringLiteral("Driver"), driver_);
-    form_->insertRow(row + 2, QStringLiteral("Input device"), input_);
-    form_->insertRow(row + 3, QStringLiteral("Channels"), channels_);
+    form_->insertRow(row + 1, QStringLiteral("Device setup"), deviceSetup_);
+    form_->insertRow(row + 3, QStringLiteral("Input device"), input_);
+    form_->insertRow(row + 4, QStringLiteral("Channels"), channels_);
     for (const auto& item : {std::pair<QComboBox*, QString>{driver_, QStringLiteral("driver")},
-             {input_, QStringLiteral("input-device")}}) {
+             {input_, QStringLiteral("input-device")}, {deviceSetup_, QStringLiteral("device-setup")}}) {
         item.first->setObjectName(prefix + QLatin1Char('.') + item.second);
         registerGuiControl(*item.first, item.first->objectName(), QStringLiteral("application.audio-driver"),
             GuiControlAvailability::Modal);
@@ -63,19 +90,24 @@ AudioDeviceControls::AudioDeviceControls(QFormLayout* form, QComboBox* device,
         preference.backend == QStringLiteral("WASAPI")});
     applyPreference(preference, selectedId);
     QObject::connect(driver_, &QComboBox::currentIndexChanged, this, [this] { populate({}); });
+    QObject::connect(deviceSetup_, &QComboBox::currentIndexChanged, this, [this] { populate({}); });
     QObject::connect(device_, &QComboBox::currentIndexChanged, this, [this] {
         if (driver_->currentData() == QStringLiteral("WASAPI")) wasapiId_ = device_->currentData().toString();
+        else if (driver_->currentData() == QStringLiteral("CoreAudio") && deviceSetup_->currentData().toInt() ==
+            static_cast<int>(jam2::audio::AudioDeviceSetup::SeparateInputOutput)) coreOutputId_ = device_->currentData().toString();
         else nativeId_ = device_->currentData().toString();
         updateView();
     });
     QObject::connect(input_, &QComboBox::currentIndexChanged, this, [this] {
-        inputId_ = input_->currentData().toString(); updateView();
+        if (driver_->currentData() == QStringLiteral("CoreAudio")) coreInputId_ = input_->currentData().toString();
+        else inputId_ = input_->currentData().toString();
+        updateView();
     });
 }
 
 void AudioDeviceControls::applyPreference(const AudioDevicePreference& preference, const QString& selectedId)
 {
-    const QSignalBlocker blocker(driver_);
+    const QSignalBlocker blocker(driver_), setupBlocker(deviceSetup_);
     QString backend = preference.backend;
     if (backend.isEmpty() && !selectedId.isEmpty()) {
         for (const auto& choice : choices_) if (choice.id == selectedId) backend = choice.backend;
@@ -85,10 +117,13 @@ void AudioDeviceControls::applyPreference(const AudioDevicePreference& preferenc
         if (backend != QStringLiteral("WASAPI")) buffer.nativeFrames = preference.bufferSize > 0 ? preference.bufferSize : 64;
     }
     inputId_ = preference.wasapiInputId;
+    coreInputId_ = preference.coreAudioInputId;
+    deviceSetup_->setCurrentIndex(qMax(0, deviceSetup_->findData(static_cast<int>(preference.deviceSetup))));
     QString selected = selectedId;
     if (selected.isEmpty()) for (const auto& choice : choices_)
         if (choice.stableId == preference.stableId && choice.backend == preference.backend) selected = choice.id;
     if (selected.isEmpty() && !preference.stableId.isEmpty()) selected = QStringLiteral("unavailable");
+    nativeId_ = selected; coreOutputId_ = selected;
     device_->setPlaceholderText(QStringLiteral("Select an available audio device"));
     inputChannels_->setText(preference.inputChannels); outputChannels_->setText(preference.outputChannels);
     populate(selected);
@@ -110,14 +145,19 @@ void AudioDeviceControls::populate(const QString& selectedId)
 {
     const QSignalBlocker outputBlocker(device_), inputBlocker(input_);
     const bool wasapi = driver_->currentData() == QStringLiteral("WASAPI");
-    const auto requested = !selectedId.isEmpty() ? selectedId : (wasapi ? wasapiId_ : nativeId_);
+    const bool coreaudio = driver_->currentData() == QStringLiteral("CoreAudio");
+    const bool separate = coreaudio && deviceSetup_->currentData().toInt() == static_cast<int>(jam2::audio::AudioDeviceSetup::SeparateInputOutput);
+    const auto requested = !selectedId.isEmpty() ? selectedId : (wasapi ? wasapiId_ : separate ? coreOutputId_ : nativeId_);
     device_->clear(); input_->clear(); input_->addItem(QStringLiteral("None"), QString());
     for (const auto& choice : choices_) {
         if (wasapi && choice.backend == QStringLiteral("WASAPI")) {
             if (choice.direction == jam2::audio::EndpointDirection::Input)
                 input_->addItem(choice.label, choice.stableId);
             else device_->addItem(choice.label, choice.id);
-        } else if (!wasapi && choice.backend != QStringLiteral("WASAPI")) {
+        } else if (coreaudio && choice.backend == QStringLiteral("CoreAudio")) {
+            if (choice.inputChannels > 0) input_->addItem(choice.label, choice.stableId);
+            if (choice.outputChannels > 0 && (separate || choice.inputChannels > 0)) device_->addItem(choice.label, choice.id);
+        } else if (!wasapi && !coreaudio && choice.backend != QStringLiteral("WASAPI")) {
             device_->addItem(choice.label, choice.id);
         }
     }
@@ -125,13 +165,15 @@ void AudioDeviceControls::populate(const QString& selectedId)
         const auto index = device_->findData(requested);
         device_->setCurrentIndex(index); // Missing saved endpoints remain visibly unselected.
     }
-    const auto inputIndex = input_->findData(inputId_);
+    const auto& selectedInput = coreaudio ? coreInputId_ : inputId_;
+    const auto inputIndex = input_->findData(selectedInput);
     if (inputIndex >= 0) input_->setCurrentIndex(inputIndex);
-    else if (!inputId_.isEmpty()) {
-        input_->addItem(QStringLiteral("Unavailable saved input"), inputId_);
+    else if (!selectedInput.isEmpty()) {
+        input_->addItem(QStringLiteral("Unavailable saved input"), selectedInput);
         input_->setCurrentIndex(input_->count() - 1);
     }
     if (wasapi) wasapiId_ = device_->currentData().toString();
+    else if (separate) coreOutputId_ = device_->currentData().toString();
     else nativeId_ = device_->currentData().toString();
     updateView();
 }
@@ -139,6 +181,8 @@ void AudioDeviceControls::populate(const QString& selectedId)
 void AudioDeviceControls::updateView()
 {
     const bool wasapi = driver_->currentData() == QStringLiteral("WASAPI");
+    const bool coreaudio = driver_->currentData() == QStringLiteral("CoreAudio");
+    const bool separate = coreaudio && deviceSetup_->currentData().toInt() == static_cast<int>(jam2::audio::AudioDeviceSetup::SeparateInputOutput);
     for (auto& buffer : buffers_) {
         auto* bufferSize_ = buffer.editor;
         if (!buffer.showingWasapi && bufferSize_->currentData().toInt() > 0)
@@ -153,10 +197,13 @@ void AudioDeviceControls::updateView()
         buffer.showingWasapi = wasapi;
         buffer.form->setRowVisible(bufferSize_, !wasapi);
     }
-    form_->setRowVisible(input_, wasapi); form_->setRowVisible(channels_, wasapi);
-    form_->setRowVisible(inputChannels_, !wasapi); form_->setRowVisible(outputChannels_, !wasapi);
+    form_->setRowVisible(driver_, !coreaudio);
+    form_->setRowVisible(deviceSetup_, coreaudio);
+    form_->setRowVisible(input_, wasapi || separate); form_->setRowVisible(channels_, wasapi);
+    form_->setRowVisible(inputChannels_, !wasapi && (!separate || !input_->currentData().toString().isEmpty()));
+    form_->setRowVisible(outputChannels_, !wasapi);
     if (auto* label = qobject_cast<QLabel*>(form_->labelForField(device_)))
-        label->setText(wasapi ? QStringLiteral("Output device") : QStringLiteral("Device"));
+        label->setText(wasapi || separate ? QStringLiteral("Output device") : QStringLiteral("Device"));
     std::size_t inputs = 0, outputs = 0;
     for (const auto& choice : choices_) {
         if (choice.stableId == input_->currentData().toString()) inputs = choice.channels;
@@ -179,6 +226,11 @@ AudioDevicePreference AudioDeviceControls::preference(AudioDevicePreference orig
         original.bufferSize = 0;
         original.wasapiInputId = input_->currentData().toString();
         original.wasapiInputName = original.wasapiInputId.isEmpty() ? QString() : input_->currentText();
+    }
+    if (original.backend == QStringLiteral("CoreAudio")) {
+        original.deviceSetup = static_cast<jam2::audio::AudioDeviceSetup>(deviceSetup_->currentData().toInt());
+        original.coreAudioInputId = coreInputId_;
+        original.coreAudioInputName = coreInputId_.isEmpty() ? QString() : input_->currentText();
     }
     return original;
 }
@@ -256,6 +308,17 @@ QString audioDeviceCapabilitiesText(
 QString audioDeviceRuntimeText(const jam2::audio::StreamInfo& stream,
     const jam2::audio::DeviceStreamStatus& status)
 {
+    if (stream.device.backend == "CoreAudio") {
+        return QStringLiteral("<b>CoreAudio</b><br>Input: %1 | Output: %2<br>"
+            "Private aggregate: %3 | Clock: output | Input drift correction: %4<br>"
+            "Sample rate %5 Hz | Buffer %6 frames | Input/output latency %7/%8 frames")
+            .arg(QString::fromStdString(stream.input_device_name).toHtmlEscaped(),
+                 QString::fromStdString(stream.device.name).toHtmlEscaped(),
+                 stream.private_aggregate ? QStringLiteral("yes") : QStringLiteral("no"),
+                 stream.input_drift_compensation ? QStringLiteral("on (CoreAudio)") : QStringLiteral("off"))
+            .arg(stream.sample_rate, 0, 'f', 0).arg(stream.buffer_size)
+            .arg(stream.input_latency_frames).arg(stream.output_latency_frames);
+    }
     if (stream.device.backend != "WASAPI") return {};
     return QStringLiteral("<b>WASAPI shared</b><br>Input: %1 | Output: %2<br>"
         "Jam %3 Hz | Windows input/output %4/%5 Hz<br>"

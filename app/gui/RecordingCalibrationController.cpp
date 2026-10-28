@@ -19,6 +19,8 @@ RecordingCalibrationKey RecordingCalibrationController::key(std::size_t channel)
         k.captureTargetMs = s.wasapi.capture_target_ms;
         k.lowLatencyShared = s.low_latency_shared;
     }
+    if (s.device.backend == "CoreAudio" && s.coreaudio.setup == jam2::audio::AudioDeviceSetup::SeparateInputOutput)
+        k.inputDeviceId = QString::fromStdString(s.coreaudio.input_device_uid);
     if (std::isfinite(s.sample_rate) && s.sample_rate >= 8000 && s.sample_rate <= 384000)
         k.sampleRate = static_cast<int>(std::llround(s.sample_rate));
     if (s.buffer_size <= 65536) k.bufferFrames = static_cast<int>(s.buffer_size);

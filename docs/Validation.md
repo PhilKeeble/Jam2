@@ -134,3 +134,43 @@ and WAVs, and checks cleanup after a partially failed device start. With no
 profile it skips. These checks require no speakers; they do not measure acoustic
 or cable round-trip latency. Mono/surround routing is verified deterministically
 in the native conversion tests.
+
+## macOS private aggregate checks
+
+Run `./compile.sh --tests coreaudio` on macOS for the optimized Release build
+and relevant native CTests. The GUI tests exercise the real Local, Start Jam,
+Join Jam and Settings controls using deterministic device metadata, including
+Apply/Save/Cancel and persistent UIDs. Portable core tests validate single and
+split channel layouts, output-device input-channel offsets, disabled input
+streams, optional input and invalid/missing selections. Runtime configuration
+and restart checks run with the existing four-peer lifecycle integration.
+
+Hardware testing is opt-in. Obtain physical UIDs from
+`release/Jam2.app/Contents/MacOS/jam2 list-devices`, then run:
+
+```sh
+export JAM2_COREAUDIO_OUTPUT_UID='<output device UID>'
+export JAM2_COREAUDIO_INPUT_UID='<different input device UID>'
+./compile.sh --tests coreaudio
+```
+
+The macOS-only `jam2_coreaudio_aggregate_integration` checks process-private
+aggregate creation, output clock/input drift configuration, advancing native
+callbacks, physical channel identities, playback-only operation and cleanup
+after stop and a deliberately failed startup. Without both environment
+variables, this hardware test skips. It opens the specified hardware at 48 kHz
+with its current buffer size; ensure those devices support that sample rate.
+Microphone permission for the native test runner may need granting on macOS.
+
+Windows can run `compile.cmd --in-dev-shell --tests coreaudio` to build and test
+the shared GUI, preferences, planning and runtime handoff. This does not compile
+or validate the native CoreAudio backend. On macOS, finish with GUI checks of
+single-device, split-device and None-input startup, an actual capture/playback
+run, Stop/restart, missing/unplugged-device errors, and Settings Apply rollback.
+Confirm unrelated applications can still use their devices and that no Jam2
+aggregate remains after stop or process exit.
+
+Implementation references: Apple's [aggregate device API](https://developer.apple.com/documentation/coreaudio/audiohardwarecreateaggregatedevice(_:_:)),
+[private aggregate key](https://developer.apple.com/documentation/coreaudio/kaudioaggregatedeviceisprivatekey),
+[input drift compensation](https://developer.apple.com/documentation/coreaudio/kaudiosubdevicedriftcompensationkey),
+and [per-IOProc stream usage](https://developer.apple.com/documentation/coreaudio/audiohardwareioprocstreamusage).

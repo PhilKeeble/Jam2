@@ -1,4 +1,5 @@
 #include "ApplicationRuntime.hpp"
+#include "coreaudio_device_setup.hpp"
 
 #include <QMetaObject>
 
@@ -53,8 +54,18 @@ bool ApplicationRuntime::ensureEngine(
         return true;
     }
     jam2::EngineConfig requested = jam2_make_engine_config(options, leaderAudioLocalClick);
-    if (!requested.wasapi.output_endpoint_id.empty())
-        requested.channels = jam2::audio::automatic_wasapi_channels(requested.wasapi, jam2::audio::list_devices());
+    try {
+        if (!requested.wasapi.output_endpoint_id.empty())
+            requested.channels = jam2::audio::automatic_wasapi_channels(requested.wasapi, jam2::audio::list_devices());
+        if (!requested.coreaudio.output_device_uid.empty()) {
+            const auto plan = jam2::audio::plan_coreaudio_devices(requested.coreaudio, requested.channels, jam2::audio::list_devices());
+            requested.channels = plan.device_channels;
+            requested.audio_device_id = plan.output.id;
+        }
+    } catch (const std::exception& exception) {
+        if (onError) onError(QString::fromUtf8(exception.what()));
+        return false;
+    }
     if (engine_ != nullptr) {
         const jam2::EngineConfig* active = engine_->config();
         if (active != nullptr && !jam2_engine_restart_required(*active, requested)) {

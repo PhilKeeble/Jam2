@@ -28,6 +28,11 @@ int main(int argc, char** argv)
             "test preference path was rejected");
 
         UserPreferences expected;
+        require(UserPreferencesStore::load().localAudio.deviceSetup == jam2::audio::AudioDeviceSetup::SingleDevice,
+            "missing device setup preferences must keep the single-device workflow");
+        expected.localAudio.deviceSetup = jam2::audio::AudioDeviceSetup::SeparateInputOutput;
+        expected.localAudio.coreAudioInputId = QStringLiteral("microphone-uid");
+        expected.localAudio.coreAudioInputName = QStringLiteral("USB microphone");
         require(UserPreferencesStore::load().sync.listeningTools,
             "missing listening sync preference defaults on");
         require(UserPreferencesStore::load().create.strategy == jam2::ConnectionStrategy::Jam2Server,
@@ -57,6 +62,10 @@ int main(int argc, char** argv)
         UserPreferencesStore::save(expected);
 
         const UserPreferences actual = UserPreferencesStore::load();
+        require(actual.localAudio.deviceSetup == expected.localAudio.deviceSetup &&
+            actual.localAudio.coreAudioInputId == expected.localAudio.coreAudioInputId &&
+            actual.localAudio.coreAudioInputName == expected.localAudio.coreAudioInputName,
+            "CoreAudio setup and stable input identity round-trip");
         require(actual.create.strategy == jam2::ConnectionStrategy::Direct && actual.create.noStun,
             "typed connection strategy round-trips");
         require(actual.create.name==expected.create.name && actual.join.name==expected.join.name,"create/join names did not round-trip");

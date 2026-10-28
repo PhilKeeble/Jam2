@@ -41,7 +41,9 @@ inline std::size_t buffer_frames(const AudioBufferList* buffers) noexcept
     std::size_t frames = static_cast<std::size_t>(-1);
     for (UInt32 buffer_index = 0; buffer_index < buffers->mNumberBuffers; ++buffer_index) {
         const AudioBuffer& buffer = buffers->mBuffers[buffer_index];
-        if (buffer.mNumberChannels == 0) {
+        // Disabled IOProc streams retain their channel slots but may expose a
+        // null/zero-sized buffer. They must not shorten an active stream.
+        if (buffer.mNumberChannels == 0 || buffer.mData == nullptr) {
             continue;
         }
         frames = std::min(

@@ -317,6 +317,8 @@ struct DeviceInfo {
     std::size_t channel_count = 0;
     long minimum_period_frames = 0;
     long default_period_frames = 0;
+    std::size_t input_channel_count = 0;
+    std::size_t output_channel_count = 0;
 };
 
 inline const std::string& stable_device_id(const DeviceInfo& device) noexcept
@@ -333,6 +335,15 @@ struct WasapiConfig {
     int capture_capacity_ms = 200;
     int capture_max_correction_ppm = 2000;
     bool operator==(const WasapiConfig&) const = default;
+};
+
+enum class AudioDeviceSetup : std::uint8_t { SingleDevice, SeparateInputOutput };
+
+struct CoreAudioConfig {
+    AudioDeviceSetup setup = AudioDeviceSetup::SingleDevice;
+    std::string output_device_uid;
+    std::string input_device_uid; // Empty in separate mode means playback only.
+    bool operator==(const CoreAudioConfig&) const = default;
 };
 
 struct DeviceTestResult {
@@ -686,6 +697,9 @@ struct StreamInfo {
     ChannelSelection channels;
     std::string sample_format;
     WasapiConfig wasapi;
+    CoreAudioConfig coreaudio;
+    bool private_aggregate = false;
+    bool input_drift_compensation = false;
     std::string input_device_name;
     double input_mix_sample_rate = 0;
     double output_mix_sample_rate = 0;
@@ -781,7 +795,8 @@ std::unique_ptr<DeviceStream> start_duplex_stream(
     StreamControl& control,
     OutputRecorder* recorder,
     TrackTakeRecorder* track_take_recorder = nullptr,
-    const WasapiConfig& wasapi = {});
+    const WasapiConfig& wasapi = {},
+    const CoreAudioConfig& coreaudio = {});
 
 // Called once per device callback before capture is pushed. This is fixed-work,
 // allocation-free, lock-free, and is shared by real and headless devices.

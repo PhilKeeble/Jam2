@@ -2189,7 +2189,7 @@ void MainWindow::startLocalPerform()
         return;
     }
     QString permissionError;
-    if (!jam2EnsureMicrophonePermission(&permissionError)) {
+    if (jam2::gui::audioDeviceUsesInput(sessionRuntimeDraft_.audio) && !jam2EnsureMicrophonePermission(&permissionError)) {
         QMessageBox::warning(this, QStringLiteral("Jam2 Microphone Access"), permissionError);
         return;
     }
@@ -2266,7 +2266,7 @@ void MainWindow::startJam(bool createSession)
         return;
     }
     QString permissionError;
-    if (!jam2EnsureMicrophonePermission(&permissionError)) {
+    if (jam2::gui::audioDeviceUsesInput(sessionRuntimeDraft_.audio) && !jam2EnsureMicrophonePermission(&permissionError)) {
         QMessageBox::warning(this, QStringLiteral("Jam2 Microphone Access"), permissionError);
         appendLog(permissionError);
         return;
@@ -3972,27 +3972,7 @@ jam2::gui::SessionAudioDeviceList MainWindow::sessionDialogDevices(
     result.devices.reserve(static_cast<qsizetype>(availableDevices_.size()));
     result.devices = jam2::gui::audioDeviceChoices(availableDevices_);
 
-    if (!requestedDeviceId.isEmpty()) {
-        const auto requested = std::find_if(
-            result.devices.cbegin(), result.devices.cend(),
-            [&requestedDeviceId](const auto& item) {
-                return item.id == requestedDeviceId;
-            });
-        if (requested != result.devices.cend()) {
-            result.selectedId = requestedDeviceId;
-            return result;
-        }
-    }
-    for (const jam2::audio::DeviceInfo& device : availableDevices_) {
-        const QString stable = QString::fromStdString(
-            jam2::audio::stable_device_id(device));
-        if (QString::fromStdString(device.backend) == preference.backend &&
-            stable == preference.stableId) {
-            result.selectedId = QString::number(device.id);
-            return result;
-        }
-    }
-    if (!result.devices.isEmpty()) result.selectedId = result.devices.front().id;
+    result.selectedId = jam2::gui::preferredAudioDeviceId(result.devices, preference, requestedDeviceId);
     return result;
 }
 
@@ -4117,7 +4097,7 @@ bool MainWindow::applyLocalAudioSettings(
 {
     const bool wasLocalActive = jam2_.isRunning() && !jam2_.isNetworkRunning();
     QString permissionError;
-    if (!wasLocalActive && !jam2EnsureMicrophonePermission(&permissionError)) {
+    if (jam2::gui::audioDeviceUsesInput(desired) && !jam2EnsureMicrophonePermission(&permissionError)) {
         QMessageBox::warning(
             parent, QStringLiteral("Jam2 Microphone Access"), permissionError);
         return false;
@@ -4239,6 +4219,8 @@ void MainWindow::showSettingsDialog()
         localInitial.backend != updated.localAudio.backend ||
         localInitial.stableId != updated.localAudio.stableId ||
         localInitial.wasapiInputId != updated.localAudio.wasapiInputId ||
+        localInitial.deviceSetup != updated.localAudio.deviceSetup ||
+        localInitial.coreAudioInputId != updated.localAudio.coreAudioInputId ||
         localInitial.sampleRate != updated.localAudio.sampleRate ||
         localInitial.bufferSize != updated.localAudio.bufferSize ||
         localInitial.inputChannels != updated.localAudio.inputChannels ||
@@ -11172,7 +11154,7 @@ void MainWindow::startInputCapture(std::uint64_t targetFrame, int countInBars)
         return;
     }
     QString permissionError;
-    if (!jam2EnsureMicrophonePermission(&permissionError)) {
+    if (jam2::gui::audioDeviceUsesInput(sessionRuntimeDraft_.audio) && !jam2EnsureMicrophonePermission(&permissionError)) {
         QMessageBox::warning(this, QStringLiteral("Jam2 Track Recording Microphone Access"), permissionError);
         appendLog(permissionError);
         return;
@@ -11274,7 +11256,7 @@ void MainWindow::startInputCaptureAtGroupSchedule(
 {
     if (trackRecordingWorkflow_.inputTakeActive()) return;
     QString permissionError;
-    if (!jam2EnsureMicrophonePermission(&permissionError)) {
+    if (jam2::gui::audioDeviceUsesInput(sessionRuntimeDraft_.audio) && !jam2EnsureMicrophonePermission(&permissionError)) {
         QMessageBox::warning(
             this, QStringLiteral("Jam2 Track Recording Microphone Access"),
             permissionError);
@@ -15098,10 +15080,17 @@ Jam2RuntimeOptions MainWindow::runtimeOptions() const
         options.wasapi.input_endpoint_id = sessionRuntimeDraft_.audio.wasapiInputId.toStdString();
     }
     options.input_channels = jam2::audio::InputChannels::Mono;
+    if (!automationHeadlessAudio_ && sessionRuntimeDraft_.audio.backend == QStringLiteral("CoreAudio")) {
+        options.coreaudio.setup = sessionRuntimeDraft_.audio.deviceSetup;
+        options.coreaudio.output_device_uid = sessionRuntimeDraft_.audio.stableId.toStdString();
+        options.coreaudio.input_device_uid = sessionRuntimeDraft_.audio.coreAudioInputId.toStdString();
+    }
     if (!options.wasapi.output_endpoint_id.empty()) {
         options.channel_selection = jam2::audio::automatic_wasapi_channels(options.wasapi, availableDevices_);
     } else {
-        options.channel_selection.input = parseUiChannels(sessionRuntimeDraft_.audio.inputChannels, "input");
+        const bool noCoreAudioInput = options.coreaudio.setup == jam2::audio::AudioDeviceSetup::SeparateInputOutput && options.coreaudio.input_device_uid.empty();
+        options.channel_selection.input = noCoreAudioInput ? std::vector<int>{} :
+            parseUiChannels(sessionRuntimeDraft_.audio.inputChannels, "input");
         options.channel_selection.output = parseUiChannels(sessionRuntimeDraft_.audio.outputChannels, "output");
     }
     options.capture_ring_frames =

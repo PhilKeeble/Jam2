@@ -2224,8 +2224,8 @@ endif()
 add_dependencies(jam2_tests_unit jam2_wasapi_processing_tests)
 add_dependencies(jam2_tests_all jam2_wasapi_processing_tests)
 
-if(WIN32)
-    add_executable(jam2_wasapi_gui_tests EXCLUDE_FROM_ALL unit/gui/WasapiGuiTests.cpp
+function(jam2_add_audio_device_gui_test backend source)
+    add_executable(jam2_${backend}_gui_tests EXCLUDE_FROM_ALL ${source}
         "${CMAKE_SOURCE_DIR}/app/gui/AudioDeviceUiSupport.cpp"
         "${CMAKE_SOURCE_DIR}/app/gui/SessionStartupDialogs.cpp"
         "${CMAKE_SOURCE_DIR}/app/gui/SettingsDialog.cpp"
@@ -2239,17 +2239,25 @@ if(WIN32)
         "${CMAKE_SOURCE_DIR}/app/gui/StyleProfileCatalog.cpp"
         "${CMAKE_SOURCE_DIR}/app/gui/ResearchDrumEngine.cpp"
         "${CMAKE_SOURCE_DIR}/app/gui/ResearchDrumKit.cpp")
-    jam2_configure_test_target(jam2_wasapi_gui_tests)
-    target_include_directories(jam2_wasapi_gui_tests PRIVATE "${CMAKE_SOURCE_DIR}/app/gui" "${CMAKE_SOURCE_DIR}/app/application")
-    target_link_libraries(jam2_wasapi_gui_tests PRIVATE jam2_core jam2_daisysp_drums jam2_looper_model Qt6::Core Qt6::Widgets)
-    add_test(NAME jam2_wasapi_gui_units COMMAND $<TARGET_FILE:jam2_wasapi_gui_tests>)
-    set_tests_properties(jam2_wasapi_gui_units PROPERTIES LABELS "unit;gui;audio;wasapi;dialog;persistence"
-        TIMEOUT 45 ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
-        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Widgets>")
-    add_dependencies(jam2_tests_unit jam2_wasapi_gui_tests)
-    add_dependencies(jam2_tests_gui jam2_wasapi_gui_tests)
-    add_dependencies(jam2_tests_all jam2_wasapi_gui_tests)
+    jam2_configure_test_target(jam2_${backend}_gui_tests)
+    target_include_directories(jam2_${backend}_gui_tests PRIVATE "${CMAKE_SOURCE_DIR}/app/gui" "${CMAKE_SOURCE_DIR}/app/application")
+    target_link_libraries(jam2_${backend}_gui_tests PRIVATE jam2_core jam2_daisysp_drums jam2_looper_model Qt6::Core Qt6::Widgets)
+    add_test(NAME jam2_${backend}_gui_units COMMAND $<TARGET_FILE:jam2_${backend}_gui_tests>)
+    set_tests_properties(jam2_${backend}_gui_units PROPERTIES LABELS "unit;gui;audio;${backend};dialog;persistence"
+        TIMEOUT 45 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+    if(WIN32)
+        set_tests_properties(jam2_${backend}_gui_units PROPERTIES
+            ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Widgets>")
+    endif()
+    add_dependencies(jam2_tests_unit jam2_${backend}_gui_tests)
+    add_dependencies(jam2_tests_gui jam2_${backend}_gui_tests)
+    add_dependencies(jam2_tests_all jam2_${backend}_gui_tests)
+endfunction()
+
+if(WIN32)
+    jam2_add_audio_device_gui_test(wasapi unit/gui/WasapiGuiTests.cpp)
 endif()
+jam2_add_audio_device_gui_test(coreaudio unit/gui/CoreAudioGuiTests.cpp)
 
 if(WIN32)
     set(JAM2_WASAPI_HARDWARE_PROFILE "" CACHE FILEPATH "Explicit WASAPI/ASIO endpoint hardware-test profile")
@@ -2274,4 +2282,29 @@ if(WIN32)
         jam2_wasapi_hardware_tests jam2_audio_device_processing_tests jam2_gui_widget_boundary_tests
         jam2_recording_calibration_tests jam2_user_preferences_tests jam2_cli_boundary_tests
         jam2_audio_flow_interaction_tests)
+endif()
+
+add_executable(jam2_coreaudio_device_setup_tests EXCLUDE_FROM_ALL unit/core/CoreAudioDeviceSetupTests.cpp)
+jam2_configure_test_target(jam2_coreaudio_device_setup_tests)
+target_link_libraries(jam2_coreaudio_device_setup_tests PRIVATE jam2_core)
+add_test(NAME jam2_coreaudio_device_setup_units COMMAND $<TARGET_FILE:jam2_coreaudio_device_setup_tests>)
+set_tests_properties(jam2_coreaudio_device_setup_units PROPERTIES LABELS "unit;core;audio;coreaudio" TIMEOUT 30)
+add_dependencies(jam2_tests_unit jam2_coreaudio_device_setup_tests)
+add_dependencies(jam2_tests_all jam2_coreaudio_device_setup_tests)
+add_custom_target(jam2_tests_coreaudio DEPENDS jam2 jam2_coreaudio_device_setup_tests jam2_coreaudio_gui_tests
+    jam2_gui_widget_boundary_tests jam2_recording_calibration_tests jam2_user_preferences_tests jam2_cli_boundary_tests
+    jam2_multiplex_session_lifecycle_tests)
+set_property(TEST jam2_multiplex_four_session_lifecycle_integration APPEND PROPERTY LABELS coreaudio)
+if(APPLE)
+    add_executable(jam2_coreaudio_aggregate_tests EXCLUDE_FROM_ALL integration/core/CoreAudioAggregateIntegration.cpp)
+    jam2_configure_test_target(jam2_coreaudio_aggregate_tests)
+    target_link_libraries(jam2_coreaudio_aggregate_tests PRIVATE jam2_core)
+    add_test(NAME jam2_coreaudio_aggregate_integration COMMAND $<TARGET_FILE:jam2_coreaudio_aggregate_tests>)
+    set_tests_properties(jam2_coreaudio_aggregate_integration PROPERTIES
+        LABELS "integration;hardware;audio;coreaudio" TIMEOUT 45 RUN_SERIAL TRUE SKIP_RETURN_CODE 77)
+    add_dependencies(jam2_tests_coreaudio jam2_coreaudio_aggregate_tests jam2_coreaudio_recording_timing_tests jam2_audio_device_processing_tests)
+    add_dependencies(jam2_tests_hardware jam2_coreaudio_aggregate_tests)
+    add_dependencies(jam2_tests_all jam2_coreaudio_aggregate_tests)
+    set_property(TEST jam2_coreaudio_recording_timing_units APPEND PROPERTY LABELS coreaudio)
+    set_property(TEST jam2_audio_device_processing_units APPEND PROPERTY LABELS coreaudio)
 endif()

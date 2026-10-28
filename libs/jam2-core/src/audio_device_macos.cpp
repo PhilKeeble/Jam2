@@ -2,6 +2,7 @@
 #include "audio_device_processing.hpp"
 #include "coreaudio_buffer_processing.hpp"
 #include "coreaudio_recording_timing.hpp"
+#include "coreaudio_device_setup.hpp"
 
 #include <CoreAudio/CoreAudio.h>
 #include <CoreFoundation/CoreFoundation.h>
@@ -10,7 +11,10 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <cstring>
 #include <limits>
 #include <sstream>
 #include <span>
@@ -228,6 +232,7 @@ std::uint32_t device_channels(AudioObjectID device, AudioObjectPropertyScope sco
         return 0;
     }
     const UInt32 size = property_size(device, property);
+    if (size < sizeof(AudioBufferList)) return 0;
     std::vector<std::uint8_t> storage(size);
     UInt32 mutable_size = size;
     require_ok(
@@ -413,6 +418,8 @@ DeviceInfo make_device_info(int index, AudioObjectID device)
     const UInt32 transport = get_u32_property_or_zero(device, kAudioDevicePropertyTransportType);
     const UInt32 input_channels = device_channels(device, kAudioDevicePropertyScopeInput);
     const UInt32 output_channels = device_channels(device, kAudioDevicePropertyScopeOutput);
+    info.input_channel_count = input_channels;
+    info.output_channel_count = output_channels;
     const UInt32 buffer_frames = get_u32_property_or_zero(device, kAudioDevicePropertyBufferFrameSize);
     const double sample_rate = get_double_property_or_zero(device, kAudioDevicePropertyNominalSampleRate);
     std::ostringstream details;
@@ -468,6 +475,98 @@ void configure_device(AudioObjectID device, double requested_sample_rate, long r
             "AudioObjectSetPropertyData buffer frame size");
     }
 }
+
+template<class T> class ScopedCF {
+public:
+    explicit ScopedCF(T value) : value_(value) {
+        if (!value_) throw std::runtime_error("CoreFoundation allocation failed");
+    }
+    ~ScopedCF() { CFRelease(value_); }
+    ScopedCF(const ScopedCF&) = delete;
+    ScopedCF& operator=(const ScopedCF&) = delete;
+    T get() const noexcept { return value_; }
+private:
+    T value_;
+};
+
+AudioObjectID device_with_uid(const std::string& uid)
+{
+    for (const auto object : get_device_ids())
+        if (get_cf_string_property(object, kAudioDevicePropertyDeviceUID) == uid) return object;
+    throw std::runtime_error("selected CoreAudio device disconnected: " + uid);
+}
+
+class PrivateAggregate final {
+public:
+    ~PrivateAggregate() {
+        if (object != kAudioObjectUnknown) {
+            const auto status = AudioHardwareDestroyAggregateDevice(object);
+            if (status != noErr) std::fprintf(stderr, "Jam2 private aggregate cleanup failed: %d\n", static_cast<int>(status));
+        }
+    }
+    PrivateAggregate(const PrivateAggregate&) = delete;
+    PrivateAggregate& operator=(const PrivateAggregate&) = delete;
+    static std::unique_ptr<PrivateAggregate> create(const CoreAudioDevicePlan& plan) {
+        auto result = std::unique_ptr<PrivateAggregate>(new PrivateAggregate);
+        ScopedCF uuid(CFUUIDCreate(kCFAllocatorDefault));
+        ScopedCF uuidText(CFUUIDCreateString(kCFAllocatorDefault, uuid.get()));
+        ScopedCF uid(CFStringCreateWithFormat(kCFAllocatorDefault, nullptr, CFSTR("org.jam2.private.%@"), uuidText.get()));
+        ScopedCF outputUid(CFStringCreateWithCString(kCFAllocatorDefault, stable_device_id(plan.output).c_str(), kCFStringEncodingUTF8));
+        ScopedCF inputUid(CFStringCreateWithCString(kCFAllocatorDefault, stable_device_id(plan.input).c_str(), kCFStringEncodingUTF8));
+        const int one = 1, zero = 0;
+        ScopedCF enabled(CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &one));
+        ScopedCF disabled(CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &zero));
+        const void* subKeys[]{CFSTR(kAudioSubDeviceUIDKey), CFSTR(kAudioSubDeviceDriftCompensationKey)};
+        const void* outputValues[]{outputUid.get(), disabled.get()};
+        const void* inputValues[]{inputUid.get(), enabled.get()};
+        ScopedCF output(CFDictionaryCreate(kCFAllocatorDefault, subKeys, outputValues, 2,
+            &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks));
+        ScopedCF input(CFDictionaryCreate(kCFAllocatorDefault, subKeys, inputValues, 2,
+            &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks));
+        const void* entries[]{output.get(), input.get()};
+        ScopedCF subdevices(CFArrayCreate(kCFAllocatorDefault, entries, 2, &kCFTypeArrayCallBacks));
+        const void* keys[]{CFSTR(kAudioAggregateDeviceUIDKey), CFSTR(kAudioAggregateDeviceNameKey),
+            CFSTR(kAudioAggregateDeviceIsPrivateKey), CFSTR(kAudioAggregateDeviceIsStackedKey),
+            CFSTR(kAudioAggregateDeviceMainSubDeviceKey), CFSTR(kAudioAggregateDeviceSubDeviceListKey)};
+        const void* values[]{uid.get(), CFSTR("Jam2 private audio"), enabled.get(), disabled.get(), outputUid.get(), subdevices.get()};
+        ScopedCF description(CFDictionaryCreate(kCFAllocatorDefault, keys, values, 6,
+            &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks));
+        require_ok(AudioHardwareCreateAggregateDevice(description.get(), &result->object), "Create Jam2 private aggregate");
+        // HAL publication is asynchronous. Wait off the audio thread until the
+        // complete ordered channel layout exists, then verify clock and drift.
+        const auto deadline = std::chrono::steady_clock::now() + kDeviceConfigurationTimeout;
+        bool ready = false;
+        while (std::chrono::steady_clock::now() < deadline) {
+            if (device_channels(result->object, kAudioDevicePropertyScopeInput) ==
+                    plan.output.input_channel_count + plan.input.input_channel_count &&
+                device_channels(result->object, kAudioDevicePropertyScopeOutput) ==
+                    plan.output.output_channel_count + plan.input.output_channel_count) {
+                const auto active = get_object_ids(result->object, kAudioAggregateDevicePropertyActiveSubDeviceList, kAudioObjectPropertyScopeGlobal);
+                if (active.size() == 2) {
+                    ready = true;
+                    for (std::size_t i = 0; i < active.size(); ++i) {
+                        const auto expected = i == 0 ? stable_device_id(plan.output) : stable_device_id(plan.input);
+                        if (get_cf_string_property(active[i], kAudioDevicePropertyDeviceUID) != expected) { ready = false; break; }
+                        UInt32 drift = i == 0 ? 0 : 1;
+                        auto property = address(kAudioSubDevicePropertyDriftCompensation);
+                        require_ok(AudioObjectSetPropertyData(active[i], &property, 0, nullptr, sizeof(drift), &drift), "Set aggregate input clock correction");
+                        if (get_property<UInt32>(active[i], property, "Verify aggregate clock correction") != drift)
+                            throw std::runtime_error("CoreAudio aggregate drift correction was not applied");
+                    }
+                    if (ready) break;
+                }
+            }
+            std::this_thread::sleep_for(kDeviceConfigurationPollInterval);
+        }
+        if (!ready) throw std::runtime_error("CoreAudio private aggregate did not publish the selected channel layout within 3 seconds");
+        if (get_cf_string_property(result->object, kAudioAggregateDevicePropertyMainSubDevice) != stable_device_id(plan.output))
+            throw std::runtime_error("CoreAudio private aggregate did not select the output clock");
+        return result;
+    }
+    AudioObjectID object = kAudioObjectUnknown;
+private:
+    PrivateAggregate() = default;
+};
 
 bool is_supported_float32_format(AudioObjectID device, AudioObjectPropertyScope scope)
 {
@@ -638,8 +737,9 @@ OSStatus duplex_io_proc(
         return noErr;
     }
     const std::uint64_t callback_start_us = processing::callback_now_us();
-    const std::size_t input_buffer_frames = coreaudio::buffer_frames(input);
     const std::size_t output_buffer_frames = coreaudio::buffer_frames(output);
+    const std::size_t input_buffer_frames = context->channels.input.empty()
+        ? output_buffer_frames : coreaudio::buffer_frames(input);
     const std::size_t callback_frames = std::max(input_buffer_frames, output_buffer_frames);
     if (has_host_time(now)) {
         const std::uint64_t timestamp_callbacks =
@@ -1098,14 +1198,19 @@ public:
         StreamControl& control,
         OutputRecorder* recorder,
         TrackTakeRecorder* track_take_recorder,
-        double sample_rate)
-        : device_(device),
+        double sample_rate,
+        std::unique_ptr<PrivateAggregate> aggregate,
+        CoreAudioConfig coreaudio_config,
+        ChannelSelection device_channels,
+        std::string input_name)
+        : aggregate_(std::move(aggregate)), device_(device),
           info_(std::move(info)),
           buffer_size_(buffer_size),
           maximum_callback_frames_(maximum_callback_frames),
           variable_callback_frames_(variable_callback_frames),
           input_channels_(input_channels),
-          channels_(channels),
+          channels_(std::move(device_channels)),
+          coreaudio_config_(std::move(coreaudio_config)), input_name_(std::move(input_name)),
           sample_rate_(sample_rate)
     {
         context_.input_channels = input_channels;
@@ -1139,11 +1244,11 @@ public:
         context_.playback_prefill_frames = playback_prefill_frames;
         context_.sample_rate = sample_rate;
         context_.metronome_wave_bank.prepare(sample_rate);
-        input_device_latency_frames_ = static_cast<long>(get_u32_property_or_zero(
+        input_device_latency_frames_ = channels_.input.empty() ? 0L : static_cast<long>(get_u32_property_or_zero(
             device_, kAudioDevicePropertyLatency, kAudioDevicePropertyScopeInput));
-        input_safety_offset_frames_ = static_cast<long>(get_u32_property_or_zero(
+        input_safety_offset_frames_ = channels_.input.empty() ? 0L : static_cast<long>(get_u32_property_or_zero(
             device_, kAudioDevicePropertySafetyOffset, kAudioDevicePropertyScopeInput));
-        input_stream_latency_frames_ = maximum_stream_latency_frames(
+        input_stream_latency_frames_ = channels_.input.empty() ? 0L : maximum_stream_latency_frames(
             device_, kAudioDevicePropertyScopeInput);
         output_device_latency_frames_ = channels_.output.empty() ? 0L : static_cast<long>(
             get_u32_property_or_zero(
@@ -1156,7 +1261,7 @@ public:
         context_.input_latency = {
             static_cast<std::uint32_t>(input_device_latency_frames_),
             static_cast<std::uint32_t>(input_stream_latency_frames_),
-            static_cast<std::uint32_t>(input_safety_offset_frames_), true};
+            static_cast<std::uint32_t>(input_safety_offset_frames_), !channels_.input.empty()};
         context_.output_latency = {
             static_cast<std::uint32_t>(output_device_latency_frames_),
             static_cast<std::uint32_t>(output_stream_latency_frames_),
@@ -1204,6 +1309,10 @@ public:
 
     void start()
     {
+        if (!coreaudio_config_.output_device_uid.empty()) {
+            configure_stream_usage(kAudioDevicePropertyScopeInput, context_.channels.input);
+            configure_stream_usage(kAudioDevicePropertyScopeOutput, context_.channels.output);
+        }
         require_ok(AudioDeviceStart(device_, proc_id_), "AudioDeviceStart");
         started_ = true;
     }
@@ -1247,6 +1356,10 @@ public:
         result.input_channels = input_channels_;
         result.channels = channels_;
         result.sample_format = "CoreAudio Float32 packed";
+        result.coreaudio = coreaudio_config_;
+        result.private_aggregate = aggregate_ != nullptr;
+        result.input_drift_compensation = aggregate_ != nullptr;
+        result.input_device_name = input_name_;
         return result;
     }
 
@@ -1321,6 +1434,28 @@ private:
         maximum = source.maximum.load(std::memory_order_relaxed);
     }
 
+    void configure_stream_usage(AudioObjectPropertyScope scope, const std::vector<int>& selected)
+    {
+        const auto streams = get_object_ids(device_, kAudioDevicePropertyStreams, scope);
+        if (streams.empty()) return;
+        std::vector<std::uint32_t> channel_counts;
+        for (const auto stream : streams) channel_counts.push_back(get_property<AudioStreamBasicDescription>(
+            stream, address(kAudioStreamPropertyVirtualFormat), "Read selected stream channels").mChannelsPerFrame);
+        const auto usage = coreaudio_stream_usage(selected, channel_counts);
+        const auto size = static_cast<UInt32>(offsetof(AudioHardwareIOProcStreamUsage, mStreamIsOn) + usage.size() * sizeof(UInt32));
+        std::vector<std::uint8_t> storage(std::max<std::size_t>(size, sizeof(AudioHardwareIOProcStreamUsage)), 0);
+        auto* value = reinterpret_cast<AudioHardwareIOProcStreamUsage*>(storage.data());
+        value->mIOProc = reinterpret_cast<void*>(proc_id_);
+        value->mNumberStreams = static_cast<UInt32>(usage.size());
+        std::copy(usage.begin(), usage.end(), value->mStreamIsOn);
+        const auto property = address(kAudioDevicePropertyIOProcStreamUsage, scope);
+        require_ok(AudioObjectSetPropertyData(device_, &property, 0, nullptr, size, value), "Configure selected CoreAudio streams");
+        UInt32 actual_size = size;
+        require_ok(AudioObjectGetPropertyData(device_, &property, 0, nullptr, &actual_size, value), "Verify selected CoreAudio streams");
+        if (value->mNumberStreams != usage.size() || !std::equal(usage.begin(), usage.end(), value->mStreamIsOn))
+            throw std::runtime_error("CoreAudio did not apply selected input/output stream usage");
+    }
+
     void register_property_listener(
         AudioObjectPropertySelector selector,
         bool& active,
@@ -1350,6 +1485,7 @@ private:
             device_, &property, device_property_listener, &context_);
     }
 
+    std::unique_ptr<PrivateAggregate> aggregate_;
     AudioObjectID device_ = kAudioObjectUnknown;
     DeviceInfo info_;
     AudioDeviceIOProcID proc_id_ = nullptr;
@@ -1371,6 +1507,8 @@ private:
     long output_stream_latency_frames_ = 0;
     InputChannels input_channels_ = InputChannels::Mono;
     ChannelSelection channels_;
+    CoreAudioConfig coreaudio_config_;
+    std::string input_name_;
     double sample_rate_ = 0.0;
     CoreAudioDuplexContext context_;
 };
@@ -1383,7 +1521,8 @@ std::vector<DeviceInfo> list_devices()
     std::vector<DeviceInfo> devices;
     devices.reserve(ids.size());
     for (std::size_t i = 0; i < ids.size(); ++i) {
-        devices.push_back(make_device_info(static_cast<int>(i), ids[i]));
+        auto info = make_device_info(static_cast<int>(i), ids[i]);
+        if (!info.clsid.starts_with("org.jam2.private.")) devices.push_back(std::move(info));
     }
     return devices;
 }
@@ -1421,14 +1560,33 @@ std::unique_ptr<DeviceStream> start_duplex_stream(
     StreamControl& control,
     OutputRecorder* recorder,
     TrackTakeRecorder* track_take_recorder,
-    const WasapiConfig& wasapi)
+    const WasapiConfig& wasapi,
+    const CoreAudioConfig& coreaudio_config)
 {
     if (!wasapi.output_endpoint_id.empty()) throw std::runtime_error("WASAPI is only available on Windows");
-    auto selected = select_device(id);
+    SelectedDevice selected;
+    if (coreaudio_config.output_device_uid.empty()) selected = select_device(id);
+    std::unique_ptr<PrivateAggregate> aggregate;
+    auto device_channels_selected = channels;
+    std::string input_name = selected.info.name;
+    if (!coreaudio_config.output_device_uid.empty()) {
+        const auto plan = plan_coreaudio_devices(coreaudio_config, channels, list_devices());
+        selected.info = plan.output;
+        selected.object = device_with_uid(stable_device_id(plan.output));
+        configure_device(selected.object, requested_sample_rate, requested_buffer_size);
+        if (plan.aggregate) {
+            configure_device(device_with_uid(stable_device_id(plan.input)), requested_sample_rate, requested_buffer_size);
+            aggregate = PrivateAggregate::create(plan);
+            selected.object = aggregate->object;
+        }
+        channels = plan.stream_channels;
+        device_channels_selected = plan.device_channels;
+        input_name = plan.has_input ? plan.input.name : "None";
+    }
     const UInt32 input_channels = device_channels(selected.object, kAudioDevicePropertyScopeInput);
     const UInt32 output_channels = device_channels(selected.object, kAudioDevicePropertyScopeOutput);
-    if (channels.input.empty()) {
-        throw std::runtime_error("CoreAudio stream requires at least one selected input channel");
+    if (channels.input.empty() && channels.output.empty()) {
+        throw std::runtime_error("CoreAudio stream requires selected input or output channels");
     }
     for (int channel : channels.input) {
         if (channel < 0 || static_cast<UInt32>(channel) >= input_channels) {
@@ -1440,7 +1598,7 @@ std::unique_ptr<DeviceStream> start_duplex_stream(
             throw std::runtime_error(channel_range_error("CoreAudio", "output", channels, output_channels, false));
         }
     }
-    if (!is_supported_float32_format(selected.object, kAudioDevicePropertyScopeInput)) {
+    if (!channels.input.empty() && !is_supported_float32_format(selected.object, kAudioDevicePropertyScopeInput)) {
         throw std::runtime_error("CoreAudio stream currently supports float32 linear PCM input only");
     }
     if (!channels.output.empty() && !is_supported_float32_format(selected.object, kAudioDevicePropertyScopeOutput)) {
@@ -1448,7 +1606,7 @@ std::unique_ptr<DeviceStream> start_duplex_stream(
     }
 
     configure_device(selected.object, requested_sample_rate, requested_buffer_size);
-    selected.info = make_device_info(id, selected.object);
+    if (!aggregate) selected.info = make_device_info(selected.info.id, selected.object);
     const long buffer_size =
         static_cast<long>(get_u32_property_or_zero(selected.object, kAudioDevicePropertyBufferFrameSize));
     if (buffer_size <= 0) {
@@ -1478,7 +1636,8 @@ std::unique_ptr<DeviceStream> start_duplex_stream(
         control,
         recorder,
         track_take_recorder,
-        sample_rate > 0.0 ? sample_rate : requested_sample_rate);
+        sample_rate > 0.0 ? sample_rate : requested_sample_rate,
+        std::move(aggregate), coreaudio_config, device_channels_selected, input_name);
     stream->start();
     return stream;
 }

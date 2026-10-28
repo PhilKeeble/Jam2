@@ -343,6 +343,11 @@ void testCoreAudioBufferProcessing()
             std::all_of(disabledSamples.begin(), disabledSamples.end(),
                 [](std::int32_t sample) { return sample == 0; }),
         "CoreAudio disabled streams retain global channel numbering and render selected null input as silence");
+    disabledList->mBuffers[0].mDataByteSize = 0;
+    expect(coreaudio::buffer_frames(disabledList) == 4 && coreaudio::input_channel(disabledList, 2).available(),
+        "disabled aggregate streams with zero-sized buffers must not suppress active device callbacks");
+    disabledList->mBuffers[1].mData = nullptr;
+    expect(coreaudio::buffer_frames(disabledList) == 0, "all disabled CoreAudio streams have no active frames");
 
     expect(coreaudio::float_to_i32(-2.0F) == -2147483647 &&
             coreaudio::float_to_i32(-1.0F) == -2147483647 &&

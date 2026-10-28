@@ -3,6 +3,7 @@
 #include <QString>
 #include "common.hpp"
 #include "RecordingCalibrationProfile.hpp"
+#include "audio_device.hpp"
 
 struct AudioDevicePreference {
     QString backend;
@@ -14,6 +15,9 @@ struct AudioDevicePreference {
     int bufferSize = 64;
     QString wasapiInputId;
     QString wasapiInputName;
+    jam2::audio::AudioDeviceSetup deviceSetup = jam2::audio::AudioDeviceSetup::SingleDevice;
+    QString coreAudioInputId;
+    QString coreAudioInputName;
 };
 
 struct LocalTuningPreference {

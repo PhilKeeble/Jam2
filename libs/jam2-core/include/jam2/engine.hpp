@@ -83,6 +83,7 @@ struct EngineConfig {
     EngineAudioBackend backend = EngineAudioBackend::Device;
     int audio_device_id = -1;
     audio::WasapiConfig wasapi;
+    audio::CoreAudioConfig coreaudio;
     int sample_rate = 48000;
     long audio_buffer_frames = 0;
     int headless_clock_drift_ppm = 0;
