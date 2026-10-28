@@ -83,17 +83,6 @@ bool isSameMachine(const QString& host)
     });
 }
 
-bool isWildcardEndpoint(const QString& endpoint, int& separator)
-{
-    separator = endpoint.lastIndexOf(QLatin1Char(':'));
-    if (separator <= 0) {
-        return false;
-    }
-    const QString host = endpoint.left(separator);
-    return host == QStringLiteral("0.0.0.0") || host == QStringLiteral("::") ||
-        host == QStringLiteral("[::]");
-}
-
 bool matchesContractSampleRate(const QJsonObject& message, int expectedSampleRate)
 {
     if (expectedSampleRate <= 0) {
@@ -285,7 +274,7 @@ SharedSessionController::SharedSessionController(QObject* parent)
             onAssetBinaryMessage(token, payload);
         }
     };
-    server_.onAuthenticated = [this](const QString& token, const QJsonObject& message) {
+    server_.onAuthenticated = [this](const QString& token, const ControlServer::AuthenticatedPeer& message) {
         handleAuthenticatedPeer(token, message);
     };
     server_.onDisconnected = [this](const QString& token) { handleDisconnectedPeer(token); };
@@ -578,6 +567,7 @@ QJsonObject SharedSessionController::multiplexDiagnostics() const
         {QStringLiteral("pause_confirmed"), stats.pauseConfirmed},
         {QStringLiteral("signal_packets_sent"), static_cast<qint64>(stats.signalPacketsSent)},
         {QStringLiteral("signal_packets_received"), static_cast<qint64>(stats.signalPacketsReceived)},
+        {QStringLiteral("signal_packets_rejected"), static_cast<qint64>(stats.signalPacketsRejected)},
         {QStringLiteral("audio_packets_sent"), static_cast<qint64>(stats.audioPacketsSent)},
         {QStringLiteral("audio_packets_received"), static_cast<qint64>(stats.audioPacketsReceived)},
         {QStringLiteral("audio_queue_drops"), static_cast<qint64>(stats.audioQueueDrops)},
@@ -1317,13 +1307,10 @@ void SharedSessionController::handleAssetClientEvent(const TransportEvent& incom
 
 void SharedSessionController::handleAuthenticatedPeer(
     const QString& token,
-    const QJsonObject& message)
+    const ControlServer::AuthenticatedPeer& message)
 {
-    if (role_ != Role::Creator || token.isEmpty()) {
-        return;
-    }
-    const auto name = jam2::application::PeerName::fromWire(message.value(QStringLiteral("peer_name")).toString().toUtf8());
-    if (!name) { server_.rejectAuthenticatedPeer(token,jam2::application::peerNameRequirement()); return; }
+    if (role_ != Role::Creator || token.isEmpty()) return;
+    if (!message.name.valid()) { server_.rejectAuthenticatedPeer(token,jam2::application::peerNameRequirement()); return; }
     const int remotePeers = peers_.size() - (peers_.contains(creator_.localToken) ? 1 : 0);
     if (creator_.sessionPeerLimit > 0 && !peers_.contains(token) &&
         remotePeers >= creator_.sessionPeerLimit) {
@@ -1332,24 +1319,10 @@ void SharedSessionController::handleAuthenticatedPeer(
         return;
     }
 
-    QString endpoint = message.value(QStringLiteral("udp_endpoint")).toString();
-    const QString peerHost = normalizedHost(message.value(QStringLiteral("peer_host")).toString());
-    int separator = -1;
-    if (isWildcardEndpoint(endpoint, separator)) {
-        if (peerHost.isEmpty()) {
-            server_.sendTo(token, QJsonObject{
-                {QStringLiteral("type"), QStringLiteral("session.error")},
-                {QStringLiteral("message"), QStringLiteral("Wildcard UDP candidate could not be resolved")},
-            }, true);
-            return;
-        }
-        endpoint = peerHost + endpoint.mid(separator);
-    }
-    if (endpoint.isEmpty()) {
-        server_.sendTo(token, QJsonObject{
-            {QStringLiteral("type"), QStringLiteral("session.error")},
-            {QStringLiteral("message"), QStringLiteral("Authenticated peer omitted its UDP endpoint")},
-        }, true);
+    const QString endpoint = message.endpoint.text();
+    const QString peerHost = normalizedHost(message.host);
+    if (!message.endpoint.valid()) {
+        server_.rejectAuthenticatedPeer(token, QStringLiteral("Authenticated peer omitted its UDP endpoint"));
         return;
     }
 
@@ -1371,7 +1344,7 @@ void SharedSessionController::handleAuthenticatedPeer(
     }
     controlRecoveryDeadlines_.remove(token);
     Peer peer;
-    peer.name = *name;
+    peer.name = message.name;
     peer.endpoint = endpoint;
     peer.peerId = *peerId;
     peer.edgeState = EdgeState::Authenticated;

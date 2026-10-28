@@ -90,10 +90,11 @@ bool ControlClient::prepareConnection(
     sessionHex_ = sessionHex.toLower();
     masterKey_ = decodeHex(keyHex, 16);
     meshPeerToken_ = meshPeerToken.toLower();
-    meshUdpEndpoint_ = meshUdpEndpoint;
+    meshUdpEndpoint_ = channel == Channel::Asset ? QString{} : jam2::application::binary_wire::Endpoint::fromText(meshUdpEndpoint).text();
     channel_ = channel;
     if (decodeHex(sessionHex_, 8).size() != 8 || masterKey_.size() != 16 ||
-        !peerIdFromToken(meshPeerToken_).has_value() || !localName_.valid() || meshUdpEndpoint_.size() > 255) {
+        !peerIdFromToken(meshPeerToken_).has_value() || !localName_.valid() ||
+        (channel == Channel::Control && !jam2::application::binary_wire::Endpoint::fromText(meshUdpEndpoint_).valid())) {
         reject(
             QStringLiteral("UDP multiplex control session, key, token, or endpoint is invalid"),
             TransportFailure::InvalidConfiguration,
@@ -189,7 +190,7 @@ void ControlClient::readConnection(
     while (handled < kFramesPerTurn) {
         QByteArray body;
         QString error;
-        const TakeFrameResult result = takeFrame(buffer_, body, error);
+        const TakeFrameResult result = takeFrame(buffer_, body, error, handshakeState_ == HandshakeState::Authenticated ? kMaximumRecordBodyBytes : kMaximumHandshakeBodyBytes);
         if (result == TakeFrameResult::NeedMore) {
             if (buffer_.isEmpty()) {
                 frameTimer_.stop();
@@ -212,7 +213,7 @@ void ControlClient::readConnection(
         ++handled;
         ++stats_.framesReceived;
 
-        QJsonObject message;
+        Handshake message;
         if (handshakeState_ != HandshakeState::Authenticated) {
             if (!decodeHandshake(body, message, error)) {
                 ++stats_.authenticationRejects;
@@ -287,30 +288,21 @@ void ControlClient::connectionClosed(
     }
 }
 
-void ControlClient::handleHandshake(const QJsonObject& message)
+void ControlClient::handleHandshake(const Handshake& message)
 {
-    const QString type = message.value(QStringLiteral("type")).toString();
-    if (type == QStringLiteral("hello.error")) {
+    if (const auto* rejected = std::get_if<Rejected>(&message)) {
         ++stats_.authenticationRejects;
-        reject(QStringLiteral("UDP multiplex auth failed: ") +
-            message.value(QStringLiteral("reason")).toString(QStringLiteral("auth failed")),
-            TransportFailure::AuthenticationRejected);
+        reject(QStringLiteral("UDP multiplex auth failed: ") + rejectionText(rejected->reason), TransportFailure::AuthenticationRejected);
         return;
     }
-
     if (handshakeState_ == HandshakeState::WaitingForChallenge) {
-        serverNonce_ = decodeHex(message.value(QStringLiteral("server_nonce")).toString(), 16);
-        if (type != QStringLiteral("hello.challenge") ||
-            message.value(QStringLiteral("version")).toInt() != kControlProtocolVersion ||
-            message.value(QStringLiteral("session")).toString().toLower() != sessionHex_ ||
-            serverNonce_.size() != 16) {
+        const auto* challenge = std::get_if<Challenge>(&message);
+        if (!challenge || challenge->session != sessionHex_) {
             ++stats_.authenticationRejects;
-            reject(
-                QStringLiteral("UDP multiplex control server challenge is invalid"),
-                TransportFailure::AuthenticationRejected,
-                true);
+            reject(QStringLiteral("UDP multiplex control server challenge is invalid"), TransportFailure::AuthenticationRejected, true);
             return;
         }
+        serverNonce_ = challenge->nonce;
         clientNonce_ = randomNonce();
         const QString channel = channel_ == Channel::Asset
             ? QStringLiteral("asset") : QStringLiteral("control");
@@ -321,17 +313,13 @@ void ControlClient::handleHandshake(const QJsonObject& message)
             : QByteArrayLiteral("jam2-control-client-proof");
         const QByteArray proof = keyedValue(
             masterKey_, clientProofDomain, transcript_).left(16);
-        QJsonObject proofMessage{
-            {QStringLiteral("type"), QStringLiteral("hello.proof")},
-            {QStringLiteral("version"), kControlProtocolVersion},
-            {QStringLiteral("session"), sessionHex_},
-            {QStringLiteral("client_nonce"), encodeHex(clientNonce_)},
-            {QStringLiteral("peer_token"), meshPeerToken_},
-            {QStringLiteral("udp_endpoint"), meshUdpEndpoint_},
-            {QStringLiteral("channel"), channel},
-            {QStringLiteral("proof"), encodeHex(proof)},
-        };
-        if (channel_ == Channel::Control) proofMessage.insert(QStringLiteral("peer_name"),localName_.text());
+        Proof proofMessage;
+        proofMessage.nonce = clientNonce_; proofMessage.peer = meshPeerToken_; proofMessage.proof = proof;
+        proofMessage.channel = channel_ == Channel::Asset ? HandshakeChannel::Asset : HandshakeChannel::Control;
+        if (channel_ == Channel::Control) {
+            proofMessage.endpoint = jam2::application::binary_wire::Endpoint::fromText(meshUdpEndpoint_);
+            proofMessage.name = localName_;
+        }
         const QByteArray response = encodeHandshake(proofMessage);
         if (!writeFrame(response)) {
             return;
@@ -344,20 +332,13 @@ void ControlClient::handleHandshake(const QJsonObject& message)
         return;
     }
 
-    if (handshakeState_ != HandshakeState::WaitingForServerProof ||
-        type != QStringLiteral("hello.ok") ||
-        message.value(QStringLiteral("version")).toInt() != kControlProtocolVersion ||
-        message.value(QStringLiteral("peer_token")).toString() != meshPeerToken_ ||
-        message.value(QStringLiteral("channel")).toString(QStringLiteral("control")) !=
-            (channel_ == Channel::Asset ? QStringLiteral("asset") : QStringLiteral("control"))) {
+    const auto* accepted = std::get_if<Accepted>(&message);
+    if (handshakeState_ != HandshakeState::WaitingForServerProof || !accepted) {
         ++stats_.authenticationRejects;
-        reject(
-            QStringLiteral("UDP multiplex control server proof state is invalid"),
-            TransportFailure::AuthenticationRejected,
-            true);
+        reject(QStringLiteral("UDP multiplex control server proof state is invalid"), TransportFailure::AuthenticationRejected, true);
         return;
     }
-    const QByteArray receivedProof = decodeHex(message.value(QStringLiteral("proof")).toString(), 16);
+    const QByteArray receivedProof = accepted->proof;
     const QByteArray serverProofDomain = channel_ == Channel::Asset
         ? QByteArrayLiteral("jam2-asset-server-proof")
         : QByteArrayLiteral("jam2-control-server-proof");
@@ -382,7 +363,7 @@ void ControlClient::handleHandshake(const QJsonObject& message)
         channel_ == Channel::Asset ? QByteArrayLiteral("jam2-asset-c2s")
                                    : QByteArrayLiteral("jam2-control-c2s"),
         transcript_);
-    if (true) {
+    {
         const std::weak_ptr<ControlConnection> weak = connection_;
         wire_ = std::make_shared<jam2::application::control_wire::Channel>(sendKey_, receiveKey_,
             [weak](const QByteArray& bytes) { const auto connection = weak.lock(); return connection && connection->isConnected() && connection->write(bytes); },

@@ -112,7 +112,7 @@ int main(int argc, char** argv) {
         std::array<bool, 4> started{};
         int warnings = 0;
         QByteArray receivedAsset;
-        coordinator.onAuthenticated = [&](const QString& token, const QJsonObject&) {
+        coordinator.onAuthenticated = [&](const QString& token, const ControlServer::AuthenticatedPeer&) {
             if (!authenticated.insert(token).second) return;
             const int newcomer = token[0].unicode() - '1';
             for (int index = 1; index < 4; ++index) {

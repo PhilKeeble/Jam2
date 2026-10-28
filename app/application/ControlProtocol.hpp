@@ -2,15 +2,16 @@
 #include "ControlWireVersion.hpp"
 
 #include <QByteArray>
-#include <QJsonObject>
-#include <QList>
+#include "PeerName.hpp"
+#include "BinaryWire.hpp"
+#include <variant>
 #include <QString>
 
 #include <optional>
 
 namespace jam2::control_protocol {
 
-constexpr qsizetype kMaxJsonBytes = 64 * 1024;
+constexpr qsizetype kMaximumHandshakeBodyBytes = 90;
 constexpr qsizetype kMaximumRecordBodyBytes=64*1024+28;
 constexpr int kControlProtocolVersion = jam2::application::kControlWireVersion;
 constexpr qint64 kOutputHighWaterBytes = 5 * 1024 * 1024;
@@ -91,8 +92,24 @@ QByteArray makeTranscript(
 QByteArray keyedValue(const QByteArray& masterKey, const QByteArray& domain, const QByteArray& transcript);
 bool constantTimeEqual(const QByteArray& left, const QByteArray& right);
 
-QByteArray encodeHandshake(const QJsonObject& message);
-TakeFrameResult takeFrame(QByteArray& buffer, QByteArray& body, QString& error);
-bool decodeHandshake(const QByteArray& body, QJsonObject& message, QString& error);
+enum class HandshakeChannel : quint8 { Control = 1, Asset = 2 };
+enum class HandshakeRejection : quint8 { InvalidFields = 1, InvalidProof, DuplicatePeer, ControlRequired, Capacity };
+struct Challenge { QString session; QByteArray nonce; };
+struct Proof {
+    QByteArray nonce;
+    QString peer;
+    QByteArray proof;
+    HandshakeChannel channel = HandshakeChannel::Control;
+    jam2::application::binary_wire::Endpoint endpoint;
+    jam2::application::PeerName name;
+};
+struct Accepted { QByteArray proof; };
+struct Rejected { HandshakeRejection reason = HandshakeRejection::InvalidFields; };
+using Handshake = std::variant<Challenge, Proof, Accepted, Rejected>;
+QString rejectionText(HandshakeRejection reason);
+QByteArray encodeHandshake(const Handshake& message);
+TakeFrameResult takeFrame(QByteArray& buffer, QByteArray& body, QString& error,
+    qsizetype maximumBodyBytes = kMaximumRecordBodyBytes);
+bool decodeHandshake(const QByteArray& body, Handshake& message, QString& error);
 
 } // namespace jam2::control_protocol

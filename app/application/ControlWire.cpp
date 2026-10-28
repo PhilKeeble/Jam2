@@ -9,7 +9,6 @@
 #include <QCborArray>
 #include <QCryptographicHash>
 #include <QJsonArray>
-#include <QJsonDocument>
 #include <QMessageAuthenticationCode>
 #include <QSet>
 #include <QHash>

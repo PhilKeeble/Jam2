@@ -74,7 +74,7 @@ private:
     void connectionClosed(
         const jam2::application::ControlConnection::Pointer& connection,
         const QString& detail);
-    void handleHandshake(const QJsonObject& message);
+    void handleHandshake(const jam2::control_protocol::Handshake& message);
     void retireWire();
     bool writeFrame(const QByteArray& frame);
     void reject(

@@ -45,7 +45,7 @@ void recordsAndDeltas()
     require(sender.encode({{"type", "session.heartbeat"}, {"sequence", 0x01020304}}, encoded, error) &&
         encoded.payload.toHex() == "0101020304", "golden positional heartbeat bytes changed");
     const auto golden = wire::authenticate(encoded.operation, 0x0102030405060708ULL, encoded.payload, QByteArray(32, '\0'));
-    require(golden.toHex() == "00000021000304000102030405060708d608ad9239c625646ee9a6b022cabd560101020304",
+    require(golden.toHex() == "000000210003050001020304050607084bdf4eb1c21190ca0ed923d07091bd970101020304",
         "golden big-endian/HMAC record changed");
     auto message = song();
     require(sender.encode(message, encoded, error), "encode checkpoint");

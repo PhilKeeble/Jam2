@@ -209,7 +209,7 @@ public:
     std::function<void(const QString&, const QJsonObject&)> onAssetMessage;
     std::function<void(const QString&, const QByteArray&)> onAssetBinaryMessage;
     std::function<void(const QString&)> onAssetDisconnected;
-    std::function<void(const QString&, const QJsonObject&)> onPeerAuthenticated;
+    std::function<void(const QString&, const ControlServer::AuthenticatedPeer&)> onPeerAuthenticated;
     std::function<void(const QString&)> onPeerDisconnected;
     std::function<void(const SessionContract&)> onContract;
 
@@ -245,7 +245,7 @@ private:
     void handleClientEvent(const jam2::control_protocol::TransportEvent& event);
     void handleAssetClientEvent(const jam2::control_protocol::TransportEvent& event);
     void interruptAssetJoiner();
-    void handleAuthenticatedPeer(const QString& token, const QJsonObject& message);
+    void handleAuthenticatedPeer(const QString& token, const ControlServer::AuthenticatedPeer& message);
     void handleDisconnectedPeer(const QString& token);
     void handleClientMessage(const QJsonObject& message);
     bool acceptContract(const QJsonObject& message);

@@ -5,8 +5,7 @@
 #include "PeerBootstrap.hpp"
 #include "PeerIntroductionCoordinator.hpp"
 
-#include <QJsonDocument>
-#include <QJsonObject>
+#include "RendezvousWire.hpp"
 #include <QPointer>
 #include <QtEndian>
 
@@ -24,12 +23,8 @@
 namespace jam2::application {
 namespace {
 using Phase = UdpMultiplexTransport::LinkPhase;
-quint64 number(const QJsonObject& object, const char* field)
-{
-    const auto value = object.value(QLatin1String(field)).toInteger(-1);
-    return value < 0 ? 0 : static_cast<quint64>(value);
-}
-QString text(const QJsonObject& object, const char* field) { return object.value(QLatin1String(field)).toString(); }
+namespace rv = rendezvous_wire;
+using SignalKind = rv::Kind;
 bool token(const QString& value) { return control_protocol::decodeHex(value, 16).size() == 16; }
 quint64 peerId(const QString& value) { return control_protocol::peerIdFromToken(value).value_or(0); }
 QByteArray bytes(std::span<const std::uint8_t> value)
@@ -496,7 +491,7 @@ struct UdpMultiplexTransport::Impl {
                 continue;
             }
             if (!packet.link || !packet.link->readable.load(std::memory_order_acquire) || packet.link->phase != Phase::Active) continue;
-            if (packet.signal) receiveSignal(QJsonDocument::fromJson(bytes(contents)).object(), now);
+            if (packet.signal) receiveSignalBytes(bytes(contents), now);
             else muxReceive(packet.link, contents, now);
         }
     }
@@ -584,30 +579,32 @@ struct UdpMultiplexTransport::Impl {
         receiverChanged.notify_all();
         if (worker.joinable()) worker.join();
     }
-    QJsonObject fields(const char* kind, const std::shared_ptr<Link>& link = {})
+    rv::Message fields(SignalKind kind, const std::shared_ptr<Link>& link = {})
     {
-        QJsonObject object{{QStringLiteral("v"), 1}, {QStringLiteral("type"), QLatin1String(kind)},
-            {QStringLiteral("session"), config.sessionHex}, {QStringLiteral("key"), config.keyHex},
-            {QStringLiteral("peer"), config.localToken}};
-        if (config.creator) object[QStringLiteral("directory_revision")] = static_cast<qint64>(directoryRevision);
-        if (QString::fromLatin1(kind) == QLatin1String("jam_create") && !registrationChallenge.isEmpty())
-            object[QStringLiteral("nonce")] = registrationChallenge;
+        rv::Message object; object.kind = kind; object.session = config.sessionHex;
+        object.key = config.keyHex; object.peer = config.localToken;
+        if (config.creator) object.directoryRevision = directoryRevision;
+        if (kind == SignalKind::Create) object.nonce = registrationChallenge;
         if (link) {
-            object[QStringLiteral("nonce")] = link->request;
-            object[QStringLiteral("attempt")] = link->attempt;
-            object[QStringLiteral("introduction")] = static_cast<qint64>(link->introduction);
-            if (QString::fromLatin1(kind) == QLatin1String("jam_candidate") && !localHost.empty()) {
-                object[QStringLiteral("local_endpoint")] = QJsonObject{
-                    {QStringLiteral("host"), QString::fromStdString(localHost)},
-                    {QStringLiteral("port"), link->socket->local_endpoint().port}};
-            }
+            object.nonce = link->request; object.attempt = static_cast<quint8>(link->attempt);
+            object.introduction = link->introduction;
+            if (kind == SignalKind::Candidate && !localHost.empty())
+                object.local = rv::Endpoint::from(QString::fromStdString(localHost), link->socket->local_endpoint().port);
         }
         return object;
     }
-    void send(const std::shared_ptr<jam2::UdpSocket>& socket, const QJsonObject& object)
+    void send(const std::shared_ptr<jam2::UdpSocket>& socket, const rv::Message& object)
     {
-        const auto packet = QJsonDocument(object).toJson(QJsonDocument::Compact);
+        const auto packet = rv::encode(object);
+        if (packet.isEmpty()) { ++counters.sendErrors; return; }
         if (socket->send_to(server, view(packet)).outcome == jam2::UdpSendOutcome::Sent) ++counters.signalPacketsSent;
+        else ++counters.sendErrors;
+    }
+    void receiveSignalBytes(const QByteArray& bytes, quint64 now)
+    {
+        const auto message = rv::decode(bytes);
+        if (!message || rv::request(message->kind)) { ++counters.signalPacketsRejected; return; }
+        receiveSignal(*message, now);
     }
     void configureSocket(jam2::UdpSocket& socket) const {
         if (config.socketBuffers.sendBytes) socket.set_send_buffer_size(*config.socketBuffers.sendBytes);
@@ -623,10 +620,10 @@ struct UdpMultiplexTransport::Impl {
         }
         throw std::runtime_error("Could not allocate an unused UDP candidate port");
     }
-    void ackPair(const QJsonObject& message)
+    void ackPair(const rv::Message& message)
     {
-        auto object = fields("jam_pair_ack");
-        for (const char* name : {"nonce", "attempt", "introduction"}) object[QLatin1String(name)] = message.value(QLatin1String(name));
+        auto object = fields(SignalKind::PairAck);
+        object.nonce = message.nonce; object.attempt = message.attempt; object.introduction = message.introduction;
         send(signalSocket, object);
     }
     void failure(const QString& a, const QString& b, const QString& detail)
@@ -733,52 +730,51 @@ struct UdpMultiplexTransport::Impl {
             }
         }
     }
-    void receiveSignal(const QJsonObject& message, quint64 now)
+    void receiveSignal(const rv::Message& message, quint64 now)
     {
-        if (number(message, "v") != 1 || text(message,"to") != config.localToken ||
-            text(message,"session") != config.sessionHex) return;
+        if (message.to != config.localToken || message.session != config.sessionHex) return;
         ++counters.signalPacketsReceived;
-        if (token(text(message,"creator"))) coordinator = text(message,"creator");
-        const auto kind = text(message,"type"), peer = text(message,"peer"), request = text(message,"nonce");
-        if (config.creator && (kind == QLatin1String("jam_admit_ack") || kind == QLatin1String("jam_remove_ack") || kind == QLatin1String("jam_reject_ack"))) {
-            const auto action = kind == QLatin1String("jam_admit_ack") ? CommandKind::Admit
-                : kind == QLatin1String("jam_remove_ack") ? CommandKind::Remove : CommandKind::Reject;
+        if (token(message.creator)) coordinator = message.creator;
+        const auto kind = message.kind; const auto peer = message.peer, request = message.nonce;
+        if (config.creator && (kind == SignalKind::AdmitAck || kind == SignalKind::RemoveAck || kind == SignalKind::RejectAck)) {
+            const auto action = kind == SignalKind::AdmitAck ? CommandKind::Admit
+                : kind == SignalKind::RemoveAck ? CommandKind::Remove : CommandKind::Reject;
             const auto pending = membershipActions.find({action, peer});
-            if (pending != membershipActions.end() && pending->second.sequence == number(message, "member_sequence"))
+            if (pending != membershipActions.end() && pending->second.sequence == message.memberSequence)
                 membershipActions.erase(pending);
             return;
         }
-        if (kind == QLatin1String("jam_create_challenge") && config.creator) {
-            if (number(message, "directory_revision") == directoryRevision && token(text(message, "nonce"))) {
-                registrationChallenge = text(message, "nonce"); nextRegister = 0;
+        if (kind == SignalKind::CreateChallenge && config.creator) {
+            if (message.directoryRevision == directoryRevision && token(message.nonce)) {
+                registrationChallenge = message.nonce; nextRegister = 0;
             }
             return;
         }
-        if (kind == QLatin1String("jam_created")) {
-            if (number(message, "directory_revision") != directoryRevision) return;
+        if (kind == SignalKind::Created) {
+            if (message.directoryRevision != directoryRevision) return;
             const bool first = !registered;
             if (!paused) { registered = true; nextRegister = now + 15000000; }
             if (first) post([](auto& self) { if (self.onRegistered) self.onRegistered(); });
             return;
         }
-        if (kind == QLatin1String("jam_paused")) {
-            if (number(message, "directory_revision") == directoryRevision) pauseConfirmed = true;
+        if (kind == SignalKind::Paused) {
+            if (message.directoryRevision == directoryRevision) pauseConfirmed = true;
             return;
         }
-        if (kind == QLatin1String("jam_wait")) { registeringMember = false; return; }
-        if (kind == QLatin1String("jam_join_request") && config.creator && token(peer)) {
+        if (kind == SignalKind::Wait) { registeringMember = false; return; }
+        if (kind == SignalKind::JoinRequest && config.creator && token(peer)) {
             if (pendingJoins.contains(peer)) return;
             pendingJoins.insert(peer);
             post([peer](auto& self) { if (self.onJoinRequest) self.onJoinRequest(peer); }); return;
         }
-        if (kind == QLatin1String("jam_error")) {
-            log(text(message,"detail"));
+        if (kind == SignalKind::Error) {
+            log(rv::errorText(message.error));
             if (joining && now >= joinDeadline && !warningPosted) {
-                warningPosted = true; joining = false; failure(config.localToken, coordinator, text(message,"detail"));
+                warningPosted = true; joining = false; failure(config.localToken, coordinator, rv::errorText(message.error));
             }
             return;
         }
-        if (kind == QLatin1String("jam_connected") || kind == QLatin1String("jam_failed")) {
+        if (kind == SignalKind::Connected || kind == SignalKind::Failed) {
             ackPair(message);
             if (!terminalRequests.insert(request).second) return;
             terminalOrder.push_back(request);
@@ -786,9 +782,9 @@ struct UdpMultiplexTransport::Impl {
             requests.erase(request);
             if (const auto found = links.find(peer); found != links.end() && found->second->request == request) {
                 const auto link = found->second;
-                if (number(message,"introduction") != link->introduction ||
-                    number(message,"attempt") != static_cast<quint64>(link->attempt) || link->phase == Phase::Active || link->phase == Phase::Failed) return;
-                if (kind == QLatin1String("jam_connected")) {
+                if (message.introduction != link->introduction ||
+                    message.attempt != static_cast<quint64>(link->attempt) || link->phase == Phase::Active || link->phase == Phase::Failed) return;
+                if (kind == SignalKind::Connected) {
                     if (!link->gotHello || !link->gotAck) return;
                     activateLink(link,now);
                     log(QStringLiteral("UDP link active: %1, attempt %2, local port %3, route=%4, remote=%5").arg(peer).arg(link->attempt).arg(link->socket->local_endpoint().port).arg(link->route, QString::fromStdString(jam2::endpoint_to_string(jam2::format_udp_endpoint(link->remote)))));
@@ -796,16 +792,16 @@ struct UdpMultiplexTransport::Impl {
                 }
                 link->phase = Phase::Failed; link->socket.reset();
                 pendingJoins.erase(peer);
-            } else if (kind == QLatin1String("jam_connected")) return;
-            const auto detail = number(message,"attempt") >= 10
+            } else if (kind == SignalKind::Connected) return;
+            const auto detail = message.attempt >= 10
                 ? QStringLiteral("Direct UDP connection failed after 10 socket pairs; existing links remain active.")
                 : QStringLiteral("UDP introduction did not complete; existing links remain active.");
-            failure(text(message,"a"), text(message,"b"), detail);
+            failure(message.a, message.b, detail);
             return;
         }
-        if (kind == QLatin1String("jam_prepare")) {
+        if (kind == SignalKind::Prepare) {
             if (!token(peer) || !token(request) || peer == config.localToken || terminalRequests.contains(request)) return;
-            const auto attempt = number(message,"attempt"), intro = number(message,"introduction");
+            const auto attempt = message.attempt; const auto intro = message.introduction;
             if (attempt < 1 || attempt > 10 || intro == 0) return;
             auto found = links.find(peer);
             if (found != links.end()) {
@@ -831,31 +827,17 @@ struct UdpMultiplexTransport::Impl {
         const auto found = links.find(peer);
         if (found == links.end()) return;
         const auto link = found->second;
-        if (link->request != request || link->introduction != number(message,"introduction") ||
-            static_cast<quint64>(link->attempt) != number(message,"attempt") ||
+        if (link->request != request || link->introduction != message.introduction ||
+            static_cast<quint64>(link->attempt) != message.attempt ||
             link->phase == Phase::Active || link->phase == Phase::Failed) return;
-        const auto endpointObject = message.value(QStringLiteral("endpoint")).toObject();
-        const auto endpoint = [&]() -> std::optional<jam2::ResolvedUdpEndpoint> {
-            const auto host = text(endpointObject,"host");
-            const auto port = number(endpointObject,"port");
-            if (host.isEmpty() || port == 0 || port > 65535) return {};
-            try { return jam2::resolve_udp_endpoint({host.toStdString(), static_cast<std::uint16_t>(port)}); }
-            catch (...) { return {}; }
-        };
-        if (kind == QLatin1String("jam_registered") || kind == QLatin1String("jam_offer") || kind == QLatin1String("jam_go")) {
-            // Endpoint is the partner on generic server messages; own observed
-            // endpoint is provided explicitly in jam_registered by the server.
-            const auto observed = message.value(QStringLiteral("observed")).toObject();
-            const auto host = text(observed,"host"); const auto port = number(observed,"port");
-            if (!host.isEmpty() && port > 0 && port <= 65535)
-                link->observed = jam2::resolve_udp_endpoint({host.toStdString(), static_cast<std::uint16_t>(port)});
-        }
-        if (kind == QLatin1String("jam_offer") && (link->phase == Phase::Preparing || link->phase == Phase::Offered)) {
-            if (const auto remote = endpoint()) {
-                link->remote = *remote; link->phase = Phase::Offered; link->nextAction = 0;
-                link->route = text(message, "route") == QLatin1String("lan") ? QStringLiteral("lan") : QStringLiteral("public");
+        if (message.observed.valid())
+            link->observed = jam2::resolve_udp_endpoint({message.observed.host().toStdString(), message.observed.port});
+        if (kind == SignalKind::Offer && (link->phase == Phase::Preparing || link->phase == Phase::Offered)) {
+            if (message.endpoint.valid()) {
+                link->remote = jam2::resolve_udp_endpoint({message.endpoint.host().toStdString(), message.endpoint.port}); link->phase = Phase::Offered; link->nextAction = 0;
+                link->route = message.lan ? QStringLiteral("lan") : QStringLiteral("public");
             }
-        } else if (kind == QLatin1String("jam_go") && link->phase == Phase::Offered) {
+        } else if (kind == SignalKind::Go && link->phase == Phase::Offered) {
             link->phase = Phase::Probing; link->deadline = now + 3000000; link->nextAction = 0;
         }
     }
@@ -1048,7 +1030,7 @@ struct UdpMultiplexTransport::Impl {
                     continue;
                 }
                 if (!rendezvous() && isPeerBootstrap(packet)) { receiveBootstrap(packet,received->endpoint,now); continue; }
-                if (rendezvous() && received->endpoint==server) { receiveSignal(QJsonDocument::fromJson(bytes(packet)).object(),now); continue; }
+                if (rendezvous() && received->endpoint==server) { receiveSignalBytes(bytes(packet),now); continue; }
                 std::shared_ptr<Link> selected;
                 for (const auto* collection : {&links,&retainedLinks}) {
                     for (const auto& [peer,link] : *collection) {
@@ -1104,31 +1086,31 @@ struct UdpMultiplexTransport::Impl {
             const bool full = config.maximumPeers > 0 && admitted.size() >= static_cast<std::size_t>(config.maximumPeers);
             if (full && !pending() && !paused) {
                 ++directoryRevision;
-                send(signalSocket, fields("jam_pause")); paused = true; registered = false;
+                send(signalSocket, fields(SignalKind::Pause)); paused = true; registered = false;
                 pauseConfirmed = false; nextPause = now + 500000; pauseDeadline = now + 8000000;
                 log(QStringLiteral("Jam full; rendezvous keepalives paused"));
             }
             if (paused && !pauseConfirmed && now >= nextPause && now < pauseDeadline) {
-                send(signalSocket, fields("jam_pause")); nextPause = now + 500000;
+                send(signalSocket, fields(SignalKind::Pause)); nextPause = now + 500000;
             }
             if (!full && paused) { ++directoryRevision; paused = false; registered = false; nextRegister = 0; }
             if (!paused && now >= nextRegister) {
-                auto object = fields("jam_create");
-                object[QStringLiteral("max_peers")] = config.maximumPeers;
-                object[QStringLiteral("member_count")] = static_cast<int>(admitted.size());
+                auto object = fields(SignalKind::Create);
+                object.maximumPeers = config.maximumPeers;
+                object.memberCount = static_cast<int>(admitted.size());
                 send(signalSocket, object); nextRegister = now + (registered ? 15000000 : 500000);
             }
         } else if (joining && now >= nextJoin) {
             if (now >= joinDeadline) {
                 joining = false; failure(config.localToken, coordinator, QStringLiteral("Rendezvous server or creator did not accept the join"));
-            } else { send(signalSocket, fields(recoveryJoin ? "jam_recover" : "jam_join")); nextJoin = now + 500000; }
+            } else { send(signalSocket, fields(recoveryJoin ? SignalKind::Recover : SignalKind::Join)); nextJoin = now + 500000; }
         }
         if (registeringMember && now >= memberDeadline) {
             registeringMember = false;
             log(QStringLiteral("Temporary mesh registration timed out; existing links remain active"));
         }
         if (registeringMember && now >= nextMember) {
-            send(signalSocket, fields("jam_member")); nextMember = now + 500000;
+            send(signalSocket, fields(SignalKind::Member)); nextMember = now + 500000;
         }
         for (auto it = membershipActions.begin(); it != membershipActions.end();) {
             if (now >= it->second.deadline) {
@@ -1137,9 +1119,9 @@ struct UdpMultiplexTransport::Impl {
             }
             if (now >= it->second.nextSend) {
                 const auto kind = it->first.first;
-                auto object = fields(kind == CommandKind::Admit ? "jam_admit" : kind == CommandKind::Remove ? "jam_remove" : "jam_reject");
-                object[QStringLiteral("to")] = it->first.second;
-                object[QStringLiteral("member_sequence")] = static_cast<qint64>(it->second.sequence);
+                auto object = fields(kind == CommandKind::Admit ? SignalKind::Admit : kind == CommandKind::Remove ? SignalKind::Remove : SignalKind::Reject);
+                object.to = it->first.second;
+                object.memberSequence = it->second.sequence;
                 send(signalSocket, object); it->second.nextSend = now + 500000;
             }
             ++it;
@@ -1151,9 +1133,9 @@ struct UdpMultiplexTransport::Impl {
                 it = requests.erase(it); continue;
             }
             if (now >= request.nextSend) {
-                auto object = fields("jam_pair");
-                object[QStringLiteral("a")] = request.a; object[QStringLiteral("b")] = request.b;
-                object[QStringLiteral("nonce")] = request.nonce;
+                auto object = fields(SignalKind::Pair);
+                object.a = request.a; object.b = request.b;
+                object.nonce = request.nonce;
                 send(signalSocket, object); request.nextSend = now + 500000;
             }
             ++it;
@@ -1259,7 +1241,7 @@ struct UdpMultiplexTransport::Impl {
                 failure(config.localToken, link->peer, QStringLiteral("UDP candidate registration or READY handoff timed out")); continue;
             }
             if (link->phase == Phase::Preparing && now >= link->nextAction) {
-                if (rendezvous()) send(link->socket, fields("jam_candidate", link));
+                if (rendezvous()) send(link->socket, fields(SignalKind::Candidate, link));
                 else {
                     auto candidateMessage=bootstrapMessage(PeerBootstrapKind::Candidate,link);
                     candidateMessage.local=PeerBootstrapEndpoint::from({localHost,link->socket->local_endpoint().port});
@@ -1267,7 +1249,7 @@ struct UdpMultiplexTransport::Impl {
                 }
                 link->nextAction = now + 500000;
             } else if (link->phase == Phase::Offered && now >= link->nextAction) {
-                if (rendezvous()) send(link->socket, fields("jam_ready", link));
+                if (rendezvous()) send(link->socket, fields(SignalKind::Ready, link));
                 else sendBootstrap(link->socket,server,bootstrapMessage(PeerBootstrapKind::Ready,link));
                 link->nextAction = now + 500000;
             } else if (link->phase == Phase::Probing) {
@@ -1308,7 +1290,7 @@ struct UdpMultiplexTransport::Impl {
                     link->phase = Phase::Failed; link->socket.reset(); pendingJoins.erase(link->peer);
                     failure(config.localToken, link->peer, QStringLiteral("UDP attempt result synchronization timed out"));
                 } else if (now >= link->nextAction) {
-                    auto object = fields("jam_outcome", link); object[QStringLiteral("success")] = link->report;
+                    auto object = fields(SignalKind::Outcome, link); object.success = link->report;
                     send(link->socket, object); link->nextAction = now + 500000;
                 }
             }
@@ -1415,7 +1397,7 @@ struct UdpMultiplexTransport::Impl {
                 if (complete && leavesSent == 3) break;
                 jam2::UdpSocket::waitForAny(sockets, 10000);
             }
-            if (config.creator && rendezvous()) { ++directoryRevision; send(signalSocket, fields("jam_leave")); }
+            if (config.creator && rendezvous()) { ++directoryRevision; send(signalSocket, fields(SignalKind::Leave)); }
         } catch (const std::exception& exception) {
             const auto detail = QString::fromUtf8(exception.what());
             if (!rendezvous()) post([detail](auto& self) { if (self.onBootstrapFailure) self.onBootstrapFailure(detail); });

@@ -1,7 +1,6 @@
 #include "ControlProtocol.hpp"
 
 #include <QCryptographicHash>
-#include <QJsonDocument>
 #include <QMessageAuthenticationCode>
 #include <QRandomGenerator>
 
@@ -155,22 +154,51 @@ bool constantTimeEqual(const QByteArray& left, const QByteArray& right)
     return difference == 0;
 }
 
-QByteArray encodeHandshake(const QJsonObject& message)
+QString rejectionText(HandshakeRejection reason)
 {
-    const QByteArray payload = QJsonDocument(message).toJson(QJsonDocument::Compact);
-    if (payload.isEmpty() || payload.size() > kMaxJsonBytes) {
-        return {};
+    switch (reason) {
+    case HandshakeRejection::InvalidFields: return QStringLiteral("authentication fields are invalid");
+    case HandshakeRejection::InvalidProof: return QStringLiteral("authentication proof is invalid");
+    case HandshakeRejection::DuplicatePeer: return QStringLiteral("peer token is already active");
+    case HandshakeRejection::ControlRequired: return QStringLiteral("asset stream requires an authenticated control peer");
+    case HandshakeRejection::Capacity: return QStringLiteral("authentication capacity reached");
     }
-    return frameBody(payload);
+    return QStringLiteral("unknown authentication rejection");
+}
+QByteArray encodeHandshake(const Handshake& message)
+{
+    using namespace jam2::application::binary_wire;
+    Writer w; w.bytes.reserve(kMaximumHandshakeBodyBytes); w.number<quint8>(kControlProtocolVersion);
+    std::visit([&](const auto& value) {
+        using T = std::decay_t<decltype(value)>;
+        if constexpr (std::is_same_v<T, Challenge>) {
+            w.number<quint8>(1); w.hex(value.session, 8); w.fixed(value.nonce, 16);
+        } else if constexpr (std::is_same_v<T, Proof>) {
+            w.number<quint8>(2); w.fixed(value.nonce, 16); w.hex(value.peer, 16); w.fixed(value.proof, 16);
+            w.number<quint8>(static_cast<quint8>(value.channel));
+            if (!peerIdFromToken(value.peer)) w.okay = false;
+            if (value.channel == HandshakeChannel::Control) {
+                if (!value.endpoint.valid() || !value.name.valid()) w.okay = false;
+                writeEndpoint(w, value.endpoint);
+                const auto name = value.name.utf8(); w.number<quint8>(static_cast<quint8>(name.size())); w.bytes += name;
+            } else if (value.channel != HandshakeChannel::Asset || !value.endpoint.empty() || value.name.valid()) w.okay = false;
+        } else if constexpr (std::is_same_v<T, Accepted>) {
+            w.number<quint8>(3); w.fixed(value.proof, 16);
+        } else {
+            w.number<quint8>(4); w.number<quint8>(static_cast<quint8>(value.reason));
+            if (value.reason < HandshakeRejection::InvalidFields || value.reason > HandshakeRejection::Capacity) w.okay = false;
+        }
+    }, message);
+    return w.okay && w.bytes.size() <= kMaximumHandshakeBodyBytes ? frameBody(w.bytes) : QByteArray{};
 }
 
-TakeFrameResult takeFrame(QByteArray& buffer, QByteArray& body, QString& error)
+TakeFrameResult takeFrame(QByteArray& buffer, QByteArray& body, QString& error, qsizetype maximumBodyBytes)
 {
     if (buffer.size() < 4) {
         return TakeFrameResult::NeedMore;
     }
     const quint32 size = readU32(buffer, 0);
-    if (size == 0 || size > static_cast<quint32>(kMaximumRecordBodyBytes)) {
+    if (size == 0 || size > static_cast<quint32>(maximumBodyBytes)) {
         error = QStringLiteral("control frame length exceeds the current record bound");
         return TakeFrameResult::Invalid;
     }
@@ -182,20 +210,39 @@ TakeFrameResult takeFrame(QByteArray& buffer, QByteArray& body, QString& error)
     return TakeFrameResult::Ready;
 }
 
-bool decodeHandshake(const QByteArray& body, QJsonObject& message, QString& error)
+bool decodeHandshake(const QByteArray& body, Handshake& message, QString& error)
 {
-    if (body.size() > kMaxJsonBytes) {
-        error = QStringLiteral("handshake JSON exceeds its bound");
-        return false;
+    using namespace jam2::application::binary_wire;
+    Reader r{body}; Handshake decoded;
+    if (body.size() > kMaximumHandshakeBodyBytes || r.number<quint8>() != kControlProtocolVersion) {
+        error = QStringLiteral("unsupported or oversized binary handshake"); return false;
     }
-    QJsonParseError parseError;
-    const QJsonDocument document = QJsonDocument::fromJson(body, &parseError);
-    if (!document.isObject()) {
-        error = QStringLiteral("invalid handshake JSON: ") + parseError.errorString();
-        return false;
+    switch (r.number<quint8>()) {
+    case 1: { Challenge m; m.session = r.hex(8); m.nonce = r.take(16); decoded = std::move(m); break; }
+    case 2: {
+        Proof m; m.nonce = r.take(16); m.peer = r.hex(16); m.proof = r.take(16);
+        m.channel = static_cast<HandshakeChannel>(r.number<quint8>());
+        if (m.channel == HandshakeChannel::Control) {
+            m.endpoint = readEndpoint(r);
+            const auto size = r.number<quint8>();
+            if (size > jam2::application::PeerName::kMaximumUtf8Bytes) r.okay = false;
+            const auto name = jam2::application::PeerName::fromWire(r.take(size));
+            if (!m.endpoint.valid() || !name) r.okay = false;
+            else m.name = *name;
+        } else if (m.channel != HandshakeChannel::Asset) r.okay = false;
+        if (!peerIdFromToken(m.peer)) r.okay = false;
+        decoded = std::move(m); break;
     }
-    message = document.object();
-    return true;
+    case 3: decoded = Accepted{r.take(16)}; break;
+    case 4: {
+        const auto reason = static_cast<HandshakeRejection>(r.number<quint8>());
+        if (reason < HandshakeRejection::InvalidFields || reason > HandshakeRejection::Capacity) r.okay = false;
+        decoded = Rejected{reason}; break;
+    }
+    default: r.okay = false; break;
+    }
+    if (!r.done()) { error = QStringLiteral("invalid binary handshake fields or length"); return false; }
+    message = std::move(decoded); return true;
 }
 
 } // namespace jam2::control_protocol

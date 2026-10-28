@@ -76,8 +76,8 @@ int main(int argc,char** argv)
                 if (i && peer!=token(0)) { ++repaired[i]; clients[i]->send({{"type","session.udp.recover"},{"peer",peer}}); }
             };
         }
-        host.onAuthenticated=[&](const QString& peer,const QJsonObject& message) {
-            require(message.value("peer_name").toString()==(peer==token(2) ? QString::fromUtf8("Élodie") : QStringLiteral("Alex")),"join name not authenticated");
+        host.onAuthenticated=[&](const QString& peer,const ControlServer::AuthenticatedPeer& message) {
+            require(message.name.text()==(peer==token(2) ? QString::fromUtf8("Élodie") : QStringLiteral("Alex")),"join name not authenticated");
             if (holdAdmission || !authenticated.insert(peer).second) return;
             peers[0]->admitPeer(peer);
             for (const auto& other : authenticated) if (other!=peer) peers[0]->introduce(peer,other,nonce());

@@ -229,7 +229,7 @@ private:
     void notePreAuthenticationDisconnect();
     void applySessionSnapshot(const SharedSessionController::Snapshot& snapshot);
     void refreshControlConnection();
-    void handleMeshPeerAuthenticated(const QString& token, const QJsonObject& message);
+    void handleMeshPeerAuthenticated(const QString& token, const ControlServer::AuthenticatedPeer& message);
     QString meshBindEndpoint() const;
     QString localMeshEndpoint(bool createSession) const;
     QString meshPeerToken();

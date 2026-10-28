@@ -66,7 +66,12 @@ public:
     std::function<void(const QString&, const QByteArray&)> onBinaryMessage;
     std::function<void(const QString&, const QJsonObject&)> onAssetMessage;
     std::function<void(const QString&, const QByteArray&)> onAssetBinaryMessage;
-    std::function<void(const QString&, const QJsonObject&)> onAuthenticated;
+    struct AuthenticatedPeer {
+        jam2::application::PeerName name;
+        jam2::application::binary_wire::Endpoint endpoint;
+        QString host;
+    };
+    std::function<void(const QString&, const AuthenticatedPeer&)> onAuthenticated;
     std::function<void(const QString&)> onDisconnected;
     std::function<void(const QString&)> onAssetDisconnected;
     std::function<void(const jam2::control_protocol::TransportEvent&)> onEvent;
@@ -98,7 +103,7 @@ private:
     void acceptPeer(const jam2::application::ControlConnection::Pointer& connection);
     void disconnectPeer(const PeerHandle& peer, const QString& detail = QString());
     void readPeer(const PeerHandle& peer);
-    void handleHandshake(const PeerHandle& peer, const QJsonObject& message);
+    void handleHandshake(const PeerHandle& peer, const jam2::control_protocol::Handshake& message);
     bool writeFrame(
         const PeerHandle& peer,
         const QByteArray& frame,
@@ -107,7 +112,8 @@ private:
         const PeerHandle& peer,
         const QString& reason,
         jam2::control_protocol::TransportFailure failure,
-        bool abort = false);
+        bool abort = false,
+        jam2::control_protocol::HandshakeRejection wireReason = jam2::control_protocol::HandshakeRejection::InvalidFields);
     void publishEvent(jam2::control_protocol::TransportEvent event);
     PeerHandle findPeer(
         const jam2::application::ControlConnection::Pointer& connection) const;

@@ -294,7 +294,7 @@ void authenticatedControlAndAssets()
     require(server.listenViaTransport(session, key), "external transport could not configure control server");
     auto [serverBytes, clientBytes] = endpoints();
     bool authenticated = false;
-    server.onAuthenticated = [&](const QString& peer, const QJsonObject&) { authenticated = peer == token; };
+    server.onAuthenticated = [&](const QString& peer, const ControlServer::AuthenticatedPeer&) { authenticated = peer == token; };
     server.acceptTransport(serverBytes);
     client.connectViaTransport(clientBytes, session, key, token, QStringLiteral("127.0.0.1:50000"));
     until([&] { return authenticated && client.isConnected(); });

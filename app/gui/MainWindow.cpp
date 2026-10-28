@@ -1054,7 +1054,7 @@ MainWindow::MainWindow(
         updateAssetChannelRequirement();
         QTimer::singleShot(0, this, [this] { requestNextPendingAsset(); });
     };
-    sessionController_.onPeerAuthenticated = [this](const QString& token, const QJsonObject& message) {
+    sessionController_.onPeerAuthenticated = [this](const QString& token, const ControlServer::AuthenticatedPeer& message) {
         handleMeshPeerAuthenticated(token, message);
     };
     sessionController_.onPeerDisconnected = [this](const QString& token) {
@@ -5663,13 +5663,13 @@ QString MainWindow::meshBindEndpoint() const
     return QStringLiteral("%1:%2").arg(host).arg(configuration.port);
 }
 
-void MainWindow::handleMeshPeerAuthenticated(const QString& token, const QJsonObject& message)
+void MainWindow::handleMeshPeerAuthenticated(const QString& token, const ControlServer::AuthenticatedPeer& message)
 {
     if (!sessionController_.isServer() || token.isEmpty()) {
         return;
     }
     const QString peerHost = normalizedNetworkHost(
-        message.value(QStringLiteral("peer_host")).toString());
+        message.host);
     const bool localMachinePeer = isLocalMachineAddress(peerHost);
     if (localMachinePeer) {
         localMeshPeerTokens_.insert(token);

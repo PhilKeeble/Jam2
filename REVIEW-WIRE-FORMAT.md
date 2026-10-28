@@ -1,5 +1,10 @@
 # Jam2 Server wire format review
 
+> Current bootstrap update: application wire v5 uses typed binary stream authentication;
+> rendezvous uses the matching binary J2RV v1 protocol in Jam2-Server. No session-network
+> JSON fallback remains. See [BinaryBootstrap.md](docs/BinaryBootstrap.md) for the current
+> layouts and validation. References to JSON handshakes below describe earlier stages.
+
 Implemented on `UDP-Multiplex`. This records decisions actually made during
 implementation, their consequences, unresolved limits, and validation results.
 The earlier discussion is in `UDP-Multiplex-WireFormat.md`.

@@ -1,5 +1,6 @@
 #pragma once
 #include <QJsonDocument>
+#include "../../app/application/RendezvousWire.hpp"
 #include <QJsonObject>
 #include <QFile>
 #include <QDir>
@@ -131,7 +132,8 @@ public:
                 const auto publicAddress=distinctHosts_ ? QHostAddress(QStringLiteral("127.0.0.%1").arg(2+routes_.size()%200)) : QHostAddress(QHostAddress::LocalHost);
                 require(route->socket.bind(publicAddress, 0), "bind simulated NAT mapping");
             }
-            auto object = QJsonDocument::fromJson(packet).object();
+            namespace rv = jam2::application::rendezvous_wire;
+            auto object = rv::decode(packet);
             if (packet.size()>=64 && packet.startsWith("J2PB")) {
                 route->peer=QString::fromLatin1(packet.mid(16,16).toHex());
                 route->request=QString::fromLatin1(packet.mid(32,16).toHex());
@@ -140,18 +142,20 @@ public:
                 else if (kind==6 && packet.size()>=79) route->attempt=static_cast<quint8>(packet[56]);
             }
             if (blockedCreatorPorts.contains(local)) { ++dropped; continue; }
-            if (invalidLan && object.value("type") == "jam_candidate" && object.value("attempt").toInt() == 1) {
-                auto hint = object.value("local_endpoint").toObject(); hint["host"] = "127.0.0.2";
-                object["local_endpoint"] = hint; packet = QJsonDocument(object).toJson(QJsonDocument::Compact);
+            if (invalidLan && object && object->kind == rv::Kind::Candidate && object->attempt == 1) {
+                object->local = rv::Endpoint::from(QStringLiteral("127.0.0.2"), object->local.port);
+                packet = rv::encode(*object);
             }
-            if (blockLeave && object.value("type") == "jam_leave") { ++leavesDropped; continue; }
-            const auto kind = object.value("type").toString();
-            if (blockFirst && (kind == "jam_admit" || kind == "jam_remove" || kind == "jam_reject") &&
-                firstMembership.insert(kind + object.value("to").toString()).second) { ++dropped; continue; }
-            if (object.value("type") == "jam_candidate") {
-                route->peer = object.value("peer").toString();
-                route->request = object.value("nonce").toString();
-                route->attempt = object.value("attempt").toInt();
+            if (blockLeave && object && object->kind == rv::Kind::Leave) { ++leavesDropped; continue; }
+            if (object) {
+                const auto kind = object->kind;
+                if (blockFirst && (kind == rv::Kind::Admit || kind == rv::Kind::Remove || kind == rv::Kind::Reject) &&
+                    firstMembership.insert(QString::number(static_cast<int>(kind)) + object->to).second) { ++dropped; continue; }
+                route->peer = object->peer;
+                if (kind == rv::Kind::Candidate) {
+                    route->request = object->nonce;
+                    route->attempt = object->attempt;
+                }
             }
             const auto deliver = [this, local](const QByteArray& bytes) {
                 return routes_.at(local)->socket.writeDatagram(bytes, QHostAddress::LocalHost, server_) == bytes.size();
@@ -167,10 +171,14 @@ public:
                 route->socket.readDatagram(packet.data(), packet.size(), &source, &from);
                 if (from == server_) {
                     if (blockedCreatorPorts.contains(local)) { ++dropped; continue; }
-                    const auto message = QJsonDocument::fromJson(packet).object();
-                    const auto kind = message.value("type").toString();
-                    if (blockFirst && kind.endsWith("_ack") &&
-                        firstMembership.insert(kind + message.value("peer").toString()).second) { ++dropped; continue; }
+                    const auto message = jam2::application::rendezvous_wire::decode(packet);
+                    if (message) {
+                        namespace rv = jam2::application::rendezvous_wire;
+                        const auto kind = message->kind;
+                        if (blockFirst && (kind == rv::Kind::AdmitAck || kind == rv::Kind::RemoveAck || kind == rv::Kind::RejectAck) &&
+                            firstMembership.insert(QString::number(static_cast<int>(kind)) + message->peer).second) { ++dropped; continue; }
+                        if (!message->creator.isEmpty()) creatorPeer_ = message->creator;
+                    }
                     if (packet.startsWith("J2PB") && packet.size()>=32)
                         creatorPeer_=QString::fromLatin1(packet.mid(16,16).toHex());
                     const auto deliver = [this, local](const QByteArray& bytes) {

@@ -187,7 +187,7 @@ public:
             }
         };
         runtime_.onNetworkFinished = [this](int code) { handleRuntimeFinished(code); };
-        sessionController_.onPeerAuthenticated = [this](const QString& token, const QJsonObject& message) {
+        sessionController_.onPeerAuthenticated = [this](const QString& token, const ControlServer::AuthenticatedPeer& message) {
             handleAuthenticatedPeer(token, message);
         };
         sessionController_.onSnapshot = [this](const SharedSessionController::Snapshot& snapshot) {
@@ -1214,7 +1214,7 @@ private:
         invitePublished_=true; emitStartup(QStringLiteral("waiting"));
     }
 
-    void handleAuthenticatedPeer(const QString& token, const QJsonObject& message)
+    void handleAuthenticatedPeer(const QString& token, const ControlServer::AuthenticatedPeer& message)
     {
         (void)message;
         hadAuthenticatedPeer_ = true;

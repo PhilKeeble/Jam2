@@ -12,31 +12,6 @@
 using namespace jam2::control_protocol;
 using jam2::application::ControlConnection;
 
-namespace {
-
-bool validUdpEndpointText(const QString& endpoint)
-{
-    if (endpoint.isEmpty()) {
-        return true;
-    }
-    const int separator = endpoint.lastIndexOf(QLatin1Char(':'));
-    bool portOk = false;
-    const int port = separator > 0 ? endpoint.mid(separator + 1).toInt(&portOk) : 0;
-    const QString host = separator > 0 ? endpoint.left(separator) : QString{};
-    if (!portOk || port < 1 || port > 65535 || host.isEmpty() || host.size() > 253) {
-        return false;
-    }
-    for (const QChar character : host) {
-        if (!(character.isLetterOrNumber() || character == QLatin1Char('.') ||
-              character == QLatin1Char('-'))) {
-            return false;
-        }
-    }
-    return true;
-}
-
-} // namespace
-
 ControlServer::ControlServer(QObject* parent)
     : QObject(parent)
 {
@@ -314,13 +289,7 @@ void ControlServer::acceptPeer(const ControlConnection::Pointer& connection)
                 true);
         }
     });
-    QJsonObject challengeMessage{
-        {QStringLiteral("type"), QStringLiteral("hello.challenge")},
-        {QStringLiteral("version"), kControlProtocolVersion},
-        {QStringLiteral("session"), sessionHex_},
-        {QStringLiteral("server_nonce"), encodeHex(peer->serverNonce)},
-    };
-    const QByteArray challenge = encodeHandshake(challengeMessage);
+    const QByteArray challenge = encodeHandshake(Challenge{sessionHex_, peer->serverNonce});
     if (!writeFrame(peer, challenge)) {
         return;
     }
@@ -457,7 +426,7 @@ void ControlServer::readPeer(const PeerHandle& peer)
     while (handled < kFramesPerTurn) {
         QByteArray body;
         QString error;
-        const TakeFrameResult result = takeFrame(peer->buffer, body, error);
+        const TakeFrameResult result = takeFrame(peer->buffer, body, error, peer->authenticated ? kMaximumRecordBodyBytes : kMaximumHandshakeBodyBytes);
         if (result == TakeFrameResult::NeedMore) {
             if (peer->buffer.isEmpty()) {
                 peer->frameTimer->stop();
@@ -481,7 +450,7 @@ void ControlServer::readPeer(const PeerHandle& peer)
         ++handled;
         ++stats_.framesReceived;
 
-        QJsonObject message;
+        Handshake message;
         if (!peer->authenticated) {
             if (!decodeHandshake(body, message, error)) {
                 noteAuthenticationReject();
@@ -519,35 +488,28 @@ void ControlServer::readPeer(const PeerHandle& peer)
     }
 }
 
-void ControlServer::handleHandshake(const PeerHandle& peer, const QJsonObject& message)
+void ControlServer::handleHandshake(const PeerHandle& peer, const Handshake& message)
 {
-    const QString type = message.value(QStringLiteral("type")).toString();
-    const QString session = message.value(QStringLiteral("session")).toString().toLower();
-    const QByteArray clientNonce = decodeHex(message.value(QStringLiteral("client_nonce")).toString(), 16);
-    const QByteArray clientProof = decodeHex(message.value(QStringLiteral("proof")).toString(), 16);
-    QString token = message.value(QStringLiteral("peer_token")).toString();
-    const QString udpEndpoint = message.value(QStringLiteral("udp_endpoint")).toString();
-    const QString channel = message.value(QStringLiteral("channel"))
-        .toString(QStringLiteral("control"));
-    const bool assetChannel = channel == QStringLiteral("asset");
+    const auto* fields = std::get_if<Proof>(&message);
+    if (!fields) {
+        noteAuthenticationReject();
+        rejectPeer(peer, QStringLiteral("UDP multiplex control expected a proof"), TransportFailure::AuthenticationRejected);
+        return;
+    }
+    const auto& clientNonce = fields->nonce;
+    const auto& clientProof = fields->proof;
+    const QString token = fields->peer;
+    const QString udpEndpoint = fields->endpoint.text();
+    const bool assetChannel = fields->channel == HandshakeChannel::Asset;
+    const QString channel = assetChannel ? QStringLiteral("asset") : QStringLiteral("control");
     std::optional<jam2::application::PeerName> peerName;
     if (assetChannel) {
         for (const auto& control : peers_) if (control && control->authenticated && !control->assetChannel && control->token == token)
             peerName = control->name;
-        if (message.contains(QStringLiteral("peer_name"))) peerName.reset();
-    } else peerName = jam2::application::PeerName::fromWire(message.value(QStringLiteral("peer_name")).toString().toUtf8());
-    const bool tokenValid = peerIdFromToken(token).has_value();
-    if (type != QStringLiteral("hello.proof") ||
-        message.value(QStringLiteral("version")).toInt() != kControlProtocolVersion ||
-        session != sessionHex_ || clientNonce.size() != 16 || clientProof.size() != 16 ||
-        !tokenValid || !peerName || !validUdpEndpointText(udpEndpoint) ||
-        (channel != QStringLiteral("control") && !assetChannel) ||
-        (assetChannel && udpEndpoint.size() > 255)) {
+    } else peerName = fields->name;
+    if (!peerName || !peerName->valid()) {
         noteAuthenticationReject();
-        rejectPeer(
-            peer,
-            QStringLiteral("UDP multiplex control authentication fields are invalid"),
-            TransportFailure::AuthenticationRejected);
+        rejectPeer(peer, QStringLiteral("UDP multiplex control authentication name is invalid"), TransportFailure::AuthenticationRejected);
         return;
     }
     bool controlPeerPresent = false;
@@ -566,7 +528,7 @@ void ControlServer::handleHandshake(const PeerHandle& peer, const QJsonObject& m
             rejectPeer(
                 peer,
                 QStringLiteral("UDP multiplex control peer token is already active"),
-                TransportFailure::AuthenticationRejected);
+                TransportFailure::AuthenticationRejected, false, HandshakeRejection::DuplicatePeer);
             return;
         }
     }
@@ -575,7 +537,7 @@ void ControlServer::handleHandshake(const PeerHandle& peer, const QJsonObject& m
         rejectPeer(
             peer,
             QStringLiteral("UDP multiplex asset stream requires an authenticated control peer"),
-            TransportFailure::AuthenticationRejected);
+            TransportFailure::AuthenticationRejected, false, HandshakeRejection::ControlRequired);
         return;
     }
     peer->transcript = makeTranscript(
@@ -590,7 +552,7 @@ void ControlServer::handleHandshake(const PeerHandle& peer, const QJsonObject& m
         rejectPeer(
             peer,
             QStringLiteral("UDP multiplex control client proof is invalid"),
-            TransportFailure::AuthenticationRejected);
+            TransportFailure::AuthenticationRejected, false, HandshakeRejection::InvalidProof);
         return;
     }
 
@@ -599,14 +561,7 @@ void ControlServer::handleHandshake(const PeerHandle& peer, const QJsonObject& m
         : QByteArrayLiteral("jam2-control-server-proof");
     const QByteArray serverProof = keyedValue(
         masterKey_, serverProofDomain, peer->transcript).left(16);
-    const QByteArray response = encodeHandshake(QJsonObject{
-        {QStringLiteral("type"), QStringLiteral("hello.ok")},
-        {QStringLiteral("version"), kControlProtocolVersion},
-        {QStringLiteral("role"), QStringLiteral("listener")},
-        {QStringLiteral("peer_token"), token},
-        {QStringLiteral("channel"), channel},
-        {QStringLiteral("proof"), encodeHex(serverProof)},
-    });
+    const QByteArray response = encodeHandshake(Accepted{serverProof});
     if (!writeFrame(peer, response)) {
         return;
     }
@@ -684,13 +639,7 @@ void ControlServer::handleHandshake(const PeerHandle& peer, const QJsonObject& m
         assetChannel});
     const ControlConnection::Pointer connection = peer->connection;
     if (!assetChannel && connection && findPeer(connection) && onAuthenticated) {
-        QJsonObject authenticatedMessage{
-            {QStringLiteral("peer_token"), token},
-            {QStringLiteral("udp_endpoint"), udpEndpoint},
-            {QStringLiteral("peer_host"), connection->peerHost()},
-            {QStringLiteral("peer_name"), peerName->text()},
-        };
-        onAuthenticated(token, authenticatedMessage);
+        onAuthenticated(token, AuthenticatedPeer{*peerName, fields->endpoint, connection->peerHost()});
     }
 }
 
@@ -731,7 +680,7 @@ void ControlServer::rejectPeer(
     const PeerHandle& peer,
     const QString& reason,
     TransportFailure failure,
-    bool abort)
+    bool abort, HandshakeRejection wireReason)
 {
     const ControlConnection::Pointer connection = peer ? peer->connection : nullptr;
     if (!connection || !findPeer(connection)) {
@@ -752,10 +701,7 @@ void ControlServer::rejectPeer(
         disconnectPeer(peer);
         return;
     }
-    const QByteArray errorFrame = encodeHandshake(QJsonObject{
-        {QStringLiteral("type"), QStringLiteral("hello.error")},
-        {QStringLiteral("reason"), reason},
-    });
+    const QByteArray errorFrame = encodeHandshake(Rejected{wireReason});
     if (!errorFrame.isEmpty() &&
         connection->bytesToWrite() + errorFrame.size() <= kOutputHighWaterBytes &&
         connection->write(errorFrame, true)) {

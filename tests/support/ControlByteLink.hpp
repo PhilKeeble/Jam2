@@ -7,7 +7,7 @@
 #include <algorithm>
 namespace jam2::test {
 using jam2::application::ControlConnection;
-// A byte-only fixture: all authentication, framing, sequencing, JSON and binary
+// A byte-only fixture: all authentication, framing, sequencing and binary
 // handling under test are the actual ControlClient/ControlServer implementations.
 class Bytes final : public ControlConnection, public std::enable_shared_from_this<Bytes> {
 public:

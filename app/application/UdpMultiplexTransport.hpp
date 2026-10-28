@@ -73,7 +73,7 @@ public:
         quint64 pendingAdmissionTimeouts = 0, pendingAdmissionTimeoutMs = 0;
         quint64 stunRequestsSent = 0, stunResponsesRejected = 0;
         quint64 introductionPending = 0;
-        quint64 signalPacketsSent = 0, signalPacketsReceived = 0;
+        quint64 signalPacketsSent = 0, signalPacketsReceived = 0, signalPacketsRejected = 0;
         quint64 audioPacketsSent = 0, audioPacketsReceived = 0, audioQueueDrops = 0;
         quint64 assetBytesSent = 0, controlBytesSent = 0, invalidMuxPackets = 0;
         quint64 assetBytesReceived = 0, controlBytesReceived = 0, budgetDeferrals = 0, sendErrors = 0;
