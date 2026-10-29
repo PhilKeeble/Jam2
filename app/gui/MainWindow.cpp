@@ -3103,24 +3103,26 @@ QJsonObject MainWindow::automationPerformanceSnapshot() const
     for (const std::uint64_t frames : engine.jam_recording.stem_signal_frames) {
         jamRecordingStemSignalFrames.append(static_cast<qint64>(frames));
     }
-#if defined(Q_OS_MACOS)
     const auto home = performanceHome_ ? performanceHome_->foregroundStats() : PerformanceForegroundStats{};
     const auto background = performanceHome_ ? performanceHome_->backgroundPresentationStats()
                                             : PerformanceBackgroundPresentationStats{};
     const QJsonObject homeRenderer{
         {QStringLiteral("visible"), home.visible},
         {QStringLiteral("animation_active"), home.animationActive},
+        {QStringLiteral("animation_interval_ms"), home.animationIntervalMs},
+        {QStringLiteral("background_motion_enabled"), home.backgroundMotionEnabled},
+        {QStringLiteral("background_layers_ready"), background.layersReady},
+        {QStringLiteral("background_reveal_active"), background.revealActive},
+        {QStringLiteral("background_cache_bytes"), static_cast<qint64>(background.bytes)},
+        {QStringLiteral("foreground_cache_bytes"), static_cast<qint64>(home.bytes)},
         {QStringLiteral("animation_ticks"), static_cast<qint64>(home.animationTicks)},
         {QStringLiteral("paint_events"), static_cast<qint64>(home.paintEvents)},
         {QStringLiteral("background_refreshes"), static_cast<qint64>(background.refreshes)},
         {QStringLiteral("foreground_rebuilds"), static_cast<qint64>(
             home.refreshes[0] + home.refreshes[1] + home.refreshes[2] + home.refreshes[3])},
     };
-#endif
     return {
-#if defined(Q_OS_MACOS)
         {QStringLiteral("home_renderer"), homeRenderer},
-#endif
         {QStringLiteral("engine_running"), jam2_.isRunning()},
         {QStringLiteral("network_running"), jam2_.isNetworkRunning()},
         {QStringLiteral("headless_audio"),

@@ -61,6 +61,15 @@
 #include <map>
 #include <vector>
 #include <ctime>
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
 namespace {
 
@@ -76,6 +85,25 @@ void expect(bool condition, const char* message)
 bool approximatelyEqual(double actual, double expected, double tolerance = 0.000001)
 {
     return std::abs(actual - expected) <= tolerance;
+}
+
+double processCpuSeconds()
+{
+#if defined(_WIN32)
+    FILETIME created{}, exited{}, kernel{}, user{};
+    if (!GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user)) {
+        expect(false, "native process CPU time must be available");
+        return 0.0;
+    }
+    const auto ticks = [](const FILETIME& time) {
+        return (static_cast<std::uint64_t>(time.dwHighDateTime) << 32) | time.dwLowDateTime;
+    };
+    return static_cast<double>(ticks(kernel) + ticks(user)) / 1e7;
+#else
+    const auto ticks = std::clock();
+    expect(ticks != static_cast<std::clock_t>(-1), "process CPU clock must be available");
+    return static_cast<double>(ticks) / CLOCKS_PER_SEC;
+#endif
 }
 
 void processPaint(QWidget& widget)
@@ -1360,7 +1388,6 @@ void testBeatGridWidgets()
             beatHitEdits == 1,
         "beat-grid painted step button advances hit state");
     processPaint(beat);
-#if defined(Q_OS_MACOS)
     QVector<QPair<QPointer<QWidget>, bool>> hiddenPlayheads;
     for (QWidget* child : beat.findChildren<QWidget*>()) {
         if (child->property("authoringBeat").isValid())
@@ -1382,7 +1409,6 @@ void testBeatGridWidgets()
             resumedPlayhead = true;
     }
     expect(resumedPlayhead, "shown editor immediately applies the latest hidden transport state");
-#endif
 
     BeatGridWidget lyrics(&model, QStringLiteral("lyric"));
     lyrics.resize(900, 650);
@@ -1785,7 +1811,6 @@ void testPerformanceWidget()
         "performance background layer task completes before fixture teardown");
 }
 
-#if defined(__APPLE__)
 void testPerformanceBackgroundPresentation()
 {
     BeatGridModel model;
@@ -1800,6 +1825,9 @@ void testPerformanceBackgroundPresentation()
     QApplication::processEvents();
     const auto firstImage = widget.grab();
     const auto initial = widget.backgroundPresentationStats();
+    const auto foreground = widget.foregroundStats();
+    expect(foreground.animationIntervalMs == 50 && !foreground.backgroundMotionEnabled,
+        "resource-saving renderer uses a measured 20 Hz cadence and frozen decorative background");
     const double ratio = widget.devicePixelRatioF();
     expect(!firstImage.isNull() && initial.pixelSize == QSize(
                static_cast<int>(std::ceil(widget.width() * ratio)),
@@ -1966,9 +1994,18 @@ void benchmarkPerformanceRendering(bool staticViews = false)
     } paints;
     widget.installEventFilter(&paints);
     widget.show();
-    QEventLoop warmup;
-    QTimer::singleShot(6000, &warmup, &QEventLoop::quit);
-    warmup.exec();
+    // Measure the steady renderer after its real asynchronous layer build and
+    // five-second reveal, independently of platform/CPU startup speed.
+    QElapsedTimer startup; startup.start();
+    while ((!widget.backgroundPresentationStats().layersReady ||
+            widget.backgroundPresentationStats().revealActive) && startup.elapsed() < 15000) {
+        QEventLoop warmup;
+        QTimer::singleShot(50, &warmup, &QEventLoop::quit);
+        warmup.exec();
+    }
+    const auto ready = widget.backgroundPresentationStats();
+    expect(ready.layersReady && !ready.revealActive, "renderer startup completes before CPU measurements");
+    if (!ready.layersReady || ready.revealActive) return;
     if (staticViews) {
         QJsonArray scenarios;
         QElapsedTimer transportClock;
@@ -1989,7 +2026,7 @@ void benchmarkPerformanceRendering(bool staticViews = false)
             transportClock.restart();
             if (playing) transport.start();
             const int beforePaints = paints.count;
-            const std::clock_t beforeCpu = std::clock();
+            const double beforeCpu = processCpuSeconds();
             QElapsedTimer elapsed;
             elapsed.start();
             QEventLoop sample;
@@ -1997,7 +2034,7 @@ void benchmarkPerformanceRendering(bool staticViews = false)
             sample.exec();
             transport.stop();
             const double seconds = elapsed.nsecsElapsed() / 1e9;
-            const double cpu = static_cast<double>(std::clock() - beforeCpu) / CLOCKS_PER_SEC;
+            const double cpu = processCpuSeconds() - beforeCpu;
             const QJsonObject metric{{QStringLiteral("scenario"), scenario},
                 {QStringLiteral("cpu_one_core_percent"), cpu / seconds * 100.0},
                 {QStringLiteral("wall_seconds"), seconds},
@@ -2021,14 +2058,14 @@ void benchmarkPerformanceRendering(bool staticViews = false)
     }
     const auto settledBackground = widget.backgroundPresentationStats().refreshes;
     const int initialPaints = paints.count;
-    const std::clock_t initialCpu = std::clock();
+    const double initialCpu = processCpuSeconds();
     QElapsedTimer wall;
     wall.start();
     QEventLoop measurement;
     QTimer::singleShot(6000, &measurement, &QEventLoop::quit);
     measurement.exec();
     const double wallSeconds = wall.nsecsElapsed() / 1000000000.0;
-    const double cpuSeconds = static_cast<double>(std::clock() - initialCpu) / CLOCKS_PER_SEC;
+    const double cpuSeconds = processCpuSeconds() - initialCpu;
     const QJsonObject metrics{
         {QStringLiteral("wall_seconds"), wallSeconds},
         {QStringLiteral("process_cpu_seconds"), cpuSeconds},
@@ -2068,14 +2105,12 @@ void benchmarkPerformanceRendering(bool staticViews = false)
     expect(QThreadPool::globalInstance()->waitForDone(10000),
         "performance rendering benchmark drains asynchronous background work");
 }
-#endif
 
 } // namespace
 
 int main(int argc, char** argv)
 {
     QApplication app(argc, argv);
-#if defined(__APPLE__)
     if (argc == 2 && QString::fromLocal8Bit(argv[1]) == QStringLiteral("--performance-background")) {
         testPerformanceBackgroundPresentation();
         return failures == 0 ? 0 : 1;
@@ -2088,7 +2123,6 @@ int main(int argc, char** argv)
         benchmarkPerformanceRendering();
         return failures == 0 ? 0 : 1;
     }
-#endif
     if (argc == 2 && QString::fromLocal8Bit(argv[1]) == QStringLiteral("--looper-waveform")) {
         testLooperWaveformGridAlignment();
         return failures == 0 ? 0 : 1;
@@ -2112,9 +2146,7 @@ int main(int argc, char** argv)
     testMetronomeWidgets();
     testBeatGridWidgets();
     testPerformanceWidget();
-#if defined(__APPLE__)
     testPerformanceBackgroundPresentation();
-#endif
     if (failures == 0) {
         std::cout << "GUI widget boundary tests passed\n";
         return 0;

@@ -101,8 +101,9 @@ struct PerformancePeerPresentation {
     bool selected = false;
 };
 
-#if defined(Q_OS_MACOS)
 struct PerformanceBackgroundPresentationStats {
+    bool layersReady = false;
+    bool revealActive = false;
     QSize pixelSize;
     double devicePixelRatio = 1.0;
     qsizetype bytes = 0;
@@ -115,6 +116,8 @@ struct PerformanceBackgroundPresentationStats {
 struct PerformanceForegroundStats {
     bool visible = false;
     bool animationActive = false;
+    int animationIntervalMs = 0;
+    bool backgroundMotionEnabled = false;
     std::uint64_t animationTicks = 0;
     std::uint64_t paintEvents = 0;
     qsizetype bytes = 0;
@@ -123,7 +126,6 @@ struct PerformanceForegroundStats {
     std::uint64_t reusedPaints = 0;
     std::uint64_t fallbackPaints = 0;
 };
-#endif
 
 class PerformanceHomeWidget final : public QWidget, public jam2::gui::GuiVirtualControlProvider {
 public:
@@ -162,10 +164,8 @@ public:
         const QString& status);
     void setArrangementState(bool running, bool armed);
     QString rendererStatsText() const;
-#if defined(Q_OS_MACOS)
     PerformanceBackgroundPresentationStats backgroundPresentationStats() const noexcept;
     PerformanceForegroundStats foregroundStats() const noexcept;
-#endif
     QVector<jam2::gui::GuiVirtualControl> guiVirtualControls() const override;
     bool invokeGuiVirtualControl(
         const QString& id,
@@ -191,10 +191,8 @@ public:
 
 protected:
     void paintEvent(QPaintEvent* event) override;
-#if defined(Q_OS_MACOS)
     void showEvent(QShowEvent* event) override;
     void hideEvent(QHideEvent* event) override;
-#endif
     void resizeEvent(QResizeEvent* event) override;
     void mousePressEvent(QMouseEvent* event) override;
     void mouseMoveEvent(QMouseEvent* event) override;
@@ -235,7 +233,6 @@ private:
         bool current);
     void drawBeatPreview(QPainter& painter, const QRect& bounds, int bankIndex,
         int previewBeatsPerBar, quint64 barStart, bool current);
-#if defined(Q_OS_MACOS)
     enum class ForegroundPart : std::size_t { Chord, Runway, CurrentBar, NextBar };
     struct ForegroundKey {
         const BeatGridModel* model = nullptr;
@@ -263,7 +260,6 @@ private:
     std::uint64_t foregroundFallbackPaints_ = 0;
     std::uint64_t animationTicks_ = 0;
     std::uint64_t paintEvents_ = 0;
-#endif
     struct ChordVisualLayout {
         QPointF center;
         double radius;
@@ -326,13 +322,11 @@ private:
     QImage filamentCache_;
     QImage dustCache_;
     QImage backgroundFrameCache_;
-#if defined(Q_OS_MACOS)
     QImage backgroundPresentationCache_;
     qint64 presentedBackgroundCompositeMs_ = -2;
     std::uint64_t backgroundPresentationRefreshes_ = 0;
     std::uint64_t backgroundPresentationReusedPaints_ = 0;
     std::uint64_t backgroundPresentationFallbackPaints_ = 0;
-#endif
     qint64 backgroundBuildNanoseconds_ = 0;
     qsizetype backgroundCacheBytes_ = 0;
     qint64 lastBackgroundCompositeMs_ = -1;

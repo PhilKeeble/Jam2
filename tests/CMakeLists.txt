@@ -912,28 +912,28 @@ set_tests_properties(jam2_gui_widget_boundary_units PROPERTIES
     LABELS "unit;gui;widget;performance"
     TIMEOUT 45
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
-if(APPLE)
-    add_test(NAME jam2_static_views_performance
-        COMMAND $<TARGET_FILE:jam2_gui_widget_boundary_tests> --static-views)
-    set_tests_properties(jam2_static_views_performance PROPERTIES
-        LABELS "unit;gui;widget;performance" TIMEOUT 60 RUN_SERIAL TRUE)
-    add_test(NAME jam2_performance_background_units
-        COMMAND $<TARGET_FILE:jam2_gui_widget_boundary_tests> --performance-background)
-    add_test(NAME jam2_performance_background_hidpi_units
-        COMMAND $<TARGET_FILE:jam2_gui_widget_boundary_tests> --performance-background)
-    set_tests_properties(jam2_performance_background_units PROPERTIES
-        LABELS "unit;gui;widget;performance" TIMEOUT 30
-        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_SCALE_FACTOR=1")
-    set_tests_properties(jam2_performance_background_hidpi_units PROPERTIES
-        LABELS "unit;gui;widget;performance" TIMEOUT 30
-        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_SCALE_FACTOR=2")
-    add_test(NAME jam2_performance_rendering_performance
-        COMMAND $<TARGET_FILE:jam2_gui_widget_boundary_tests> --performance-rendering)
-    set_tests_properties(jam2_performance_rendering_performance PROPERTIES
-        LABELS "unit;gui;widget;performance" TIMEOUT 45 RUN_SERIAL TRUE)
-endif()
+add_test(NAME jam2_static_views_performance
+    COMMAND $<TARGET_FILE:jam2_gui_widget_boundary_tests> --static-views)
+set_tests_properties(jam2_static_views_performance PROPERTIES
+    LABELS "unit;gui;widget;performance" TIMEOUT 60 RUN_SERIAL TRUE)
+add_test(NAME jam2_performance_background_units
+    COMMAND $<TARGET_FILE:jam2_gui_widget_boundary_tests> --performance-background)
+add_test(NAME jam2_performance_background_hidpi_units
+    COMMAND $<TARGET_FILE:jam2_gui_widget_boundary_tests> --performance-background)
+set_tests_properties(jam2_performance_background_units PROPERTIES
+    LABELS "unit;gui;widget;performance" TIMEOUT 30
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_SCALE_FACTOR=1")
+set_tests_properties(jam2_performance_background_hidpi_units PROPERTIES
+    LABELS "unit;gui;widget;performance" TIMEOUT 30
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_SCALE_FACTOR=2")
+add_test(NAME jam2_performance_rendering_performance
+    COMMAND $<TARGET_FILE:jam2_gui_widget_boundary_tests> --performance-rendering)
+set_tests_properties(jam2_performance_rendering_performance PROPERTIES
+    LABELS "unit;gui;widget;performance" TIMEOUT 45 RUN_SERIAL TRUE)
 if(WIN32)
-    set_tests_properties(jam2_gui_widget_boundary_units jam2_looper_waveform_alignment_units PROPERTIES
+    set_tests_properties(jam2_gui_widget_boundary_units jam2_looper_waveform_alignment_units
+        jam2_static_views_performance jam2_performance_background_units
+        jam2_performance_background_hidpi_units jam2_performance_rendering_performance PROPERTIES
         ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Widgets>")
 endif()
@@ -1668,16 +1668,23 @@ add_executable(jam2_four_performance_integration EXCLUDE_FROM_ALL
 jam2_configure_test_target(jam2_four_performance_integration)
 target_link_libraries(jam2_four_performance_integration PRIVATE
     jam2_test_process_support Qt6::Core Qt6::Network)
-if(APPLE)
-    add_executable(jam2_performance_visibility_integration EXCLUDE_FROM_ALL
-        integration/gui/PerformanceVisibilityIntegration.cpp)
-    jam2_configure_test_target(jam2_performance_visibility_integration)
-    target_link_libraries(jam2_performance_visibility_integration PRIVATE jam2_test_process_support Qt6::Core)
-    add_test(NAME jam2_performance_visibility_integration
-        COMMAND $<TARGET_FILE:jam2_performance_visibility_integration> "${JAM2_TEST_PUBLIC_EXECUTABLE}")
-    set_tests_properties(jam2_performance_visibility_integration PROPERTIES
-        LABELS "integration;gui;widget;performance" TIMEOUT 45 RUN_SERIAL TRUE)
+add_executable(jam2_performance_visibility_integration EXCLUDE_FROM_ALL
+    integration/gui/PerformanceVisibilityIntegration.cpp)
+jam2_configure_test_target(jam2_performance_visibility_integration)
+target_link_libraries(jam2_performance_visibility_integration PRIVATE jam2_test_process_support Qt6::Core)
+add_test(NAME jam2_performance_visibility_integration
+    COMMAND $<TARGET_FILE:jam2_performance_visibility_integration> "${JAM2_TEST_PUBLIC_EXECUTABLE}")
+set_tests_properties(jam2_performance_visibility_integration PROPERTIES
+    LABELS "integration;gui;widget;performance" TIMEOUT 45 RUN_SERIAL TRUE)
+add_test(NAME jam2_performance_resource_measurement
+    COMMAND $<TARGET_FILE:jam2_performance_visibility_integration> "${JAM2_TEST_PUBLIC_EXECUTABLE}" --measure-only)
+set_tests_properties(jam2_performance_resource_measurement PROPERTIES
+    LABELS "integration;gui;widget;performance" TIMEOUT 60 RUN_SERIAL TRUE)
+if(WIN32)
+    set_tests_properties(jam2_performance_visibility_integration jam2_performance_resource_measurement PROPERTIES
+        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
 endif()
+
 add_test(NAME jam2_four_performance_integration
     COMMAND $<TARGET_FILE:jam2_four_performance_integration>
         "${JAM2_TEST_PUBLIC_EXECUTABLE}")
@@ -2431,3 +2438,7 @@ add_dependencies(jam2_tests_unit jam2_session_notification_tests)
 add_dependencies(jam2_tests_gui jam2_session_notification_tests jam2_four_peer_departure_tests)
 add_dependencies(jam2_tests_network jam2_four_peer_departure_tests)
 add_dependencies(jam2_tests_all jam2_session_notification_tests jam2_four_peer_departure_tests)
+
+add_dependencies(jam2_tests_gui jam2_performance_visibility_integration)
+add_dependencies(jam2_tests_performance jam2_performance_visibility_integration)
+add_dependencies(jam2_tests_all jam2_performance_visibility_integration)

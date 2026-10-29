@@ -36,12 +36,8 @@ constexpr int kPeerChipWidth = 104;
 constexpr int kBackgroundLayerWidth = 960;
 constexpr int kBackgroundLayerHeight = 540;
 constexpr qint64 kBackgroundCompositeIntervalMs = 125;
-#if defined(Q_OS_MACOS)
 // Temporary visual comparison: retain the artwork, freeze its decorative motion.
 constexpr bool kBackgroundMotionEnabled = false;
-#else
-constexpr bool kBackgroundMotionEnabled = true;
-#endif
 constexpr double kBackgroundMorphSeconds = 24.0;
 constexpr double kBackgroundMaximumParallaxPixels = 56.0;
 constexpr qint64 kNovaLifetimeMs = 5200;
@@ -889,26 +885,17 @@ PerformanceHomeWidget::PerformanceHomeWidget(QWidget* parent)
     animationClock_.start();
     renderWindow_.start();
     rebuildBackground();
-#if defined(Q_OS_MACOS)
-    // Decorative motion yields CPU time to CoreAudio and packet delivery.
+    // Decorative motion yields CPU time to audio callbacks and packet delivery.
     // Musical state updates and input actions still repaint immediately.
     animationTimer_.setInterval(50);
-#else
-    animationTimer_.setInterval(33);
-#endif
     QObject::connect(&animationTimer_, &QTimer::timeout, this, [this] {
         advanceAnimation();
     });
-#if !defined(Q_OS_MACOS)
-    animationTimer_.start();
-#endif
 }
 
 void PerformanceHomeWidget::setSongModel(const BeatGridModel* model)
 {
-#if defined(Q_OS_MACOS)
     for (auto& cache : foregroundCaches_) cache.image = {};
-#endif
     model_ = model;
     update();
 }
@@ -917,12 +904,10 @@ void PerformanceHomeWidget::setChordPreviewVisible(bool visible)
 {
     if (chordPreviewVisible_ == visible) return;
     chordPreviewVisible_ = visible;
-#if defined(Q_OS_MACOS)
     if (!visible) {
         foregroundCaches_[0].image = {};
         foregroundCaches_[1].image = {};
     }
-#endif
     chordHitRect_ = {};
     chordRunwayRect_ = {};
     update();
@@ -932,12 +917,10 @@ void PerformanceHomeWidget::setBeatPreviewVisible(bool visible)
 {
     if (beatPreviewVisible_ == visible) return;
     beatPreviewVisible_ = visible;
-#if defined(Q_OS_MACOS)
     if (!visible) {
         foregroundCaches_[2].image = {};
         foregroundCaches_[3].image = {};
     }
-#endif
     currentBeatHitRect_ = {};
     nextBeatHitRect_ = {};
     update();
@@ -961,9 +944,7 @@ void PerformanceHomeWidget::setTiming(
     const bool beatStateChanged = previousActiveBeat != nextActiveBeat ||
         beatsPerBar_ != boundedBeatsPerBar || running_ != running;
 
-#if defined(Q_OS_MACOS)
     const bool songBeatChanged = absoluteBeat_ != absoluteBeat;
-#endif
     absoluteBeat_ = absoluteBeat;
     subdivision_ = boundedSubdivision;
     beatsPerBar_ = boundedBeatsPerBar;
@@ -972,14 +953,12 @@ void PerformanceHomeWidget::setTiming(
     if (beatStateChanged && !currentBeatHitRect_.isEmpty()) {
         update(currentBeatHitRect_.adjusted(0, 0, 0, -currentBeatHitRect_.height() + 32));
     }
-#if defined(Q_OS_MACOS)
     if (songBeatChanged || beatStateChanged) {
         update(chordHitRect_.adjusted(-14, -14, 14, 14));
         update(chordRunwayRect_);
         update(currentBeatHitRect_.adjusted(-1, -25, 1, 1));
         update(nextBeatHitRect_.adjusted(-1, -1, 1, 1));
     }
-#endif
 }
 
 void PerformanceHomeWidget::setAudioPeaks(const jam2::EngineGuiPeakSnapshot& peaks)
@@ -1017,9 +996,7 @@ void PerformanceHomeWidget::setPeers(QVector<PerformancePeerPresentation> peers)
 
 void PerformanceHomeWidget::updateAnimatedForeground()
 {
-#if defined(Q_OS_MACOS)
     if (!isVisible()) return;
-#endif
     if (width() <= 0 || height() <= 0) return;
 
     constexpr int headerHeight = 116;
@@ -1186,7 +1163,6 @@ void PerformanceHomeWidget::setArrangementState(bool running, bool armed)
 QString PerformanceHomeWidget::rendererStatsText() const
 {
     QString stats = rendererStats_;
-#if defined(Q_OS_MACOS)
     const auto presentation = backgroundPresentationStats();
     stats += QStringLiteral(" | native background %1x%2 @%3 %4 MiB/%5 MiB refreshes %6 reused %7 fallback %8")
         .arg(presentation.pixelSize.width()).arg(presentation.pixelSize.height())
@@ -1201,7 +1177,6 @@ QString PerformanceHomeWidget::rendererStatsText() const
         .arg(foreground.refreshes[0]).arg(foreground.refreshes[1])
         .arg(foreground.refreshes[2]).arg(foreground.refreshes[3])
         .arg(foreground.reusedPaints).arg(foreground.fallbackPaints);
-#endif
     if (!tuner_.enabled) {
         return stats + QStringLiteral(" | tuner off");
     }
@@ -1222,12 +1197,13 @@ QString PerformanceHomeWidget::rendererStatsText() const
         .arg(static_cast<qulonglong>(tuner_.ring.overruns));
 }
 
-#if defined(Q_OS_MACOS)
 PerformanceForegroundStats PerformanceHomeWidget::foregroundStats() const noexcept
 {
     PerformanceForegroundStats stats;
     stats.visible = isVisible();
     stats.animationActive = animationTimer_.isActive();
+    stats.animationIntervalMs = animationTimer_.interval();
+    stats.backgroundMotionEnabled = kBackgroundMotionEnabled;
     stats.animationTicks = animationTicks_;
     stats.paintEvents = paintEvents_;
     for (std::size_t i = 0; i < foregroundCaches_.size(); ++i) {
@@ -1287,6 +1263,9 @@ void PerformanceHomeWidget::paintForeground(QPainter& painter, ForegroundPart pa
 PerformanceBackgroundPresentationStats PerformanceHomeWidget::backgroundPresentationStats() const noexcept
 {
     PerformanceBackgroundPresentationStats stats;
+    stats.layersReady = backgroundLayersReady_;
+    stats.revealActive = backgroundLayersReadyMs_ >= 0 &&
+        lastBackgroundCompositeMs_ < backgroundLayersReadyMs_ + 5000;
     stats.pixelSize = backgroundPresentationCache_.size();
     stats.devicePixelRatio = backgroundPresentationCache_.devicePixelRatio();
     stats.bytes = backgroundPresentationCache_.sizeInBytes();
@@ -1295,7 +1274,6 @@ PerformanceBackgroundPresentationStats PerformanceHomeWidget::backgroundPresenta
     stats.fallbackPaints = backgroundPresentationFallbackPaints_;
     return stats;
 }
-#endif
 
 PerformanceHomeWidget::SongPosition PerformanceHomeWidget::songPosition(
     quint64 absoluteBeat) const
@@ -1517,7 +1495,6 @@ void PerformanceHomeWidget::rebuildBackground()
 }
 
 
-#if defined(Q_OS_MACOS)
 void PerformanceHomeWidget::showEvent(QShowEvent* event)
 {
     QWidget::showEvent(event);
@@ -1530,16 +1507,13 @@ void PerformanceHomeWidget::hideEvent(QHideEvent* event)
     animationTimer_.stop();
     QWidget::hideEvent(event);
 }
-#endif
 
 void PerformanceHomeWidget::advanceAnimation()
 {
     if (!isVisible()) {
         return;
     }
-#if defined(Q_OS_MACOS)
     ++animationTicks_;
-#endif
     const qint64 now = animationClock_.elapsed();
     const double delta = qBound(0.001, static_cast<double>(now - lastAnimationMs_) / 1000.0, 0.1);
     lastAnimationMs_ = now;
@@ -1669,7 +1643,6 @@ void PerformanceHomeWidget::paintNebulaFields(
     // large images makes Qt's raster pool compete with audio delivery. Compose
     // them at device resolution only when the background or geometry changes;
     // ordinary foreground repaints then copy one opaque image without scaling.
-#if defined(Q_OS_MACOS)
     const double pixelRatio = devicePixelRatioF();
     const QSize pixelSize(static_cast<int>(std::ceil(width() * pixelRatio)),
         static_cast<int>(std::ceil(height() * pixelRatio)));
@@ -1710,7 +1683,6 @@ void PerformanceHomeWidget::paintNebulaFields(
         presentedBackgroundCompositeMs_ = -2;
     }
     ++backgroundPresentationFallbackPaints_;
-#endif
     painter.save();
     painter.setRenderHint(QPainter::SmoothPixmapTransform);
     painter.setCompositionMode(QPainter::CompositionMode_SourceOver);
@@ -1938,11 +1910,9 @@ void PerformanceHomeWidget::paintHtmlStage()
         lensDiameter,
         lensDiameter);
     const QString currentChord = chordAt(position);
-#if defined(Q_OS_MACOS)
     paintForeground(painter, ForegroundPart::Chord,
         foregroundKey(chordHitRect_.adjusted(-1, -1, 1, 1), liveBank_, beatsPerBar_, position.songBeat),
         [&](QPainter& painter) {
-#endif
     QRadialGradient lens(
         QPointF(chordHitRect_.center().x() - 5, chordHitRect_.center().y() - 9),
         chordHitRect_.width() / 2.0);
@@ -1955,10 +1925,6 @@ void PerformanceHomeWidget::paintHtmlStage()
     painter.setPen(QPen(QColor(47, 59, 62, 118), 8));
     painter.drawEllipse(chordHitRect_.adjusted(8, 8, -8, -8));
 
-#if !defined(Q_OS_MACOS)
-    paintChordProgress(painter, position);
-
-#endif
     QFont lensLabel(QStringLiteral("Bahnschrift"));
     lensLabel.setPointSizeF(8.0);
     lensLabel.setLetterSpacing(QFont::AbsoluteSpacing, 1.4);
@@ -2032,11 +1998,9 @@ void PerformanceHomeWidget::paintHtmlStage()
         painter.drawEllipse(center, 3, 3);
     }
 
-#if defined(Q_OS_MACOS)
     });
     paintChordProgress(painter, position);
 
-#endif
     constexpr int runwayHeight = 60;
     const bool sideRunway = chordHitRect_.bottom() + 17 + runwayHeight + 8 > previewTop;
     const int runwayLeft = sideRunway ? chordHitRect_.right() + 18
@@ -2052,11 +2016,9 @@ void PerformanceHomeWidget::paintHtmlStage()
         runwayTop,
         runwayWidth,
         runwayHeight);
-#if defined(Q_OS_MACOS)
     paintForeground(painter, ForegroundPart::Runway,
         foregroundKey(chordRunwayRect_.adjusted(-1, -1, 1, 1), liveBank_, beatsPerBar_, position.songBeat),
         [&](QPainter& painter) {
-#endif
     const QVector<QPair<QString, QString>> upcoming = upcomingChords(position);
     QVector<QPair<QString, QString>> chordCells;
     chordCells.push_back({
@@ -2112,9 +2074,7 @@ void PerformanceHomeWidget::paintHtmlStage()
             Qt::AlignLeft | Qt::AlignVCenter,
             chordCells.at(index).first);
     }
-#if defined(Q_OS_MACOS)
     });
-#endif
 
     }
 
@@ -2285,9 +2245,7 @@ void PerformanceHomeWidget::paintHtmlStage()
 
 void PerformanceHomeWidget::paintEvent(QPaintEvent*)
 {
-#if defined(Q_OS_MACOS)
     ++paintEvents_;
-#endif
     if (width() >= 900) {
         paintHtmlStage();
         return;
@@ -2417,11 +2375,9 @@ void PerformanceHomeWidget::paintEvent(QPaintEvent*)
         static_cast<int>(orbitCenter.y() - orbitRadius * 0.62),
         static_cast<int>(orbitRadius * 1.24),
         static_cast<int>(orbitRadius * 1.24));
-#if defined(Q_OS_MACOS)
     paintForeground(painter, ForegroundPart::Chord,
         foregroundKey(chordHitRect_.adjusted(-1, -1, 1, 1), liveBank_, beatsPerBar_, position.songBeat),
         [&](QPainter& painter) {
-#endif
     QRadialGradient lens(chordHitRect_.center(), chordHitRect_.width() / 2.0);
     lens.setColorAt(0.0, QColor(36, 21, 47, 230));
     lens.setColorAt(0.72, QColor(18, 14, 34, 230));
@@ -2452,20 +2408,16 @@ void PerformanceHomeWidget::paintEvent(QPaintEvent*)
                 .arg(position.songBeat % static_cast<quint64>(beatsPerBar_) + 1)
             : QStringLiteral("1.1"));
 
-#if defined(Q_OS_MACOS)
     });
-#endif
     const int runwayWidth = qMin(430, width() / 3);
     chordRunwayRect_ = QRect(
         static_cast<int>(orbitCenter.x() + orbitRadius * 0.86),
         static_cast<int>(orbitCenter.y() - 46),
         runwayWidth,
         92);
-#if defined(Q_OS_MACOS)
     paintForeground(painter, ForegroundPart::Runway,
         foregroundKey(chordRunwayRect_.adjusted(-1, -1, 1, 1), liveBank_, beatsPerBar_, position.songBeat),
         [&](QPainter& painter) {
-#endif
     const QVector<QPair<QString, QString>> upcoming = upcomingChords(position);
     const int chordCellWidth = chordRunwayRect_.width() / 3;
     for (int index = 0; index < 3; ++index) {
@@ -2499,9 +2451,7 @@ void PerformanceHomeWidget::paintEvent(QPaintEvent*)
             Qt::AlignHCenter | Qt::AlignBottom,
             index < upcoming.size() ? upcoming.at(index).second : QString{});
     }
-#if defined(Q_OS_MACOS)
     });
-#endif
 
     }
 
@@ -2600,7 +2550,6 @@ void PerformanceHomeWidget::paintBeatPreview(
     quint64 barStart,
     bool current)
 {
-#if defined(Q_OS_MACOS)
     const int meter = qMax(1, previewBeatsPerBar);
     const QRect layerBounds = (current
         ? bounds.united(QRect(bounds.left() + 12, bounds.top() - 24, 226, 27))
@@ -2609,9 +2558,6 @@ void PerformanceHomeWidget::paintBeatPreview(
         foregroundKey(layerBounds, bankIndex, meter, barStart,
             current && running_ ? static_cast<int>(absoluteBeat_ % static_cast<quint64>(meter)) : -1),
         [&](QPainter& layer) { drawBeatPreview(layer, bounds, bankIndex, meter, barStart, current); });
-#else
-    drawBeatPreview(painter, bounds, bankIndex, previewBeatsPerBar, barStart, current);
-#endif
 }
 
 void PerformanceHomeWidget::drawBeatPreview(QPainter& painter, const QRect& bounds,
