@@ -1,4 +1,5 @@
 #include "BeatGridWidget.hpp"
+#include <QShowEvent>
 #include "MusicTheory.hpp"
 #include "SectionTimeline.hpp"
 
@@ -1186,6 +1187,9 @@ void BeatGridWidget::setUpcomingSection(
     upcomingTargetBeatsPerBar_ = qMax(1, targetBeatsPerBar);
     upcomingArrangementActive_ = arrangementActive;
     upcomingArrangementArmed_ = arrangementArmed;
+#if defined(Q_OS_MACOS)
+    if (!isVisible()) return;
+#endif
     updateUpcomingPreview();
 }
 
@@ -1410,12 +1414,25 @@ void BeatGridWidget::scheduleResponsiveChordRebuild()
     });
 }
 
+#if defined(Q_OS_MACOS)
+void BeatGridWidget::showEvent(QShowEvent* event)
+{
+    QWidget::showEvent(event);
+    setGridPosition(gridBeat_, gridSubdivision_, gridRunning_, gridBeatPhase_);
+    updateUpcomingPreview();
+}
+#endif
+
 void BeatGridWidget::setGridPosition(quint64 absoluteBeat, int subdivision, bool running, double beatPhase)
 {
     gridBeat_ = absoluteBeat;
     gridSubdivision_ = subdivision;
     gridBeatPhase_ = qBound(0.0, beatPhase, 0.999999);
     gridRunning_ = running;
+#if defined(Q_OS_MACOS)
+    // Keep transport state current without traversing or restyling hidden editors.
+    if (!isVisible()) return;
+#endif
     const int sectionIndex = selectedSectionIndex();
     if (sectionIndex < 0 || sectionIndex >= model_->sections().size()) return;
 
@@ -1436,16 +1453,29 @@ void BeatGridWidget::setGridPosition(quint64 absoluteBeat, int subdivision, bool
         bool changed = false;
         if (widget->property("authoringBar").isValid()) {
             const bool live = widget->property("authoringBar").toInt() == nextLiveBar;
+            const bool liveChanged = widget->property("live").toBool() != live;
             widget->setProperty("live", live);
             if (auto* button = qobject_cast<QPushButton*>(widget);
                 button && button->property("barBaseText").isValid()) {
                 button->setText(button->property("barBaseText").toString());
             }
+#if defined(Q_OS_MACOS)
+            changed = liveChanged;
+#else
             changed = true;
+            (void)liveChanged;
+#endif
         }
         if (widget->property("authoringBeat").isValid()) {
-            widget->setProperty("playhead", widget->property("authoringBeat").toInt() == nextLiveBeat);
+            const bool playhead = widget->property("authoringBeat").toInt() == nextLiveBeat;
+            const bool playheadChanged = widget->property("playhead").toBool() != playhead;
+            widget->setProperty("playhead", playhead);
+#if defined(Q_OS_MACOS)
+            changed = changed || playheadChanged;
+#else
             changed = true;
+            (void)playheadChanged;
+#endif
         }
         if (changed) {
             widget->style()->unpolish(widget);

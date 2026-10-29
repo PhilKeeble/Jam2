@@ -45,6 +45,12 @@
 #include <QVariantMap>
 #include <QVBoxLayout>
 #include <QWheelEvent>
+#include <QEventLoop>
+#include <QFile>
+#include <QJsonDocument>
+#include <QJsonArray>
+#include <QPointer>
+#include <QJsonObject>
 
 #include <algorithm>
 #include <array>
@@ -54,6 +60,7 @@
 #include <limits>
 #include <map>
 #include <vector>
+#include <ctime>
 
 namespace {
 
@@ -1353,6 +1360,29 @@ void testBeatGridWidgets()
             beatHitEdits == 1,
         "beat-grid painted step button advances hit state");
     processPaint(beat);
+#if defined(Q_OS_MACOS)
+    QVector<QPair<QPointer<QWidget>, bool>> hiddenPlayheads;
+    for (QWidget* child : beat.findChildren<QWidget*>()) {
+        if (child->property("authoringBeat").isValid())
+            hiddenPlayheads.push_back({child, child->property("playhead").toBool()});
+    }
+    expect(!hiddenPlayheads.isEmpty(), "beat editor exposes real playhead controls");
+    beat.hide();
+    beat.setGridPosition(1, 0, true, 0.25);
+    beat.setUpcomingSection(1, 2, 4, 3, true, false);
+    for (const auto& state : hiddenPlayheads) {
+        expect(state.first && state.first->property("playhead").toBool() == state.second,
+            "hidden editor preserves its controls without styling each beat update");
+    }
+    processPaint(beat);
+    bool resumedPlayhead = false;
+    for (QWidget* child : beat.findChildren<QWidget*>()) {
+        if (child->property("authoringBeat").isValid() &&
+            child->property("authoringBeat").toInt() == 1 && child->property("playhead").toBool())
+            resumedPlayhead = true;
+    }
+    expect(resumedPlayhead, "shown editor immediately applies the latest hidden transport state");
+#endif
 
     BeatGridWidget lyrics(&model, QStringLiteral("lyric"));
     lyrics.resize(900, 650);
@@ -1755,11 +1785,310 @@ void testPerformanceWidget()
         "performance background layer task completes before fixture teardown");
 }
 
+#if defined(__APPLE__)
+void testPerformanceBackgroundPresentation()
+{
+    BeatGridModel model;
+    model.setCell(0, QStringLiteral("chord"), 0, QStringLiteral("Cmaj7"));
+    PerformanceHomeWidget widget;
+    widget.setAttribute(Qt::WA_DontShowOnScreen, true);
+    widget.setSongModel(&model);
+    widget.resize(1200, 760);
+    processPaint(widget);
+    expect(QThreadPool::globalInstance()->waitForDone(10000),
+        "background layers complete through the real asynchronous worker");
+    QApplication::processEvents();
+    const auto firstImage = widget.grab();
+    const auto initial = widget.backgroundPresentationStats();
+    const double ratio = widget.devicePixelRatioF();
+    expect(!firstImage.isNull() && initial.pixelSize == QSize(
+               static_cast<int>(std::ceil(widget.width() * ratio)),
+               static_cast<int>(std::ceil(widget.height() * ratio))) &&
+            initial.devicePixelRatio == ratio && initial.bytes > 0 &&
+            initial.bytes <= initial.maximumBytes && initial.refreshes > 0,
+        "real view creates a bounded native-resolution background after asynchronous layer delivery");
+    const auto controls = widget.guiVirtualControls();
+    const auto target = std::find_if(controls.begin(), controls.end(), [](const auto& control) {
+        return control.id == QStringLiteral("performance.home.open.chords.current");
+    });
+    expect(target != controls.end(), "cached view exposes the real chord control");
+    QString opened;
+    widget.onOpenDetail = [&](const QString& page) { opened = page; };
+    if (target != controls.end()) {
+        const auto bounds = target->state.value(QStringLiteral("bounds")).toMap();
+        const QRect rect(bounds.value(QStringLiteral("x")).toInt(), bounds.value(QStringLiteral("y")).toInt(),
+            bounds.value(QStringLiteral("width")).toInt(), bounds.value(QStringLiteral("height")).toInt());
+        sendMouse(widget, QEvent::MouseButtonPress, rect.center(), Qt::LeftButton, Qt::LeftButton);
+    }
+    expect(opened == QStringLiteral("chords"), "cached view dispatches the actual chord hit target");
+    widget.setWavGenerationActive(true);
+    widget.setTiming(1, 0, 4, 0.75, true);
+    const auto changedImage = widget.grab();
+    widget.grab();
+    const auto reused = widget.backgroundPresentationStats();
+    expect(changedImage.toImage() != firstImage.toImage() && reused.reusedPaints > initial.reusedPaints &&
+            reused.fallbackPaints == 0,
+        "foreground state visibly changes while ordinary paints reuse the native background");
+    for (const QSize size : {QSize(850, 650), QSize(1680, 950), QSize(1200, 760)}) {
+        widget.resize(size);
+        const auto image = widget.grab();
+        const auto stats = widget.backgroundPresentationStats();
+        expect(!image.isNull() && stats.pixelSize == QSize(
+                   static_cast<int>(std::ceil(widget.width() * ratio)),
+                   static_cast<int>(std::ceil(widget.height() * ratio))) &&
+                stats.bytes <= stats.maximumBytes && stats.fallbackPaints == 0,
+            "compact and wide layouts replace the cache at the actual pixel dimensions");
+    }
+    if (ratio >= 2.0) {
+        // Just beyond 64 MiB at 2x, without allocating an additional cached image.
+        widget.resize(8500, 500);
+        expect(!widget.grab().isNull() && widget.backgroundPresentationStats().bytes == 0 &&
+                widget.backgroundPresentationStats().fallbackPaints > 0,
+            "oversized presentation falls back to the original rendering path within the cache budget");
+        expect(widget.foregroundStats().fallbackPaints > 0 &&
+                widget.foregroundStats().bytes <= widget.foregroundStats().maximumBytes,
+            "oversized beat layers fall back without exceeding the foreground memory bound");
+        widget.resize(1200, 760);
+        widget.grab();
+        expect(widget.backgroundPresentationStats().bytes > 0,
+            "normal rendering recovers after an oversized view");
+    }
+    expect(widget.rendererStatsText().contains(QStringLiteral("native background")) &&
+            widget.rendererStatsText().contains(QStringLiteral("MiB/64 MiB")),
+        "renderer diagnostics expose cache size, bound and reuse counters");
+    widget.hide();
+    QApplication::processEvents();
+    const auto hidden = widget.backgroundPresentationStats();
+    QEventLoop hiddenWait;
+    QTimer::singleShot(160, &hiddenWait, &QEventLoop::quit);
+    hiddenWait.exec();
+    expect(widget.backgroundPresentationStats().refreshes == hidden.refreshes,
+        "hidden view performs no new presentation compositions");
+
+    widget.show();
+    widget.setTiming(0, 0, 4, 0.0, false);
+    widget.grab();
+    const auto stopped = widget.foregroundStats();
+    widget.grab();
+    expect(widget.foregroundStats().refreshes == stopped.refreshes &&
+            widget.foregroundStats().reusedPaints >= stopped.reusedPaints + 4 &&
+            stopped.bytes > 0 && stopped.bytes <= stopped.maximumBytes,
+        "stopped chord and beat layers reuse all four bounded native-resolution images");
+    widget.setTiming(0, 0, 4, 0.25, true);
+    const auto phaseBefore = widget.grab().toImage();
+    const auto playing = widget.foregroundStats();
+    widget.setTiming(0, 1, 4, 0.75, true);
+    const auto phaseAfter = widget.grab().toImage();
+    expect(widget.foregroundStats().refreshes == playing.refreshes && phaseBefore != phaseAfter,
+        "phase-only updates keep static layers while the progress arc remains live");
+    widget.setTiming(1, 0, 4, 0.0, true);
+    widget.grab();
+    const auto beat = widget.foregroundStats();
+    expect(beat.refreshes[0] > playing.refreshes[0] && beat.refreshes[1] > playing.refreshes[1] &&
+            beat.refreshes[2] > playing.refreshes[2] && beat.refreshes[3] == playing.refreshes[3],
+        "active beat changes refresh chord labels and current grid without rebuilding the next bar");
+    widget.setTiming(4, 0, 4, 0.0, true);
+    widget.grab();
+    const auto bar = widget.foregroundStats();
+    expect(bar.refreshes[3] > beat.refreshes[3], "bar changes refresh the next grid");
+    model.setBeatHit(0, 4, 0, QStringLiteral("xag."));
+    model.setCell(0, QStringLiteral("chord"), 4, QStringLiteral("F#m7"));
+    widget.grab();
+    const auto edit = widget.foregroundStats();
+    expect(edit.refreshes[0] > bar.refreshes[0] && edit.refreshes[2] > bar.refreshes[2] &&
+            edit.refreshes[3] > bar.refreshes[3], "model revisions invalidate cached musical content");
+    QFont changedFont = widget.font();
+    changedFont.setPointSizeF(15.0);
+    widget.setFont(changedFont);
+    widget.grab();
+    expect(widget.foregroundStats().refreshes[2] > edit.refreshes[2],
+        "font changes regenerate cached text");
+    widget.setBankState(1, 2, 1, 3, false, QString{});
+    widget.setTiming(7, 0, 4, 0.0, true);
+    widget.grab();
+    const auto bank = widget.foregroundStats();
+    expect(bank.refreshes[3] > edit.refreshes[3], "pending bank and meter changes update the preview");
+    for (const auto& control : widget.guiVirtualControls()) {
+        if (control.id != QStringLiteral("performance.home.open.beats.current")) continue;
+        const auto bounds = control.state.value(QStringLiteral("bounds")).toMap();
+        const QRect rect(bounds.value(QStringLiteral("x")).toInt(), bounds.value(QStringLiteral("y")).toInt(),
+            bounds.value(QStringLiteral("width")).toInt(), bounds.value(QStringLiteral("height")).toInt());
+        sendMouse(widget, QEvent::MouseButtonPress, rect.center(), Qt::LeftButton, Qt::LeftButton);
+    }
+    expect(opened == QStringLiteral("beats"), "cached beat preview retains the actual mouse action");
+    widget.setChordPreviewVisible(false);
+    widget.setBeatPreviewVisible(false);
+    widget.grab();
+    const auto disabled = widget.foregroundStats();
+    widget.setTiming(20, 0, 4, 0.5, true);
+    widget.grab();
+    expect(disabled.bytes == 0 && widget.foregroundStats().refreshes == disabled.refreshes,
+        "disabled previews release their layers and perform no chord or beat drawing");
+    widget.setChordPreviewVisible(true);
+    widget.setBeatPreviewVisible(true);
+    widget.setSongModel(nullptr);
+    widget.grab();
+    widget.setSongModel(&model);
+    widget.resize(850, 650);
+    widget.grab();
+    const auto compact = widget.foregroundStats();
+    widget.grab();
+    expect(compact.bytes > 0 && compact.bytes <= compact.maximumBytes &&
+            widget.foregroundStats().refreshes == compact.refreshes,
+        "compact layout and model replacement recover and reuse current musical content");
+    widget.hide();
+}
+
+void benchmarkPerformanceRendering(bool staticViews = false)
+{
+    BeatGridModel model;
+    model.setCell(0, QStringLiteral("chord"), 0, QStringLiteral("Cmaj7"));
+    PerformanceHomeWidget widget;
+    widget.setAttribute(Qt::WA_DontShowOnScreen, true);
+    widget.resize(1920, 1080);
+    widget.setSongModel(&model);
+    widget.setTiming(0, 0, 4, 0.25, true);
+    widget.setPeers({{1, QStringLiteral("Alex"), true, -3.0, false},
+        {2, QStringLiteral("Blair"), true, -6.0, false},
+        {3, QStringLiteral("Casey"), true, -9.0, false}});
+    jam2::EngineGuiPeakSnapshot peaks;
+    peaks.input_peak_ppm = 300000;
+    peaks.remote_peak_ppm = 600000;
+    widget.setAudioPeaks(peaks);
+    class PaintCounter final : public QObject {
+    public:
+        int count = 0;
+        bool eventFilter(QObject*, QEvent* event) override
+        {
+            if (event->type() == QEvent::Paint) ++count;
+            return false;
+        }
+    } paints;
+    widget.installEventFilter(&paints);
+    widget.show();
+    QEventLoop warmup;
+    QTimer::singleShot(6000, &warmup, &QEventLoop::quit);
+    warmup.exec();
+    if (staticViews) {
+        QJsonArray scenarios;
+        QElapsedTimer transportClock;
+        QTimer transport;
+        transport.setInterval(16);
+        QObject::connect(&transport, &QTimer::timeout, &widget, [&] {
+            const double beats = transportClock.elapsed() / 500.0;
+            widget.setTiming(static_cast<quint64>(beats), 0, 4, beats - std::floor(beats), true);
+        });
+        for (const QString& scenario : {QStringLiteral("stopped"), QStringLiteral("playing"),
+                 QStringLiteral("previews_disabled"), QStringLiteral("hidden")}) {
+            const bool playing = scenario != QStringLiteral("stopped");
+            const bool previews = scenario != QStringLiteral("previews_disabled");
+            widget.setChordPreviewVisible(previews);
+            widget.setBeatPreviewVisible(previews);
+            if (scenario == QStringLiteral("hidden")) widget.hide();
+            widget.setTiming(0, 0, 4, 0.0, playing);
+            transportClock.restart();
+            if (playing) transport.start();
+            const int beforePaints = paints.count;
+            const std::clock_t beforeCpu = std::clock();
+            QElapsedTimer elapsed;
+            elapsed.start();
+            QEventLoop sample;
+            QTimer::singleShot(6000, &sample, &QEventLoop::quit);
+            sample.exec();
+            transport.stop();
+            const double seconds = elapsed.nsecsElapsed() / 1e9;
+            const double cpu = static_cast<double>(std::clock() - beforeCpu) / CLOCKS_PER_SEC;
+            const QJsonObject metric{{QStringLiteral("scenario"), scenario},
+                {QStringLiteral("cpu_one_core_percent"), cpu / seconds * 100.0},
+                {QStringLiteral("wall_seconds"), seconds},
+                {QStringLiteral("paint_events"), paints.count - beforePaints},
+                {QStringLiteral("renderer"), widget.rendererStatsText()}};
+            scenarios.append(metric);
+            std::cout << "METRIC static_views " << QJsonDocument(metric).toJson(QJsonDocument::Compact).constData() << '\n';
+            expect(scenario == QStringLiteral("hidden") ? paints.count == beforePaints
+                : paints.count - beforePaints > 10, "visible animation runs and hidden views do not paint");
+        }
+        const QString artifacts = qEnvironmentVariable("JAM2_TEST_ARTIFACT_ROOT");
+        if (!artifacts.isEmpty()) {
+            QFile file(QDir(artifacts).filePath(QStringLiteral("static-views.json")));
+            const auto bytes = QJsonDocument(scenarios).toJson();
+            expect(file.open(QIODevice::WriteOnly) && file.write(bytes) == bytes.size(),
+                "static view benchmark retains all scenarios");
+        }
+        widget.hide();
+        expect(QThreadPool::globalInstance()->waitForDone(10000), "static view benchmark drains workers");
+        return;
+    }
+    const auto settledBackground = widget.backgroundPresentationStats().refreshes;
+    const int initialPaints = paints.count;
+    const std::clock_t initialCpu = std::clock();
+    QElapsedTimer wall;
+    wall.start();
+    QEventLoop measurement;
+    QTimer::singleShot(6000, &measurement, &QEventLoop::quit);
+    measurement.exec();
+    const double wallSeconds = wall.nsecsElapsed() / 1000000000.0;
+    const double cpuSeconds = static_cast<double>(std::clock() - initialCpu) / CLOCKS_PER_SEC;
+    const QJsonObject metrics{
+        {QStringLiteral("wall_seconds"), wallSeconds},
+        {QStringLiteral("process_cpu_seconds"), cpuSeconds},
+        {QStringLiteral("cpu_one_core_percent"), cpuSeconds / wallSeconds * 100.0},
+        {QStringLiteral("paint_events"), paints.count - initialPaints},
+        {QStringLiteral("device_pixel_ratio"), widget.devicePixelRatioF()},
+        {QStringLiteral("renderer"), widget.rendererStatsText()},
+        {QStringLiteral("background_cache_bytes"), widget.backgroundPresentationStats().bytes},
+        {QStringLiteral("background_cache_refreshes"), static_cast<qint64>(widget.backgroundPresentationStats().refreshes)},
+        {QStringLiteral("background_cache_reused_paints"), static_cast<qint64>(widget.backgroundPresentationStats().reusedPaints)},
+    };
+    const auto bytes = QJsonDocument(metrics).toJson(QJsonDocument::Compact);
+    std::cout << "METRIC performance_rendering " << bytes.constData() << '\n';
+    const QString artifacts = qEnvironmentVariable("JAM2_TEST_ARTIFACT_ROOT");
+    if (!artifacts.isEmpty()) {
+        QFile file(QDir(artifacts).filePath(QStringLiteral("performance-rendering.json")));
+        expect(file.open(QIODevice::WriteOnly) && file.write(bytes) == bytes.size(),
+            "performance rendering benchmark retains its measurements");
+        expect(widget.grab().save(QDir(artifacts).filePath(QStringLiteral("performance-rendering.png"))),
+            "performance rendering benchmark retains the real rendered view");
+    }
+    expect(paints.count - initialPaints > 10, "performance animation continues during measurement");
+    expect(widget.backgroundPresentationStats().refreshes == settledBackground &&
+            widget.rendererStatsText().contains(QStringLiteral("nebula motion frozen")),
+        "temporary frozen-nebula preview retains the artwork without background recomposition after startup");
+    QString opened;
+    widget.onOpenDetail = [&](const QString& page) { opened = page; };
+    for (const auto& control : widget.guiVirtualControls()) {
+        if (control.id != QStringLiteral("performance.home.open.chords.current")) continue;
+        const auto bounds = control.state.value(QStringLiteral("bounds")).toMap();
+        const QRect target(bounds.value(QStringLiteral("x")).toInt(), bounds.value(QStringLiteral("y")).toInt(),
+            bounds.value(QStringLiteral("width")).toInt(), bounds.value(QStringLiteral("height")).toInt());
+        sendMouse(widget, QEvent::MouseButtonPress, target.center(), Qt::LeftButton, Qt::LeftButton);
+    }
+    expect(opened == QStringLiteral("chords"), "performance view retains its real painted navigation action");
+    widget.hide();
+    expect(QThreadPool::globalInstance()->waitForDone(10000),
+        "performance rendering benchmark drains asynchronous background work");
+}
+#endif
+
 } // namespace
 
 int main(int argc, char** argv)
 {
     QApplication app(argc, argv);
+#if defined(__APPLE__)
+    if (argc == 2 && QString::fromLocal8Bit(argv[1]) == QStringLiteral("--performance-background")) {
+        testPerformanceBackgroundPresentation();
+        return failures == 0 ? 0 : 1;
+    }
+    if (argc == 2 && QString::fromLocal8Bit(argv[1]) == QStringLiteral("--static-views")) {
+        benchmarkPerformanceRendering(true);
+        return failures == 0 ? 0 : 1;
+    }
+    if (argc == 2 && QString::fromLocal8Bit(argv[1]) == QStringLiteral("--performance-rendering")) {
+        benchmarkPerformanceRendering();
+        return failures == 0 ? 0 : 1;
+    }
+#endif
     if (argc == 2 && QString::fromLocal8Bit(argv[1]) == QStringLiteral("--looper-waveform")) {
         testLooperWaveformGridAlignment();
         return failures == 0 ? 0 : 1;
@@ -1783,6 +2112,9 @@ int main(int argc, char** argv)
     testMetronomeWidgets();
     testBeatGridWidgets();
     testPerformanceWidget();
+#if defined(__APPLE__)
+    testPerformanceBackgroundPresentation();
+#endif
     if (failures == 0) {
         std::cout << "GUI widget boundary tests passed\n";
         return 0;

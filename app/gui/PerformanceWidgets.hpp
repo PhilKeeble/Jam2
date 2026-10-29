@@ -101,6 +101,30 @@ struct PerformancePeerPresentation {
     bool selected = false;
 };
 
+#if defined(Q_OS_MACOS)
+struct PerformanceBackgroundPresentationStats {
+    QSize pixelSize;
+    double devicePixelRatio = 1.0;
+    qsizetype bytes = 0;
+    qsizetype maximumBytes = 64 * 1024 * 1024;
+    std::uint64_t refreshes = 0;
+    std::uint64_t reusedPaints = 0;
+    std::uint64_t fallbackPaints = 0;
+};
+
+struct PerformanceForegroundStats {
+    bool visible = false;
+    bool animationActive = false;
+    std::uint64_t animationTicks = 0;
+    std::uint64_t paintEvents = 0;
+    qsizetype bytes = 0;
+    qsizetype maximumBytes = 32 * 1024 * 1024;
+    std::array<std::uint64_t, 4> refreshes{}; // Chord, runway, current bar, next bar.
+    std::uint64_t reusedPaints = 0;
+    std::uint64_t fallbackPaints = 0;
+};
+#endif
+
 class PerformanceHomeWidget final : public QWidget, public jam2::gui::GuiVirtualControlProvider {
 public:
     explicit PerformanceHomeWidget(QWidget* parent = nullptr);
@@ -138,6 +162,10 @@ public:
         const QString& status);
     void setArrangementState(bool running, bool armed);
     QString rendererStatsText() const;
+#if defined(Q_OS_MACOS)
+    PerformanceBackgroundPresentationStats backgroundPresentationStats() const noexcept;
+    PerformanceForegroundStats foregroundStats() const noexcept;
+#endif
     QVector<jam2::gui::GuiVirtualControl> guiVirtualControls() const override;
     bool invokeGuiVirtualControl(
         const QString& id,
@@ -163,6 +191,10 @@ public:
 
 protected:
     void paintEvent(QPaintEvent* event) override;
+#if defined(Q_OS_MACOS)
+    void showEvent(QShowEvent* event) override;
+    void hideEvent(QHideEvent* event) override;
+#endif
     void resizeEvent(QResizeEvent* event) override;
     void mousePressEvent(QMouseEvent* event) override;
     void mouseMoveEvent(QMouseEvent* event) override;
@@ -193,6 +225,7 @@ private:
         double seconds,
         double participantComplexity);
     void paintHtmlStage();
+    void paintChordProgress(QPainter& painter, const SongPosition& position);
     void paintBeatPreview(
         QPainter& painter,
         const QRect& bounds,
@@ -200,6 +233,37 @@ private:
         int previewBeatsPerBar,
         quint64 barStart,
         bool current);
+    void drawBeatPreview(QPainter& painter, const QRect& bounds, int bankIndex,
+        int previewBeatsPerBar, quint64 barStart, bool current);
+#if defined(Q_OS_MACOS)
+    enum class ForegroundPart : std::size_t { Chord, Runway, CurrentBar, NextBar };
+    struct ForegroundKey {
+        const BeatGridModel* model = nullptr;
+        int revision = -1;
+        QRect bounds;
+        QFont font;
+        double ratio = 1.0;
+        int bank = 0;
+        int meter = 4;
+        quint64 beat = 0;
+        int activeBeat = -1;
+        bool operator==(const ForegroundKey&) const = default;
+    };
+    struct ForegroundCache {
+        ForegroundKey key;
+        QImage image;
+        std::uint64_t refreshes = 0;
+    };
+    ForegroundKey foregroundKey(const QRect& bounds, int bank, int meter,
+        quint64 beat, int activeBeat = -1) const;
+    void paintForeground(QPainter& painter, ForegroundPart part, const ForegroundKey& key,
+        const std::function<void(QPainter&)>& draw);
+    std::array<ForegroundCache, 4> foregroundCaches_;
+    std::uint64_t foregroundReusedPaints_ = 0;
+    std::uint64_t foregroundFallbackPaints_ = 0;
+    std::uint64_t animationTicks_ = 0;
+    std::uint64_t paintEvents_ = 0;
+#endif
     struct ChordVisualLayout {
         QPointF center;
         double radius;
@@ -262,6 +326,13 @@ private:
     QImage filamentCache_;
     QImage dustCache_;
     QImage backgroundFrameCache_;
+#if defined(Q_OS_MACOS)
+    QImage backgroundPresentationCache_;
+    qint64 presentedBackgroundCompositeMs_ = -2;
+    std::uint64_t backgroundPresentationRefreshes_ = 0;
+    std::uint64_t backgroundPresentationReusedPaints_ = 0;
+    std::uint64_t backgroundPresentationFallbackPaints_ = 0;
+#endif
     qint64 backgroundBuildNanoseconds_ = 0;
     qsizetype backgroundCacheBytes_ = 0;
     qint64 lastBackgroundCompositeMs_ = -1;

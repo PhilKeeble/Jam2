@@ -121,6 +121,9 @@ private:
     void updateUpcomingPreview();
     void emitStructureChanged();
     void resizeEvent(QResizeEvent* event) override;
+#if defined(Q_OS_MACOS)
+    void showEvent(QShowEvent* event) override;
+#endif
     QVector<int> chordDetailBarWidths(const SongSection& section) const;
     int chordDetailAvailableWidth() const;
     jam2::gui::ChordDetailGroup currentChordDetailGroup(
