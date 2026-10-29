@@ -1,6 +1,7 @@
 #include "SettingsDialog.hpp"
 
 #include "AudioDeviceUiSupport.hpp"
+#include "PeerName.hpp"
 
 #include "GuiControlContract.hpp"
 #include "GuiPresentation.hpp"
@@ -710,6 +711,18 @@ std::optional<SettingsDialogResult> SettingsDialog::run(
 
     auto* generalContent = new QWidget(&dialog);
     auto* generalLayout = new QVBoxLayout(generalContent);
+    auto* nameBox = new QGroupBox(QStringLiteral("Your name"), generalContent);
+    auto* nameForm = new QFormLayout(nameBox);
+    auto* peerName = new QLineEdit(preferences_.create.name.isEmpty()
+        ? preferences_.join.name : preferences_.create.name, nameBox);
+    peerName->setMaxLength(32);
+    peerName->setPlaceholderText(QStringLiteral("1 to 8 letters"));
+    peerName->setToolTip(jam2::application::peerNameRequirement());
+    auto* nameHint = new QLabel(nameBox);
+    nameHint->setWordWrap(true);
+    nameForm->addRow(QStringLiteral("Peer name"), peerName);
+    nameForm->addRow(nameHint);
+    generalLayout->addWidget(nameBox);
     auto* startupBox = new QGroupBox(QStringLiteral("When Jam2 opens"), generalContent);
     auto* startupForm = new QFormLayout(startupBox);
     auto* startupView = new QComboBox(startupBox);
@@ -1203,7 +1216,7 @@ std::optional<SettingsDialogResult> SettingsDialog::run(
     addSettingsPage(QStringLiteral("Ideas & WAVs"), makeScrollTab(ideaContent));
     addSettingsPage(QStringLiteral("Levels"), makeScrollTab(levelsContent));
     addSettingsPage(QStringLiteral("Metronome"), makeScrollTab(metronomeContent));
-    addSettingsPage(QStringLiteral("Startup"), makeScrollTab(generalContent));
+    addSettingsPage(QStringLiteral("General"), makeScrollTab(generalContent));
     addSettingsPage(QStringLiteral("Views & Tracks"), makeScrollTab(viewsContent));
     addSettingsPage(QStringLiteral("Logs"), makeScrollTab(logContent));
     addSettingsPage(QStringLiteral("Recording"), makeScrollTab(recordingContent));
@@ -1214,6 +1227,17 @@ std::optional<SettingsDialogResult> SettingsDialog::run(
     tabLayout->addWidget(settingsNavigation);
     tabLayout->addWidget(settingsPages, 1);
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel, &dialog);
+    const auto validatePeerName = [=] {
+        const bool valid = peerName->text().isEmpty() ||
+            jam2::application::PeerName::fromInput(peerName->text()).has_value();
+        buttons->button(QDialogButtonBox::Save)->setEnabled(valid);
+        nameHint->setText(valid
+            ? QStringLiteral("Used to pre-fill Create and Join Jam.")
+            : jam2::application::peerNameRequirement());
+        nameHint->setStyleSheet(valid ? QStringLiteral("color:#9eaaa9;") : QStringLiteral("color:#efab81;"));
+    };
+    QObject::connect(peerName, &QLineEdit::textChanged, &dialog, validatePeerName);
+    validatePeerName();
     const auto registerSettingsControl = [](
         QObject* control,
         const QString& id,
@@ -1375,6 +1399,7 @@ std::optional<SettingsDialogResult> SettingsDialog::run(
         {defaultMeter, "meter"}, {defaultDivision, "click-division"},
         {generateOnStartup, "generate-idea"},
     });
+    registerSettingsControl(peerName, QStringLiteral("identity.peer-name"), "session.peer-name");
     registerPageControls(QStringLiteral("ideas"), "application.settings-ideas", {
         {ideaParts, "parts"}, {ideaKey, "key"}, {ideaStyle, "style"},
         {ideaProfile, "profile"}, {ideaMeter, "meter"},
@@ -1491,6 +1516,10 @@ std::optional<SettingsDialogResult> SettingsDialog::run(
     if (dialog.exec() != QDialog::Accepted) return std::nullopt;
 
     UserPreferences updated = preferences_;
+    const auto savedPeerName = jam2::application::PeerName::fromInput(peerName->text());
+    if (!peerName->text().isEmpty() && !savedPeerName) return std::nullopt;
+    updated.create.name = savedPeerName ? savedPeerName->text() : QString{};
+    updated.join.name = updated.create.name;
     updated.localAudio = localControls->preference(updated.localAudio);
     updated.localAudio.sampleRate = localSampleRate->currentData().toInt();
     updated.localAudio.bufferSize = localBufferSize->currentData().toInt();

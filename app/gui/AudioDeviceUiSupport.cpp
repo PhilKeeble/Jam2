@@ -6,12 +6,14 @@
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QLabel>
+#include <QHBoxLayout>
 #include <QPushButton>
 #include <QStringList>
 #include <QVBoxLayout>
 #include <QFormLayout>
 #include <QLineEdit>
 #include <QSignalBlocker>
+#include <QStyle>
 
 #include <algorithm>
 #include <stdexcept>
@@ -50,7 +52,8 @@ AudioDeviceControls::AudioDeviceControls(QFormLayout* form, QComboBox* device,
     const AudioDevicePreference& preference, const QString& selectedId, const QString& prefix, QComboBox* bufferSize)
     : QObject(device), form_(form), device_(device), driver_(new QComboBox(device->parentWidget())),
       deviceSetup_(new QComboBox(device->parentWidget())), input_(new QComboBox(device->parentWidget())), inputChannels_(inputChannels),
-      outputChannels_(outputChannels), channels_(new QLabel(device->parentWidget())), noDuplexDevice_(new QLabel(device->parentWidget())), choices_(std::move(choices))
+      outputChannels_(outputChannels), channels_(new QLabel(device->parentWidget())),
+      noDuplexWarning_(new QWidget(device->parentWidget())), noDuplexDevice_(new QLabel(noDuplexWarning_)), choices_(std::move(choices))
 {
     input_->setSizeAdjustPolicy(device_->sizeAdjustPolicy());
     input_->setMinimumContentsLength(device_->minimumContentsLength());
@@ -70,18 +73,37 @@ AudioDeviceControls::AudioDeviceControls(QFormLayout* form, QComboBox* device,
         driver_->addItem(QStringLiteral("ASIO"), QStringLiteral("ASIO"));
         driver_->addItem(QStringLiteral("WASAPI"), QStringLiteral("WASAPI"));
     }
-    deviceSetup_->addItem(QStringLiteral("One device for input and output"), static_cast<int>(jam2::audio::AudioDeviceSetup::SingleDevice));
-    deviceSetup_->addItem(QStringLiteral("Separate input and output devices"), static_cast<int>(jam2::audio::AudioDeviceSetup::SeparateInputOutput));
+    deviceSetup_->addItem(QStringLiteral("Audio Interface"), static_cast<int>(jam2::audio::AudioDeviceSetup::SingleDevice));
+    deviceSetup_->addItem(QStringLiteral("Separate Devices"), static_cast<int>(jam2::audio::AudioDeviceSetup::SeparateInputOutput));
     int row = 0; QFormLayout::ItemRole role{}; form_->getWidgetPosition(device_, &row, &role);
     form_->insertRow(row, QStringLiteral("Driver"), driver_);
     form_->insertRow(row + 1, QStringLiteral("Device setup"), deviceSetup_);
     form_->insertRow(row + 3, QStringLiteral("Input device"), input_);
     form_->insertRow(row + 4, QStringLiteral("Channels"), channels_);
     noDuplexDevice_->setObjectName(prefix + QStringLiteral(".no-duplex-device"));
-    noDuplexDevice_->setText(QStringLiteral("No device found supporting input and output. Use two devices instead."));
+    noDuplexDevice_->setText(QStringLiteral("No audio interface with both input and output found. Select Separate Devices instead."));
     noDuplexDevice_->setTextFormat(Qt::PlainText);
     noDuplexDevice_->setWordWrap(true);
-    form_->insertRow(row + 5, QString(), noDuplexDevice_);
+    noDuplexDevice_->setAlignment(Qt::AlignLeft | Qt::AlignTop);
+    auto warningTextPolicy = noDuplexDevice_->sizePolicy();
+    warningTextPolicy.setHorizontalPolicy(QSizePolicy::Expanding);
+    noDuplexDevice_->setSizePolicy(warningTextPolicy);
+    noDuplexWarning_->setObjectName(prefix + QStringLiteral(".no-duplex-warning"));
+    noDuplexWarning_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+    noDuplexWarning_->setMinimumWidth(device_->minimumWidth());
+    noDuplexWarning_->setMaximumWidth(device_->maximumWidth());
+    auto* warningLayout = new QHBoxLayout(noDuplexWarning_);
+    warningLayout->setContentsMargins(0, 0, 0, 0);
+    warningLayout->setSpacing(8);
+    auto* warningIcon = new QLabel(noDuplexWarning_);
+    warningIcon->setObjectName(prefix + QStringLiteral(".no-duplex-icon"));
+    warningIcon->setAccessibleName(QStringLiteral("Warning"));
+    warningIcon->setFixedSize(18, 18);
+    warningIcon->setPixmap(noDuplexWarning_->style()->standardIcon(QStyle::SP_MessageBoxWarning)
+        .pixmap(QSize(18, 18), device_->devicePixelRatioF()));
+    warningLayout->addWidget(warningIcon, 0, Qt::AlignTop);
+    warningLayout->addWidget(noDuplexDevice_, 1);
+    form_->insertRow(row + 5, QString(), noDuplexWarning_);
     for (const auto& item : {std::pair<QComboBox*, QString>{driver_, QStringLiteral("driver")},
              {input_, QStringLiteral("input-device")}, {deviceSetup_, QStringLiteral("device-setup")}}) {
         item.first->setObjectName(prefix + QLatin1Char('.') + item.second);
@@ -231,7 +253,7 @@ void AudioDeviceControls::updateView()
         buffer.showingWasapi = wasapi;
         buffer.form->setRowVisible(bufferSize_, !wasapi);
     }
-    form_->setRowVisible(noDuplexDevice_, coreaudio && !separate && device_->count() == 0);
+    form_->setRowVisible(noDuplexWarning_, coreaudio && !separate && device_->count() == 0);
     form_->setRowVisible(driver_, !coreaudio);
     form_->setRowVisible(deviceSetup_, coreaudio);
     form_->setRowVisible(input_, wasapi || separate); form_->setRowVisible(channels_, wasapi);

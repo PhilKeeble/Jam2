@@ -74,6 +74,7 @@ private:
     QLineEdit* inputChannels_;
     QLineEdit* outputChannels_;
     QLabel* channels_;
+    QWidget* noDuplexWarning_;
     QLabel* noDuplexDevice_;
     struct BufferControl {
         QComboBox* editor;

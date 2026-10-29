@@ -7,9 +7,12 @@
 #include <QApplication>
 #include <QComboBox>
 #include <QDialog>
+#include <QDir>
 #include <QFormLayout>
 #include <QLabel>
 #include <QLineEdit>
+#include <QListWidget>
+#include <QPixmap>
 #include <QPushButton>
 #include <QTemporaryDir>
 #include <QTimer>
@@ -25,6 +28,44 @@ template<class T> T* control(QWidget* root, const QString& id) {
     for (auto* item : root->findChildren<T*>())
         if (guiControlId(*item) == id || item->objectName() == id) return item;
     throw std::runtime_error("missing actual control: " + id.toStdString());
+}
+void capture(QWidget& widget, const QString& fileName) {
+    const QString root = qEnvironmentVariable("JAM2_TEST_ARTIFACT_ROOT");
+    if (!root.isEmpty()) require(widget.grab().save(QDir(root).filePath(fileName)), "save actual dialog rendering");
+}
+void requireWarningLayout(QWidget& root, const QString& prefix) {
+    auto* warning = control<QLabel>(&root, prefix + QStringLiteral(".no-duplex-device"));
+    auto* output = control<QComboBox>(&root, prefix == QStringLiteral("session.dialog")
+        ? prefix + QStringLiteral(".audio-device") : prefix + QStringLiteral(".device"));
+    auto* rowWidget = control<QWidget>(&root, prefix + QStringLiteral(".no-duplex-warning"));
+    auto* icon = control<QLabel>(&root, prefix + QStringLiteral(".no-duplex-icon"));
+    bool fieldAligned = false;
+    for (auto* form : root.findChildren<QFormLayout*>()) {
+        int row = -1; QFormLayout::ItemRole role{};
+        form->getWidgetPosition(rowWidget, &row, &role);
+        if (row >= 0) fieldAligned = role == QFormLayout::FieldRole;
+    }
+    const bool fits = fieldAligned && warning->isVisible() && icon->isVisible() && !icon->pixmap().isNull() &&
+        rowWidget->mapToGlobal(QPoint()).x() == output->mapToGlobal(QPoint()).x() &&
+        icon->mapToGlobal(QPoint()).x() == rowWidget->mapToGlobal(QPoint()).x() &&
+        warning->mapToGlobal(QPoint()).x() > icon->mapToGlobal(QPoint()).x() + icon->width() &&
+        rowWidget->width() == output->width() &&
+        warning->height() >= warning->heightForWidth(warning->width()) &&
+        // A form can retain one line of padding after text stops wrapping at a wider size.
+        rowWidget->height() <= qMax(icon->height(), warning->heightForWidth(warning->width())) + warning->fontMetrics().height() &&
+        warning->alignment().testFlag(Qt::AlignTop) &&
+        warning->mapToGlobal(QPoint()).y() == icon->mapToGlobal(QPoint()).y();
+    if (!fits) {
+        std::cerr << prefix.toStdString() << " field=" << fieldAligned << " row=" << rowWidget->width()
+            << " output=" << output->width() << " text_height=" << warning->height()
+            << " needed=" << warning->heightForWidth(warning->width())
+            << " row_x=" << rowWidget->mapToGlobal(QPoint()).x() << " output_x=" << output->mapToGlobal(QPoint()).x()
+            << " icon_x=" << icon->mapToGlobal(QPoint()).x() << " text_x=" << warning->mapToGlobal(QPoint()).x()
+            << " visible=" << warning->isVisible() << '/' << icon->isVisible()
+            << " icon_null=" << icon->pixmap().isNull() << '\n';
+        capture(root, QStringLiteral("warning-layout-failure.png"));
+    }
+    require(fits, "warning icon and wrapped text align with the dropdown column without clipping");
 }
 std::vector<jam2::audio::DeviceInfo> devices() {
     std::vector<jam2::audio::DeviceInfo> result;
@@ -65,12 +106,16 @@ void startup() {
     LocalEngineDialogState initial; initial.audio = preference(); initial.selectedDeviceId = QStringLiteral("0");
     LocalEngineDialog dialog(initial, list, {}); dialog.show(); QApplication::processEvents();
     auto* setup = control<QComboBox>(&dialog, QStringLiteral("application.local-engine.device-setup"));
+    require(setup->count() == 2 &&
+        setup->itemText(setup->findData(static_cast<int>(AudioDeviceSetup::SingleDevice))) == QStringLiteral("Audio Interface") &&
+        setup->itemText(setup->findData(static_cast<int>(AudioDeviceSetup::SeparateInputOutput))) == QStringLiteral("Separate Devices"),
+        "CoreAudio setup labels describe the existing typed interface and separate-device modes");
     auto* input = control<QComboBox>(&dialog, QStringLiteral("application.local-engine.input-device"));
     auto* output = control<QComboBox>(&dialog, QStringLiteral("application.local-engine.device"));
     auto* channels = control<QLineEdit>(&dialog, QStringLiteral("application.local-engine.input-channels"));
     require(setup->isVisible() && input->isHidden() && channels->isVisible() && output->count() == 1,
         "single-device UI must offer duplex devices and native channel selection");
-    require(control<QLabel>(&dialog, QStringLiteral("application.local-engine.no-duplex-device"))->isHidden(),
+    require(!control<QLabel>(&dialog, QStringLiteral("application.local-engine.no-duplex-device"))->isVisible(),
         "available duplex devices must not show missing-device guidance");
     require(control<QComboBox>(&dialog, QStringLiteral("application.local-engine.driver"))->isHidden(),
         "CoreAudio must expose device setup rather than a redundant Driver row");
@@ -147,11 +192,18 @@ void dualDeviceTestingAndGuidance() {
     LocalEngineDialog local(initial, list, {test}); local.show(); QApplication::processEvents();
     auto* warning = control<QLabel>(&local, QStringLiteral("application.local-engine.no-duplex-device"));
     auto* setup = control<QComboBox>(&local, QStringLiteral("application.local-engine.device-setup"));
-    require(warning->isVisible() && warning->text().contains(QStringLiteral("Use two devices instead")) &&
+    require(warning->isVisible() && warning->text().contains(QStringLiteral("Select Separate Devices instead")) &&
         control<QComboBox>(&local, QStringLiteral("application.local-engine.device"))->count() == 0,
         "one-device mode explains when no duplex device is available");
+    for (int width : {560, 760}) {
+        local.resize(width, local.height()); QApplication::processEvents();
+        requireWarningLayout(local, QStringLiteral("application.local-engine"));
+    }
+    capture(local, QStringLiteral("no-interface-local.png"));
     setup->setCurrentIndex(1); QApplication::processEvents();
-    require(warning->isHidden(), "two-device mode hides the no-duplex guidance");
+    require(!warning->isVisible() && !control<QLabel>(&local,
+        QStringLiteral("application.local-engine.no-duplex-icon"))->isVisible(),
+        "separate-device mode hides both the warning icon and guidance");
     control<QPushButton>(&local, QStringLiteral("application.local-engine.test-device"))->click();
     setup->setCurrentIndex(0); QApplication::processEvents();
     require(warning->isVisible(), "returning to one-device mode restores guidance");
@@ -159,11 +211,31 @@ void dualDeviceTestingAndGuidance() {
     StartJamDialogState start; start.audio = initial.audio; start.audio.deviceSetup = AudioDeviceSetup::SeparateInputOutput;
     StartJamDialog creator(start, list, {{}, test, {}, {}}); creator.show(); QApplication::processEvents();
     for (auto* button : creator.findChildren<QPushButton*>()) if (button->text() == QStringLiteral("Test Device")) button->click();
+    control<QComboBox>(&creator, QStringLiteral("session.dialog.device-setup"))->setCurrentIndex(0);
+    QApplication::processEvents(); requireWarningLayout(creator, QStringLiteral("session.dialog"));
+    capture(creator, QStringLiteral("no-interface-create.png"));
     creator.hide();
     JoinJamDialogState join; join.audio = start.audio;
     JoinJamDialog listener(join, list, {{}, test, {}}); listener.show(); QApplication::processEvents();
     for (auto* button : listener.findChildren<QPushButton*>()) if (button->text() == QStringLiteral("Test Device")) button->click();
+    control<QComboBox>(&listener, QStringLiteral("session.dialog.device-setup"))->setCurrentIndex(0);
+    QApplication::processEvents(); requireWarningLayout(listener, QStringLiteral("session.dialog"));
+    capture(listener, QStringLiteral("no-interface-join.png"));
     listener.hide(); require(tests == 3, "Local, Start Jam and Join Jam actions test both selected devices");
+    SettingsDialogInput settingsInput; settingsInput.devices = metadata; settingsInput.localAudio = initial.audio;
+    settingsInput.preferences.localAudio = initial.audio;
+    bool settingsWarning = false;
+    QTimer::singleShot(0, [&] {
+        auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+        if (!dialog) return;
+        try {
+            requireWarningLayout(*dialog, QStringLiteral("application.settings-dialog.audio.local"));
+            capture(*dialog, QStringLiteral("no-interface-settings.png")); settingsWarning = true;
+        } catch (const std::exception& e) { std::cerr << e.what() << '\n'; }
+        dialog->reject();
+    });
+    require(!SettingsDialog::run(settingsInput, {}) && settingsWarning,
+        "Settings audio warning aligns with its dropdowns and supports cancellation");
 
     int calls = 0;
     const AudioDeviceProbe probe = [&](int id) { ++calls; jam2::audio::DeviceTestResult result; result.device = metadata.at(id - 1); return result; };
@@ -202,7 +274,10 @@ void settings() {
         auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
         if (!dialog) return;
         try {
-            control<QComboBox>(dialog, QStringLiteral("application.settings-dialog.audio.local.device-setup"))->setCurrentIndex(1);
+            auto* setup = control<QComboBox>(dialog, QStringLiteral("application.settings-dialog.audio.local.device-setup"));
+            require(setup->itemText(0) == QStringLiteral("Audio Interface") && setup->itemText(1) == QStringLiteral("Separate Devices"),
+                "Settings exposes the same descriptive CoreAudio setup choices");
+            setup->setCurrentIndex(1);
             auto* output = control<QComboBox>(dialog, QStringLiteral("application.settings-dialog.audio.local.device"));
             output->setCurrentIndex(output->findData(QStringLiteral("1")));
             control<QPushButton>(dialog, QStringLiteral("application.settings-dialog.audio.local.test-device"))->click();
@@ -232,10 +307,82 @@ void settings() {
     require(text.contains(QStringLiteral("&lt;mic&gt;")) && text.contains(QStringLiteral("Private aggregate: yes")) &&
         text.contains(QStringLiteral("Clock: output")), "diagnostics must expose the aggregate clock and escape device names");
 }
+
+void settingsPeerName() {
+    QTemporaryDir folder; QString error;
+    require(folder.isValid() && UserPreferencesStore::setFilePathForTesting(folder.filePath(QStringLiteral("name.ini")), error),
+        "peer name test uses isolated saved preferences");
+    SettingsDialogInput initial; initial.devices = devices(); initial.localAudio = preference();
+    initial.preferences.localAudio = initial.localAudio;
+    initial.preferences.create.name = QStringLiteral("Alex");
+    initial.preferences.join.name = QStringLiteral("Blair");
+    QTimer::singleShot(0, [&] {
+        auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+        if (!dialog) return;
+        try {
+            auto* navigation = control<QListWidget>(dialog, QStringLiteral("application.settings-dialog.navigation"));
+            const auto general = navigation->findItems(QStringLiteral("General"), Qt::MatchExactly);
+            require(general.size() == 1, "Settings has a discoverable General page");
+            navigation->setCurrentItem(general.front()); QApplication::processEvents();
+            auto* name = control<QLineEdit>(dialog, QStringLiteral("application.settings-dialog.identity.peer-name"));
+            auto* save = control<QPushButton>(dialog, QStringLiteral("application.settings-dialog.save"));
+            require(name->isVisible() && name->text() == QStringLiteral("Alex"), "General displays the existing saved peer name");
+            for (const QString& invalid : {QStringLiteral("Two Words"), QStringLiteral("Alex7"), QStringLiteral("TooLongName")}) {
+                name->setText(invalid); require(!save->isEnabled(), "invalid peer name disables Settings Save");
+                save->click(); require(dialog->isVisible(), "invalid peer name cannot accept the real Settings dialog");
+            }
+            name->setText(QStringLiteral("E\u0301lodie"));
+            require(save->isEnabled(), "valid Unicode name enables Settings Save");
+            capture(*dialog, QStringLiteral("settings-peer-name.png"));
+            save->click();
+        } catch (const std::exception& e) { std::cerr << e.what() << '\n'; dialog->reject(); }
+    });
+    const auto result = SettingsDialog::run(initial, {});
+    require(result && result->preferences.create.name == QStringLiteral("\u00c9lodie") &&
+        result->preferences.join.name == result->preferences.create.name, "Settings saves one canonical peer name for both roles");
+    require(UserPreferencesStore::saveChecked(result->preferences), "save configured name to disk");
+    const auto loaded = UserPreferencesStore::load();
+    SessionAudioDeviceList list{audioDeviceChoices(devices()), QStringLiteral("0")};
+    StartJamDialogState create; create.create = loaded.create; create.audio = preference();
+    JoinJamDialogState join; join.join = loaded.join; join.audio = preference();
+    StartJamDialog creator(create, list, {}); JoinJamDialog listener(join, list, {});
+    require(control<QLineEdit>(&creator, QStringLiteral("session.dialog.name"))->text() == QStringLiteral("\u00c9lodie") &&
+        control<QLineEdit>(&listener, QStringLiteral("session.dialog.name"))->text() == QStringLiteral("\u00c9lodie"),
+        "reloaded preferences automatically fill the actual Create and Join name fields");
+    auto saved = initial; saved.preferences = loaded;
+    QTimer::singleShot(0, [] {
+        auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+        if (!dialog) return;
+        control<QLineEdit>(dialog, QStringLiteral("application.settings-dialog.identity.peer-name"))->setText(QStringLiteral("Casey"));
+        control<QPushButton>(dialog, QStringLiteral("application.settings-dialog.cancel"))->click();
+    });
+    require(!SettingsDialog::run(saved, {}) && UserPreferencesStore::load().join.name == QStringLiteral("\u00c9lodie"),
+        "Cancel preserves the persisted name for both roles");
+    QTimer::singleShot(0, [] {
+        auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+        if (!dialog) return;
+        control<QLineEdit>(dialog, QStringLiteral("application.settings-dialog.identity.peer-name"))->clear();
+        control<QPushButton>(dialog, QStringLiteral("application.settings-dialog.save"))->click();
+    });
+    const auto cleared = SettingsDialog::run(saved, {});
+    require(cleared && cleared->preferences.create.name.isEmpty() && cleared->preferences.join.name.isEmpty(),
+        "clearing the optional Settings name clears both dialog defaults");
+    initial.preferences.create.name.clear(); initial.preferences.join.name = QStringLiteral("Casey");
+    QTimer::singleShot(0, [] {
+        auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+        if (!dialog) return;
+        auto* name = control<QLineEdit>(dialog, QStringLiteral("application.settings-dialog.identity.peer-name"));
+        if (name->text() != QStringLiteral("Casey")) { dialog->reject(); return; }
+        control<QPushButton>(dialog, QStringLiteral("application.settings-dialog.save"))->click();
+    });
+    const auto legacy = SettingsDialog::run(initial, {});
+    require(legacy && legacy->preferences.create.name == QStringLiteral("Casey"),
+        "Settings retains a legacy Join-only default when no Create name was saved");
+}
 }
 int main(int argc, char** argv) {
     QApplication app(argc, argv); installJam2Style();
-    try { startup(); dualDeviceTestingAndGuidance(); settings(); }
+    try { startup(); dualDeviceTestingAndGuidance(); settings(); settingsPeerName(); }
     catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
     std::cout << "CoreAudio setup controls, modal actions and persistence passed\n";
 }
