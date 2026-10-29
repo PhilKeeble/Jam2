@@ -77,7 +77,7 @@ void rendezvousCodec(const QString& path) {
         require(decoded->session==session && (rv::request(decoded->kind) ? decoded->key==key && decoded->peer==peer : decoded->to==QString(32,'2')), "rendezvous identity decoding failed");
         for (qsizetype end=0;end<bytes.size();++end) require(!rv::decode(bytes.first(end)), "truncated rendezvous datagram accepted");
         require(!rv::decode(bytes+'x'), "trailing rendezvous data accepted");
-        auto wrong=bytes; wrong[4]=0; require(!rv::decode(wrong), "old rendezvous version accepted");
+        auto wrong=bytes; wrong[4]=1; require(!rv::decode(wrong), "old rendezvous version accepted");
         wrong=bytes; wrong[5]=31; require(!rv::decode(wrong), "unknown rendezvous kind accepted");
         ++count;
     }
@@ -93,8 +93,20 @@ void rendezvousCodec(const QString& path) {
     bytes=rv::encode(m); bytes[62]=0; require(!rv::decode(bytes), "zero introduction attempt accepted");
     m=fixture(rv::Kind::Offer); bytes=rv::encode(m); bytes[bytes.size()-1]=2;
     require(!rv::decode(bytes), "noncanonical LAN-route boolean accepted");
-    m=fixture(rv::Kind::Error); bytes=rv::encode(m); bytes[bytes.size()-1]=0;
+    m=fixture(rv::Kind::Error); bytes=rv::encode(m); bytes[30]=0;
     require(!rv::decode(bytes), "unknown error code accepted");
+    for (quint8 rejected=0; rejected<=14; ++rejected) {
+        m=fixture(rv::Kind::Error); m.error=rv::Error::Capacity; m.rejectedKind=rejected;
+        if (rejected>=7) m.reference=QString(32,'5');
+        bytes=rv::encode(m); auto decoded=rv::decode(bytes);
+        require(bytes.size()==(rejected>=7 ? 48 : 32) && decoded &&
+            decoded->rejectedKind==rejected && decoded->reference==m.reference,
+            "typed error correlation failed");
+        require(rv::errorText(rv::Error::Capacity).contains("STUN / Direct") &&
+            rv::errorText(rv::Error::InvalidSchema).contains("update Jam2"),
+            "actionable signaling diagnostic missing");
+        bytes[31]=15; require(!rv::decode(bytes), "invalid rejected kind accepted");
+    }
     require(!rv::decode(QByteArrayLiteral("{\"v\":1,\"type\":\"jam_join\"}")), "rendezvous JSON fallback remains");
 }
 // Feed actual ControlServer instances through byte links. Changed fields must

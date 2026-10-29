@@ -6,6 +6,8 @@
 #include "UdpMultiplexTransport.hpp"
 
 #include <QCoreApplication>
+#include <QUdpSocket>
+#include <QNetworkDatagram>
 #include <QElapsedTimer>
 #include <QJsonDocument>
 #include <QPointer>
@@ -39,6 +41,111 @@ template<class Condition> void until(Condition condition)
 using jam2::test::Bytes;
 using jam2::test::endpoints;
 
+
+void signalingRejections()
+{
+    using namespace jam2::application;
+    namespace rv = rendezvous_wire;
+    for (const auto code : {rv::Error::Capacity, rv::Error::InvalidSchema}) {
+        QUdpSocket server;
+        require(server.bind(QHostAddress::LocalHost, 0), "bind diagnostic source");
+        UdpMultiplexTransport::Config config;
+        config.creator=true; config.localToken=QString(32,'1');
+        config.sessionHex="0123456789abcdef"; config.keyHex=QString(32,'9');
+        config.bindHost="127.0.0.1"; config.server={"127.0.0.1", server.localPort()};
+        UdpMultiplexTransport transport;
+        int failures=0; bool startup=false;
+        transport.onSignalerFailure=[&](const UdpMultiplexTransport::SignalerFailure& result) {
+            ++failures; startup=result.startup;
+            require(result.code==code && result.requestKind==1, "typed diagnostic lost error or request kind");
+        };
+        QString error; require(transport.start(config,error), "start diagnostic transport");
+        until([&] { return server.hasPendingDatagrams(); });
+        const auto request=server.receiveDatagram();
+        rv::Message response; response.kind=rv::Kind::Error; response.error=code;
+        response.rejectedKind=1; response.session=config.sessionHex; response.to=config.localToken;
+        const auto bytes=rv::encode(response);
+        require(server.writeDatagram(bytes,request.senderAddress(),request.senderPort())==bytes.size(), "send typed rejection");
+        until([&] { return failures==1; });
+        server.writeDatagram(bytes,request.senderAddress(),request.senderPort());
+        QElapsedTimer timer; timer.start();
+        while(timer.elapsed()<600) { QCoreApplication::processEvents(); QThread::msleep(1); }
+        require(failures==1 && startup && !transport.snapshot().registered,
+            "startup diagnostic was duplicated or registration continued");
+        require(!server.hasPendingDatagrams(), "rejected startup kept retrying registration");
+        transport.stop();
+    }
+}
+
+
+
+void transientDirectoryRejections()
+{
+    using namespace jam2::application;
+    namespace rv=rendezvous_wire;
+    QUdpSocket server; require(server.bind(QHostAddress::LocalHost,0),"bind transient source");
+    UdpMultiplexTransport::Config config; config.localToken=QString(32,'2');
+    config.sessionHex="0123456789abcdef"; config.keyHex=QString(32,'9');
+    config.bindHost="127.0.0.1"; config.server={"127.0.0.1",server.localPort()};
+    UdpMultiplexTransport transport; QString error; int failures=0;
+    transport.onSignalerFailure=[&](const auto& failure) {
+        require(failure.code==rv::Error::Capacity && failure.startup,"temporary membership error became terminal"); ++failures;
+    };
+    require(transport.start(config,error),"start transient join");
+    until([&] { return server.hasPendingDatagrams(); }); auto request=server.receiveDatagram();
+    rv::Message response; response.kind=rv::Kind::Error; response.session=config.sessionHex;
+    response.to=config.localToken; response.rejectedKind=2;
+    for(const auto code : {rv::Error::JamFull,rv::Error::Unavailable}) {
+        response.error=code; server.writeDatagram(rv::encode(response),request.senderAddress(),request.senderPort());
+        until([&] { return server.hasPendingDatagrams(); }); request=server.receiveDatagram();
+        require(failures==0 && rv::decode(request.data())->kind==rv::Kind::Join,
+            "temporary creator membership ordering prevented retry");
+    }
+    response.error=rv::Error::Capacity; server.writeDatagram(rv::encode(response),request.senderAddress(),request.senderPort());
+    until([&] { return failures==1; }); transport.stop();
+}
+
+void correlatedSignalingRejection()
+{
+    using namespace jam2::application;
+    namespace rv=rendezvous_wire;
+    QUdpSocket server; require(server.bind(QHostAddress::LocalHost,0),"bind correlated source");
+    UdpMultiplexTransport::Config config; config.creator=true;
+    config.localToken=QString(32,'1'); config.sessionHex="0123456789abcdef";
+    config.keyHex=QString(32,'9'); config.bindHost="127.0.0.1";
+    config.server={"127.0.0.1",server.localPort()};
+    UdpMultiplexTransport transport; QString error; int failures=0;
+    transport.onSignalerFailure=[&](const UdpMultiplexTransport::SignalerFailure& failure) {
+        require(!failure.startup && failure.code==rv::Error::Capacity &&
+            failure.requestKind==10 && failure.reference==QString(32,'5'),"pair diagnostic correlation lost");
+        ++failures;
+    };
+    require(transport.start(config,error),"start correlated client");
+    until([&] { return server.hasPendingDatagrams(); }); const auto request=server.receiveDatagram();
+    const auto create=rv::decode(request.data()); require(create.has_value(),"decode real create");
+    rv::Message response; response.kind=rv::Kind::Created; response.session=config.sessionHex;
+    response.to=config.localToken; response.creator=config.localToken; response.directoryRevision=create->directoryRevision;
+    server.writeDatagram(rv::encode(response),request.senderAddress(),request.senderPort());
+    until([&] { return transport.snapshot().registered; });
+    require(transport.introduce(config.localToken,QString(32,'2'),QString(32,'5')),"queue pair");
+    until([&] { return server.hasPendingDatagrams(); }); const auto pair=server.receiveDatagram();
+    require(rv::decode(pair.data())->kind==rv::Kind::Pair,"native pair request missing");
+    response.kind=rv::Kind::Error; response.error=rv::Error::Capacity; response.rejectedKind=10;
+    response.reference=QString(32,'6');
+    server.writeDatagram(rv::encode(response),pair.senderAddress(),pair.senderPort());
+    QElapsedTimer timer; timer.start();
+    while(timer.elapsed()<100) { QCoreApplication::processEvents(); QThread::msleep(1); }
+    require(failures==0,"unrelated nonce interrupted introduction");
+    response.reference=QString(32,'5');
+    const auto bytes=rv::encode(response);
+    server.writeDatagram(bytes,pair.senderAddress(),pair.senderPort());
+    until([&] { return failures==1; });
+    server.writeDatagram(bytes,pair.senderAddress(),pair.senderPort()); timer.restart();
+    while(timer.elapsed()<600) { QCoreApplication::processEvents(); QThread::msleep(1); }
+    require(failures==1 && !server.hasPendingDatagrams() && transport.snapshot().registered,
+        "rejected pair kept retrying, duplicated error, or stopped existing registration");
+    transport.stop();
+}
 
 void emptyRoutingSnapshotBoundary()
 {
@@ -392,6 +499,9 @@ int main(int argc, char** argv)
 {
     QCoreApplication app(argc, argv);
     try {
+        signalingRejections();
+        correlatedSignalingRejection();
+        transientDirectoryRejections();
         emptyRoutingSnapshotBoundary();
         framingProgressDeadline();
         aggregatedAcknowledgementsAndBorrowedPayload();

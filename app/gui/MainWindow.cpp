@@ -5096,6 +5096,7 @@ void MainWindow::handleControlEvent(
         break;
     case TransportEventType::Failure:
         controlRefreshAvailable_ = true;
+        if (!event.retryable && !shuttingDown_) showJamFailure(event.detail);
         if (event.retryable) {
             displayState = QStringLiteral("UDP multiplex issue");
         }

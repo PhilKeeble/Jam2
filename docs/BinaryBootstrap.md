@@ -3,7 +3,7 @@
 The UDP-Multiplex branch uses binary authentication and rendezvous packets.
 These replace the four JSON `hello.*` frames and the JSON `jam_*` directory
 protocol. There is no JSON fallback. All peers must use application wire version
-5, and Jam2 Server must use the matching `J2RV` protocol. The server project is
+5, and Jam2 Server must use the matching `J2RV` version 2 protocol. The server project is
 `../Jam2-Server`; updating the client alone is insufficient.
 
 All integers below are unsigned and big-endian. IDs, nonces, proofs and keys are
@@ -47,7 +47,7 @@ map.
 
 ## Rendezvous UDP datagrams
 
-Header: `[magic:4="J2RV"][version:u8=1][kind:u8]`.
+Header: `[magic:4="J2RV"][version:u8=2][kind:u8]`.
 
 Every request adds `[session:8][sender peer:16][session key:16]` (46 bytes including
 header). Every response adds `[session:8][recipient peer:16]` (30 bytes including
@@ -75,7 +75,7 @@ bounded to INT32_MAX; `attempt` is u8 in 1?10; peer IDs and nonces are 16 bytes;
 | 34 | Paused | revision | 38 |
 | 35 | Wait | creator peer | 46 |
 | 36 | JoinRequest | joining peer | 46 |
-| 37 | Error | error:u8 | 31 |
+| 37 | Error | error:u8, rejected kind:u8, reference:16 for kinds 7?14 | 32 / 48 |
 | 38?40 | AdmitAck / RemoveAck / RejectAck | affected peer, sequence | 54 |
 | 41 | Prepare | nonce, attempt, introduction, partner peer | 71 |
 | 42 | Registered | nonce, attempt, introduction, partner peer, observed endpoint | 77 |
@@ -91,8 +91,7 @@ not only the derived audio peer ID. Registration refreshes keep their existing
 15-second interval; pending retries retain their existing timers.
 
 Error codes: 1 credentials/creator mismatch, 2 directory capacity, 3 unavailable or
-full, 4 key mismatch, 5 full/pending limit, 6 creator declined admission, 7 pending
-introduction limit. The C++ client maps these to readable local diagnostics.
+full, 4 key mismatch, 5 jam participant limit, 6 creator declined admission, 7 invalid schema. The C++ client maps these to readable local diagnostics.
 
 Datagrams are bounded to 128 bytes. Both implementations reject unknown versions,
 unknown kinds/error codes, invalid endpoints/booleans/counts/attempts, truncation
@@ -103,8 +102,8 @@ responses only from its configured rendezvous endpoint.
 
 ## Validation
 
-`tests/fixtures/rendezvous-v1.tsv` and the identical server
-`testdata/rendezvous-v1.tsv` contain a fixed byte vector for every kind. Native C++
+`tests/fixtures/rendezvous-v2.tsv` and the identical server
+`../Jam2-Server/src/testdata/rendezvous-v2.tsv` contain a fixed byte vector for every kind. Native C++
 and Go tests independently construct typed messages and compare against those
 bytes, and reject every truncated prefix. Native tests also cover transcript
 binding, malformed fields, retired JSON, size bounds and connection cleanup.
@@ -124,3 +123,7 @@ at their internal boundaries; their network records are encoded as typed binary,
 CBOR or binary patches. This change removes the remaining session-network JSON
 serialization and authentication/rendezvous JSON dispatch, not those independent
 local formats.
+
+## Production signaling diagnostics
+
+J2RV version 2 is the only current rendezvous schema. Error adds code:u8, rejected request kind:u8, then a 16-byte reference for kinds 7?14 (membership target for 7?9, introduction nonce for 10?14). Generic errors use kind zero. Error datagrams are 32 or 48 bytes. Code 2 is server capacity; code 5 is the creator participant limit; code 7 is invalid schema, including an unsupported version. Capacity suggests retrying shortly or using STUN / Direct; invalid schema suggests updating Jam2. Correlated failures cancel only their pending operation and preserve proven links. Duplicate replies produce one connection warning or startup failure. Server and client must be upgraded together; there is no older-schema decoder.

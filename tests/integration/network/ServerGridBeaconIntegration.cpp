@@ -1,3 +1,4 @@
+#include <QTemporaryDir>
 #include "FourPeerCoordinator.hpp"
 #include "LoopbackPortReservations.hpp"
 #include "UdpCandidateNetwork.hpp"
@@ -28,13 +29,14 @@ QJsonObject command(AutomationProcess& peer,const QJsonObject& request,const QSt
 }
 using States=std::array<QJsonObject,4>;
 struct Server {
+    QTemporaryDir logDirectory;
     QProcess process;
     std::unique_ptr<ThreadedCandidateNetwork> network;
     QString endpoint;
     explicit Server(const QString& executable) {
         QUdpSocket reserve; require(reserve.bind(QHostAddress::LocalHost,0),"reserve server port"); const auto port=reserve.localPort(); reserve.close();
         process.setProcessChannelMode(QProcess::MergedChannels);
-        process.start(executable,{"--jam2-server","--listen",QStringLiteral("127.0.0.1:%1").arg(port)});
+        process.start(executable,{"--jam2-server", "--log-dir", logDirectory.path(), "--debug","--listen",QStringLiteral("127.0.0.1:%1").arg(port)});
         require(process.waitForStarted(5000),"start signaller");
         network=std::make_unique<ThreadedCandidateNetwork>(port); network->setMultiplexImpairment(false);
         network->setAuthorityBeaconsEnabled(false);

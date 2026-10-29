@@ -9,7 +9,32 @@ The reviewed design remains in [UDP-Muliplex.md](UDP-Muliplex.md).
 
 Use the normal Release build and `release/jam2.exe`. All three strategies use the same current transport. Enter a mandatory 1-8-letter peer name when creating or joining. Jam2 Server invitations select external rendezvous (`strategy=server`); Direct/STUN invitations point to the creator's reachable UDP port and use creator-coordinated mesh introductions. All participants must use the current branch build.
 
-Run the companion Go binary with `--jam2-server --listen 0.0.0.0:40404`.
+Run the companion Go binary with `--jam2-server --listen 0.0.0.0:40440`.
+Product signaling now uses J2RV version 2; client and server must be upgraded together.
+The companion repository's Go module is under `src/`, its Dockerfile and Ansible
+playbook under `deploy/`, and its generated SCP deployment bundle under `dist/`.
+Build the service image from the **Jam2-Server repository root**:
+
+```powershell
+docker build -f deploy/Dockerfile --target server -t jam2-rendezvous-binary:local .
+```
+
+For the native Windows CTests, also from the Jam2-Server repository root:
+
+```powershell
+docker run --rm -v "${PWD}:/repo" -w /repo/src golang:1.26.10-bookworm sh -c 'GOOS=windows GOARCH=amd64 go build -trimpath -o /repo/logs/jam2-rendezvous-native-test.exe .'
+```
+
+The Jam2 test configuration discovers `../Jam2-Server/logs/jam2-rendezvous-native-test.exe`.
+Override `JAM2_RENDEZVOUS_TEST_SERVER` for another layout. Native fixtures supply
+temporary `--log-dir` directories and enable `--debug` only for diagnostics;
+ordinary production runs are silent and write under `/var/log/jam2-server`.
+
+To produce the Linux deployment bundle, follow
+[Jam2 Server deployment instructions](../Jam2-Server/deploy/README.md).
+Upload the complete generated `dist/` folder and run its `deploy.yml` on Debian;
+the website repository is independent and is not required for that deployment.
+
 The Python sweep remains a separate explicit server mode. One process cannot
 serve product and tokenless protocols simultaneously; use separate ports/processes
 if both are needed.
@@ -17,7 +42,7 @@ if both are needed.
 For a controlled local run:
 
 ```powershell
-.\release\jam2.exe network create --connection-strategy server --rendezvous 127.0.0.1:40404 --headless-audio on --test-input tone-440
+.\release\jam2.exe network create --connection-strategy server --rendezvous 127.0.0.1:40440 --headless-audio on --test-input tone-440
 .\release\jam2.exe network join 'THE_PRINTED_INVITATION' --headless-audio on --test-input tone-440
 ```
 
@@ -73,7 +98,7 @@ active-link transitions are also logged.
 
 A failed edge produces a nonfatal notification identifying the endpoints and
 suggesting a manual strategy change and configured TCP/UDP port forwarding
-(49000 by default). Existing edges keep running. Ten failed pairs establish a
+(40440 by default). Existing edges keep running. Ten failed pairs establish a
 failed connection attempt; they do not prove a particular NAT implementation
 or explain its filtering behavior.
 
@@ -131,7 +156,7 @@ the local checks.
 Start the companion server with:
 
 ```sh
-./rendezvous --jam2-server --allow-local --listen 0.0.0.0:40404
+./rendezvous --jam2-server --allow-local --listen 0.0.0.0:40440
 ```
 
 Use updated UDP-Multiplex builds on both peers, place them on the same LAN,

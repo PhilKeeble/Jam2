@@ -1,5 +1,6 @@
 #pragma once
 #include "UdpStreamConnection.hpp"
+#include "RendezvousWire.hpp"
 #include "udp_socket.hpp"
 #include <QObject>
 #include <functional>
@@ -27,7 +28,7 @@ public:
         jam2::Endpoint stunServer{"stun.l.google.com",19302};
         int stunTimeoutMs = 1000, stunRetries = 3;
         QString sessionHex, keyHex, localToken;
-        jam2::Endpoint server{"jam2gether.com", 40404};
+        jam2::Endpoint server{"jam2gether.com", 40440};
         QString bindHost = QStringLiteral("0.0.0.0");
         int maximumPeers = 0;
         // Zero removes the fixed asset rate cap; reliable-stream congestion control still applies.
@@ -122,6 +123,13 @@ public:
     void transportIntentAccepted(std::uint64_t id,std::span<const std::uint8_t> payload) noexcept override;
     std::optional<jam2::UdpSocket::ReceivedDatagram> receiveFor(std::span<std::uint8_t> buffer,
         std::uint64_t timeoutUs, jam2::RealtimeWakeSignal* captureWake) override;
+    struct SignalerFailure {
+        rendezvous_wire::Error code;
+        quint8 requestKind;
+        QString reference;
+        bool startup;
+    };
+    std::function<void(const SignalerFailure&)> onSignalerFailure;
     std::function<void()> onRegistered;
     std::function<void(const QString&)> onBootstrapFailure;
     std::function<void(const QString&)> onJoinRequest;

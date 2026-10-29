@@ -788,7 +788,7 @@ void GuiTestAgent::handle(const QJsonObject& command)
         }
         QString error;
         jam2::ConnectionStrategy strategy = jam2::ConnectionStrategy::Direct;
-        jam2::Endpoint rendezvous{"jam2gether.com", 40404};
+        jam2::Endpoint rendezvous{"jam2gether.com", 40440};
         try {
             if (command.contains(QStringLiteral("strategy")))
                 strategy = jam2::parse_connection_strategy(command.value(QStringLiteral("strategy")).toString().toStdString());

@@ -28,6 +28,14 @@ int main(int argc, char** argv)
             "test preference path was rejected");
 
         UserPreferences expected;
+        const auto defaults = UserPreferencesStore::load();
+        require(defaults.create.port == 40440 && defaults.join.port == 40440,
+            "new create and join preferences default to UDP 40440");
+        require(defaults.create.rendezvousServer.host == "jam2gether.com" &&
+                defaults.create.rendezvousServer.port == 40440,
+            "new preferences use the production rendezvous endpoint");
+        expected.create.port = 49000;
+        expected.join.port = 49001;
         require(UserPreferencesStore::load().localAudio.deviceSetup == jam2::audio::AudioDeviceSetup::SingleDevice,
             "missing device setup preferences must keep the single-device workflow");
         expected.localAudio.deviceSetup = jam2::audio::AudioDeviceSetup::SeparateInputOutput;
@@ -62,6 +70,8 @@ int main(int argc, char** argv)
         UserPreferencesStore::save(expected);
 
         const UserPreferences actual = UserPreferencesStore::load();
+        require(actual.create.port == 49000 && actual.join.port == 49001,
+            "saved create and join ports are preserved instead of replaced by new defaults");
         require(actual.localAudio.deviceSetup == expected.localAudio.deviceSetup &&
             actual.localAudio.coreAudioInputId == expected.localAudio.coreAudioInputId &&
             actual.localAudio.coreAudioInputName == expected.localAudio.coreAudioInputName,

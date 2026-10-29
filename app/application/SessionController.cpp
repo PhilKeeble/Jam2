@@ -266,11 +266,11 @@ public:
         if (creator_) {
             writeConsoleLine(QStringLiteral("Mode: create"));
             coordinatorToken_ = localToken_;
-            localEndpointText_ = bindText_.isEmpty() ? QStringLiteral("0.0.0.0:49000") : bindText_;
+            localEndpointText_ = bindText_.isEmpty() ? QStringLiteral("0.0.0.0:40440") : bindText_;
             completeCreatorBootstrap();
         } else {
             writeConsoleLine(QStringLiteral("Mode: join"));
-            localEndpointText_ = bindText_.isEmpty() ? QStringLiteral("0.0.0.0:49000") : bindText_;
+            localEndpointText_ = bindText_.isEmpty() ? QStringLiteral("0.0.0.0:40440") : bindText_;
             emitStartup(QStringLiteral("connecting"));
             connectCoordinator();
         }

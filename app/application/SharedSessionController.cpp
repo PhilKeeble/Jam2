@@ -321,6 +321,15 @@ bool SharedSessionController::startMultiplex(bool creator)
         fail(TransportFailure::TransportError,detail,false);
         publishTransportEvent(TransportEvent{TransportEventType::Failure,TransportFailure::TransportError,detail},role_==Role::Creator);
     };
+    multiplex_->onSignalerFailure = [this](const UdpMultiplexTransport::SignalerFailure& failure) {
+        if (closing_) return;
+        const auto detail = rendezvous_wire::errorText(failure.code);
+        if (failure.startup) {
+            fail(TransportFailure::TransportError, detail, false);
+            publishTransportEvent(TransportEvent{TransportEventType::Failure,
+                TransportFailure::TransportError, detail}, false);
+        } else if (onConnectionWarning) onConnectionWarning(detail);
+    };
     multiplex_->onRegistered = [this] {
         if (closing_ || !multiplex_) return;
         if (role_==Role::Creator) if (const auto endpoint=multiplex_->bootstrapEndpoint()) {

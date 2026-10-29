@@ -39,13 +39,13 @@ void localRouteDiscovery()
 
 void reusableInvitations()
 {
-    jam2::SessionInfo info{{"jam2gether.com", 40404}, 0x123456789abcdef0ULL, {}};
+    jam2::SessionInfo info{{"jam2gether.com", 40440}, 0x123456789abcdef0ULL, {}};
     info.strategy = jam2::ConnectionStrategy::Jam2Server;
     const auto url = jam2::make_jam_url(info);
     const auto parsed = jam2::parse_jam_url(url);
     require(parsed.strategy == jam2::ConnectionStrategy::Jam2Server &&
         parsed.session_id == info.session_id && parsed.key == info.key &&
-        parsed.endpoint.host == info.endpoint.host && parsed.endpoint.port == 40404,
+        parsed.endpoint.host == info.endpoint.host && parsed.endpoint.port == 40440,
         "server invitation did not retain strategy and credentials");
     require(jam2::make_jam_url(parsed) == url, "recreating a jam changed its reusable invitation");
     info.strategy = jam2::ConnectionStrategy::Direct;

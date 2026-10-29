@@ -184,6 +184,17 @@ void testOptionAndStatsContracts()
         "--stream-ms", "1"};
     const Jam2RuntimeOptions options =
         jam2::cli::parse_options(valid.count(), valid.data(), 2);
+    expect(options.bind.host == "0.0.0.0" && options.bind.port == 40440 &&
+            options.rendezvous_server.host == "jam2gether.com" &&
+            options.rendezvous_server.port == 40440,
+        "CLI defaults bind and rendezvous endpoints to UDP 40440");
+    Arguments ports{"jam2", "network", "create", "--bind", "127.0.0.1:49000",
+        "--rendezvous", "127.0.0.1:40404"};
+    const auto portOverrides = jam2::cli::parse_options(ports.count(), ports.data(), 3);
+    expect(portOverrides.bind.host == "127.0.0.1" && portOverrides.bind.port == 49000 &&
+            portOverrides.rendezvous_server.host == "127.0.0.1" &&
+            portOverrides.rendezvous_server.port == 40404,
+        "explicit bind and rendezvous ports override the production defaults");
     expect(options.headless_audio && options.stream_ms == 1 &&
             options.channel_selection.input == std::vector<int>({0, 2}) &&
             options.channel_selection.output == std::vector<int>({1}) &&

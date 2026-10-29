@@ -42,7 +42,7 @@ Replace the current No STUN selection with a typed Connection strategy dropdown:
 
 | Strategy | Strategy-specific fields | Behaviour |
 | --- | --- | --- |
-| Jam2 Server | No public-address/STUN fields | UDP rendezvous at jam2gether.com:40404 |
+| Jam2 Server | No public-address/STUN fields | UDP rendezvous at jam2gether.com:40440 |
 | STUN | Existing STUN server, timeout and retries | Existing STUN workflow and transports |
 | Direct | Existing public-host input, labelled Your Public IPv4 Address | Existing explicit-public-endpoint workflow and transports |
 
@@ -59,7 +59,7 @@ points. Do not leave visible orphan controls or stale values overriding the
 selected strategy. The default dropdown selection and exact placement of the
 explicit new-session action remain UI details to settle during implementation.
 
-A Server-mode invitation carries the jam2gether.com:40404 endpoint, the existing
+A Server-mode invitation carries the jam2gether.com:40440 endpoint, the existing
 session ID/key and an explicit strategy/protocol indication so a joiner does not
 mistake the rendezvous server for the legacy creator TCP endpoint. Preserve
 legacy invitation parsing. The exact extension/version is a protocol-design task.
@@ -91,7 +91,7 @@ this experiment; database/storage choices are deferred.
 
 Only the creator maintains persistent UDP registration:
 
-1. Create/restart registers the session at jam2gether.com:40404.
+1. Create/restart registers the session at jam2gether.com:40440.
 2. While admission is open, the creator checks in every 15 seconds.
 3. Joining peers contact the server temporarily for their introductions.
 4. The creator tells existing peers over its established control links when to
@@ -215,14 +215,14 @@ Suggested message intent:
 
 > C could not complete the direct connection to B after 10 socket attempts.
 > The current jam is still running, but B and C cannot exchange audio directly.
-> Try restarting with STUN and forwarding the configured jam port (TCP and UDP 49000 by
+> Try restarting with STUN and forwarding the configured jam port (TCP and UDP 40440 by
 > default), or use an appropriate Direct configuration.
 
 Keep the cause wording accurate: ten failures do not by themselves prove a
 specific NAT diagnosis. Because STUN/Direct retain their existing TCP control and
 UDP audio transports, fallback guidance needs both TCP and UDP forwarding for
 the configured creator port. STUN discovers an endpoint; it does not configure
-a router. Do not instruct users to forward 49000 while actually binding the
+a router. Do not instruct users to forward 40440 while actually binding the
 legacy jam to a different configured port.
 
 If A/C never establishes, deliver the join failure to C through its temporary

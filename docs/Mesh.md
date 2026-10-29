@@ -26,7 +26,7 @@ There is no public static topology command, separate two-person transport, centr
 Creator:
 
 ```powershell
-.\release\jam2.exe network create --name Alice --bind 0.0.0.0:49000 --public-endpoint 203.0.113.10:49000 --profile fast --audio-device 5 --sample-rate 44100
+.\release\jam2.exe network create --name Alice --bind 0.0.0.0:40440 --public-endpoint 203.0.113.10:40440 --profile fast --audio-device 5 --sample-rate 44100
 ```
 
 The creator prints a `jam2://...` URL. A joiner uses that URL:

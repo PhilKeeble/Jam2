@@ -1,3 +1,4 @@
+#include <QTemporaryDir>
 #include <QCoreApplication>
 #include <QDir>
 #include <QElapsedTimer>
@@ -53,7 +54,8 @@ int main(int argc, char** argv) {
         require(!local || QString::fromLocal8Bit(argv[3]) == "local", "unknown native application test mode");
         QUdpSocket reserve; require(reserve.bind(QHostAddress::LocalHost, 0), "reserve signaler port");
         const auto port = reserve.localPort(); reserve.close();
-        QStringList serverArguments{"--jam2-server", "--listen", QStringLiteral("127.0.0.1:%1").arg(port)};
+        QTemporaryDir logDirectory;
+        QStringList serverArguments{"--jam2-server", "--log-dir", logDirectory.path(), "--debug", "--listen", QStringLiteral("127.0.0.1:%1").arg(port)};
         if (local) serverArguments << "--allow-local";
         Child signaler(QString::fromLocal8Bit(argv[2]), serverArguments);
         const auto executable = QString::fromLocal8Bit(argv[1]);

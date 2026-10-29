@@ -88,7 +88,7 @@ Use `-h` or `--help` for the command menu, then apply it to a command or network
 Host:
 
 ```powershell
-.\release\jam2.exe network create --name Alice --bind 0.0.0.0:49000 --profile fast --audio-device 0 --input-channels 1 --output-channels 1,2
+.\release\jam2.exe network create --name Alice --bind 0.0.0.0:40440 --profile fast --audio-device 0 --input-channels 1 --output-channels 1,2
 ```
 
 Client:

@@ -57,9 +57,9 @@ struct RuntimePreference {
 
 struct CreatePreference {
     jam2::ConnectionStrategy strategy = jam2::ConnectionStrategy::Jam2Server;
-    jam2::Endpoint rendezvousServer{"jam2gether.com", 40404}; // In-memory test/CLI override; the GUI uses the default.
+    jam2::Endpoint rendezvousServer{"jam2gether.com", 40440}; // In-memory test/CLI override; the GUI uses the default.
     QString bindHost = QStringLiteral("0.0.0.0");
-    int port = 49000;
+    int port = 40440;
     QString publicHost;
     QString stunServer = QStringLiteral("stun.l.google.com:19302");
     int stunTimeoutMs = 1000;
@@ -77,7 +77,7 @@ struct CreatePreference {
 
 struct JoinPreference {
     QString bindHost = QStringLiteral("0.0.0.0");
-    int port = 49000;
+    int port = 40440;
     LocalTuningPreference tuning;
     RuntimePreference runtime;
     QString name;

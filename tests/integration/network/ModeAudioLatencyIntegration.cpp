@@ -47,6 +47,7 @@ QJsonObject snapshot(AutomationProcess& peer)
     return command(peer, {{"type", "snapshot"}, {"id", "latency"}, {"control", "looper.listening-tools"}}, "snapshot");
 }
 struct Signaller {
+    QTemporaryDir logDirectory;
     QProcess process;
     QString endpoint;
     explicit Signaller(const QString& executable)
@@ -55,7 +56,7 @@ struct Signaller {
         require(reserve.bind(QHostAddress::LocalHost, 0), "reserve local signaller port");
         endpoint = QStringLiteral("127.0.0.1:%1").arg(reserve.localPort()); reserve.close();
         process.setProcessChannelMode(QProcess::MergedChannels);
-        process.start(executable, {"--jam2-server", "--listen", endpoint, "--allow-local"});
+        process.start(executable, {"--jam2-server", "--log-dir", logDirectory.path(), "--debug", "--listen", endpoint, "--allow-local"});
         require(process.waitForStarted(5000), "start real signaller: " + process.errorString());
     }
     ~Signaller()

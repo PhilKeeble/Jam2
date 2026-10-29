@@ -1,3 +1,4 @@
+#include <QTemporaryDir>
 #include "../../support/UdpCandidateNetwork.hpp"
 #include "UdpMultiplexTransport.hpp"
 #include "AssetChunkProtocol.hpp"
@@ -37,18 +38,19 @@ quint64 id(int i) { return *jam2::control_protocol::peerIdFromToken(peer(i)); }
 // The translator can block a whole candidate tuple, as an admission failure,
 // without substituting a second implementation of the handshake.
 struct Server {
+    QTemporaryDir logDirectory;
     QProcess process;
     quint16 port;
     Server(const QString& executable, bool allowLocal = false) {
         QUdpSocket reserve; require(reserve.bind(QHostAddress::LocalHost, 0), "reserve server port");
         port = reserve.localPort(); reserve.close();
         process.setProcessChannelMode(QProcess::MergedChannels);
-        QStringList arguments{"--jam2-server", "--listen", QStringLiteral("127.0.0.1:%1").arg(port)};
+        QStringList arguments{"--jam2-server", "--log-dir", logDirectory.path(), "--debug", "--listen", QStringLiteral("127.0.0.1:%1").arg(port)};
         if (allowLocal) arguments << "--allow-local";
         process.start(executable, arguments);
         require(process.waitForStarted(5000), "start real Go server");
     }
-    ~Server() { process.kill(); process.waitForFinished(5000); }
+    ~Server() { process.kill(); process.waitForFinished(5000); if (std::uncaught_exceptions()) std::cerr << process.readAll().toStdString(); }
 };
 int reusableInvitationRestart(const QString& executable) {
     Server server(executable);
@@ -137,6 +139,10 @@ int main(int argc, char** argv) {
             asset[index]->setPeerName(*jam2::application::PeerName::fromInput("Alex"));
             peers[index]->onSignalerStatus = [index](const QString& value) {
                 std::cout << index << ": " << value.toStdString() << std::endl;
+            };
+            peers[index]->onSignalerFailure = [index](const UdpMultiplexTransport::SignalerFailure& error) {
+                std::cerr << index << ": typed rejection code=" << static_cast<int>(error.code)
+                    << " kind=" << static_cast<int>(error.requestKind) << " ref=" << error.reference.toStdString() << '\n';
             };
             peers[index]->onPairFailure = [&](const QString&, const QString&, const QString& detail) {
                 ++warnings; std::cerr << detail.toStdString() << std::endl;

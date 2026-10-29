@@ -125,7 +125,7 @@ public:
         int heartbeatIntervalMs = kDefaultHeartbeatIntervalMs;
         int heartbeatMissLimit = kDefaultHeartbeatMissLimit;
         jam2::ConnectionStrategy strategy = jam2::ConnectionStrategy::Stun;
-        jam2::Endpoint rendezvousServer{"jam2gether.com", 40404};
+        jam2::Endpoint rendezvousServer{"jam2gether.com", 40440};
         QString name;
         QString bindHost = QStringLiteral("0.0.0.0");
         std::optional<jam2::Endpoint> publicEndpoint;

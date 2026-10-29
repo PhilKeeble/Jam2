@@ -3,7 +3,7 @@
 #include <optional>
 
 namespace jam2::application::rendezvous_wire {
-inline constexpr quint8 kVersion = 1;
+inline constexpr quint8 kVersion = 2;
 inline constexpr qsizetype kMaximumBytes = 128;
 using Endpoint = binary_wire::Endpoint;
 enum class Kind : quint8 {
@@ -42,13 +42,15 @@ enum class Error : quint8 { None = 0,
     Capacity = 2,
     Unavailable = 3,
     Credentials = 4,
-    PendingOrFull = 5,
+    JamFull = 5,
     Declined = 6,
-    Pending = 7,
+    InvalidSchema = 7,
 };
 struct Message {
     Kind kind = Kind::Join;
     QString session, key, peer, to, creator, nonce, a, b;
+    quint8 rejectedKind = 0;
+    QString reference;
     quint64 directoryRevision = 0, memberSequence = 0, introduction = 0;
     quint32 maximumPeers = 0, memberCount = 0;
     quint8 attempt = 0;
@@ -59,12 +61,12 @@ struct Message {
 inline QString errorText(Error error) {
     switch (error) {
     case Error::CredentialsOrCreator: return QStringLiteral("session credentials or creator do not match");
-    case Error::Capacity: return QStringLiteral("directory capacity reached");
+    case Error::Capacity: return QStringLiteral("Jam2 Server is at capacity. Try again in a few minutes, or use STUN / Direct mode.");
     case Error::Unavailable: return QStringLiteral("jam unavailable or full");
     case Error::Credentials: return QStringLiteral("session credentials do not match");
-    case Error::PendingOrFull: return QStringLiteral("jam full or pending introduction limit reached");
+    case Error::JamFull: return QStringLiteral("The jam has reached its participant limit.");
     case Error::Declined: return QStringLiteral("creator declined admission or jam is full");
-    case Error::Pending: return QStringLiteral("pending introduction limit reached");
+    case Error::InvalidSchema: return QStringLiteral("Jam2 Server could not understand this request. Your version may be incompatible; please update Jam2.");
     default: return QStringLiteral("unknown rendezvous error");
     }
 }
@@ -94,7 +96,7 @@ inline QByteArray encode(const Message& m) {
     case Kind::Paused: { w.number(m.directoryRevision); break; }
     case Kind::Wait: { w.hex(m.creator, 16); break; }
     case Kind::JoinRequest: { w.hex(m.peer, 16); break; }
-    case Kind::Error: { if (m.error < Error::CredentialsOrCreator || m.error > Error::Pending) w.okay = false; w.number<quint8>(static_cast<quint8>(m.error)); break; }
+    case Kind::Error: { if (m.error < Error::CredentialsOrCreator || m.error > Error::InvalidSchema) w.okay = false; w.number<quint8>(static_cast<quint8>(m.error)); if (m.rejectedKind > 14) w.okay = false; w.number(m.rejectedKind); if (m.rejectedKind >= 7) w.hex(m.reference, 16); break; }
     case Kind::AdmitAck: { w.hex(m.peer, 16); w.number(m.memberSequence); break; }
     case Kind::RemoveAck: { w.hex(m.peer, 16); w.number(m.memberSequence); break; }
     case Kind::RejectAck: { w.hex(m.peer, 16); w.number(m.memberSequence); break; }
@@ -135,7 +137,7 @@ inline std::optional<Message> decode(const QByteArray& bytes) {
     case Kind::Paused: { m.directoryRevision = r.number<quint64>(); break; }
     case Kind::Wait: { m.creator = r.hex(16); break; }
     case Kind::JoinRequest: { m.peer = r.hex(16); break; }
-    case Kind::Error: { m.error = static_cast<Error>(r.number<quint8>()); if (m.error < Error::CredentialsOrCreator || m.error > Error::Pending) r.okay = false; break; }
+    case Kind::Error: { m.error = static_cast<Error>(r.number<quint8>()); if (m.error < Error::CredentialsOrCreator || m.error > Error::InvalidSchema) r.okay = false; m.rejectedKind = r.number<quint8>(); if (m.rejectedKind > 14) r.okay = false; if (m.rejectedKind >= 7) m.reference = r.hex(16); break; }
     case Kind::AdmitAck: { m.peer = r.hex(16); m.memberSequence = r.number<quint64>(); break; }
     case Kind::RemoveAck: { m.peer = r.hex(16); m.memberSequence = r.number<quint64>(); break; }
     case Kind::RejectAck: { m.peer = r.hex(16); m.memberSequence = r.number<quint64>(); break; }

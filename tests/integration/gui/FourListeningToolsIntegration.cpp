@@ -23,6 +23,7 @@ namespace {
 using namespace std::chrono_literals;
 void require(bool ok, const QString& error) { if (!ok) throw std::runtime_error(error.toStdString()); }
 struct ServerFixture {
+    QTemporaryDir logDirectory;
     QProcess process;
     std::unique_ptr<ThreadedCandidateNetwork> network;
     QString endpoint;
@@ -30,7 +31,7 @@ struct ServerFixture {
         QUdpSocket reserve; require(reserve.bind(QHostAddress::LocalHost, 0), "reserve signaller port");
         const auto port = reserve.localPort(); reserve.close();
         process.setProcessChannelMode(QProcess::MergedChannels);
-        process.start(executable, {"--jam2-server", "--listen", QStringLiteral("127.0.0.1:%1").arg(port)});
+        process.start(executable, {"--jam2-server", "--log-dir", logDirectory.path(), "--debug", "--listen", QStringLiteral("127.0.0.1:%1").arg(port)});
         require(process.waitForStarted(5000), "start real Go signaller: " + process.errorString());
         network = std::make_unique<ThreadedCandidateNetwork>(port);
         endpoint = QStringLiteral("127.0.0.1:%1").arg(network->port());

@@ -37,6 +37,7 @@ bool largeUdpFixtures = false;
 bool bulkUdpFixtures = false;
 class TestSignaler {
 public:
+    QTemporaryDir logDirectory;
     QProcess process;
     QString endpoint;
     bool started = false;
@@ -46,7 +47,7 @@ public:
         if (!reserve.bind(QHostAddress::LocalHost, 0)) return false;
         endpoint = QStringLiteral("127.0.0.1:%1").arg(reserve.localPort()); reserve.close();
         process.setProcessChannelMode(QProcess::MergedChannels);
-        process.start(executable, {"--jam2-server", "--listen", endpoint});
+        process.start(executable, {"--jam2-server", "--log-dir", logDirectory.path(), "--debug", "--listen", endpoint});
         started = process.waitForStarted(5000);
         if (started) {
             const auto port = endpoint.mid(endpoint.lastIndexOf(':') + 1).toUShort();
@@ -902,7 +903,7 @@ int main(int argc, char* argv[])
             {QStringLiteral("type"), QStringLiteral("jam.create")}, {QStringLiteral("name"), QStringLiteral("Alex")},
             {QStringLiteral("id"), QStringLiteral("create")},
             {QStringLiteral("strategy"), serverMode ? QStringLiteral("server") : QStringLiteral("direct")},
-            {QStringLiteral("rendezvous"), serverMode ? signaler.endpoint : QStringLiteral("jam2gether.com:40404")},
+            {QStringLiteral("rendezvous"), serverMode ? signaler.endpoint : QStringLiteral("jam2gether.com:40440")},
             {QStringLiteral("port"), ports[0]},
             {QStringLiteral("test_input"), QStringLiteral("tone-440")},
         })) return 1;

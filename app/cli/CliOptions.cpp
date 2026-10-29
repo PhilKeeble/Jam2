@@ -170,7 +170,7 @@ void print_network_options_help()
 {
     std::cout << R"(
 Network options:
-  --bind <host:port>                  Local network bind endpoint
+  --bind <host:port>                  Local network bind endpoint (default 0.0.0.0:40440)
   --socket-send-buffer <bytes>        Request the OS UDP send buffer size
   --socket-recv-buffer <bytes>        Request the OS UDP receive buffer size
 )";
@@ -187,7 +187,7 @@ STUN discovers only the creator endpoint; audio remains direct UDP.
 Create/bootstrap options:
   --name <letters>                   Required peer name, 1 to 8 Unicode letters
   --connection-strategy <server|stun|direct>  Connection strategy (default STUN)
-  --rendezvous <host:port>            Server-mode signaler (default jam2gether.com:40404)
+  --rendezvous <host:port>            Server-mode signaler (default jam2gether.com:40440)
   --stun <host:port>                  STUN server endpoint
   --public-endpoint <host:port>       Explicit advertised UDP candidate
   --no-stun                           Skip STUN discovery

@@ -162,6 +162,9 @@ struct UdpMultiplexTransport::Impl {
     std::size_t audioRead = 0, audioWrite = 0, audioCount = 0, cursor = 0;
     QString coordinator, registrationChallenge;
     std::string localHost;
+    bool registrationRejected = false;
+    std::set<QString> signalFailures;
+    std::optional<rv::Message> pendingJoinRejection;
     bool registered = false, paused = false, joining = false, registeringMember = false, warningPosted = false;
     bool recoveryJoin = false;
     std::set<QString> repairing;
@@ -671,7 +674,7 @@ struct UdpMultiplexTransport::Impl {
             switch (command.kind) {
             case CommandKind::Recover:
                 if (!config.creator && command.a == coordinator) {
-                    recoveryJoin = true; joining = true; warningPosted = false;
+                    recoveryJoin = true; joining = true; warningPosted = false; pendingJoinRejection.reset();
                     nextJoin = 0; joinDeadline = now + 45000000;
                 }
                 break;
@@ -769,10 +772,39 @@ struct UdpMultiplexTransport::Impl {
             post([peer](auto& self) { if (self.onJoinRequest) self.onJoinRequest(peer); }); return;
         }
         if (kind == SignalKind::Error) {
-            log(rv::errorText(message.error));
-            if (joining && now >= joinDeadline && !warningPosted) {
-                warningPosted = true; joining = false; failure(config.localToken, coordinator, rv::errorText(message.error));
+            const auto rejected = static_cast<SignalKind>(message.rejectedKind);
+            const bool transient = message.error == rv::Error::Unavailable || message.error == rv::Error::JamFull;
+            if (transient && joining && now < joinDeadline) {
+                pendingJoinRejection = message; return;
             }
+            if (transient && registeringMember && now < memberDeadline) return;
+            const bool startup = !registered && links.empty() && (config.creator || joining);
+            bool relevant = message.rejectedKind == 0 || rejected == SignalKind::Create ||
+                ((rejected == SignalKind::Join || rejected == SignalKind::Recover) && joining) ||
+                (rejected == SignalKind::Member && registeringMember);
+            if (message.rejectedKind >= 7 && message.rejectedKind <= 9) {
+                const auto action = rejected == SignalKind::Admit ? CommandKind::Admit :
+                    rejected == SignalKind::Remove ? CommandKind::Remove : CommandKind::Reject;
+                relevant = membershipActions.erase({action, message.reference}) != 0;
+            } else if (message.rejectedKind >= 10) {
+                relevant = requests.erase(message.reference) != 0;
+                for (auto& [id, link] : links) {
+                    if (link->request != message.reference || link->phase == Phase::Active || link->phase == Phase::Failed) continue;
+                    relevant = true;
+                    link->phase = Phase::Failed; link->socket.reset(); pendingJoins.erase(id);
+                }
+            }
+            if (!relevant) return; // Ignore delayed errors for completed operations.
+            const auto signature = QString::number(static_cast<int>(message.error)) + ':' +
+                QString::number(message.rejectedKind) + ':' + message.reference;
+            if (!signalFailures.insert(signature).second) return;
+            if (signalFailures.size() > 64) signalFailures.erase(signalFailures.begin());
+            if (message.rejectedKind == 0 || rejected == SignalKind::Create) registrationRejected = true;
+            if (startup || rejected == SignalKind::Join || rejected == SignalKind::Recover) joining = false;
+            if (rejected == SignalKind::Member) registeringMember = false;
+            const UdpMultiplexTransport::SignalerFailure result{
+                message.error, message.rejectedKind, message.reference, startup};
+            post([result](auto& self) { if (self.onSignalerFailure) self.onSignalerFailure(result); });
             return;
         }
         if (kind == SignalKind::Connected || kind == SignalKind::Failed) {
@@ -1095,7 +1127,7 @@ struct UdpMultiplexTransport::Impl {
                 send(signalSocket, fields(SignalKind::Pause)); nextPause = now + 500000;
             }
             if (!full && paused) { ++directoryRevision; paused = false; registered = false; nextRegister = 0; }
-            if (!paused && now >= nextRegister) {
+            if (!paused && !registrationRejected && now >= nextRegister) {
                 auto object = fields(SignalKind::Create);
                 object.maximumPeers = config.maximumPeers;
                 object.memberCount = static_cast<int>(admitted.size());
@@ -1103,7 +1135,8 @@ struct UdpMultiplexTransport::Impl {
             }
         } else if (joining && now >= nextJoin) {
             if (now >= joinDeadline) {
-                joining = false; failure(config.localToken, coordinator, QStringLiteral("Rendezvous server or creator did not accept the join"));
+                if (pendingJoinRejection) receiveSignal(*pendingJoinRejection, now);
+                else { joining = false; failure(config.localToken, coordinator, QStringLiteral("Rendezvous server or creator did not accept the join")); }
             } else { send(signalSocket, fields(recoveryJoin ? SignalKind::Recover : SignalKind::Join)); nextJoin = now + 500000; }
         }
         if (registeringMember && now >= memberDeadline) {

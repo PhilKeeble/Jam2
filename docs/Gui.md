@@ -9,7 +9,7 @@ Names are mandatory: 1 to 8 Unicode letters after NFC normalization, with no dig
 On the creator's machine:
 
 1. Open `jam2`.
-2. In **Start Jam**, enter your name and choose the bind host and UDP port. `0.0.0.0:49000` is the usual starting point.
+2. In **Start Jam**, enter your name and choose the bind host and UDP port. `0.0.0.0:40440` is the usual starting point.
 3. Choose Jam2 Server for external rendezvous, STUN for creator endpoint discovery, or Direct for a supplied creator endpoint. Direct/STUN require the creator UDP port to be reachable; the creator introduces the other peers for hole punching.
 4. Choose the local audio device and input/output channels.
 5. Choose a tuning profile. `fast` is the default, `moderate` is more forgiving, and `safe` is the current Wi-Fi profile.
