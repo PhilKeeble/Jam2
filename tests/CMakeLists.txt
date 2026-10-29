@@ -2373,3 +2373,27 @@ endif()
 add_dependencies(jam2_tests_gui jam2_signaler_failure_tests)
 add_dependencies(jam2_tests_network jam2_signaler_failure_tests)
 add_dependencies(jam2_tests_all jam2_signaler_failure_tests)
+
+add_executable(jam2_session_notification_tests EXCLUDE_FROM_ALL
+    unit/gui/SessionNotificationsTests.cpp
+    "${CMAKE_SOURCE_DIR}/app/gui/SessionNotifications.cpp")
+jam2_configure_test_target(jam2_session_notification_tests)
+target_include_directories(jam2_session_notification_tests PRIVATE
+    "${CMAKE_SOURCE_DIR}/app/gui" "${CMAKE_SOURCE_DIR}/app/application")
+target_link_libraries(jam2_session_notification_tests PRIVATE jam2_core Qt6::Widgets Qt6::Network)
+add_test(NAME jam2_session_notification_units COMMAND $<TARGET_FILE:jam2_session_notification_tests>)
+set_tests_properties(jam2_session_notification_units PROPERTIES LABELS "unit;gui;session" TIMEOUT 30 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+add_executable(jam2_four_peer_departure_tests EXCLUDE_FROM_ALL integration/gui/FourPeerDepartureIntegration.cpp)
+jam2_configure_test_target(jam2_four_peer_departure_tests)
+target_link_libraries(jam2_four_peer_departure_tests PRIVATE jam2_test_process_support Qt6::Core Qt6::Network)
+add_test(NAME jam2_four_peer_departure_integration COMMAND $<TARGET_FILE:jam2_four_peer_departure_tests> "${JAM2_TEST_PUBLIC_EXECUTABLE}")
+set_tests_properties(jam2_four_peer_departure_integration PROPERTIES LABELS "integration;gui;network;four-peer;udp-multiplex;fake-audio" TIMEOUT 90)
+if(WIN32)
+    set_tests_properties(jam2_session_notification_units jam2_four_peer_departure_integration PROPERTIES
+        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Widgets>")
+endif()
+add_dependencies(jam2_tests_unit jam2_session_notification_tests)
+add_dependencies(jam2_tests_gui jam2_session_notification_tests jam2_four_peer_departure_tests)
+add_dependencies(jam2_tests_network jam2_four_peer_departure_tests)
+add_dependencies(jam2_tests_all jam2_session_notification_tests jam2_four_peer_departure_tests)

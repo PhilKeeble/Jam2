@@ -17,6 +17,7 @@
 #include "SharedTrackController.hpp"
 #include "SharedSessionController.hpp"
 #include "SessionStartupDialogs.hpp"
+#include "SessionNotifications.hpp"
 #include "TrackRecordingWorkflow.hpp"
 #include "TrackWorkspaceController.hpp"
 #include "UserPreferences.hpp"
@@ -199,6 +200,7 @@ private:
         const SharedSessionController::Snapshot& snapshot);
     void stopJam(bool returnToLocal = true);
     void showJamFailure(const QString& detail);
+    void updateJamStartupState(const SharedSessionController::Snapshot& snapshot);
     void refreshDevices();
     void appendLog(const QString& line);
     void updateStatsDisplay(const ConnectionDiagnosticsSnapshot* stats);
@@ -929,7 +931,7 @@ private:
     };
     std::shared_ptr<AutomationFileWorkerGate> automationFileWorkerGate_;
     bool pendingMeshInvitePopup_ = false;
-    bool jamStartupPending_ = false;
+    jam2::gui::SessionNotifications sessionNotifications_;
     bool jamStartupCreating_ = false;
     QString pendingJamRuntimeError_;
     QString lastJamFailureDialog_;

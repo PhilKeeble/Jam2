@@ -762,7 +762,7 @@ MainWindow::MainWindow(
         appendLog(QStringLiteral("runtime error: ") + line);
         pendingJamRuntimeError_ = line.trimmed();
         const SharedSessionController::Role role = sessionController_.snapshot().role;
-        if (!shuttingDown_ && (jamStartupPending_ ||
+        if (!shuttingDown_ && (sessionNotifications_.startupPending() ||
             role == SharedSessionController::Role::Creator ||
             role == SharedSessionController::Role::Joiner)) {
             // Runtime startup can fail synchronously inside the controller. Let
@@ -772,7 +772,7 @@ MainWindow::MainWindow(
             QTimer::singleShot(0, this, [this] {
                 const SharedSessionController::Role currentRole =
                     sessionController_.snapshot().role;
-                if (!shuttingDown_ && (jamStartupPending_ ||
+                if (!shuttingDown_ && (sessionNotifications_.startupPending() ||
                     currentRole == SharedSessionController::Role::Creator ||
                     currentRole == SharedSessionController::Role::Joiner)) {
                     showJamFailure(pendingJamRuntimeError_);
@@ -793,7 +793,6 @@ MainWindow::MainWindow(
         handleConnectionDiagnostics(snapshot);
     };
     jam2_.onStartup = [this](const Jam2RuntimeStartup& startup) {
-        jamStartupPending_ = false;
         const QString local = QString::fromStdString(jam2::endpoint_to_string(startup.local_endpoint));
         appendLog(QStringLiteral("native UDP session ready: ") + local);
         if (startup.public_candidate) {
@@ -811,6 +810,7 @@ MainWindow::MainWindow(
             setTunerEnabled(tunerRequestedEnabled_);
         }
         const SharedSessionController::Snapshot session = sessionController_.snapshot();
+        updateJamStartupState(session);
         if ((session.role == SharedSessionController::Role::Creator ||
              session.role == SharedSessionController::Role::Joiner) &&
             session.contract.sampleRate > 0) {
@@ -1424,7 +1424,7 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event)
             connectionLabel_->text() == QStringLiteral("AUDIO ISSUE");
         if (mouse->button() == Qt::LeftButton &&
             (audioAction || !jam2_.isRunning()) &&
-            !jamStartupPending_ &&
+            !sessionNotifications_.startupPending() &&
             role != SharedSessionController::Role::Creator &&
             role != SharedSessionController::Role::Joiner) {
             showSettingsDialog();
@@ -2276,7 +2276,7 @@ void MainWindow::startJam(bool createSession)
         createSession ? QStringLiteral("STARTING JAM") : QStringLiteral("JOINING"),
         createSession ? QStringLiteral("Starting a jam") : QStringLiteral("Joining a jam"),
         {QStringLiteral("Preparing authenticated control and direct audio connections.")});
-    jamStartupPending_ = true;
+    sessionNotifications_.beginStartup();
     jamStartupCreating_ = createSession;
     if (createSession) {
         JamSyncPolicyState state(jamSyncPolicy_);
@@ -2572,6 +2572,9 @@ QJsonObject MainWindow::automationJamSnapshot() const
         {QStringLiteral("asset_server_active_connections"), static_cast<qint64>(
             sessionController_.serverStats().assetActiveConnections)},
         {QStringLiteral("last_startup_failure"), lastJamFailureDialog_},
+        {QStringLiteral("startup_pending"), sessionNotifications_.startupPending()},
+        {QStringLiteral("peer_departure_count"), static_cast<qint64>(sessionNotifications_.departureCount())},
+        {QStringLiteral("last_departed_peer_name"), sessionNotifications_.lastDepartureName()},
         {QStringLiteral("health_pill"), connectionLabel_
             ? connectionLabel_->text() : QString{}},
         {QStringLiteral("incoming_audio_breakdown"), diagnosticIncomingAudioValue_
@@ -3624,6 +3627,7 @@ void MainWindow::clearAutomationTransferPause()
 
 void MainWindow::showJamFailure(const QString& detail)
 {
+    if (!sessionNotifications_.startupPending() || shuttingDown_) return;
     const QString normalized = detail.trimmed().isEmpty()
         ? QStringLiteral("An unknown in-process network error occurred.")
         : detail.trimmed();
@@ -3647,7 +3651,7 @@ void MainWindow::showJamFailure(const QString& detail)
             ? QStringLiteral("An unknown in-process network error occurred.")
             : queuedJamFailureDetail_;
         pendingJamRuntimeError_.clear();
-        jamStartupPending_ = false;
+        sessionNotifications_.finishStartup();
         const QString action = jamStartupCreating_
             ? QStringLiteral("Start Jam failed")
             : QStringLiteral("Join Jam failed");
@@ -4282,7 +4286,7 @@ void MainWindow::showSettingsDialog()
 void MainWindow::stopJam(bool returnToLocal)
 {
     const bool shouldReturnToLocal = returnToLocal && !shuttingDown_;
-    jamStartupPending_ = false;
+    sessionNotifications_.reset();
     controlRefreshAvailable_ = false;
     lastDiagnostics_.reset();
     updateStatsDisplay(nullptr);
@@ -4903,12 +4907,26 @@ void MainWindow::updateMixMeters(const MixerMeterLevels& levels)
     }
 }
 
+void MainWindow::updateJamStartupState(const SharedSessionController::Snapshot& snapshot)
+{
+    const bool ready = jam2_.isNetworkRunning() &&
+        ((snapshot.role == SharedSessionController::Role::Creator &&
+          sessionController_.multiplexSnapshot().registered) ||
+         (snapshot.role == SharedSessionController::Role::Joiner &&
+          snapshot.lifecycle == SharedSessionController::Lifecycle::Active));
+    if (ready) sessionNotifications_.finishStartup();
+}
+
 void MainWindow::applySessionSnapshot(const SharedSessionController::Snapshot& snapshot)
 {
     if (snapshot.role != SharedSessionController::Role::Creator &&
         snapshot.role != SharedSessionController::Role::Joiner) {
         return;
     }
+    // Starting a controller first publishes its previous inactive/local state.
+    // That internal reset must not cancel the new startup presentation.
+    updateJamStartupState(snapshot);
+    sessionNotifications_.observe(snapshot, this, !automationSuppressDialogs_ && !shuttingDown_);
     if (snapshot.role==SharedSessionController::Role::Creator && sessionRuntimeDraft_.configuration.strategy!=jam2::ConnectionStrategy::Jam2Server) {
         const auto transport=sessionController_.multiplexSnapshot();
         if (transport.registered && transport.bootstrapPublic.port) {
@@ -5243,6 +5261,7 @@ void MainWindow::handleControlEvent(
     } else if (event.type == TransportEventType::Disconnected) {
         if (serverSide) {
             setMixRemotePeerVisible(sessionController_.hasPeer());
+            updateJamSessionHeaderStatus(sessionController_.snapshot());
         } else {
             setMixRemotePeerVisible(false);
         }

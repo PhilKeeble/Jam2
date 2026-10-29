@@ -637,6 +637,8 @@ void GuiTestAgent::handle(const QJsonObject& command)
                 {QStringLiteral("width"), window_.width()},
                 {QStringLiteral("height"), window_.height()},
                 {QStringLiteral("active_modal"), QApplication::activeModalWidget() != nullptr},
+                {QStringLiteral("active_modal_title"), QApplication::activeModalWidget()
+                    ? QApplication::activeModalWidget()->windowTitle() : QString{}},
             });
             page.insert(QStringLiteral("jam"), window_.automationJamSnapshot());
             page.insert(QStringLiteral("content"), window_.automationContentSnapshot());

@@ -1591,23 +1591,14 @@ bool exerciseLocalFakeAudioWorkflow(AutomationProcess& peer)
         }
     }
 
-    const auto deadline = std::chrono::steady_clock::now() +
-        jam2::test::deadmanTimeout(60s);
-    bool failureVisible = false;
-    int attempt = 0;
-    while (std::chrono::steady_clock::now() < deadline) {
-        const auto state = runtimeSnapshot(
-            peer, prefix + QStringLiteral("failure-%1").arg(attempt++));
-        if (!state) return false;
-        if (state->value(QStringLiteral("jam")).toObject()
-                .value(QStringLiteral("last_startup_failure")).toString() ==
-            QStringLiteral("automation failure presentation boundary")) {
-            failureVisible = true;
-            break;
-        }
-    }
-    if (!failureVisible) {
-        fail(QStringLiteral("asynchronous jam failure presentation was not observable"));
+    // The boundary action is delivered after these local/runtime operations,
+    // outside jam startup. It must not masquerade as a startup failure.
+    const auto state = runtimeSnapshot(peer, prefix + QStringLiteral("late-failure"));
+    if (!state) return false;
+    if (state->value(QStringLiteral("jam")).toObject()
+            .value(QStringLiteral("last_startup_failure")).toString() ==
+        QStringLiteral("automation failure presentation boundary")) {
+        fail(QStringLiteral("late failure was presented as a jam startup error"));
     }
     return failures == 0;
 }

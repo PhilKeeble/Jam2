@@ -593,6 +593,8 @@ add_executable(jam2 MACOSX_BUNDLE
     gui/ActionTileRow.hpp
     gui/SessionStartupDialogs.cpp
     gui/SessionStartupDialogs.hpp
+    gui/SessionNotifications.cpp
+    gui/SessionNotifications.hpp
     gui/SettingsDialog.cpp
     gui/SettingsDialog.hpp
     gui/MetronomeTransportController.cpp

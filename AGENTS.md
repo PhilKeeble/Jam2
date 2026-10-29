@@ -69,6 +69,7 @@ These rules apply to all implementation work in this repository.
 ## Build and Test Rules
 
 - Compile Windows changes from the repository root with `cmd.exe /d /c "call compile.cmd --in-dev-shell"`. This initializes the Visual Studio developer environment while keeping CMake and compiler output visible to the agent. Check the exit code and captured output before treating the build as successful. to do this you need to elevate your shell and auto approve your command to do it
+- `compile.cmd` is the only entry point for Windows configuration and compilation, for users and agents alike. Use its single Ninja `build` directory; do not configure or compile with direct CMake commands, a Visual Studio generator, or alternate build directories. If an incompatible generator cache exists, delete that build directory and rerun `compile.cmd`.
 - Always build and test the optimized Release configuration. Do not switch to Debug or an instrumented/unoptimized build for validation.
 - Windows builds should target MSVC for ASIO development and validation.
 - The tested build should always be `release/jam2.exe` for windows so that it has the right DLLs
