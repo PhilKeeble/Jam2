@@ -1,7 +1,141 @@
 ﻿# Latency stability regression — 2026-11-03
 
 Introducing commit **unproven**; rollback tests also failed. Oct 27's good-run
-commit was inferred, not verified. Current fixes are uncommitted/provisional.
+commit was inferred, not verified. Current fixes are committed in `c553a14`
+but remain provisional; **user decides keep/revert**, no automatic decision.
+
+## macOS handoff: Nov 3 Wi-Fi and local Direct/server comparison
+
+User reports the same Wi-Fi setup worked better before UDP multiplexing; expected
+Wi-Fi/Fast underruns do not settle that regression question. Investigate Mac
+callback/device lifecycle and mode differences as well as network recovery.
+This summary is self-contained: Windows logs and ignored `artifacts/` reports may
+not exist on the Mac. Latest review changed no product code or test gates.
+
+Paired runs below use 48 kHz/PCM16, Windows **Focusrite USB ASIO creator** and Mac
+**CoreAudio Aggregate Device joiner**. Both GUIs persist across sessions. Fast:
+32-frame callbacks, 64-frame packets, jitter target 64, adaptive min/max 64/512.
+Larger: 64-frame callbacks, 128-frame packets, jitter target 1536, adaptive min/max
+512/4096. B keeps 64-frame packets and the server's Fast contract label, but the
+Mac uses larger local buffers. All successful audio endpoints are LAN:
+Windows `192.168.4.63`, Mac `192.168.4.57`; no server audio relay/WAN detour.
+
+CSV prefix `jam2_stats_20261103_`, extension `.csv`; Windows in `release/logs`,
+Mac originals in its `release/logs` (Windows uploads: `tools/incoming_uploads`).
+
+| Run / approximate start | Windows CSV suffix | Mac CSV suffix |
+|---|---|---|
+| A Server Fast, 18:17 | 181531_887_pid9148, first peer join | 181715_359_pid23894 |
+| B Server mixed, 18:19 | Same CSV, second peer join | 181930_720_pid23894 |
+| C Server larger, 18:21 | 182120_395_pid9148 | 182134_296_pid23894 |
+| D Direct Fast, 18:24 | 182346_634_pid9148 | 182413_151_pid23894 |
+| E Direct larger, 18:26 | 182613_251_pid9148 | 182625_568_pid23894 |
+
+GUI files: Windows `jam2_gui_20261103_181520_455_pid9148.log`,
+Mac `jam2_gui_20261103_181602_636_pid23894.log`. Pair by endpoints/lifecycle;
+host clocks differ. Use connected periodic counter **deltas**, excluding first
+10 s and final 2 s for steady comparisons; raw totals include earlier/idle runs.
+
+| Run | Median software queue ms, Windows / Mac | Missing source audio ms/min, Windows / Mac |
+|---|---:|---:|
+| A Server Fast | 4.08 / 3.32 | 3247 / 3801 |
+| B Server mixed | 2.67 / 96.32 | 3297 / 0.93 |
+| C Server larger | 97.85 / 95.15 | 0 / 8.16 |
+| D Direct Fast | 4.67 / 3.67 | 3226 / 3330 |
+| E Direct larger | 92.85 / 96.04 | 5.50 / 3.20 |
+
+Queue = jitter + peer + output storage, excluding transit and hardware latency.
+Shortage = underrun source frames / sample rate / duration, not measured audible
+silence; do not add cumulative padding/trimming as independent dropout time.
+Fast starts roughly two hard receive recoveries/sec in both modes. Larger buffers
+largely prevent that, retaining about 29-31 ms jitter + 61-67 ms output storage.
+
+**Mac-specific difference to reproduce**, not yet proven caused by server mode:
+
+| Mac measurement | Server Fast | Direct Fast | Server larger | Direct larger |
+|---|---:|---:|---:|---:|
+| Additional overload notifications in connected sampled interval | 45 | 0 | 7 | 0 |
+| Reported max callback work, ms | 1.545 | 0.081 | 1.868 | 0.028 |
+| Reported max callback interval, ms | 2.335 | 0.899 | 3.393 | 1.563 |
+| Median reported mixer service-gap high water, ms | 4.28 | 1.40 | 2.58 | 1.40 |
+
+Windows has no consistent corresponding callback penalty; Fast max work is
+0.304 ms server / 0.577 ms Direct, larger 0.416 / 0.314 ms. RTT averages are
+roughly 12-13 ms in both modes. Mac C reuses B's 64-frame engine; D reconfigures
+the engine. Sequential Wi-Fi variation and engine reuse confound mode causality.
+Direct's severe Fast shortages despite zero Mac overloads remain a shared issue.
+
+Recovery observations: audio arrival gaps reach ~93-101 ms while local receive-loop
+maxima are ~2-5 ms. C Windows' 91.838 ms gap calculates exactly its 3129-frame
+target: ceil(91.838*48) - (1536-128) + 128. Repeated evidence renews 30 s holds;
+no sustained clean hold-expired phase is captured. Mac C target reaches 4096;
+sampled total queues peak ~100.69 ms across these runs. **New catch-up starts = 0
+on all ten receiver-runs**: raised targets/holds and insufficient output low water
+block it. Mac A's 14 retired frames are older-controller consumption accounting,
+not new-path activation. Pending credit is capped bookkeeping, not actual retained
+latency; disconnect cancellation is not playback retirement. Delayed-beacon filter
+records 86 rejected observations; raw sampled errors reach ~89 ms, mapping-target
+errors stay below 3.90 ms. Zero sequence loss/mux drops does not imply good audio.
+
+### macOS investigation / native test entry points
+
+- Read `AGENTS.md` and applicable macOS test instructions; use optimized Release
+  via `compile.sh`, the staged public app and a matching **local** Go signaller.
+  Keep clean latency/quality gates; no full suite unless requested. Inspect
+  `libs/jam2-core/src/audio_device_macos.cpp`, `audio_device_processing.cpp`,
+  `engine.cpp`, `peer_mixer.cpp`, `peer_stream.cpp`, and
+  `app/cli/NetworkRuntime.cpp` (`jam2_engine_restart_required`). Compare callback
+  work/intervals, overloads, timestamp validity/cycle timing, actual callback sizes,
+  worker runway, queue components and engine create/reuse/restart in each mode.
+- Existing `jam2_four_mode_audio_latency_integration` and
+  `jam2_udp_four_receive_models_performance` are **four-peer fake-audio** tests
+  (`tests/integration/network/ModeAudioLatencyIntegration.cpp`), 48 kHz/PCM24,
+  64-frame packets/**128-frame headless callbacks**, with Direct/server ABBA
+  ordering. They do not validate 32/64-frame real CoreAudio callbacks. Their
+  local Go binary requires CMake cache `JAM2_RENDEZVOUS_TEST_SERVER`; current
+  CMake does not import that environment variable on macOS. Ensure registration,
+  not a missing-test/skip pass. Then use, for example:
+  `bash ./compile.sh --tests network --test-name jam2_four_mode_audio_latency_integration`.
+- CoreAudio entry points: `jam2_coreaudio_aggregate_integration` (explicit
+  `JAM2_COREAUDIO_INPUT_UID`/`JAM2_COREAUDIO_OUTPUT_UID`; device lifecycle, not a
+  two-peer mode comparison), `jam2_audio_device_processing_units`,
+  `jam2_coreaudio_recording_timing_units`, and
+  `jam2_multiplex_four_session_lifecycle_integration`. Recovery tests:
+  `jam2_audio_flow_large-recovery`, `jam2_audio_flow_repeated-recovery`,
+  `jam2_audio_flow_startup-recovery`. Windows large/repeated pass; startup,
+  `jam2_core_input_units`, `jam2_core_playback_recovery_units` and
+  `jam2_core_release_return_units` have known remaining failures, not Mac-only
+  regressions. Preserve measurements/assertions rather than weakening them.
+- Coverage gap: real-device selection in
+  `tests/integration/network/AsioDeliveryImpairmentIntegration.cpp` is ASIO-only;
+  `jam2_asio_oct30_delivery_hardware` is Windows-only. Use its
+  `tests/profiles/asio-mode-equivalence.json` as the small **two-instance localhost
+  CoreAudio CTest** model; it is not an existing Mac hardware test. Profile real
+  device UIDs/channels/callbacks, compare Direct/server/server/Direct with a local
+  signaller, tone 60 s + pulse 40 s, identical settings in both modes. Separately
+  compare fresh engines against GUI stop/rejoin with engine reuse; retain the
+  existing four-peer coverage. Record callback audio, not just a GUI estimate.
+  Test both 48 kHz contracts above; only compare absolute Windows numbers at
+  matching supported rates/settings, without silently changing the device setup.
+- Windows reference without its files: fresh candidate Focusrite/TONEX localhost,
+  44.1 kHz/32 callbacks/64 PCM16, eight tone/pulse cases completed; receiver median
+  software queues span **1.59-3.47 ms**, recorded pulse round trips **6.33-7.19 ms**
+  excluding converters. Earlier reused-GUI queues: Direct **1.46/1.54 ms**,
+  server **2.86/2.88 ms**. These are references, **not a passing golden baseline**:
+  fresh pre-fix and candidate matrices each failed 5/6 mode comparisons. Compare
+  matched software/frame measurements on Mac, accounting separately for driver
+  latency (Wi-Fi Mac reports ~14.5-15.2 ms output, Windows ~3.25-3.92 ms).
+  Hardware gates allow one callback per-direction median/p99 variation, two for
+  recorded round trip, and no extra steady underruns/trims/tone discontinuities.
+- After the clean local comparison, replay repeated ~90-100 ms holds/bursts plus
+  shorter gaps, then remove impairment and follow real queues through hold expiry,
+  target decay and catch-up. Current Wi-Fi runs cannot prove post-stress clearing
+  or before/after benefit. Report results for the user to decide, not automatic
+  acceptance/revert or an assumption that Wi-Fi explains the historical regression.
+
+Optional Windows-local reports, if available:
+[Wi-Fi review](artifacts/wifi-recovery-review-20261103/RESULTS.md),
+[ASIO comparison](artifacts/asio-mode-review-20261103/RESULTS.md).
 
 ## Inputs / directions
 
