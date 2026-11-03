@@ -391,6 +391,48 @@ bool AuthorityBeaconSchedule::due(std::uint64_t now_us, AuthorityBeaconState sta
 {
     return !last_ || *last_ != state || now_us >= next_us_;
 }
+
+std::optional<std::int64_t> grid_clock_offset(GridClockObservation observation) noexcept
+{
+    const auto raw=map_authority_clock(0,observation.authority_frame,observation.local_raw_frame);
+    const auto epoch=map_authority_clock(0,observation.local_epoch,observation.authority_epoch);
+    if (!raw.valid || !epoch.valid) return {};
+    const auto a=raw.render_offset_frames,b=epoch.render_offset_frames;
+    if ((b>0 && a>(std::numeric_limits<std::int64_t>::max)()-b) ||
+        (b<0 && a<(std::numeric_limits<std::int64_t>::min)()-b)) return {};
+    return a+b;
+}
+
+AuthorityPhaseDecision AuthorityPhaseTracker::observe(AuthorityPhaseObservation observation,
+    AuthorityPhaseTrackingConfig config) noexcept
+{
+    if (!observation.received_us || config.sample_rate<=0 ||
+        config.maximum_relative_drift_ppm<0 || config.maximum_relative_drift_ppm>1000000) {
+        ++stats_.invalid;return AuthorityPhaseDecision::Invalid;
+    }
+    if (initialized_ && (observation.authority_frame<=newest_frame_ ||
+            observation.received_us<newest_received_us_)) {
+        ++stats_.reordered;return AuthorityPhaseDecision::Reordered;
+    }
+    const auto elapsed=initialized_ ? observation.received_us-newest_received_us_ : 0;
+    newest_frame_=observation.authority_frame;newest_received_us_=observation.received_us;
+    stats_.raw_offset_frames=observation.proposed_offset_frames;
+    if (initialized_) {
+        drift_floor_frames_-=static_cast<long double>(elapsed)*config.sample_rate*
+            config.maximum_relative_drift_ppm/1000000000000.0L;
+        // Tolerance is a single uncertainty band, never a per-packet allowance
+        // that a gradually growing delivery queue can accumulate into drift.
+        if (observation.proposed_offset_frames<drift_floor_frames_-config.tolerance_frames) {
+            ++stats_.delayed;return AuthorityPhaseDecision::Delayed;
+        }
+    }
+    drift_floor_frames_=initialized_ ? (std::max)(drift_floor_frames_,static_cast<long double>(observation.proposed_offset_frames))
+        : static_cast<long double>(observation.proposed_offset_frames);
+    initialized_=true;++stats_.accepted;
+    stats_.accepted_offset_frames=observation.proposed_offset_frames;
+    stats_.last_accepted_us=observation.received_us;
+    return AuthorityPhaseDecision::Accepted;
+}
 void AuthorityBeaconSchedule::commitAttempt(std::uint64_t now_us, AuthorityBeaconState state) noexcept
 {
     last_ = state;

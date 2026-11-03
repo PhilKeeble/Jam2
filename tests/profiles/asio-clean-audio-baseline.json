@@ -1,0 +1,48 @@
+{
+  "schema": "jam2-asio-delivery-profile-v1",
+  "device_names": [
+    "TONEX",
+    "Focusrite USB ASIO"
+  ],
+  "sample_rate": 44100,
+  "callback_frames": 32,
+  "packet_frames": 64,
+  "clean_duration_ms": 0,
+  "impaired_duration_ms": 60000,
+  "base_one_way_delay_ms": 0,
+  "forward_jitter_ms": 0,
+  "reverse_jitter_ms": 0,
+  "repeat_ms": 0,
+  "delay_points": [
+    [
+      0,
+      0
+    ]
+  ],
+  "recovered_buffer_limit_ms": 40,
+  "description": "Unimpaired real-ASIO localhost audio recordings and latency baseline, no synthetic network impairment.",
+  "diagnostic_cases": [
+    {
+      "name": "clean-64-tone",
+      "packet_frames": 64
+    },
+    {
+      "name": "clean-128-tone",
+      "packet_frames": 128
+    },
+    {
+      "name": "clean-64-pulse",
+      "packet_frames": 64,
+      "test_input": "pulse-1s",
+      "impaired_duration_ms": 40000
+    },
+    {
+      "name": "clean-128-pulse",
+      "packet_frames": 128,
+      "test_input": "pulse-1s",
+      "impaired_duration_ms": 40000
+    }
+  ],
+  "record_audio": true,
+  "delay_scope": "none"
+}

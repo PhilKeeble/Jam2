@@ -31,8 +31,11 @@ struct PeerStreamConfig {
     double drift_smoothing = 0.02;
     int drift_deadband_ppm = 0;
     int drift_max_correction_ppm = 500;
-    // Routine local receive-thread batching is not unstable-network evidence.
-    std::uint64_t adaptive_delivery_gap_minimum_us = 50000;
+    // Gaps remain relative to the packet interval. The mixer associates them
+    // with real starvation before raising a target; arrivals alone add no delay.
+    std::uint64_t adaptive_delivery_gap_minimum_us = 0;
+    std::uint32_t adaptive_delivery_gap_confirmations = 3;
+    std::uint64_t adaptive_delivery_gap_confirmation_window_us = 2000000;
     std::uint64_t stats_warmup_us = 3000000;
     bool collect_diagnostics = false;
     // Audio participation is independent of authenticated control liveness.

@@ -315,6 +315,13 @@ void testOptionAndStatsContracts()
     mixerSource.worker_runway_frames = 36;
     mixerSource.playback_stopping_frames = 37;
     mixerSource.release_worker_guard_active = true;
+    mixerSource.recovery_pending_frames = 38;
+    mixerSource.recovery_retired_frames = 39;
+    mixerSource.recovery_cancelled_frames = 40;
+    mixerSource.recovery_safe_depth_frames = 41;
+    mixerSource.recovery_low_water_frames = 42;
+    mixerSource.recovery_release_events = 43;
+    mixerSource.recovery_release_active = true;
     jam2::cli::stats::copy_peer_mixer_stats(copied, mixerSource);
     expect(copied.mix_receive_recovery_active &&
             copied.mix_receive_recovery_events == 11 &&
@@ -344,6 +351,10 @@ void testOptionAndStatsContracts()
             copied.mix_playback_stopping_frames == 37 &&
             copied.mix_release_worker_guard_active,
         "CLI diagnostics copy debt-driven recovery and delivery-gap learning state");
+    expect(copied.mix_recovery_pending_frames == 38 && copied.mix_recovery_retired_frames == 39 &&
+        copied.mix_recovery_cancelled_frames == 40 && copied.mix_recovery_safe_depth_frames == 41 &&
+        copied.mix_recovery_low_water_frames == 42 && copied.mix_recovery_release_events == 43 &&
+        copied.mix_recovery_release_active, "CLI diagnostics preserve measured recovery accounting and headroom");
 
     jam2::PeerStreamStats firstGap;
     firstGap.audio_packet_gap_min_us = 1200;
@@ -484,9 +495,9 @@ void testOptionAndStatsContracts()
         const bool schemaMatches = opened && lines.size() == 3 &&
                 csvFieldCount(header) == csvFieldCount(finalRow) &&
                 csvFieldCount(header) == csvFieldCount(periodicRow) &&
-                header.endsWith("mix_live_tail_rounding_tolerance_frames,mix_adaptive_release_alignment_margin_frames,mix_partial_release_events,mix_partial_release_frames,mix_lookahead_hold_events,mix_lookahead_hold_frames,mix_lookahead_hold_max_fraction_ppm,mix_isolated_recovery_events,mix_worker_service_gap_us,mix_worker_runway_frames,mix_playback_stopping_frames,mix_release_worker_guard_active,wasapi_capture_depth_frames,wasapi_render_padding_frames,wasapi_capture_correction_ppm,wasapi_capture_underrun_frames,wasapi_capture_overrun_frames,wasapi_capture_discontinuities,wasapi_capture_resets,wasapi_invalid_timestamps,audio_device_error") &&
-                periodicRow.endsWith(",17,256,yes,18,19,20,21,22,128,256,320,64,64,23,63,31,32,33,34,35,36,37,yes,111,222,-333,444,555,6,7,8,-9") &&
-                finalRow.endsWith(",17,256,yes,18,19,20,21,22,128,256,320,64,64,23,63,31,32,33,34,35,36,37,yes,111,222,-333,444,555,6,7,8,-9");
+                header.endsWith("mix_live_tail_rounding_tolerance_frames,mix_adaptive_release_alignment_margin_frames,mix_partial_release_events,mix_partial_release_frames,mix_lookahead_hold_events,mix_lookahead_hold_frames,mix_lookahead_hold_max_fraction_ppm,mix_isolated_recovery_events,mix_worker_service_gap_us,mix_worker_runway_frames,mix_playback_stopping_frames,mix_release_worker_guard_active,wasapi_capture_depth_frames,wasapi_render_padding_frames,wasapi_capture_correction_ppm,wasapi_capture_underrun_frames,wasapi_capture_overrun_frames,wasapi_capture_discontinuities,wasapi_capture_resets,wasapi_invalid_timestamps,audio_device_error,grid_phase_accepted,grid_phase_delayed,grid_phase_reordered,grid_phase_raw_error_frames,grid_phase_tolerance_frames,grid_phase_maximum_drift_ppm,grid_phase_last_accepted_age_us,mix_adaptive_path_high_water_frames,mix_delivery_gap_guard_active,mix_recovery_pending_frames,mix_recovery_retired_frames,mix_recovery_cancelled_frames,mix_recovery_safe_depth_frames,mix_recovery_low_water_frames,mix_recovery_release_events,mix_recovery_release_active") &&
+                periodicRow.endsWith(",17,256,yes,18,19,20,21,22,128,256,320,64,64,23,63,31,32,33,34,35,36,37,yes,111,222,-333,444,555,6,7,8,-9,0,0,0,0,0,0,0,0,no,38,39,40,41,42,43,yes") &&
+                finalRow.endsWith(",17,256,yes,18,19,20,21,22,128,256,320,64,64,23,63,31,32,33,34,35,36,37,yes,111,222,-333,444,555,6,7,8,-9,0,0,0,0,0,0,0,0,no,38,39,40,41,42,43,yes");
         expect(schemaMatches,
             "final CSV preserves the capture-clock pacing field and schema width");
     }

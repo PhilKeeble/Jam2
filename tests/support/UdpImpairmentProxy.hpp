@@ -1,4 +1,5 @@
 #pragma once
+#include "DeliveryDelayEnvelope.hpp"
 
 #include <QByteArray>
 #include <QHostAddress>
@@ -25,6 +26,8 @@ struct DirectionImpairment {
     double burstLossAfterMs = 0.0;
     double burstLossDurationMs = 0.0;
     bool preserveOrder = true;
+    DeliveryDelayEnvelope deliveryDelay;
+    double deliveryBatchMs = 0;
 };
 
 struct DirectionProxyStats {
@@ -45,6 +48,8 @@ struct DirectionProxyStats {
     std::uint64_t sendErrors = 0;
     std::uint64_t destinationUnreachable = 0;
     std::uint64_t unroutable = 0;
+    std::uint64_t requestedDelayMaxUs = 0;
+    std::uint64_t releaseLatenessMaxUs = 0;
 };
 
 enum class UdpProxyDirection {

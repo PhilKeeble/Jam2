@@ -1,0 +1,19 @@
+{
+  "schema": "jam2-asio-delivery-profile-v1",
+  "device_names": ["TONEX", "Focusrite USB ASIO"],
+  "sample_rate": 44100,
+  "callback_frames": 32,
+  "packet_frames": 128,
+  "clean_duration_ms": 40000,
+  "impaired_duration_ms": 230000,
+  "base_one_way_delay_ms": 7.5,
+  "forward_jitter_ms": 3.6,
+  "reverse_jitter_ms": 0.5,
+  "repeat_ms": 180000,
+  "delay_points": [[0, 0], [18000, 0], [19000, 200], [19001, 325], [20000, 400], [22000, 650], [24000, 0]],
+  "recovered_buffer_limit_ms": 40,
+  "source_csv": ["jam2_stats_20261030_085245_623_pid7609.csv", "jam2_stats_20261030_085326_112_pid24448.csv"],
+  "observed_rtt_peak_ms": 665.039,
+  "observed_joiner_arrival_gap_peak_ms": 128.001,
+  "description": "Oct30 aggregate-derived approximation: roughly 15ms baseline RTT, one-direction queueing growth to 650ms with an approximately 128ms arrival gap, and catch-up, repeated after 180s. No inferred packet loss. This is not a packet-capture replay. Real ASIO callbacks, generated tone input, PCM24."
+}

@@ -39,6 +39,15 @@ __pycache__/
 *.pyc
 /latency-runs/
 
+# Local packet captures and incoming diagnostic files
+/captures/
+/tools/incoming_uploads/
+*.pcap
+*.pcapng
+*.pcap.gz
+*.pcapng.gz
+*.etl
+
 # Editor/OS noise
 .vs/
 .vscode/

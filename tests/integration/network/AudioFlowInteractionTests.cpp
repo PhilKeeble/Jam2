@@ -15,15 +15,17 @@
 #include <cmath>
 #include <cstdint>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <span>
 #include <stdexcept>
 #include <string_view>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace {
-constexpr int rate = 48000;
+int rate = 48000; // Selected once by the test case, before creating any audio/session objects.
 constexpr std::size_t packetFrames = 64;
 constexpr std::size_t callbackFrames = 32;
 constexpr std::size_t participants = 4;
@@ -85,12 +87,13 @@ public:
     std::uint64_t generation = 0;
 };
 
-jam2::PeerStreamConfig streamConfig(const jam2::JoinProfile& profile)
+jam2::PeerStreamConfig streamConfig(const jam2::JoinProfile& profile,int frames=int(packetFrames),
+    jam2::NetworkAudioFormat format=jam2::NetworkAudioFormat::Pcm24Mono)
 {
     jam2::PeerStreamConfig config;
     config.sample_rate = rate;
-    config.frames_per_packet = static_cast<int>(packetFrames);
-    config.audio_format = jam2::NetworkAudioFormat::Pcm24Mono;
+    config.frames_per_packet = frames;
+    config.audio_format = format;
     config.playout_delay_frames = profile.playout_delay_frames;
     config.playback_max_frames = profile.playback_max_frames;
     config.playback_queue_capacity_frames = profile.playback_ring_frames;
@@ -120,7 +123,8 @@ jam2::SessionInfo sessionInfo()
 struct Receiver {
     DeviceSink sink;
     std::unique_ptr<jam2::NetworkSession> session;
-    Receiver(std::size_t local, const jam2::JoinProfile& profile)
+    Receiver(std::size_t local, const jam2::JoinProfile& profile, std::int64_t gapMinimumUs=-1,int frames=int(packetFrames),
+        jam2::NetworkAudioFormat format=jam2::NetworkAudioFormat::Pcm24Mono)
         : sink(profile)
     {
         std::vector<jam2::NetworkPeerDescriptor> peers;
@@ -131,12 +135,16 @@ struct Receiver {
                 jam2::PeerEndpointState::Active});
         }
         jam2::NetworkSessionContract contract;
-        contract.frames_per_packet = static_cast<int>(packetFrames);
+        contract.audio_format = format;
+        contract.sample_rate = rate;
+        contract.frames_per_packet = frames;
         jam2::UdpSocket socket;
         socket.bind({"127.0.0.1", 0});
+        auto config=streamConfig(profile,frames,format);
+        if (gapMinimumUs>=0) config.adaptive_delivery_gap_minimum_us=std::uint64_t(gapMinimumUs);
         session = std::make_unique<jam2::NetworkSession>(std::move(socket), sessionInfo(), contract,
             jam2::SessionBootstrapRole::Creator, jam2::PeerId{local + 1}, peers,
-            streamConfig(profile), &sink);
+            config, &sink);
     }
     std::uint64_t path() const
     {
@@ -152,19 +160,22 @@ struct Receiver {
 };
 
 jam2::PeerAudioResult deliver(jam2::PeerStream& stream, std::uint32_t sequence,
-    std::uint64_t frame, std::uint64_t now, std::span<const std::int32_t> samples)
+    std::uint64_t frame, std::uint64_t now, std::span<const std::int32_t> samples,
+    jam2::NetworkAudioFormat format=jam2::NetworkAudioFormat::Pcm24Mono)
 {
-    std::array<std::uint8_t, packetFrames * 3> payload{};
-    if (!jam2::protocol::pack_audio_q31_into(jam2::NetworkAudioFormat::Pcm24Mono, samples, payload))
+    std::array<std::uint8_t, 128 * 3> storage{};
+    if (samples.size()>128) throw std::runtime_error("experiment packet exceeds fixture capacity");
+    auto payload=std::span(storage).first(samples.size()*jam2::protocol::audio_bytes_per_sample(format));
+    if (!jam2::protocol::pack_audio_q31_into(format, samples, payload))
         throw std::runtime_error("failed to pack experiment audio");
     const auto info = sessionInfo();
     jam2::protocol::Header header{jam2::protocol::PacketType::Audio, info.session_id,
         sequence, frame, static_cast<std::uint16_t>(payload.size()), 0};
     std::array<std::uint8_t, jam2::protocol::kMaxDatagramSize> wire{};
     const auto size = jam2::protocol::encode_packet_into(header, payload, info.key,
-        jam2::NetworkAudioFormat::Pcm24Mono, wire);
+        format, wire);
     const auto parsed = jam2::protocol::parse_packet(std::span(wire).first(size), info.key,
-        info.session_id, jam2::NetworkAudioFormat::Pcm24Mono);
+        info.session_id, format);
     if (!parsed) throw std::runtime_error("experiment packet failed authentication/validation");
     return stream.receiveAudio(parsed.header,
         std::span<const std::uint8_t>(wire).subspan(jam2::protocol::kHeaderSize, payload.size()), now);
@@ -274,6 +285,7 @@ void captureOverflow()
 struct Observations {
     std::uint64_t underruns = 0, padding = 0, trims = 0, missing = 0, raises = 0;
     std::uint64_t target = 0, path = 0, recovery = 0, completions = 0;
+    std::uint64_t recoveryPending = 0, recoveryRetired = 0, recoveryCancelled = 0;
 };
 Observations observe(const Receiver& receiver)
 {
@@ -281,7 +293,8 @@ Observations observe(const Receiver& receiver)
     return {receiver.sink.underrunFrames(), stats.adaptive_padding_frames,
         stats.live_tail_trimmed_frames, stats.missing_peer_frames, stats.adaptive_raise_events,
         stats.adaptive_target_frames, receiver.path(), stats.receive_recovery_events,
-        stats.receive_recovery_completions};
+        stats.receive_recovery_completions, stats.recovery_pending_frames,
+        stats.recovery_retired_frames, stats.recovery_cancelled_frames};
 }
 
 void interruptionCase(std::uint64_t outageUs, bool deactivate, const char* profileName)
@@ -428,31 +441,453 @@ struct ClockResult {
     std::uint64_t lateUnderruns = 0, lateTrims = 0, latePadding = 0;
     double drift = 0, sourceRatio = 1, averagePath = 0;
     std::uint64_t releaseFrames = 0;
+    std::uint64_t recoveries = 0, completions = 0;
 };
-ClockResult clockCase(int senderPpm, int receiverPpm, bool adaptive, bool interruptPeer = false)
+
+enum class StartupArrival { Clean, BeforeRecoveryDecision, AfterRecoveryDecision, AfterReceiveBatch };
+
+const char* startupArrivalName(StartupArrival arrival)
+{
+    switch (arrival) {
+    case StartupArrival::Clean: return "clean";
+    case StartupArrival::BeforeRecoveryDecision: return "audio-before-decision";
+    case StartupArrival::AfterRecoveryDecision: return "audio-after-decision";
+    case StartupArrival::AfterReceiveBatch: return "audio-after-batch";
+    }
+    throw std::runtime_error("invalid startup arrival ordering");
+}
+
+struct StartupRecoveryResult {
+    Observations final, settled;
+    double averagePath = 0;
+    std::uint64_t pathMinimum = 0, pathMaximum = 0, maximumOneSecondMinimum = 0;
+    std::uint64_t firstUnderrunUs = 0, targetReturnedUs = 0, targetMaximum = 0;
+    std::uint64_t acceleratedCallbacks = 0, nonUnityRequests = 0, workerRunwayMaximum = 0;
+};
+
+StartupRecoveryResult startupRecoveryCase(StartupArrival arrival, std::uint64_t workerPeriodUs,
+    std::uint64_t callbackPhaseUs, jam2::NetworkAudioFormat format)
+{
+    // Exactly four participants. Only the arrival of packet 2 and its ordering
+    // against advance() are injected. Callback reads, authentication, streams,
+    // recovery padding, mixing and playback rate changes are production code.
+    const auto profile = *jam2::find_join_profile("fast");
+    Receiver receiver(0, profile, -1, int(packetFrames), format);
+    const auto base = receiver.session->schedule().startTimeUs();
+    constexpr std::uint64_t endUs = 60000000, settledBeginUs = 10000000;
+    const auto timeAt = [](std::uint64_t frame) { return frame * 1000000 / rate; };
+    std::array<std::int32_t, packetFrames> audio{};
+    audio.fill(1048576);
+    StartupRecoveryResult result;
+    result.pathMinimum = (std::numeric_limits<std::uint64_t>::max)();
+    std::uint64_t packet = 1, callback = 1, worker = workerPeriodUs, now = 0;
+    std::uint64_t bucket = 0, bucketMinimum = result.pathMinimum, observedUs = 0;
+    long double pathIntegral = 0;
+    bool settled = false, targetWasRaised = false;
+    const auto samplePath = [&] {
+        if (now < settledBeginUs) return;
+        const auto path = receiver.path();
+        const auto nextBucket = now / 1000000;
+        if (nextBucket != bucket) {
+            if (bucket != 0) result.maximumOneSecondMinimum = std::max(result.maximumOneSecondMinimum, bucketMinimum);
+            bucket = nextBucket;
+            bucketMinimum = (std::numeric_limits<std::uint64_t>::max)();
+        }
+        bucketMinimum = std::min(bucketMinimum, path);
+        result.pathMinimum = std::min(result.pathMinimum, path);
+        result.pathMaximum = std::max(result.pathMaximum, path);
+    };
+    while (now < endUs) {
+        const auto callbackUs = timeAt(callback * callbackFrames) + callbackPhaseUs;
+        const auto next = std::min({callbackUs, worker, endUs});
+        if (next > settledBeginUs) {
+            const auto elapsed = next - std::max(now, settledBeginUs);
+            pathIntegral += static_cast<long double>(receiver.path()) * elapsed;
+            observedUs += elapsed;
+        }
+        now = next;
+        if (!settled && now >= settledBeginUs) {
+            result.settled = observe(receiver);
+            settled = true;
+        }
+        if (now == callbackUs) {
+            receiver.sink.publishClock(callback * callbackFrames, base + now);
+            receiver.sink.callback();
+            if (!result.firstUnderrunUs && receiver.sink.underrunFrames()) result.firstUnderrunUs = now;
+            if (now >= settledBeginUs && receiver.sink.control.playback_ratio_applied_ppm.load() > 1000000)
+                ++result.acceleratedCallbacks;
+            ++callback;
+            samplePath();
+        }
+        if (now == worker) {
+            const auto deliverReady = [&] {
+                while (timeAt(packet * packetFrames) <= now) {
+                    // Hold one packet until a real 32-frame callback has read
+                    // an empty ring. Later packet timestamps remain untouched.
+                    if (packet == 2 && arrival != StartupArrival::Clean && !result.firstUnderrunUs) break;
+                    for (std::size_t peer = 1; peer < participants; ++peer)
+                        expect(deliver(receiver.session->peerStream({peer + 1}), std::uint32_t(packet),
+                            (packet - 1) * packetFrames, base + now, audio, format) == jam2::PeerAudioResult::Accepted,
+                            "startup recovery accepts every authenticated source packet");
+                    ++packet;
+                }
+            };
+            if (arrival == StartupArrival::BeforeRecoveryDecision) deliverReady();
+            receiver.session->advance(base + now);
+            samplePath();
+            if (arrival != StartupArrival::BeforeRecoveryDecision && arrival != StartupArrival::AfterReceiveBatch) deliverReady();
+            receiver.session->advance(base + now);
+            receiver.session->finishReceiveBatch(false);
+            if (arrival == StartupArrival::AfterReceiveBatch) {
+                deliverReady();
+                receiver.session->advance(base + now);
+            }
+            samplePath();
+            const auto& mix = receiver.session->mixStats();
+            if (mix.adaptive_target_frames > profile.adaptive_playback_min_frames) targetWasRaised = true;
+            if (targetWasRaised && !result.targetReturnedUs && mix.adaptive_target_frames == profile.adaptive_playback_min_frames) {
+                result.targetReturnedUs = now;
+                std::cout << "METRIC startup-recovery stage=target-return ordering=" << startupArrivalName(arrival)
+                    << " format=" << (format == jam2::NetworkAudioFormat::Pcm16Mono ? "pcm16" : "pcm24")
+                    << " worker_us=" << workerPeriodUs << " callback_phase_us=" << callbackPhaseUs
+                    << " elapsed_us=" << now << " target=" << mix.adaptive_target_frames
+                    << " path=" << receiver.path() << " padding=" << mix.adaptive_padding_frames << '\n';
+            }
+            result.targetMaximum = std::max(result.targetMaximum, mix.adaptive_target_frames);
+            result.workerRunwayMaximum = std::max(result.workerRunwayMaximum, mix.worker_runway_frames);
+            if (now >= settledBeginUs && receiver.sink.control.playback_ratio_ppm.load() > 1000000)
+                ++result.nonUnityRequests;
+            worker += workerPeriodUs;
+        }
+    }
+    result.final = observe(receiver);
+    result.averagePath = double(pathIntegral / observedUs);
+    expect(receiver.session->peerCount() == 3 && receiver.session->mixStats().contributing_peers == 3,
+        "startup recovery keeps exactly four participants contributing");
+    expect(result.final.target == profile.adaptive_playback_min_frames,
+        "startup target returns to the configured minimum");
+    expect(result.final.underruns == result.settled.underruns && result.final.padding == result.settled.padding &&
+        result.final.trims == 0 && result.final.recovery == 0,
+        "settled startup recovery adds no underruns, padding, trimming or hard recovery");
+    const auto& mix = receiver.session->mixStats();
+    expect(mix.output_drop_requested_frames == 0 && mix.output_dropped_frames == 0 && mix.capacity_dropped_frames == 0,
+        "startup latency cannot be reduced by dropping queued audio");
+    expect(mix.missing_peer_frames == 0 && mix.late_after_release_frames == 0,
+        "startup latency cannot be reduced by advancing a missing-source timeline");
+    expect(mix.adaptive_delivery_gap_required_max_frames == 0 && !mix.delivery_gap_guard_active,
+        "startup recovery case isolates padding without learned delivery-gap protection");
+    for (std::size_t peer = 1; peer < participants; ++peer) {
+        expect(receiver.session->peerStream({peer + 1}).stats().sequence.lost == 0,
+            "startup injection holds delivery without packet loss");
+        expect(receiver.session->peerMixStats({peer + 1})->requested_drop_frames == 0,
+            "startup latency cannot be reduced by discarding a peer's queued audio");
+    }
+    std::cout << "METRIC startup-recovery stage=settled ordering=" << startupArrivalName(arrival)
+        << " format=" << (format == jam2::NetworkAudioFormat::Pcm16Mono ? "pcm16" : "pcm24")
+        << " worker_us=" << workerPeriodUs << " callback_phase_us=" << callbackPhaseUs
+        << " sample_rate=" << rate << " packet_frames=" << packetFrames << " callback_frames=" << callbackFrames
+        << " first_underrun_us=" << result.firstUnderrunUs << " total_underruns=" << result.final.underruns
+        << " padding=" << result.final.padding << " target_max=" << result.targetMaximum
+        << " target=" << result.final.target << " target_returned_us=" << result.targetReturnedUs
+        << " target_release_events=" << mix.adaptive_release_events
+        << " settled_begin_us=" << settledBeginUs
+        << " late_underruns=" << result.final.underruns - result.settled.underruns
+        << " late_padding=" << result.final.padding - result.settled.padding << " trims=" << result.final.trims
+        << " average_path=" << result.averagePath << " minimum_path=" << result.pathMinimum
+        << " maximum_path=" << result.pathMaximum << " greatest_one_second_minimum=" << result.maximumOneSecondMinimum
+        << " batch_tolerance=" << mix.live_tail_batch_tolerance_frames
+        << " configured_release_ppm=" << profile.adaptive_playback_release_ppm
+        << " worker_runway_max=" << result.workerRunwayMaximum << " acceleration_requests=" << result.nonUnityRequests
+        << " accelerated_callbacks=" << result.acceleratedCallbacks
+        << " recovery_pending=" << mix.recovery_pending_frames << " recovery_retired=" << mix.recovery_retired_frames << '\n';
+    return result;
+}
+
+void startupRecoveryExperiments()
+{
+    rate = 44100;
+    for (auto format : {jam2::NetworkAudioFormat::Pcm16Mono, jam2::NetworkAudioFormat::Pcm24Mono}) {
+        for (const auto [worker, phase] : {std::pair{250ULL, 400ULL}, std::pair{250ULL, 650ULL}, std::pair{500ULL, 650ULL}}) {
+            const auto clean = startupRecoveryCase(StartupArrival::Clean, worker, phase, format);
+            const auto ready = startupRecoveryCase(StartupArrival::BeforeRecoveryDecision, worker, phase, format);
+            const auto padded = startupRecoveryCase(StartupArrival::AfterRecoveryDecision, worker, phase, format);
+            const auto deferred = startupRecoveryCase(StartupArrival::AfterReceiveBatch, worker, phase, format);
+            expect(clean.final.underruns == 0 && clean.final.padding == 0, "matched startup control remains clean");
+            expect(ready.final.underruns == callbackFrames && padded.final.underruns == callbackFrames,
+                "arrival-order comparison injects exactly one identical callback underrun");
+            expect(ready.final.padding == 0,
+                "real queued audio avoids unnecessary recovery padding");
+            expect(padded.final.padding == 0,
+                "real audio in the same drained batch satisfies isolated callback recovery");
+            expect(deferred.final.padding == packetFrames && deferred.final.underruns == callbackFrames,
+                "an empty drained batch still inserts the genuinely required bounded recovery cushion");
+            std::cout << "METRIC startup-recovery stage=comparison worker_us=" << worker << " callback_phase_us=" << phase
+                << " format=" << (format == jam2::NetworkAudioFormat::Pcm16Mono ? "pcm16" : "pcm24")
+                << " clean_average_path=" << clean.averagePath << " ready_average_path=" << ready.averagePath
+                << " padded_average_path=" << padded.averagePath << " retained_extra_frames=" << padded.averagePath - ready.averagePath
+                << " retained_extra_ms=" << (padded.averagePath - ready.averagePath) * 1000 / rate << '\n';
+            expect(padded.averagePath <= ready.averagePath + 1.0,
+                "startup recovery padding must retire after clean delivery without leaving a packet of extra latency");
+            expect(deferred.averagePath <= ready.averagePath + 1.0,
+                "genuinely required recovery padding also retires after clean delivery");
+        }
+    }
+}
+
+struct RecoveryCycleResult {
+    Observations quietBegin, final;
+    long double pathIntegral = 0;
+    std::uint64_t observedUs = 0, minimumPath = (std::numeric_limits<std::uint64_t>::max)(), maximumPath = 0;
+    std::uint64_t acceleratedCallbacks = 0, nonUnityRequests = 0, workerGuardObservations = 0, gapGuardObservations = 0;
+    std::uint64_t workerRunwayMaximum = 0, stoppingMaximum = 0, targetMaximum = 0;
+    std::uint64_t minimumOutput = (std::numeric_limits<std::uint64_t>::max)(), maximumOutput = 0;
+    std::uint64_t minimumWorkerPath = (std::numeric_limits<std::uint64_t>::max)(), workerOutputAtMinimum = 0;
+    std::uint64_t acceptedPackets = 0, latePackets = 0, stalePackets = 0;
+};
+
+enum class RecoverySchedule { Repeated, Once };
+
+std::vector<RecoveryCycleResult> recoverySequenceCase(std::uint64_t pauseUs, std::uint64_t workerPeriodUs,
+    std::uint64_t callbackPhaseUs, jam2::NetworkAudioFormat format, RecoverySchedule schedule)
+{
+    // Sixteen seconds is an exact multiple of both 64-frame packets at
+    // 44.1 kHz and the worker periods. Every pause therefore has identical
+    // packet/callback phase. Delivery resumes in order without changing audio
+    // timestamps; callbacks and the production recovery controller keep running.
+    constexpr std::uint64_t cycleUs = 16000000, quietOffsetUs = 6000000;
+    constexpr std::size_t cycles = 31; // clean reference, then thirty observation windows
+    constexpr auto endUs = cycles * cycleUs;
+    const auto profile = *jam2::find_join_profile("fast");
+    Receiver receiver(0, profile, -1, int(packetFrames), format);
+    const auto base = receiver.session->schedule().startTimeUs();
+    const auto timeAt = [](std::uint64_t frame) { return frame * 1000000 / rate; };
+    std::array<std::int32_t, packetFrames> audio{};
+    audio.fill(1048576);
+    std::vector<RecoveryCycleResult> results(cycles);
+    std::array<bool, cycles> quietStarted{};
+    std::array<bool, cycles> heldAudio{};
+    std::uint64_t packet = 1, callback = 1, worker = workerPeriodUs, now = 0;
+    std::uint64_t maximumTarget = 0;
+    while (now < endUs) {
+        const auto cycle = std::size_t(now / cycleUs);
+        const auto callbackUs = timeAt(callback * callbackFrames) + callbackPhaseUs;
+        const auto next = std::min({callbackUs, worker, (cycle + 1) * cycleUs});
+        const auto quietBeginUs = cycle * cycleUs + quietOffsetUs;
+        auto& result = results[cycle];
+        if (next > quietBeginUs) {
+            const auto elapsed = next - std::max(now, quietBeginUs);
+            const auto path = receiver.path();
+            result.pathIntegral += static_cast<long double>(path) * elapsed;
+            result.observedUs += elapsed;
+            result.minimumPath = std::min(result.minimumPath, path);
+            result.maximumPath = std::max(result.maximumPath, path);
+            result.minimumOutput = std::min<std::uint64_t>(result.minimumOutput, receiver.sink.depthFrames());
+            result.maximumOutput = std::max<std::uint64_t>(result.maximumOutput, receiver.sink.depthFrames());
+        }
+        now = next;
+        if (!quietStarted[cycle] && now >= quietBeginUs) {
+            result.quietBegin = observe(receiver);
+            quietStarted[cycle] = true;
+        }
+        if (now == callbackUs) {
+            receiver.sink.publishClock(callback * callbackFrames, base + now);
+            receiver.sink.callback();
+            if (now >= quietBeginUs && receiver.sink.control.playback_ratio_applied_ppm.load() > 1000000)
+                ++result.acceleratedCallbacks;
+            ++callback;
+        }
+        if (now == worker) {
+            // Observe an empty drained receive batch before admitting any
+            // newly arrived audio, matching the existing startup ordering case.
+            receiver.session->advance(base + now);
+            receiver.session->finishReceiveBatch(false);
+            const auto deliveryCycle = now / cycleUs;
+            const bool scheduled = deliveryCycle != 0 && deliveryCycle < cycles &&
+                (schedule == RecoverySchedule::Repeated || deliveryCycle == 1);
+            const bool paused = pauseUs != 0 && scheduled && now % cycleUs < pauseUs;
+            if (paused && timeAt(packet * packetFrames) <= now) heldAudio[std::size_t(deliveryCycle)] = true;
+            if (!paused) {
+                while (timeAt(packet * packetFrames) <= now) {
+                    for (std::size_t peer = 1; peer < participants; ++peer) {
+                        const auto received = deliver(receiver.session->peerStream({peer + 1}), std::uint32_t(packet),
+                            (packet - 1) * packetFrames, base + now, audio, format);
+                        result.acceptedPackets += received == jam2::PeerAudioResult::Accepted;
+                        result.latePackets += received == jam2::PeerAudioResult::Late;
+                        result.stalePackets += received == jam2::PeerAudioResult::StaleSampleTime;
+                        const bool obsoleteDuringStress = schedule == RecoverySchedule::Once && pauseUs > 4000 &&
+                            now >= cycleUs && now <= cycleUs + pauseUs + 50000 &&
+                            (received == jam2::PeerAudioResult::Late || received == jam2::PeerAudioResult::StaleSampleTime);
+                        expect(received == jam2::PeerAudioResult::Accepted || obsoleteDuringStress,
+                            "recovery accepts valid audio or explicitly rejects obsolete packets during the injected stress");
+                    }
+                    ++packet;
+                }
+            }
+            receiver.session->advance(base + now);
+            receiver.session->finishReceiveBatch(false);
+            maximumTarget = std::max(maximumTarget, receiver.session->mixStats().adaptive_target_frames);
+            result.targetMaximum = std::max(result.targetMaximum, receiver.session->mixStats().adaptive_target_frames);
+            if (now >= quietBeginUs) {
+                const auto& mix = receiver.session->mixStats();
+                result.nonUnityRequests += receiver.sink.control.playback_ratio_ppm.load() > 1000000;
+                result.workerGuardObservations += mix.release_worker_guard_active;
+                result.gapGuardObservations += mix.delivery_gap_guard_active;
+                result.workerRunwayMaximum = std::max(result.workerRunwayMaximum, mix.worker_runway_frames);
+                result.stoppingMaximum = std::max(result.stoppingMaximum, mix.playback_stopping_frames);
+                const auto path = receiver.path();
+                if (path < result.minimumWorkerPath) {
+                    result.minimumWorkerPath = path;
+                    result.workerOutputAtMinimum = receiver.sink.depthFrames();
+                }
+            }
+            worker += workerPeriodUs;
+        }
+        if (now == (cycle + 1) * cycleUs) result.final = observe(receiver);
+    }
+    const auto average = [](const RecoveryCycleResult& result) {
+        return double(result.pathIntegral / result.observedUs);
+    };
+    const auto firstRecoveryAverage = average(results[1]);
+    for (std::size_t cycle = 0; cycle < cycles; ++cycle) {
+        const auto& result = results[cycle];
+        expect(result.observedUs == cycleUs - quietOffsetUs,
+            "each repeated-recovery measurement covers the same complete quiet window");
+        expect(result.final.underruns == result.quietBegin.underruns &&
+            result.final.padding == result.quietBegin.padding && result.final.trims == result.quietBegin.trims &&
+            result.final.missing == result.quietBegin.missing && result.final.recovery == result.quietBegin.recovery,
+            "identical isolated pauses leave no continuing corrections during clean delivery");
+        if (schedule == RecoverySchedule::Repeated || cycle >= 4 || !pauseUs)
+            expect(result.final.target == profile.adaptive_playback_min_frames,
+            "isolated-pause target returns to the configured minimum before the next event");
+        if (cycle > 0 && pauseUs && (schedule == RecoverySchedule::Repeated || cycle == 1)) expect(heldAudio[cycle],
+            "every repeated impairment actually delays due audio packets");
+        if (cycle > 1 && schedule == RecoverySchedule::Repeated) {
+            expect(average(result) <= firstRecoveryAverage + 1.0,
+                "identical isolated pauses cannot ratchet settled buffered latency above the first recovery");
+            expect(result.minimumPath <= results[1].minimumPath + 1 && result.maximumPath <= results[1].maximumPath + 1,
+                "settled buffer extrema cannot grow while the average conceals extra buffering");
+        }
+        if (!pauseUs) expect(result.final.underruns == 0 && result.final.padding == 0 &&
+            std::abs(average(result) - average(results[0])) <= 1.0,
+            "matched clean control has no starvation, padding or latency growth");
+        std::cout << "METRIC " << (schedule == RecoverySchedule::Repeated ? "repeated-recovery" : "large-recovery") << " format="
+            << (format == jam2::NetworkAudioFormat::Pcm16Mono ? "pcm16" : "pcm24")
+            << " worker_us=" << workerPeriodUs << " callback_phase_us=" << callbackPhaseUs
+            << " pause_us=" << pauseUs << " cycle=" << cycle
+            << " quiet_begin_us=" << cycle * cycleUs + quietOffsetUs << " quiet_duration_us=" << result.observedUs
+            << " average_path=" << average(result) << " minimum_path=" << result.minimumPath
+            << " maximum_path=" << result.maximumPath
+            << " extra_over_clean_frames=" << average(result) - average(results[0])
+            << " extra_over_first_recovery_frames=" << average(result) - firstRecoveryAverage
+            << " target=" << result.final.target << " target_max=" << maximumTarget << " underruns=" << result.final.underruns
+            << " padding=" << result.final.padding << " trimmed=" << result.final.trims
+            << " missing=" << result.final.missing << " recoveries=" << result.final.recovery
+            << " cycle_target_max=" << result.targetMaximum << " accelerated_callbacks=" << result.acceleratedCallbacks
+            << " acceleration_requests=" << result.nonUnityRequests << " worker_guard_observations=" << result.workerGuardObservations
+            << " gap_guard_observations=" << result.gapGuardObservations << " worker_runway_max=" << result.workerRunwayMaximum
+            << " stopping_max=" << result.stoppingMaximum << " minimum_output=" << result.minimumOutput
+            << " maximum_output=" << result.maximumOutput << " accepted_packets=" << result.acceptedPackets
+            << " minimum_worker_path=" << result.minimumWorkerPath << " worker_output_at_minimum=" << result.workerOutputAtMinimum
+            << " late_packets=" << result.latePackets << " stale_packets=" << result.stalePackets
+            << " recovery_pending=" << result.final.recoveryPending << " recovery_retired=" << result.final.recoveryRetired
+            << " recovery_cancelled=" << result.final.recoveryCancelled << '\n';
+    }
+    const auto& mix = receiver.session->mixStats();
+    expect(mix.recovery_pending_frames <= profile.adaptive_playback_max_frames,
+        "recovery consumption credit remains bounded by the configured adaptive maximum");
+    if (!pauseUs) expect(mix.recovery_release_events == 0 && mix.recovery_retired_frames == 0 && mix.recovery_pending_frames == 0,
+        "clean delivery creates no recovery debt or additional release commands");
+    if (pauseUs) expect(results[1].final.underruns > 0 && results[1].final.padding > 0,
+        "the first isolated pause actually exercises callback starvation and recovery padding");
+    if (pauseUs >= 4000 && schedule == RecoverySchedule::Repeated) expect(results.back().final.padding > results[1].final.padding,
+        "the longer repeated pause exercises further padding rather than only a retained startup cushion");
+    expect(receiver.session->peerCount() == 3 && mix.contributing_peers == 3,
+        "repeated recovery keeps exactly four participants contributing");
+    expect(maximumTarget <= profile.adaptive_playback_max_frames,
+        "repeated recovery never exceeds the configured adaptive target maximum");
+    expect(mix.output_drop_requested_frames == 0 && mix.output_dropped_frames == 0 && mix.capacity_dropped_frames == 0,
+        "recovery never overflows playback or source capacity");
+    const bool losslessPause = schedule == RecoverySchedule::Repeated || pauseUs <= 4000;
+    if (losslessPause) expect(mix.live_tail_trimmed_frames == 0 && mix.receive_recovery_events == 0 &&
+        mix.missing_peer_frames == 0 && mix.late_after_release_frames == 0,
+        "isolated-pause latency stays bounded without discarding audio or skipping source time");
+    for (std::size_t peer = 1; peer < participants; ++peer) {
+        expect(receiver.session->peerStream({peer + 1}).stats().sequence.lost == 0 &&
+            (!losslessPause || receiver.session->peerMixStats({peer + 1})->requested_drop_frames == 0),
+            "delivery holds cause no packet loss, with no source trimming in the lossless cases");
+    }
+    return results;
+}
+
+void repeatedRecoveryExperiments()
+{
+    rate = 44100;
+    for (auto format : {jam2::NetworkAudioFormat::Pcm16Mono, jam2::NetworkAudioFormat::Pcm24Mono})
+        for (const auto [worker, phase] : {std::pair{250ULL, 400ULL}, std::pair{250ULL, 650ULL}, std::pair{500ULL, 650ULL}})
+            for (std::uint64_t pause : {0ULL, 1600ULL, 4000ULL})
+                recoverySequenceCase(pause, worker, phase, format, RecoverySchedule::Repeated);
+}
+
+void largeRecoveryExperiments()
+{
+    rate = 44100;
+    const auto average = [](const RecoveryCycleResult& result) { return double(result.pathIntegral / result.observedUs); };
+    for (auto format : {jam2::NetworkAudioFormat::Pcm16Mono, jam2::NetworkAudioFormat::Pcm24Mono}) {
+        for (const auto [worker, phase] : {std::pair{250ULL, 400ULL}, std::pair{250ULL, 650ULL}, std::pair{500ULL, 650ULL}}) {
+            const auto clean = recoverySequenceCase(0, worker, phase, format, RecoverySchedule::Once);
+            const auto smallRecovery = recoverySequenceCase(1600, worker, phase, format, RecoverySchedule::Once);
+            for (std::uint64_t pause : {4000ULL, 8000ULL, 12000ULL, 20000ULL, 80000ULL}) {
+                const auto large = recoverySequenceCase(pause, worker, phase, format, RecoverySchedule::Once);
+                const auto extraOverClean = average(large.back()) - average(clean.back());
+                const auto extraOverSmall = average(large.back()) - average(smallRecovery.back());
+                std::cout << "METRIC large-recovery-comparison format="
+                    << (format == jam2::NetworkAudioFormat::Pcm16Mono ? "pcm16" : "pcm24")
+                    << " worker_us=" << worker << " callback_phase_us=" << phase << " pause_us=" << pause
+                    << " clean_average_path=" << average(clean.back()) << " small_average_path=" << average(smallRecovery.back())
+                    << " large_average_path=" << average(large.back()) << " retained_extra_frames=" << extraOverClean
+                    << " retained_extra_ms=" << extraOverClean * 1000 / rate
+                    << " extra_over_small_frames=" << extraOverSmall << '\n';
+                // The user accepted the small residual provisionally. A larger
+                // past disturbance must not establish a higher permanent floor.
+                // Also check intermediate late windows so a transient final dip
+                // cannot disguise retained latency. All are long past the 30 s hold.
+                bool allLateWindowsRecovered = true;
+                for (std::size_t cycle = 4; cycle < large.size(); ++cycle)
+                    allLateWindowsRecovered &= average(large[cycle]) <= average(smallRecovery[cycle]) + 1.0;
+                expect(allLateWindowsRecovered,
+                    "a larger past pause must not retain more settled latency than the accepted small recovery");
+            }
+        }
+    }
+}
+
+ClockResult clockCase(int senderPpm, int receiverPpm, bool adaptive, bool interruptPeer = false,
+    std::uint64_t deliveryBatchUs = 0,int releasePpm = -1,std::int64_t gapMinimumUs=-1,int durationSeconds=180,
+    std::uint64_t callbackPhaseUs=137,std::uint64_t workerPeriodUs=250,int frames=int(packetFrames),
+    std::uint64_t deliveryJitterUs=0)
 {
     auto profile = *jam2::find_join_profile("fast");
     profile.adaptive_playback_cushion = adaptive;
+    if (releasePpm>=0) profile.adaptive_playback_release_ppm=releasePpm;
     // Fixed mode needs a useful runway for an isolated oscillator experiment.
     if (!adaptive) profile.playout_delay_frames = profile.playback_prefill_frames = 256;
-    Receiver receiver(0, profile); // one receiver + three remote senders = four peers
+    Receiver receiver(0, profile,gapMinimumUs,frames); // one receiver + three remote senders = four peers
     const auto base = receiver.session->schedule().startTimeUs();
-    constexpr std::uint64_t end = 180000000;
-    constexpr std::uint64_t lateBegin = 120000000;
-    std::array<std::int32_t, packetFrames> audio{};
-    audio.fill(1048576);
+    const std::uint64_t end = std::uint64_t(durationSeconds)*1000000;
+    const std::uint64_t lateBegin = end-60000000;
+    std::vector<std::int32_t> audio(std::size_t(frames),1048576);
     const auto timeAt = [](std::uint64_t frames, int ppm) {
         return static_cast<std::uint64_t>(static_cast<long double>(frames) * 1000000.0L /
             (rate * (1.0L + static_cast<long double>(ppm) / 1000000.0L)));
     };
-    std::uint64_t packet = 1, callback = 1, worker = 250, now = 0;
+    std::uint64_t packet = 1, callback = 1, worker = workerPeriodUs, now = 0;
     Observations lateStart;
     bool lateStarted = false;
     long double pathIntegral = 0;
     std::uint64_t observedUs = 0, maximumPath = 0, accepted = 0;
     std::uint64_t releaseFrames = 0;
     while (now < end) {
-        const auto callbackUs = timeAt(callback * callbackFrames, receiverPpm) + 137;
+        const auto callbackUs = timeAt(callback * callbackFrames, receiverPpm) + callbackPhaseUs;
         const auto next = std::min({callbackUs, worker, end});
         if (next > lateBegin) {
             const auto duration = next - std::max(now, lateBegin);
@@ -470,11 +905,17 @@ ClockResult clockCase(int senderPpm, int receiverPpm, bool adaptive, bool interr
         }
         if (now == worker) {
             receiver.session->advance(base + now);
-            while (timeAt(packet * packetFrames, senderPpm) <= now) {
+            const auto packetDue = [&](std::uint64_t number) {
+                const auto random = std::uint32_t(number) * 1664525U + 1013904223U;
+                const auto sent=timeAt(number * std::uint64_t(frames),senderPpm) +
+                    (deliveryJitterUs ? 7500 + random % (deliveryJitterUs + 1) : 0);
+                return deliveryBatchUs ? (sent / deliveryBatchUs + 1) * deliveryBatchUs : sent;
+            };
+            while (packetDue(packet) <= now) {
                 for (std::size_t peer = 1; peer < participants; ++peer) {
                     if (interruptPeer && peer == 3 && now >= 5000000 && now < 25000000) continue;
                     const auto result = deliver(receiver.session->peerStream({peer + 1}),
-                        static_cast<std::uint32_t>(packet), (packet - 1) * packetFrames, base + now, audio);
+                        static_cast<std::uint32_t>(packet), (packet - 1) * std::uint64_t(frames), base + now, audio);
                     expect(result == jam2::PeerAudioResult::Accepted ||
                         (interruptPeer && peer == 3 && now >= 25000000 && now < 25010000 &&
                          result == jam2::PeerAudioResult::ForwardGapRejected),
@@ -485,12 +926,16 @@ ClockResult clockCase(int senderPpm, int receiverPpm, bool adaptive, bool interr
             }
             receiver.session->advance(base + now);
             receiver.session->finishReceiveBatch(false);
-            worker += 250;
+            worker += workerPeriodUs;
         }
         maximumPath = std::max(maximumPath, receiver.path());
     }
     const auto final = observe(receiver);
     const auto& stream = receiver.session->peerStream({2}).stats();
+    if (!deliveryBatchUs && !interruptPeer && !deliveryJitterUs)
+        expect(receiver.session->mixStats().adaptive_delivery_gap_required_max_frames==0 &&
+            !receiver.session->mixStats().delivery_gap_guard_active,
+            "unimpaired delivery retains the original controller and never selects gap protection");
     expect(stream.drift_valid && accepted > 100000, "clock fixture reaches calibrated sustained playback");
     expect(std::abs(stream.drift_ppm - senderPpm) < 10,
         "peer estimator retains the independently measured sender-to-monotonic rate");
@@ -513,8 +958,18 @@ ClockResult clockCase(int senderPpm, int receiverPpm, bool adaptive, bool interr
     ClockResult result{final.underruns - lateStart.underruns, final.trims - lateStart.trims,
         final.padding - lateStart.padding, stream.drift_ppm, stream.resampler_ratio,
         observedUs > 0 ? static_cast<double>(pathIntegral / observedUs) : 0, releaseFrames};
+    result.recoveries=final.recovery;result.completions=final.completions;
+    const auto& mix = receiver.session->mixStats();
     std::cout << "METRIC clock sender_ppm=" << senderPpm << " receiver_ppm=" << receiverPpm
-        << " adaptive=" << adaptive << " duration_s=180 late_window_s=60"
+        << " adaptive=" << adaptive << " duration_s=" << durationSeconds << " late_window_s=60"
+        << " delivery_batch_us=" << deliveryBatchUs
+        << " delivery_jitter_us=" << deliveryJitterUs
+        << " release_ppm=" << profile.adaptive_playback_release_ppm
+        << " gap_minimum_us_override=" << gapMinimumUs
+        << " callback_phase_us=" << callbackPhaseUs
+        << " worker_period_us=" << workerPeriodUs
+        << " packet_frames=" << frames
+        << " sample_rate=" << rate
         << " interrupted_peer=" << interruptPeer
         << " estimated_drift_ppm=" << result.drift << " source_ratio=" << result.sourceRatio
         << " local_device_drift_ppm=" << receiver.session->deviceClockStats().ppm
@@ -525,8 +980,46 @@ ClockResult clockCase(int senderPpm, int receiverPpm, bool adaptive, bool interr
         << " late_accelerated_output_frames=" << result.releaseFrames
         << " late_average_path=" << result.averagePath << " maximum_path=" << maximumPath
         << " final_path=" << final.path << " recovery_events=" << final.recovery
+        << " total_padding=" << mix.adaptive_padding_frames
         << " recovery_completions=" << final.completions << '\n';
     return result;
+}
+
+void coalescingExperiments()
+{
+    // One local device plus three authenticated remote streams: exactly four
+    // peers. The callbacks, rings, clocks, jitter, resamplers, mixer and recovery
+    // are production components; only arrival-window timing is injected.
+    for (const std::uint64_t batch : {0ULL,4000ULL,8000ULL}) {
+        const auto result=clockCase(0,0,true,false,batch);
+        expect(result.lateUnderruns==0 && result.lateTrims==0 && result.latePadding==0,
+            "bounded delivery windows settle without recurring underruns, trimming or padding in the final minute");
+        expect(result.recoveries==result.completions,
+            "continuous bounded delivery does not leave recovery active");
+        if (batch==0) expect(result.averagePath<=50.6,
+            "clean deterministic latency must not exceed the unchanged-code baseline of 50.56 frames");
+    }
+    const auto releaseDisabled=clockCase(0,0,true,false,8000,0);
+    expect(releaseDisabled.lateUnderruns==0 && releaseDisabled.latePadding==0,
+        "release-disabled diagnostic isolates recurring starvation from packet coalescing alone");
+    const auto cleanSkew=clockCase(17,0,true);
+    expect(cleanSkew.lateUnderruns==0 && cleanSkew.lateTrims==0 && cleanSkew.latePadding==0 && cleanSkew.averagePath<=52.6,
+        "clean independent clocks retain the unchanged-code latency baseline of 52.512 frames");
+    for (const std::uint64_t batch : {4000ULL,8000ULL}) {
+        const auto skewed=clockCase(17,0,true,false,batch);
+        expect(skewed.lateUnderruns==0 && skewed.lateTrims==0 && skewed.latePadding==0,
+            "small independent clock skew and bounded delivery windows settle without recurring corrections");
+        const auto noRelease=clockCase(17,0,true,false,batch,0);
+        // This ablation intentionally disables retirement of surplus. The
+        // source estimator is allowed 10 ppm error above, so bounded trimming
+        // is expected here; the default-release case above still requires zero.
+        const auto estimatorErrorBudget=std::uint64_t(std::ceil(0.000010*rate*60*(participants-1)));
+        expect(noRelease.lateUnderruns==0 && noRelease.lateTrims<=estimatorErrorBudget && noRelease.latePadding==0,
+            "release-disabled skew control remains bounded by the source estimator tolerance without starvation");
+    }
+    const auto longRun=clockCase(17,0,true,false,8000,-1,-1,1800);
+    expect(longRun.lateUnderruns==0 && longRun.lateTrims==0 && longRun.latePadding==0,
+        "batching and drift stay stable over thirty simulated minutes rather than postponing corrections");
 }
 
 void clockExperiments()
@@ -702,6 +1195,58 @@ int main(int argc, char** argv)
                 interruptionCase(20000000, false, profile);
             }
         } else if (experiment == "clock") clockExperiments();
+        else if (experiment == "coalescing") coalescingExperiments();
+        else if (experiment == "gap-learning") {
+            for (int skew:{0,17}) for (std::uint64_t batch:{0ULL,4000ULL,8000ULL}) {
+                const auto r=clockCase(skew,0,true,false,batch,-1,0);
+                expect(r.lateUnderruns==0 && r.lateTrims==0 && r.latePadding==0,
+                    "short-gap evidence prevents repeated corrections without clock-skew trimming");
+            }
+        }
+        else if (experiment == "callback-phases") {
+            for (int skew:{0,17}) for (std::uint64_t phase:{0ULL,75ULL,250ULL,400ULL,650ULL}) {
+                for (std::uint64_t batch:{0ULL,4000ULL,8000ULL}) {
+                    const auto result=clockCase(skew,0,true,false,batch,-1,-1,180,phase);
+                    expect(result.lateUnderruns==0 && result.lateTrims==0 && result.latePadding==0,
+                        "callback-phase changes do not leave recurring default-mode audio corrections");
+                    if (!batch) {
+                        const auto legacy=clockCase(skew,0,true,false,0,-1,50000,180,phase);
+                        expect(result.averagePath==legacy.averagePath,
+                            "every clean callback phase retains the original latency exactly");
+                    }
+                }
+            }
+        }
+        else if (experiment == "callback-runway") {
+            for (int frames:{64,128}) for (int skew:{0,17}) for (std::uint64_t worker:{500ULL,1000ULL,1500ULL})
+                for (std::uint64_t phase:{0ULL,137ULL,500ULL}) {
+                    const auto result=clockCase(skew,0,true,false,0,-1,-1,180,phase,worker,frames);
+                    expect(result.lateUnderruns==0 && result.lateTrims==0 && result.latePadding==0,
+                        "ordinary worker scheduling retains interpolation runway across callback phases");
+                }
+        }
+        else if (experiment == "asio-cadence") {
+            rate = 44100;
+            for (int frames : {64, 128}) for (int skew : {0, 17})
+                for (std::uint64_t worker : {750ULL, 1000ULL, 1500ULL})
+                    for (std::uint64_t phase : {0ULL, 137ULL, 500ULL}) {
+                        const auto result = clockCase(skew, 0, true, false, 0, -1, -1, 180, phase, worker, frames);
+                        expect(result.lateUnderruns == 0 && result.lateTrims == 0 && result.latePadding == 0,
+                            "44.1 kHz ASIO cadence settles across packet sizes, callback phases and worker periods");
+                    }
+        }
+        else if (experiment == "bounded-jitter") {
+            rate = 44100;
+            for (int frames : {64, 128}) for (int skew : {0, 17})
+                for (std::uint64_t worker : {250ULL, 1000ULL, 1500ULL}) {
+                    const auto result = clockCase(skew, 0, true, false, 0, -1, -1, 180, 137, worker, frames, 3600);
+                    expect(result.lateUnderruns == 0 && result.lateTrims == 0 && result.latePadding == 0,
+                        "bounded WAN arrival jitter settles without recurring corrections at both packet sizes");
+                }
+        }
+        else if (experiment == "startup-recovery") startupRecoveryExperiments();
+        else if (experiment == "repeated-recovery") repeatedRecoveryExperiments();
+        else if (experiment == "large-recovery") largeRecoveryExperiments();
         else throw std::runtime_error("unknown experiment");
     } catch (const std::exception& error) {
         std::cerr << "FAIL: " << error.what() << '\n';

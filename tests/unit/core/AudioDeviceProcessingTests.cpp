@@ -1459,6 +1459,41 @@ void testPlaybackRecoveryState()
     expect(processing::read_playback_recovery_state(control).unity, "settled unity adds no permanent interpolation-history floor");
 }
 
+void testMeasuredExtraPlaybackConsumption()
+{
+    for (bool batched : {false, true}) {
+        jam2::audio::StreamControl control;
+        jam2::audio::MonoRingBuffer ring(4096);
+        jam2::audio::device_processing::PlaybackResamplerState state;
+        std::array<std::int32_t, 4096> source{};
+        source.fill(1048576);
+        std::array<std::int32_t, 70> scratch{};
+        std::array<std::int32_t, 32> output{};
+        ring.push(source);
+        control.playback_ratio_ppm.store(1005000);
+        const auto render = [&] {
+            processing::pop_resampled_playback(&ring, &control, state,
+                batched ? std::span(scratch) : std::span<std::int32_t>{}, output);
+        };
+        render();
+        expect(processing::read_playback_recovery_state(control).consumption_accounting &&
+            control.playback_extra_consumed_frames.load() == 0,
+            "interpolation neighbours are not extra playback consumption");
+        for (int i = 1; i < 64; ++i) render();
+        expect(control.playback_extra_consumed_frames.load() == 10 && ring.underrun_frames() == 0,
+            "measured acceleration counts actual source advances beyond rendered output in both read paths");
+        control.playback_ratio_ppm.store(1000000);
+        for (int i = 0; i < 10; ++i) render();
+        expect(control.playback_extra_consumed_frames.load() == 10,
+            "unity playback with cached interpolation does not retire recovery debt");
+        ring.discard_all();
+        control.playback_ratio_ppm.store(2000000);
+        render();
+        expect(ring.underrun_frames() > 0 && control.playback_extra_consumed_frames.load() == 10,
+            "concealed starvation cannot be credited as successful recovery consumption");
+    }
+}
+
 int main()
 {
     testDeviceClock();
@@ -1473,6 +1508,7 @@ int main()
     testPlaybackResampler();
     testPlaybackReleaseReturnRamp();
     testPlaybackRecoveryState();
+    testMeasuredExtraPlaybackConsumption();
     testResampledPlaybackDepthAccounting();
     testPreparedSourceMixing();
     testCancelledPreparedSwapsReleaseEveryReadySlot();

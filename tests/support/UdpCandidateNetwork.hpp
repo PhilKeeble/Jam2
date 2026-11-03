@@ -81,6 +81,15 @@ public:
     // Intercept native runtime packets only; discovery and typed streams keep
     // their own existing fault controls. Deliveries preserve punched endpoints.
     std::function<void(const QString&, const QString&, const QByteArray&, Delivery)> nativeForwarder;
+    // Optional test-only impairment of both native audio/clock and reliable control.
+    // Bootstrap/rendezvous packets retain their existing handshake behavior.
+    std::function<void(const QString&, const QString&, const QByteArray&, Delivery)> datagramForwarder;
+    void forward(const QString& from, const QString& to, const QByteArray& packet, Delivery deliver) {
+        if (datagramForwarder && (packet.startsWith("JAM2") || packet.startsWith("J2MX")))
+            datagramForwarder(from, to, packet, std::move(deliver));
+        else if (nativeForwarder && packet.startsWith("JAM2")) nativeForwarder(from, to, packet, std::move(deliver));
+        else deliver(packet);
+    }
     struct AuthorityBeaconStats { quint64 forwarded=0,dropped=0; };
     void setAuthorityBeaconsEnabled(bool enabled) { authorityBeaconsEnabled_=enabled; }
     void setAuthorityBeaconInterval(quint64 milliseconds) { authorityBeaconIntervalMs_=milliseconds; authorityBeaconTimes_.clear(); }
@@ -180,9 +189,7 @@ public:
             const auto deliver = [this, local](const QByteArray& bytes) {
                 return routes_.at(local)->socket.writeDatagram(bytes, QHostAddress::LocalHost, server_) == bytes.size();
             };
-            if (nativeForwarder && packet.startsWith("JAM2"))
-                nativeForwarder(route->peer, creatorPeer_, packet, deliver);
-            else deliver(packet);
+            forward(route->peer, creatorPeer_, packet, deliver);
         }
         for (auto& [local, route] : routes_) {
             while (route->socket.hasPendingDatagrams()) {
@@ -204,9 +211,7 @@ public:
                     const auto deliver = [this, local](const QByteArray& bytes) {
                         return ingress_.writeDatagram(bytes, QHostAddress::LocalHost, local) == bytes.size();
                     };
-                    if (nativeForwarder && packet.startsWith("JAM2"))
-                        nativeForwarder(creatorPeer_, route->peer, packet, deliver);
-                    else deliver(packet);
+                    forward(creatorPeer_, route->peer, packet, deliver);
                     continue;
                 }
                 const auto found = routes_.find(from);
@@ -285,9 +290,7 @@ public:
                 const auto deliver = [this, senderLocal=sender->local, local](const QByteArray& bytes) {
                     return routes_.at(senderLocal)->socket.writeDatagram(bytes, QHostAddress::LocalHost, local) == bytes.size();
                 };
-                if (nativeForwarder && packet.startsWith("JAM2"))
-                    nativeForwarder(sender->peer, route->peer, packet, deliver);
-                else deliver(packet);
+                forward(sender->peer, route->peer, packet, deliver);
                 if (impairMultiplex && packet.startsWith("J2MX") && directCount_ % 23 == 0) {
                     sender->socket.writeDatagram(packet, QHostAddress::LocalHost, local); ++duplicated;
                 }

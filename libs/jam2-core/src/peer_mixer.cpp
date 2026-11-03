@@ -14,6 +14,7 @@ namespace {
 
 constexpr double kMinimumRatio = 0.995;
 constexpr double kMaximumRatio = 1.005;
+constexpr std::uint64_t kMaximumBoundaryLookaheadFrames = 2;
 
 std::int32_t saturate_i32(std::int64_t value) noexcept
 {
@@ -40,9 +41,8 @@ struct PeerMixer::Impl {
         std::int32_t previous_sample = 0;
         double next_output_phase = 0.0;
         PeerDeliveryGap delivery_gap;
-        // Bounded history: the default 50 ms observation threshold permits at
-        // most six observations in the inclusive 250 ms association window.
-        // Keep original timestamps; smaller later gaps cannot renew a peak.
+        // Bounded recent gap history. Keep original timestamps; smaller later
+        // gaps cannot renew the age of a larger observation.
         std::array<PeerDeliveryGap, 8> pending_delivery_gaps{};
         std::uint64_t observed_delivery_gap_us = 0;
 
@@ -281,7 +281,7 @@ struct PeerMixer::Impl {
             std::uint64_t emitted = 0;
             // Approximate only the missing neighbour, never an unavailable
             // source interval. Advancing phase prevents replay next packet.
-            while (next_output_phase < 1.0 && emitted < 2) {
+            while (next_output_phase < 1.0 && emitted < kMaximumBoundaryLookaheadFrames) {
                 if (enqueueFrames(std::span<const std::int32_t>(&previous_sample, 1)) != 1) break;
                 owner->stats.lookahead_hold_max_fraction_ppm = std::max(
                     owner->stats.lookahead_hold_max_fraction_ppm,
@@ -376,6 +376,31 @@ struct PeerMixer::Impl {
     std::uint64_t service_bucket = 0;
     std::uint64_t service_peak_us = 0;
     std::uint64_t service_previous_peak_us = 0;
+    std::uint64_t path_bucket = 0, path_peak_frames = 0, path_previous_peak_frames = 0;
+    std::uint64_t delivery_gap_evidence_until_us = 0;
+    std::uint64_t observed_extra_consumed_frames = 0;
+    std::uint64_t recovery_clean_since_us = 0;
+    std::uint64_t recovery_depth_bucket = 0;
+    std::uint64_t recovery_depth_minimum = (std::numeric_limits<std::uint64_t>::max)();
+    std::uint64_t recovery_previous_minimum = (std::numeric_limits<std::uint64_t>::max)();
+    bool deliveryGapGuardActive() const noexcept
+    { return current_advance_us<adaptive_gap_hold_until_us || current_advance_us<delivery_gap_evidence_until_us; }
+
+    void observePathHighWater(std::uint64_t now_us) noexcept
+    {
+        if (!config.adaptive_playback_cushion || output==nullptr) return;
+        const auto window=config.adaptive_surplus_stable_us ? config.adaptive_surplus_stable_us : 1000000ULL;
+        const auto bucket=now_us/window;
+        if (bucket!=path_bucket) {
+            path_previous_peak_frames=bucket==path_bucket+1 ? path_peak_frames : 0;
+            path_peak_frames=0;path_bucket=bucket;
+        }
+        std::uint64_t source=0;
+        for (const auto& peer:peers) if (peer->stats.active && peer->stats.contributing)
+            source=std::max<std::uint64_t>(source,peer->queued);
+        path_peak_frames=std::max<std::uint64_t>(path_peak_frames,source+output->depthFrames());
+        stats.adaptive_path_high_water_frames=std::max(path_peak_frames,path_previous_peak_frames);
+    }
 
     void observeService(std::uint64_t now_us) noexcept
     {
@@ -439,6 +464,7 @@ struct PeerMixer::Impl {
         interval_remainder_us = numerator % interval_denominator;
         if (output != nullptr) {
             output->setResamplerRatio(1.0);
+            observed_extra_consumed_frames = output->playbackRecoveryState().extra_consumed_frames;
         }
         stats.adaptive_playback_cushion_enabled = config.adaptive_playback_cushion;
         stats.adaptive_target_frames = adaptive_target_frames;
@@ -607,6 +633,9 @@ struct PeerMixer::Impl {
                 continue;
             }
             peer->observed_delivery_gap_us = gap.receive_time_us;
+            if (now_us>=gap.receive_time_us && now_us-gap.receive_time_us<=kAdaptiveGapAssociationUs)
+                delivery_gap_evidence_until_us=gap.receive_time_us>(std::numeric_limits<std::uint64_t>::max)()-kAdaptiveGapAssociationUs
+                    ? (std::numeric_limits<std::uint64_t>::max)() : gap.receive_time_us+kAdaptiveGapAssociationUs;
             stats.adaptive_delivery_gap_required_frames = gap.required_playback_frames;
             stats.adaptive_delivery_gap_required_max_frames = std::max<std::uint64_t>(
                 stats.adaptive_delivery_gap_required_max_frames, gap.required_playback_frames);
@@ -897,7 +926,25 @@ struct PeerMixer::Impl {
         return pushed;
     }
 
-    void padOutputTo(std::uint64_t cushion_goal) noexcept
+    void cancelRecoveryBudget() noexcept
+    {
+        stats.recovery_cancelled_frames += stats.recovery_pending_frames;
+        stats.recovery_pending_frames = 0;
+        stats.recovery_release_active = false;
+        recovery_clean_since_us = 0;
+        recovery_depth_minimum = recovery_previous_minimum = (std::numeric_limits<std::uint64_t>::max)();
+    }
+
+    void creditRecoveryFrames(std::uint64_t frames) noexcept
+    {
+        const auto room = config.adaptive_max_frames > stats.recovery_pending_frames
+            ? config.adaptive_max_frames - stats.recovery_pending_frames : 0;
+        stats.recovery_pending_frames += std::min<std::uint64_t>(frames, room);
+    }
+
+    enum class CushionPurpose { InitialPrefill, UnderrunRecovery };
+
+    void padOutputTo(std::uint64_t cushion_goal, CushionPurpose purpose) noexcept
     {
         if (!config.adaptive_playback_cushion || output == nullptr) return;
         std::size_t work = 0;
@@ -909,6 +956,7 @@ struct PeerMixer::Impl {
             const std::size_t pushed = pushOutput(
                 std::span<const std::int32_t>(silence_output.data(), count));
             stats.adaptive_padding_frames += pushed;
+            if (purpose == CushionPurpose::UnderrunRecovery) creditRecoveryFrames(pushed);
             if (pushed < count) {
                 break;
             }
@@ -922,7 +970,7 @@ struct PeerMixer::Impl {
     void ensureAdaptiveCushion() noexcept
     {
         padOutputTo(adaptive_target_frames > mixed_output.size()
-            ? adaptive_target_frames - mixed_output.size() : 0);
+            ? adaptive_target_frames - mixed_output.size() : 0, CushionPurpose::InitialPrefill);
     }
 
     void updateAdaptiveReleaseState(
@@ -937,6 +985,14 @@ struct PeerMixer::Impl {
         }
         const int effective_release_ppm = config.adaptive_release_ppm;
         const std::uint64_t output_depth = output->depthFrames();
+        const auto playback_state = output->playbackRecoveryState();
+        if (playback_state.extra_consumed_frames < observed_extra_consumed_frames) cancelRecoveryBudget();
+        const auto consumed = playback_state.extra_consumed_frames >= observed_extra_consumed_frames
+            ? playback_state.extra_consumed_frames - observed_extra_consumed_frames : 0;
+        observed_extra_consumed_frames = playback_state.extra_consumed_frames;
+        const auto retired = std::min(consumed, stats.recovery_pending_frames);
+        stats.recovery_pending_frames -= retired;
+        stats.recovery_retired_frames += retired;
         std::uint64_t shortest_source = (std::numeric_limits<std::uint64_t>::max)();
         bool independently_resampled = false;
         for (const auto& peer : peers) {
@@ -962,24 +1018,73 @@ struct PeerMixer::Impl {
         // Worker stalls retain the original independent-source block margin.
         // Clean service uses the actual stopping cost, without treating cached
         // interpolation history as additional queued latency.
-        stats.playback_stopping_frames = output->playbackRecoveryState().stopping_frames;
+        stats.playback_stopping_frames = playback_state.stopping_frames;
         const auto alignment_margin = frame_release_safe ? stats.playback_stopping_frames
             : (stats.contributing_peers > 1 && independently_resampled ? block : 0);
         stats.adaptive_release_alignment_margin_frames = alignment_margin;
         const bool recovery_cushion_active =
             adaptive_target_frames > config.adaptive_min_frames;
         // At minimum target, scheduling headroom is a ceiling, not a latency
-        // floor. Only retire surplus that stays above two callback quanta for
-        // a complete stable interval, including pre-receive low-water checks.
+        // floor. Preserve the original margin for small packets; large packets
+        // need not retain two whole packet blocks. Worker runway plus a callback
+        // remains protected throughout a complete stable low-water interval.
+        // If callback rounding would require more than the original margin,
+        // retain the original controller rather than adding a latency floor.
+        const bool callback_release_safe = frame_release_safe && output->callbackFrames() != 0 &&
+            stats.worker_runway_frames <= 2 * callback_frames - output->callbackFrames();
+        const auto release_quantum = callback_release_safe
+            ? std::min<std::uint64_t>(callback_frames, 2 * output->callbackFrames()) : callback_frames;
+        const auto service_floor = callback_release_safe
+            ? stats.worker_runway_frames + output->callbackFrames() : 2 * release_quantum;
         const auto surplus_floor = std::max<std::uint64_t>(
-            2 * callback_frames, config.adaptive_min_frames) + alignment_margin;
-        const bool surplus_safe = !missing && !receive_catchup_active &&
-            current_advance_us >= adaptive_gap_hold_until_us && actual_depth > surplus_floor;
+            std::max<std::uint64_t>(2 * release_quantum, service_floor), config.adaptive_min_frames) + alignment_margin;
+        const bool surplus_safe = !missing && !receive_catchup_active && actual_depth > surplus_floor;
         if (!surplus_safe) surplus_stable_since_us = 0;
         else if (surplus_stable_since_us == 0) surplus_stable_since_us = current_advance_us;
         const bool stable_surplus = config.adaptive_surplus_stable_us != 0 && surplus_stable_since_us != 0 &&
             current_advance_us >= surplus_stable_since_us &&
             current_advance_us - surplus_stable_since_us >= config.adaptive_surplus_stable_us;
+        const bool gap_guard=deliveryGapGuardActive();
+        stats.delivery_gap_guard_active=gap_guard;
+        if (missing || gap_guard || receive_catchup_active || receiveRecoveryDebtFrames() != 0)
+            recovery_clean_since_us = current_advance_us;
+        const bool clean_recovery = recovery_clean_since_us != 0 && config.adaptive_surplus_stable_us != 0 &&
+            current_advance_us >= recovery_clean_since_us &&
+            current_advance_us - recovery_clean_since_us >= config.adaptive_surplus_stable_us;
+        // Recovery credit survives temporary valleys. Measure low water across
+        // complete recent callback/packet cycles instead of discarding credit
+        // at an instantaneous valley just before another shortage. Keep
+        // one callback beyond measured worker runway, two interpolation frames,
+        // and the actual return-ramp stopping cost in the output ring itself.
+        stats.recovery_safe_depth_frames = std::max<std::uint64_t>(config.adaptive_min_frames,
+            std::max<std::uint64_t>(block, stats.worker_runway_frames + output->callbackFrames()))
+            + 2 + playback_state.stopping_frames;
+        const auto depth_window = std::max<std::uint64_t>(1, config.adaptive_surplus_stable_us);
+        const auto depth_bucket = current_advance_us / depth_window;
+        if (depth_bucket != recovery_depth_bucket) {
+            recovery_previous_minimum = depth_bucket == recovery_depth_bucket + 1
+                ? recovery_depth_minimum : (std::numeric_limits<std::uint64_t>::max)();
+            recovery_depth_minimum = (std::numeric_limits<std::uint64_t>::max)();
+            recovery_depth_bucket = depth_bucket;
+        }
+        recovery_depth_minimum = std::min(recovery_depth_minimum, output_depth);
+        stats.recovery_low_water_frames = std::min(recovery_depth_minimum, recovery_previous_minimum);
+        const bool recovery_release = !recovery_cushion_active && playback_state.consumption_accounting &&
+            clean_recovery && !gap_guard && !missing && !receive_catchup_active && receiveRecoveryDebtFrames() == 0 &&
+            frame_release_safe && output->callbackFrames() != 0 && effective_release_ppm > 0 &&
+            stats.recovery_pending_frames > playback_state.stopping_frames + 2 &&
+            stats.recovery_low_water_frames > stats.recovery_safe_depth_frames &&
+            output_depth > stats.recovery_safe_depth_frames;
+        if (recovery_release) {
+            stats.recovery_release_events += !stats.recovery_release_active;
+            stats.recovery_release_active = true;
+            adaptive_release_active = false;
+            output->setResamplerRatio(1.0 + static_cast<double>(effective_release_ppm) / 1000000.0);
+            return;
+        }
+        stats.recovery_release_active = false;
+        const bool release_ready = stable_surplus || (recovery_cushion_active &&
+            (!gap_guard || config.adaptive_surplus_stable_us == 0));
         const std::uint64_t release_stop_depth = recovery_cushion_active ? (minimum_output >
                 static_cast<std::uint64_t>(config.frames_per_block)
             ? minimum_output - static_cast<std::uint64_t>(config.frames_per_block) : 0) +
@@ -991,13 +1096,14 @@ struct PeerMixer::Impl {
         const bool actual_depth_at_stop =
             actual_depth <= release_stop_depth;
 
-        const bool protected_runway = mixable_source >= block ||
-            output_depth > static_cast<std::uint64_t>(config.frames_per_block) * 2;
+        const bool protected_runway = callback_release_safe ? (mixable_source >= block || output_depth > surplus_floor) :
+            (mixable_source >= block || output_depth > block * 2);
         const bool callback_worker_safe = !frame_release_safe ||
             (output_depth >= stats.worker_runway_frames &&
                 output_depth - stats.worker_runway_frames >= alignment_margin);
-        if (missing || !protected_runway || !callback_worker_safe || (!recovery_cushion_active && !stable_surplus) ||
-            receive_catchup_active || current_advance_us < adaptive_gap_hold_until_us) {
+        // A held target protects arrival runway while allowing genuine surplus
+        // from clock-estimation error to retire after a safe low-water interval.
+        if (missing || !protected_runway || !callback_worker_safe || !release_ready || receive_catchup_active) {
             adaptive_release_active = false;
         } else {
             // Callback consumption changes real surplus independently of
@@ -1062,8 +1168,12 @@ struct PeerMixer::Impl {
                     largest_source = std::max<std::uint64_t>(largest_source, peer->queued);
                 }
             }
-            const std::uint64_t path = largest_source +
-                (output != nullptr ? output->depthFrames() : 0);
+            // An instantaneous valley between arriving batches is not spare
+            // capacity. Retire unused target allowance against the complete
+            // recent path peak; extra audio is still retired by safe release.
+            const std::uint64_t actual_path=largest_source+(output != nullptr ? output->depthFrames() : 0);
+            const std::uint64_t path = deliveryGapGuardActive()
+                ? std::max<std::uint64_t>(stats.adaptive_path_high_water_frames,actual_path) : actual_path;
             const std::uint64_t allowance = stats.live_tail_batch_tolerance_frames;
             const std::uint64_t minimum_target = std::max<std::uint64_t>(
                 config.adaptive_min_frames, path > allowance ? path - allowance : 0);
@@ -1289,6 +1399,7 @@ struct PeerMixer::Impl {
     {
         observeService(now_us);
         current_advance_us = now_us;
+        observePathHighWater(now_us);
         stats.adaptive_delivery_gap_hold_active =
             config.adaptive_playback_cushion && now_us < adaptive_gap_hold_until_us;
         stats.adaptive_delivery_gap_hold_remaining_us =
@@ -1298,12 +1409,24 @@ struct PeerMixer::Impl {
         if (output != nullptr && !output->acceptsFrames()) {
             return;
         }
-        if (output != nullptr && output->callbackFrames() != 0 &&
-            output->depthFrames() < output->callbackFrames() && !receive_catchup_active &&
-            receiveRecoveryDebtFrames() == 0 && stats.worker_runway_frames < std::max<std::uint64_t>(
-                2 * std::max<std::uint64_t>(mixed_output.size(), output->callbackFrames()), config.adaptive_min_frames)) {
-            for (auto& peer : peers) if (peer->stats.active && peer->stats.contributing)
-                peer->releaseBoundaryLookahead();
+        // Cover a held interpolation neighbour at the measured worker boundary.
+        // Predicting one sample cannot cover a whole missing callback, and is
+        // unnecessary when real queued audio already covers the next turn.
+        const auto boundary_depth = output != nullptr ? output->depthFrames() : 0;
+        const auto boundary_callback = output != nullptr ? output->callbackFrames() : 0;
+        const bool callback_boundary = boundary_callback != 0 && boundary_depth < boundary_callback;
+        const auto worker_runway = stats.worker_runway_frames;
+        const bool short_worker_boundary = worker_runway > boundary_callback && boundary_depth < worker_runway &&
+            worker_runway - boundary_depth <= kMaximumBoundaryLookaheadFrames;
+        if (output != nullptr && boundary_callback != 0 &&
+            (callback_boundary || short_worker_boundary) && !receive_catchup_active &&
+            receiveRecoveryDebtFrames() == 0 && worker_runway < std::max<std::uint64_t>(
+                2 * std::max<std::uint64_t>(mixed_output.size(), boundary_callback), config.adaptive_min_frames)) {
+            const auto needed = worker_runway > boundary_depth ? worker_runway - boundary_depth : 1;
+            for (auto& peer : peers) {
+                if (peer->stats.active && peer->stats.contributing && (callback_boundary || peer->queued < needed))
+                    peer->releaseBoundaryLookahead();
+            }
         }
         if (!occupancy_dirty && stats.contributing_peers == 0 &&
             !adaptive_release_active && !receive_catchup_active) {
@@ -1341,6 +1464,7 @@ struct PeerMixer::Impl {
             ? updateOccupancy()
             : ContributorReadiness{cached_all_ready, cached_any_ready};
         if (stats.contributing_peers == 0) {
+            cancelRecoveryBudget();
             pending_recovery_padding_frames = 0;
             slot_frames_released = 0;
             slot_had_missing = false;
@@ -1373,6 +1497,13 @@ struct PeerMixer::Impl {
         observed_output_underrun_frames = output_underrun_frames;
         const bool actual_output_underrun = output_underrun_observed;
         if (actual_output_underrun) {
+            // An empty output ring does not prove old delay has disappeared:
+            // real audio can still be queued upstream or held in flight. Keep
+            // bounded outstanding credit; only measured extra consumption and
+            // observed current surplus retire it.
+            stats.recovery_release_active = false;
+            creditRecoveryFrames(missing_frames);
+            recovery_clean_since_us = now_us;
             // Raise the target before applying its output gate. Otherwise a
             // full old target can prevent the queued recovery block from being
             // released, hiding the underrun that should expand the cushion.
@@ -1462,7 +1593,7 @@ struct PeerMixer::Impl {
         if (pending_recovery_padding_frames && !receive_budget_exhausted &&
             !receive_catchup_active) {
             padOutputTo(std::min<std::uint64_t>(normalOutputLimitFrames(),
-                output->depthFrames() + pending_recovery_padding_frames));
+                output->depthFrames() + pending_recovery_padding_frames), CushionPurpose::UnderrunRecovery);
             pending_recovery_padding_frames = 0;
         }
         if (!receive_catchup_active) {
@@ -1497,6 +1628,7 @@ PeerStreamPlayback* PeerMixer::addPeer(std::uint64_t peer_id, std::size_t queue_
     auto peer = std::make_unique<Impl::PeerSlot>(impl_.get(), peer_id, capacity);
     PeerStreamPlayback* playback = peer.get();
     impl_->peers.push_back(std::move(peer));
+    impl_->cancelRecoveryBudget();
     impl_->surplus_stable_since_us = 0;
     impl_->updateOccupancy();
     return playback;
@@ -1512,6 +1644,7 @@ bool PeerMixer::removePeer(std::uint64_t peer_id) noexcept
         return false;
     }
     impl_->peers.erase(found);
+    impl_->cancelRecoveryBudget();
     impl_->surplus_stable_since_us = 0;
     impl_->updateOccupancy();
     return true;
@@ -1524,6 +1657,7 @@ bool PeerMixer::setPeerActive(std::uint64_t peer_id, bool active) noexcept
         return false;
     }
     if (peer->stats.active != active) {
+        impl_->cancelRecoveryBudget();
         peer->resetTimeline();
         peer->stats.active = active;
     }

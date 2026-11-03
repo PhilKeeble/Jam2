@@ -1,0 +1,65 @@
+{
+  "schema": "jam2-asio-delivery-profile-v1",
+  "device_names": [
+    "TONEX",
+    "Focusrite USB ASIO"
+  ],
+  "sample_rate": 44100,
+  "callback_frames": 32,
+  "packet_frames": 64,
+  "clean_duration_ms": 0,
+  "impaired_duration_ms": 65000,
+  "base_one_way_delay_ms": 7.5,
+  "forward_jitter_ms": 3.6,
+  "reverse_jitter_ms": 0.5,
+  "repeat_ms": 0,
+  "delay_points": [
+    [
+      0,
+      0
+    ]
+  ],
+  "recovered_buffer_limit_ms": 40,
+  "source_csv": [
+    "jam2_stats_20261030_085245_623_pid7609.csv",
+    "jam2_stats_20261030_085326_112_pid24448.csv"
+  ],
+  "observed_rtt_peak_ms": 665.039,
+  "observed_joiner_arrival_gap_peak_ms": 128.001,
+  "description": "Real ASIO packet-coalescing diagnostics. No packet loss or long delay excursions; isolates network arrival batching and packet granularity.",
+  "diagnostic_cases": [
+    {
+      "name": "steady-64",
+      "delay_scope": "none",
+      "impaired_duration_ms": 40000
+    },
+    {
+      "name": "batch-8ms-64",
+      "delay_scope": "audio",
+      "batch_interval_ms": 8
+    },
+    {
+      "name": "batch-8ms-64-no-release",
+      "delay_scope": "audio",
+      "batch_interval_ms": 8,
+      "adaptive_playback_release_ppm": 0
+    },
+    {
+      "name": "batch-8ms-128",
+      "delay_scope": "audio",
+      "batch_interval_ms": 8,
+      "packet_frames": 128
+    },
+    {
+      "name": "batch-4ms-64",
+      "delay_scope": "audio",
+      "batch_interval_ms": 4
+    },
+    {
+      "name": "batch-8ms-64-leader",
+      "delay_scope": "audio",
+      "batch_interval_ms": 8,
+      "metronome_mode": "leader-audio"
+    }
+  ]
+}

@@ -404,6 +404,8 @@ void copy_peer_mixer_stats(
     target.mix_worker_service_gap_us = source.worker_service_gap_us;
     target.mix_worker_runway_frames = source.worker_runway_frames;
     target.mix_playback_stopping_frames = source.playback_stopping_frames;
+    target.mix_adaptive_path_high_water_frames = source.adaptive_path_high_water_frames;
+    target.mix_delivery_gap_guard_active = source.delivery_gap_guard_active;
     target.mix_release_worker_guard_active = source.release_worker_guard_active;
     target.mix_capacity_drops = source.capacity_drops;
     target.mix_capacity_dropped_frames = source.capacity_dropped_frames;
@@ -429,6 +431,13 @@ void copy_peer_mixer_stats(
     target.adaptive_playback_release_events = source.adaptive_release_events;
     target.adaptive_playback_burst_events = source.adaptive_raise_events;
     target.adaptive_playback_padding_frames = source.adaptive_padding_frames;
+    target.mix_recovery_pending_frames = source.recovery_pending_frames;
+    target.mix_recovery_retired_frames = source.recovery_retired_frames;
+    target.mix_recovery_cancelled_frames = source.recovery_cancelled_frames;
+    target.mix_recovery_safe_depth_frames = source.recovery_safe_depth_frames;
+    target.mix_recovery_low_water_frames = source.recovery_low_water_frames;
+    target.mix_recovery_release_events = source.recovery_release_events;
+    target.mix_recovery_release_active = source.recovery_release_active;
     target.adaptive_delivery_gap_hold_active = source.adaptive_delivery_gap_hold_active;
     target.adaptive_delivery_gap_raise_events = source.adaptive_delivery_gap_raise_events;
     target.adaptive_delivery_gap_hold_events = source.adaptive_delivery_gap_hold_events;

@@ -1,6 +1,7 @@
 #include "ArtifactReader.hpp"
 #include "LoopbackPortReservations.hpp"
 #include "TestTiming.hpp"
+#include "ProxyPollWait.hpp"
 #include "UdpImpairmentProxy.hpp"
 #include "UdpCandidateNetwork.hpp"
 #include "UdpSecurityFixtures.hpp"
@@ -53,38 +54,7 @@ using jam2::test::UdpProxyStats;
 using jam2::test::UdpProxyDirection;
 using jam2::test::UdpSequenceSecurityTransformer;
 
-// The impairment pump must not introduce an unrequested Windows timer-tick
-// impairment. A scoped high-resolution wait keeps this a sleeping harness,
-// not a busy loop or a process-wide timer-resolution change.
-class ProxyPollWait final {
-public:
-#ifdef _WIN32
-    ProxyPollWait() : timer_(CreateWaitableTimerExW(nullptr, nullptr,
-        CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_MODIFY_STATE | SYNCHRONIZE)) {}
-    ~ProxyPollWait() { if (timer_) CloseHandle(timer_); }
-    bool wait() noexcept
-    {
-        LARGE_INTEGER due{};
-        due.QuadPart = -5000; // relative 500 us, in 100 ns units
-        return timer_ && SetWaitableTimer(timer_, &due, 0, nullptr, nullptr, FALSE) &&
-            WaitForSingleObject(timer_, 1000) == WAIT_OBJECT_0;
-    }
-private:
-    HANDLE timer_ = nullptr;
-#else
-    bool wait() noexcept
-    {
-        std::this_thread::sleep_for(std::chrono::microseconds(500));
-        return true;
-    }
-#endif
-public:
-    ProxyPollWait(const ProxyPollWait&) = delete;
-    ProxyPollWait& operator=(const ProxyPollWait&) = delete;
-#ifndef _WIN32
-    ProxyPollWait() = default;
-#endif
-};
+using ProxyPollWait = jam2::test::ProxyPollWait;
 
 constexpr int kPeerCount = 4;
 constexpr int kSampleRate = 48000;

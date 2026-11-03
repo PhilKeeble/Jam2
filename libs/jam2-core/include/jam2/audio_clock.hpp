@@ -13,6 +13,8 @@ struct DeviceClockSample {
 struct PlaybackRecoveryState {
     bool unity = true;
     std::uint64_t stopping_frames = 0;
+    bool consumption_accounting = false;
+    std::uint64_t extra_consumed_frames = 0;
 };
 
 struct DeviceClockStats {

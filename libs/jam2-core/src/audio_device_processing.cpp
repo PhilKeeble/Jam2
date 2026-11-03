@@ -614,7 +614,8 @@ PlaybackRecoveryState read_playback_recovery_state(const StreamControl& control)
     if (return_ramp != 0) ramp = std::min(ramp, return_ramp);
     const auto excess = std::max(applied - 1000000, 0);
     return {requested == 1000000 && applied == 1000000,
-        static_cast<std::uint64_t>(std::ceil(static_cast<double>(excess) * ramp / 2000000.0))};
+        static_cast<std::uint64_t>(std::ceil(static_cast<double>(excess) * ramp / 2000000.0)),
+        true, control.playback_extra_consumed_frames.load(std::memory_order_relaxed)};
 }
 
 void pop_resampled_playback(
@@ -648,8 +649,9 @@ void pop_resampled_playback(
     }
     PlaybackRatioSmoother sizingSmoother = state.ratioSmoother;
     double sizingPhase = state.phase;
-    std::size_t requiredSourceFrames =
+    const std::size_t prefetchFrames =
         (state.hasCurrent ? 0U : 1U) + (state.hasNext ? 0U : 1U);
+    std::size_t requiredSourceFrames = prefetchFrames;
     for (std::size_t frame = 0; frame < output.size(); ++frame) {
         sizingPhase += sizingSmoother.nextRatio();
         while (sizingPhase >= 1.0) {
@@ -658,6 +660,7 @@ void pop_resampled_playback(
         }
     }
     const bool batchSource = sourceScratch.size() >= requiredSourceFrames;
+    const auto underrunsBefore = batchSource ? 0 : playback->underrun_frames();
     std::size_t realSourceFrames = 0;
     std::size_t sourceIndex = 0;
     if (batchSource && requiredSourceFrames > 0) {
@@ -716,6 +719,14 @@ void pop_resampled_playback(
             // ring one frame later. The ring still records the exact underrun.
             state.next = nextSource(state.current);
         }
+    }
+    const bool supplied = batchSource ? realSourceFrames == requiredSourceFrames
+        : playback->underrun_frames() == underrunsBefore;
+    const auto advanced = requiredSourceFrames - prefetchFrames;
+    if (supplied && advanced > output.size()) {
+        // The callback is the sole writer; publish without a locked RMW.
+        const auto total = control->playback_extra_consumed_frames.load(std::memory_order_relaxed);
+        control->playback_extra_consumed_frames.store(total + advanced - output.size(), std::memory_order_relaxed);
     }
     control->playback_ratio_applied_ppm.store(
         state.ratioSmoother.appliedPpm(), std::memory_order_relaxed);

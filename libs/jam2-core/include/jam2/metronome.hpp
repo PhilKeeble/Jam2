@@ -32,6 +32,43 @@ struct GridPhaseObservation {
 };
 // Signed phase difference on the nearest bar. No clock, I/O or owned state.
 std::optional<std::int64_t> grid_phase_error(const GridPhaseObservation& observation) noexcept;
+struct GridClockObservation {
+    std::uint64_t authority_frame=0,authority_epoch=0,local_raw_frame=0,local_epoch=0;
+};
+// Unwrapped offset, preserving the listener's existing musical epoch across
+// authority changes. Reject differences outside the signed render-offset range.
+std::optional<std::int64_t> grid_clock_offset(GridClockObservation observation) noexcept;
+
+struct AuthorityPhaseTrackingConfig {
+    int sample_rate = 48000;
+    std::uint64_t tolerance_frames = 240;
+    int maximum_relative_drift_ppm = 1000;
+};
+struct AuthorityPhaseObservation {
+    std::uint64_t authority_frame = 0, received_us = 0;
+    std::int64_t proposed_offset_frames = 0;
+};
+struct AuthorityPhaseTrackingStats {
+    std::uint64_t accepted = 0, delayed = 0, reordered = 0, invalid = 0;
+    std::int64_t raw_offset_frames = 0, accepted_offset_frames = 0;
+    std::uint64_t last_accepted_us = 0;
+};
+enum class AuthorityPhaseDecision { Accepted, Delayed, Reordered, Invalid };
+// Additional delivery delay can only move the projected sender clock backward.
+// Preserve an established mapping across that delay, while admitting oscillator
+// drift and a newer observation that improves the delivery-delay baseline.
+class AuthorityPhaseTracker {
+public:
+    AuthorityPhaseDecision observe(AuthorityPhaseObservation observation,
+        AuthorityPhaseTrackingConfig config) noexcept;
+    void reset() noexcept { *this = {}; }
+    const AuthorityPhaseTrackingStats& stats() const noexcept { return stats_; }
+private:
+    AuthorityPhaseTrackingStats stats_;
+    std::uint64_t newest_frame_ = 0, newest_received_us_ = 0;
+    long double drift_floor_frames_ = 0;
+    bool initialized_ = false;
+};
 
 struct AuthorityBeaconState {
     std::uint64_t revision = 0, epoch = 0, active_peers = 0;

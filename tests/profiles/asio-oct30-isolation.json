@@ -1,0 +1,81 @@
+{
+  "schema": "jam2-asio-delivery-profile-v1",
+  "device_names": [
+    "TONEX",
+    "Focusrite USB ASIO"
+  ],
+  "sample_rate": 44100,
+  "callback_frames": 32,
+  "packet_frames": 128,
+  "clean_duration_ms": 20000,
+  "impaired_duration_ms": 65000,
+  "base_one_way_delay_ms": 7.5,
+  "forward_jitter_ms": 3.6,
+  "reverse_jitter_ms": 0.5,
+  "repeat_ms": 180000,
+  "delay_points": [
+    [
+      0,
+      0
+    ],
+    [
+      18000,
+      0
+    ],
+    [
+      19000,
+      200
+    ],
+    [
+      19001,
+      325
+    ],
+    [
+      20000,
+      400
+    ],
+    [
+      22000,
+      650
+    ],
+    [
+      24000,
+      0
+    ]
+  ],
+  "recovered_buffer_limit_ms": 40,
+  "source_csv": [
+    "jam2_stats_20261030_085245_623_pid7609.csv",
+    "jam2_stats_20261030_085326_112_pid24448.csv"
+  ],
+  "observed_rtt_peak_ms": 665.039,
+  "observed_joiner_arrival_gap_peak_ms": 128.001,
+  "description": "Diagnostic isolation: same physical ASIO setup; separate extra delay for audio, authority beacons, ping/pong, non-audio, and all datagrams. No injected loss.",
+  "diagnostic_cases": [
+    {
+      "name": "steady-wan",
+      "delay_scope": "none",
+      "impaired_duration_ms": 40000
+    },
+    {
+      "name": "beacons-only",
+      "delay_scope": "beacons"
+    },
+    {
+      "name": "audio-only",
+      "delay_scope": "audio"
+    },
+    {
+      "name": "ping-pong-only",
+      "delay_scope": "ping-pong"
+    },
+    {
+      "name": "non-audio-only",
+      "delay_scope": "non-audio"
+    },
+    {
+      "name": "all",
+      "delay_scope": "all"
+    }
+  ]
+}

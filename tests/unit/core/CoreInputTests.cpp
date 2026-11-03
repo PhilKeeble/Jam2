@@ -116,6 +116,7 @@ public:
 
 class MarkerMixerSink final : public jam2::PeerStreamPlayback {
 public:
+    jam2::audio::PlaybackRecoveryState playbackRecoveryState() const noexcept override { return recoveryState; }
     std::size_t callbackFrames() const noexcept override { return callbackQuantum; }
     std::size_t depthFrames() const noexcept override { return depth; }
     std::uint64_t underrunFrames() const noexcept override { return underruns; }
@@ -143,6 +144,7 @@ public:
     std::size_t callbackQuantum = 0;
     std::size_t depth = 0;
     std::uint64_t underruns = 0;
+    jam2::audio::PlaybackRecoveryState recoveryState;
     std::vector<std::int32_t> samples;
 };
 
@@ -2109,6 +2111,71 @@ void test_isolated_recovery_escalates_repeated_shortages()
         "disabled adaptive recovery cannot add runway or report a recovery it did not perform");
 }
 
+void test_four_peer_recovery_consumption_accounting()
+{
+    MarkerMixerSink sink;
+    sink.callbackQuantum = 32;
+    sink.recoveryState.consumption_accounting = true;
+    sink.recoveryState.extra_consumed_frames = 123; // earlier device/session use
+    jam2::PeerMixerConfig config;
+    config.frames_per_block = 64; config.deadline_frames = 1024; config.output_max_frames = 1024;
+    config.adaptive_playback_cushion = true;
+    config.adaptive_target_frames = config.adaptive_min_frames = 64;
+    config.adaptive_max_frames = 512;
+    jam2::PeerMixer mixer(config, &sink);
+    std::array<std::int32_t, 64> audio{};
+    audio.fill(42);
+    for (std::uint64_t id = 1; id <= 3; ++id) {
+        auto* peer = mixer.addPeer(id, 1024);
+        expect(peer && mixer.setPeerActive(id, true), "four-participant accounting sources activate");
+        if (!peer) return;
+        peer->pushFrames(audio);
+    }
+    mixer.advance(1);
+    sink.consume(sink.depth + 32);
+    mixer.advance(1000); mixer.finishReceiveBatch(false);
+    expect(mixer.stats().recovery_pending_frames == 96 && mixer.stats().recovery_retired_frames == 0,
+        "recovery credits callback silence and padding without consuming an earlier device counter");
+    sink.recoveryState.extra_consumed_frames += 5;
+    mixer.advance(1100); mixer.advance(1200);
+    expect(mixer.stats().recovery_pending_frames == 91 && mixer.stats().recovery_retired_frames == 5,
+        "a measured consumption delta retires exactly once across worker updates");
+    sink.consume(sink.depth + 32);
+    mixer.advance(1300); mixer.finishReceiveBatch(false);
+    expect(mixer.stats().recovery_pending_frames == 251,
+        "another empty output callback cannot erase delayed audio still represented by recovery credit");
+    expect(!mixer.removePeer(99) && !mixer.setPeerActive(99, false) && mixer.stats().recovery_pending_frames == 251,
+        "invalid peer commands preserve existing recovery accounting");
+    sink.recoveryState.extra_consumed_frames = 0;
+    mixer.advance(1400);
+    expect(mixer.stats().recovery_pending_frames == 0 && mixer.stats().recovery_cancelled_frames == 251,
+        "a reset device counter cancels stale credit rather than wrapping its measured delta");
+    sink.consume(sink.depth + 32);
+    mixer.advance(1500); mixer.finishReceiveBatch(false);
+    expect(mixer.stats().recovery_pending_frames > 0, "fresh recovery establishes new credit after a device reset");
+    expect(mixer.setPeerActive(2, false) && mixer.stats().recovery_pending_frames == 0,
+        "a source lifecycle change cancels the previous shared-path recovery budget");
+    for (std::size_t minimum : {64U, 512U}) {
+        MarkerMixerSink profiledSink;
+        profiledSink.callbackQuantum = 32;
+        profiledSink.recoveryState.consumption_accounting = true;
+        config.adaptive_min_frames = config.adaptive_target_frames = minimum;
+        config.adaptive_max_frames = 1024;
+        jam2::PeerMixer profiled(config, &profiledSink);
+        for (std::uint64_t id = 1; id <= 3; ++id) {
+            auto* peer = profiled.addPeer(id, 1024);
+            expect(peer && profiled.setPeerActive(id, true), "profiled accounting sources activate");
+            if (!peer) return;
+            peer->pushFrames(audio);
+        }
+        profiled.advance(1);
+        expect(profiled.stats().recovery_pending_frames == 0,
+            "intentional initial prefill is never credited as removable recovery silence");
+        expect(profiled.stats().recovery_safe_depth_frames >= minimum + 2,
+            "recovery release respects larger configured minimum latency and interpolation reserve");
+    }
+}
+
 void test_four_peer_worker_margin_tracks_service_gaps()
 {
     MarkerMixerSink sink;
@@ -3811,6 +3878,10 @@ void test_profiled_recurring_wifi_bursts_match_observed_session()
 
 int main(int argc, char** argv)
 {
+    if (argc == 2 && std::string_view(argv[1]) == "--recovery-accounting") {
+        test_four_peer_recovery_consumption_accounting();
+        return failures == 0 ? 0 : 1;
+    }
     if (argc == 2 && std::string_view(argv[1]) == "--playback-recovery") {
         test_four_peer_boundary_hold_preserves_phase_and_bounds();
         test_isolated_recovery_escalates_repeated_shortages();
@@ -3884,6 +3955,7 @@ int main(int argc, char** argv)
     test_peer_mixer_periodic_batches_do_not_accelerate_into_underruns();
     test_four_peer_boundary_hold_preserves_phase_and_bounds();
     test_isolated_recovery_escalates_repeated_shortages();
+    test_four_peer_recovery_consumption_accounting();
     test_four_peer_worker_margin_tracks_service_gaps();
     test_delivery_gap_learning_evidence_is_narrow();
     test_profiled_short_scheduler_batches();

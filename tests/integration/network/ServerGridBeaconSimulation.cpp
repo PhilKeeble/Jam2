@@ -17,11 +17,12 @@
 namespace {
 constexpr std::uint64_t sampleRate=48000, second=1000000, duration=3600*second;
 enum class Delivery { Periodic, Every100ms, Every250ms, Every1000ms, EveryMinute, BootstrapOnly, Disabled };
-enum class Network { Clean, Jitter, Asymmetric, CallbackBlocks, Outage, ClockChange, LateJoin, EpochReset, ResetLoss };
+enum class Network { Clean, Jitter, Asymmetric, CallbackBlocks, Outage, ClockChange, LateJoin, EpochReset, ResetLoss, Delayed };
 struct Scenario { const char* name; Network network; bool drift; };
 struct Packet { std::uint64_t arrival; jam2::GridAuthorityState state; };
 struct Peer {
     jam2::SessionAuthority authority;
+    jam2::metronome::AuthorityPhaseTracker phaseTracker;
     std::deque<Packet> packets;
     bool mapped=false;
     std::uint64_t epoch=0,firstMapped=0,delivered=0,filtered=0,lost=0;
@@ -87,7 +88,7 @@ void fixtures()
     require(mapping.valid && mapping.render_offset_frames==-2000,"initial clock mapping");
 }
 
-void simulate(Scenario scenario,Delivery mode)
+void simulate(Scenario scenario,Delivery mode,bool filterPhase=true)
 {
     std::array<Peer,4> peers{Peer(1),Peer(2),Peer(3),Peer(4)};
     auto assignment=peers[0].authority.orderGridProposal({1,1,jam2::GridRunState::Running,0,true,false});
@@ -96,8 +97,13 @@ void simulate(Scenario scenario,Delivery mode)
     require(peers[0].authority.activateLocalGrid(epoch,clockFrame(0,0,scenario,true)),"authority grid activation");
     assignment=peers[0].authority.grid();
     for (int i=1;i<4;++i) require(peers[i].authority.acceptGridAssignment(1,*assignment)==jam2::AuthorityUpdateResult::Accepted,"four-peer assignment");
-    const Jam2MetronomeCompensationSettings settings; // Actual runtime defaults.
-    constexpr auto tick=10000ULL,bar=96000ULL;
+    Jam2MetronomeCompensationSettings settings; // Actual runtime defaults.
+    // One hour at 100 ppm moves 360 ms. Give this filter-isolation stress
+    // profile an explicit 1 s correction range rather than hitting the separate
+    // default 250 ms clamp. Cadence/reset cases retain the actual defaults.
+    if (scenario.network==Network::Delayed) settings.maximum_ms=1000;
+    constexpr auto tick=10000ULL;
+    const auto bar=scenario.network==Network::Delayed ? 24000ULL : 96000ULL;
     const auto interval=mode==Delivery::Every100ms ? 100000ULL : mode==Delivery::Every250ms ? 250000ULL :
         mode==Delivery::Every1000ms ? 1000000ULL : mode==Delivery::EveryMinute ? 60000000ULL : 20000ULL;
     constexpr auto changeAt=second+10000; // Just after a scheduled 1-s/minute observation.
@@ -130,10 +136,15 @@ void simulate(Scenario scenario,Delivery mode)
                 if (scenario.network==Network::Outage &&
                     ((sequence%17==16) || (time>=300*second && time<310*second))) { ++peer.lost; continue; }
                 const std::uint64_t baseDelay=scenario.network==Network::Asymmetric ? 8000 : 2000;
-                const std::uint64_t noise=scenario.network==Network::Jitter ? ((sequence*37+i*11)%6)*1000 : 0;
+                const std::uint64_t noise=scenario.network==Network::Jitter ? ((sequence*37+i*11)%6)*1000 :
+                    scenario.network==Network::Delayed && time% (180*second)>=19*second && time%(180*second)<=24*second
+                        ? 200000+(sequence%6)*90000 : 0;
                 // Delays are under one send interval, so this queue stays ordered.
                 auto state=*assignment; state.authority_packet_frame=clockFrame(0,time,scenario,true);
-                peer.packets.push_back({time+baseDelay+noise,state});
+                const Packet packet{time+baseDelay+noise,state};
+                const auto position=std::upper_bound(peer.packets.begin(),peer.packets.end(),packet.arrival,
+                    [](auto arrival,const Packet& pending) {return arrival<pending.arrival;});
+                peer.packets.insert(position,packet);
             }
         }
         for (int i=1;i<4;++i) {
@@ -152,13 +163,18 @@ void simulate(Scenario scenario,Delivery mode)
                     peer.mapped=true; peer.epoch=mapping.epoch_sample_time; peer.base=peer.offset=peer.target=mapping.render_offset_frames;
                     if (!peer.mappings) peer.firstMapped=packet.arrival;
                     ++peer.mappings;
+                    peer.phaseTracker.reset();
                     const auto invalidated=scenario.network==Network::LateJoin && i==3 ? changeAt : peer.invalidatedAt;
                     peer.maxMappingWait=(std::max)(peer.maxMappingWait,packet.arrival-invalidated);
                 }
                 const auto error=jam2::metronome::grid_phase_error({projected,packet.state.authority_epoch_frame,
                     jam2::transport_musical_frame_from_raw(local,peer.offset),peer.epoch,bar});
                 require(error.has_value(),"production phase calculation rejected simulated observation");
-                peer.target=peer.offset+*error;
+                const auto unwrapped=jam2::metronome::grid_clock_offset({projected,packet.state.authority_epoch_frame,local,peer.epoch});
+                require(unwrapped.has_value(),"unwrapped clock mapping rejected valid epochs");
+                const auto proposed=filterPhase ? *unwrapped : peer.offset+*error;
+                if (!filterPhase || peer.phaseTracker.observe({packet.state.authority_packet_frame,packet.arrival,proposed},{})==
+                        jam2::metronome::AuthorityPhaseDecision::Accepted) peer.target=proposed;
             }
             if (!peer.mapped) {
                 if (time && !(scenario.network==Network::LateJoin && i==3 && time<changeAt)) peer.unmappedUs+=tick;
@@ -190,6 +206,8 @@ void simulate(Scenario scenario,Delivery mode)
     }
     for (int i=1;i<4;++i) {
         auto& peer=peers[i];
+        if (scenario.network==Network::Delayed) require(peer.maxError<10.0,
+            "delayed beacons pulled a valid four-peer clock mapping more than 10 ms off its ground truth");
         require(peer.mapped==(mode!=Delivery::Disabled),"off-from-start unexpectedly initialized the grid");
         require(mode!=Delivery::BootstrapOnly || peer.delivered==peer.mappings,"bootstrap-only delivered continuing beacons");
         require(mode!=Delivery::Disabled || peer.delivered==0,"disabled delivered a beacon");
@@ -215,6 +233,7 @@ void simulate(Scenario scenario,Delivery mode)
         const auto percentile=[&](double fraction) { return peer.errors.empty() ? std::numeric_limits<double>::quiet_NaN() : peer.errors[static_cast<std::size_t>((peer.errors.size()-1)*fraction)]; };
         std::cout << "grid_beacon_sim scenario=" << scenario.name << " delivery=" << name(mode) << " peers=4 peer=" << i
             << " virtual_seconds=" << duration/second << " mapped=" << peer.mapped << " first_mapping_us=" << peer.firstMapped
+            << " maximum_correction_ms=" << settings.maximum_ms
             << " mappings=" << peer.mappings << " max_mapping_wait_us=" << peer.maxMappingWait << " unmapped_us=" << peer.unmappedUs << " stale=" << peer.stale
             << " delivered=" << peer.delivered << " filtered=" << peer.filtered << " lost=" << peer.lost
             << " delivered_ipv4_bytes=" << peer.delivered*120 << " abs_p50_ms=" << percentile(0.5) << " abs_p95_ms=" << percentile(0.95)
@@ -228,10 +247,14 @@ void simulate(Scenario scenario,Delivery mode)
         << " max_pairwise_ms=" << (mode==Delivery::Disabled ? std::numeric_limits<double>::quiet_NaN() : maxPairwise) << '\n';
 }
 }
-int main()
+int main(int argc,char** argv)
 {
     try {
         fixtures();
+        if (argc>1 && std::string_view(argv[1])=="--delayed-control") {
+            simulate({"unfiltered-delayed-control",Network::Delayed,true},Delivery::Every1000ms,false);return 0;
+        }
+        simulate({"drift-delayed-beacons",Network::Delayed,true},Delivery::Every1000ms);
         constexpr std::array<Scenario,10> scenarios{{
             {"equal-clean",Network::Clean,false},{"drift-clean",Network::Clean,true},
             {"equal-jitter",Network::Jitter,false},{"drift-asymmetric",Network::Asymmetric,true},

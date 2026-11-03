@@ -172,6 +172,8 @@ struct PeerStream::Impl {
     long double drift_observation_best_offset_us = 0.0L;
     std::uint64_t drift_observation_packets = 0;
     std::uint64_t last_audio_delivery_receive_us = 0;
+    std::uint64_t short_gap_window_start_us = 0;
+    std::uint32_t short_gap_observations = 0;
     std::uint64_t last_accepted_audio_us = 0;
     bool resume_pending = false;
     std::uint64_t last_audio_receive_us = 0;
@@ -218,6 +220,9 @@ struct PeerStream::Impl {
 
         packet_interval_us = static_cast<std::uint64_t>(config.frames_per_packet) * 1000000ULL /
             static_cast<std::uint64_t>(config.sample_rate);
+        if (!config.adaptive_delivery_gap_confirmations || config.adaptive_delivery_gap_confirmations>1024 ||
+            !config.adaptive_delivery_gap_confirmation_window_us || config.adaptive_delivery_gap_confirmation_window_us>60000000)
+            throw std::runtime_error("PeerStream delivery-gap confirmation bounds are invalid");
         reorder_window_packets = config.jitter_buffer_max_frames > 0
             ? std::max<std::uint32_t>(
                 4,
@@ -416,6 +421,20 @@ struct PeerStream::Impl {
         }
     }
 
+    bool confirmDeliveryGap(std::uint64_t interval,std::uint64_t received_us) noexcept
+    {
+        // Retain immediate treatment of the former 50 ms gap class. Shorter
+        // gaps need repeated evidence, so isolated local wakeup jitter cannot
+        // select a different controller or add a healthy-path latency floor.
+        if (interval>=50000) return true;
+        if (!short_gap_window_start_us || received_us<short_gap_window_start_us ||
+            received_us-short_gap_window_start_us>config.adaptive_delivery_gap_confirmation_window_us) {
+            short_gap_window_start_us=received_us;short_gap_observations=0;
+        }
+        if (short_gap_observations<config.adaptive_delivery_gap_confirmations) ++short_gap_observations;
+        return short_gap_observations>=config.adaptive_delivery_gap_confirmations;
+    }
+
     void processPacket(const PendingAudioPacket& packet) noexcept
     {
         if (!highest_remote_sample_time_set) {
@@ -452,6 +471,7 @@ struct PeerStream::Impl {
             previous_resampler_ratio = stats.resampler_ratio = 1.0;
             previous_resampler_ratio_time_us = 0;
             last_audio_delivery_receive_us = last_audio_receive_us = last_audio_gap_receive_us = 0;
+            short_gap_window_start_us=0;short_gap_observations=0;
             if (playback != nullptr) playback->setResamplerRatio(1.0);
         }
         const bool past_warmup = packet.receive_time >= start_time_us + config.stats_warmup_us;
@@ -691,9 +711,9 @@ struct PeerStream::Impl {
                 ? packet.receive_time - last_audio_delivery_receive_us
                 : 0;
             const std::uint64_t minimum_gap_us = std::max(
-                packet_interval_us * 4U,
+                packet_interval_us * 5U / 2U,
                 config.adaptive_delivery_gap_minimum_us);
-            if (interval > minimum_gap_us) {
+            if (interval > minimum_gap_us && confirmDeliveryGap(interval,packet.receive_time)) {
                 const long double interval_frames_value =
                     static_cast<long double>(interval) *
                     static_cast<long double>(config.sample_rate) / 1000000.0L;

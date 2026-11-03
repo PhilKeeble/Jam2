@@ -63,11 +63,14 @@ if /I "%~1"=="--hardware-profile" (
     goto parse_arguments
 )
 echo ERROR: Unknown compile option: %~1
-echo Supported options: --tests coreaudio, --tests wasapi, --tests unit, --tests plugin, --tests hardware, --tests gui, --tests jam-sync, --tests shared-content, --tests performance, --tests network, --tests full, --tests-full, --test-name NAME, --show-gui, --hardware-profile PATH
+echo Supported options: --tests delivery, --tests coreaudio, --tests wasapi, --tests unit, --tests plugin, --tests hardware, --tests gui, --tests jam-sync, --tests shared-content, --tests performance, --tests network, --tests full, --tests-full, --test-name NAME, --show-gui, --hardware-profile PATH
 exit /b 2
 
 :arguments_ready
-if /I "%JAM2_TEST_SUITE%"=="coreaudio" (
+if /I "%JAM2_TEST_SUITE%"=="delivery" (
+    set "JAM2_TEST_TARGET=jam2_tests_delivery"
+    set "JAM2_TEST_LABEL=delivery"
+) else if /I "%JAM2_TEST_SUITE%"=="coreaudio" (
     set "JAM2_TEST_TARGET=jam2_tests_coreaudio"
     set "JAM2_TEST_LABEL=coreaudio"
 ) else if /I "%JAM2_TEST_SUITE%"=="wasapi" (
@@ -101,7 +104,7 @@ if /I "%JAM2_TEST_SUITE%"=="coreaudio" (
     set "JAM2_TEST_TARGET=jam2_tests_all"
 ) else if not "%JAM2_TEST_SUITE%"=="" (
     echo ERROR: Test suite "%JAM2_TEST_SUITE%" is not implemented yet.
-    echo Available suites: coreaudio, wasapi, unit, plugin, hardware, gui, jam-sync, shared-content, performance, network, full
+    echo Available suites: delivery, coreaudio, wasapi, unit, plugin, hardware, gui, jam-sync, shared-content, performance, network, full
     exit /b 2
 )
 if "%JAM2_TEST_SHOW_GUI%"=="1" (

@@ -97,6 +97,13 @@ struct PeerMixerStats {
     std::uint64_t adaptive_raise_events = 0;
     std::uint64_t adaptive_release_events = 0;
     std::uint64_t adaptive_padding_frames = 0;
+    std::uint64_t recovery_pending_frames = 0;
+    std::uint64_t recovery_retired_frames = 0;
+    std::uint64_t recovery_cancelled_frames = 0;
+    std::uint64_t recovery_safe_depth_frames = 0;
+    std::uint64_t recovery_low_water_frames = 0;
+    std::uint64_t recovery_release_events = 0;
+    bool recovery_release_active = false;
     bool adaptive_delivery_gap_hold_active = false;
     std::uint64_t adaptive_delivery_gap_raise_events = 0;
     std::uint64_t adaptive_delivery_gap_hold_events = 0;
@@ -106,6 +113,8 @@ struct PeerMixerStats {
     std::uint64_t live_tail_batch_tolerance_frames = 0;
     std::uint64_t live_tail_rounding_tolerance_frames = 0;
     std::uint64_t adaptive_release_alignment_margin_frames = 0;
+    std::uint64_t adaptive_path_high_water_frames = 0;
+    bool delivery_gap_guard_active = false;
     // Ordinary servicing limits, excluding peer jitter storage. Hard receive
     // recovery uses its own smaller tails; receive ingestion can transiently
     // exceed this path limit before the bounded batch is serviced.

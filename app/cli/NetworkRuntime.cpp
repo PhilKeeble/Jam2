@@ -2075,6 +2075,13 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
     std::int64_t mesh_grid_base_offset_frames = 0;
     std::int64_t mesh_grid_target_offset_frames = 0;
     bool mesh_grid_target_valid = false;
+    jam2::metronome::AuthorityPhaseTracker grid_phase_tracker;
+    std::uint64_t grid_phase_authority = 0, grid_phase_epoch = 0;
+    const jam2::metronome::AuthorityPhaseTrackingConfig grid_phase_tracking_config{
+        options.sample_rate,
+        std::max<std::uint64_t>(static_cast<std::uint64_t>(options.sample_rate+199)/200,
+            2ULL*static_cast<std::uint64_t>(std::max(0L,options.audio_buffer_size))),
+        1000};
     std::uint64_t mesh_grid_last_update_us = 0;
     std::uint64_t mesh_compensation_last_observation_us = 0;
     std::uint64_t next_peer_liveness_check_us = start_time;
@@ -2275,6 +2282,7 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
         mesh_grid_base_offset_frames = mapping.render_offset_frames;
         mesh_grid_target_offset_frames = mapping.render_offset_frames;
         mesh_grid_target_valid = true;
+        grid_phase_tracker.reset();
         return true;
     };
 
@@ -2345,6 +2353,16 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
             ? mesh_grid_target_offset_frames -
                 commands.state.metronome_render_offset_frames.load(std::memory_order_relaxed)
             : 0;
+        const auto& phase_stats=grid_phase_tracker.stats();
+        stats.grid_phase_accepted=phase_stats.accepted;
+        stats.grid_phase_delayed=phase_stats.delayed;
+        stats.grid_phase_reordered=phase_stats.reordered;
+        stats.grid_phase_raw_error_frames=phase_stats.raw_offset_frames-
+            commands.state.metronome_render_offset_frames.load(std::memory_order_relaxed);
+        stats.grid_phase_tolerance_frames=grid_phase_tracking_config.tolerance_frames;
+        stats.grid_phase_maximum_drift_ppm=grid_phase_tracking_config.maximum_relative_drift_ppm;
+        stats.grid_phase_last_accepted_age_us=phase_stats.last_accepted_us
+            ? jam2::monotonic_us()-phase_stats.last_accepted_us : 0;
         stats.transport_source_peer_id = mesh_transport_source_peer_id;
         stats.transport_event_counter = mesh_transport_event_counter;
         stats.transport_grid_revision = mesh_transport_grid_revision;
@@ -2657,12 +2675,13 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
         for (const auto& entry : peers) {
             const auto& peer = entry.second;
             if (peer.peer_id.value == authority.grid().authority_peer_id) {
-                if (peer.listener_phase_received_us && snapshot_time_us >= peer.listener_phase_received_us)
-                    snapshot.grid_authority_phase_age_us = snapshot_time_us - peer.listener_phase_received_us;
+                const auto phase_time=options.datagram_transport && authority.grid().mode==metronome_mode_id(MetronomeMode::SharedGrid)
+                    ? grid_phase_tracker.stats().last_accepted_us : peer.listener_phase_received_us;
+                if (phase_time && snapshot_time_us >= phase_time)
+                    snapshot.grid_authority_phase_age_us = snapshot_time_us - phase_time;
                 snapshot.grid_authority_phase_fresh = options.datagram_transport
-                    ? authority_beacons.phaseFresh(snapshot_time_us, peer.listener_phase_received_us)
-                    : peer.listener_phase_received_us && snapshot_time_us >= peer.listener_phase_received_us &&
-                        snapshot_time_us - peer.listener_phase_received_us <= 500000;
+                    ? authority_beacons.phaseFresh(snapshot_time_us, phase_time)
+                    : phase_time && snapshot_time_us >= phase_time && snapshot_time_us - phase_time <= 500000;
             }
             const auto* descriptor = network_session.peer(peer.peer_id);
             if (descriptor == nullptr) {
@@ -4367,9 +4386,10 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                                     const std::uint64_t projected = header.timing_value +
                                         peer_stream.stats().rtt_min_us *
                                             static_cast<std::uint64_t>(options.sample_rate) / 2000000ULL;
+                                    const auto local_raw_frame=current_engine_frame(audio.engine.get());
                                     const std::uint64_t local_frame =
                                         jam2::transport_musical_frame_from_raw(
-                                        current_engine_frame(audio.engine.get()),
+                                        local_raw_frame,
                                         commands.state.metronome_render_offset_frames.load(
                                             std::memory_order_relaxed));
                                     const std::uint64_t local_epoch =
@@ -4377,12 +4397,20 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                                     if (options.datagram_transport) {
                                         // Server experiment: the same phase calculation is also
                                         // exercised with accelerated clocks by the native test.
-                                        const auto error = jam2::metronome::grid_phase_error({
-                                            projected, metronome.epoch_sample_time, local_frame, local_epoch, bar_frames});
-                                        if (error) {
-                                            mesh_grid_target_offset_frames = commands.state.metronome_render_offset_frames.load(
-                                                std::memory_order_relaxed) + *error;
-                                            mesh_grid_target_valid = true;
+                                        // Classify physical sample-clock offset before bar
+                                        // wrapping: a delay over half a bar otherwise looks
+                                        // like an improved, forward-moving observation.
+                                        const auto mapping=jam2::metronome::grid_clock_offset({
+                                            projected,metronome.epoch_sample_time,local_raw_frame,local_epoch});
+                                        if (mapping) {
+                                            if (grid_phase_authority!=peer.peer_id.value || grid_phase_epoch!=metronome.epoch_sample_time) {
+                                                grid_phase_tracker.reset();grid_phase_authority=peer.peer_id.value;grid_phase_epoch=metronome.epoch_sample_time;
+                                            }
+                                            const auto proposed=*mapping;
+                                            if (grid_phase_tracker.observe({header.timing_value,datagram_receive_time_us,proposed},grid_phase_tracking_config)==
+                                                    jam2::metronome::AuthorityPhaseDecision::Accepted) {
+                                                mesh_grid_target_offset_frames=proposed;mesh_grid_target_valid=true;
+                                            }
                                         }
                                     } else {
                                         auto phase = [&](std::uint64_t frame, std::uint64_t epoch) {

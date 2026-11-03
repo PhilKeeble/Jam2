@@ -233,7 +233,7 @@ add_executable(jam2_audio_flow_interaction_tests EXCLUDE_FROM_ALL
     integration/network/AudioFlowInteractionTests.cpp)
 jam2_configure_test_target(jam2_audio_flow_interaction_tests)
 target_link_libraries(jam2_audio_flow_interaction_tests PRIVATE jam2_core)
-foreach(experiment capture interruption clock wasapi)
+foreach(experiment capture interruption clock wasapi coalescing gap-learning callback-phases callback-runway asio-cadence bounded-jitter startup-recovery repeated-recovery large-recovery)
     add_test(NAME jam2_audio_flow_${experiment}
         COMMAND $<TARGET_FILE:jam2_audio_flow_interaction_tests> ${experiment})
     set_tests_properties(jam2_audio_flow_${experiment} PROPERTIES
@@ -243,6 +243,15 @@ endforeach()
 set_property(TEST jam2_audio_flow_wasapi APPEND PROPERTY LABELS "wasapi;four-peer;fake-audio;network-impairment")
 set_property(TEST jam2_audio_flow_interruption jam2_audio_flow_clock
     APPEND PROPERTY LABELS "four-peer")
+set_property(TEST jam2_audio_flow_coalescing APPEND PROPERTY LABELS "four-peer;fake-audio;network-impairment;delivery")
+set_property(TEST jam2_audio_flow_gap-learning APPEND PROPERTY LABELS "four-peer;fake-audio;network-impairment;delivery")
+set_property(TEST jam2_audio_flow_callback-phases APPEND PROPERTY LABELS "four-peer;fake-audio;network-impairment;delivery")
+set_property(TEST jam2_audio_flow_callback-runway APPEND PROPERTY LABELS "four-peer;fake-audio;network-impairment;delivery")
+set_property(TEST jam2_audio_flow_asio-cadence APPEND PROPERTY LABELS "four-peer;fake-audio;network-impairment;delivery")
+set_property(TEST jam2_audio_flow_bounded-jitter APPEND PROPERTY LABELS "four-peer;fake-audio;network-impairment;delivery")
+set_property(TEST jam2_audio_flow_startup-recovery APPEND PROPERTY LABELS "four-peer;fake-audio;network-impairment;delivery;startup;recovery")
+set_property(TEST jam2_audio_flow_repeated-recovery APPEND PROPERTY LABELS "four-peer;fake-audio;network-impairment;delivery;recovery")
+set_property(TEST jam2_audio_flow_large-recovery APPEND PROPERTY LABELS "four-peer;fake-audio;network-impairment;delivery;recovery")
 
 add_executable(jam2_core_input_tests EXCLUDE_FROM_ALL
     unit/core/CoreInputTests.cpp)
@@ -273,6 +282,11 @@ add_test(NAME jam2_core_release_return_units
 set_tests_properties(jam2_core_release_return_units PROPERTIES
     LABELS "unit;core;audio;network;performance;four-peer"
     TIMEOUT 60)
+add_test(NAME jam2_core_recovery_accounting_units
+    COMMAND $<TARGET_FILE:jam2_core_input_tests> --recovery-accounting)
+set_tests_properties(jam2_core_recovery_accounting_units PROPERTIES
+    LABELS "unit;core;audio;network;performance;four-peer;delivery;recovery"
+    TIMEOUT 30)
 
 foreach(profile fast64 moderate safe)
     add_test(NAME jam2_profile_${profile}_timing
@@ -1762,6 +1776,35 @@ jam2_configure_test_target(jam2_four_metronome_impairment)
 target_link_libraries(jam2_four_metronome_impairment PRIVATE
     jam2_test_network_support jam2_test_process_support Qt6::Core Qt6::Network)
 
+add_executable(jam2_delivery_delay_envelope_tests EXCLUDE_FROM_ALL unit/support/DeliveryDelayEnvelopeTests.cpp)
+jam2_configure_test_target(jam2_delivery_delay_envelope_tests)
+target_link_libraries(jam2_delivery_delay_envelope_tests PRIVATE jam2_test_network_support)
+add_test(NAME jam2_delivery_delay_envelope_units COMMAND $<TARGET_FILE:jam2_delivery_delay_envelope_tests>)
+set_tests_properties(jam2_delivery_delay_envelope_units PROPERTIES LABELS "unit;support;network;network-impairment" TIMEOUT 15)
+
+add_executable(jam2_asio_delivery_tests EXCLUDE_FROM_ALL integration/network/AsioDeliveryImpairmentIntegration.cpp)
+jam2_configure_test_target(jam2_asio_delivery_tests)
+target_link_libraries(jam2_asio_delivery_tests PRIVATE jam2_test_network_support jam2_test_process_support)
+add_dependencies(jam2_asio_delivery_tests jam2)
+add_test(NAME jam2_oct30_four_peer_delivery_integration COMMAND $<TARGET_FILE:jam2_asio_delivery_tests>
+    "${JAM2_TEST_PUBLIC_EXECUTABLE}" --fake-four)
+set_tests_properties(jam2_oct30_four_peer_delivery_integration PROPERTIES
+    LABELS "integration;network;four-peer;audio;fake-audio;udp-multiplex;network-impairment"
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 180 RUN_SERIAL TRUE)
+set(JAM2_ASIO_DELIVERY_PROFILE "" CACHE FILEPATH "Explicit two-device ASIO network impairment profile")
+if(DEFINED ENV{JAM2_ASIO_DELIVERY_PROFILE})
+    set(JAM2_ASIO_DELIVERY_PROFILE "$ENV{JAM2_ASIO_DELIVERY_PROFILE}" CACHE FILEPATH "Explicit two-device ASIO network impairment profile" FORCE)
+endif()
+if(WIN32)
+    add_test(NAME jam2_asio_oct30_delivery_hardware COMMAND $<TARGET_FILE:jam2_asio_delivery_tests>
+        "${JAM2_TEST_PUBLIC_EXECUTABLE}" "${JAM2_ASIO_DELIVERY_PROFILE}")
+    set_tests_properties(jam2_asio_oct30_delivery_hardware PROPERTIES
+        LABELS "integration;hardware;audio;asio;network-impairment" WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        TIMEOUT 800 RUN_SERIAL TRUE SKIP_RETURN_CODE 77)
+    set_tests_properties(jam2_asio_oct30_delivery_hardware jam2_oct30_four_peer_delivery_integration jam2_delivery_delay_envelope_units PROPERTIES
+        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
+endif()
+
 add_executable(jam2_four_session_command_integration EXCLUDE_FROM_ALL
     integration/network/FourSessionCommandIntegration.cpp)
 jam2_configure_test_target(jam2_four_session_command_integration)
@@ -2442,3 +2485,56 @@ add_dependencies(jam2_tests_all jam2_session_notification_tests jam2_four_peer_d
 add_dependencies(jam2_tests_gui jam2_performance_visibility_integration)
 add_dependencies(jam2_tests_performance jam2_performance_visibility_integration)
 add_dependencies(jam2_tests_all jam2_performance_visibility_integration)
+
+add_dependencies(jam2_tests_unit jam2_delivery_delay_envelope_tests)
+add_dependencies(jam2_tests_network jam2_delivery_delay_envelope_tests jam2_asio_delivery_tests)
+add_dependencies(jam2_tests_hardware jam2_asio_delivery_tests)
+add_dependencies(jam2_tests_all jam2_delivery_delay_envelope_tests jam2_asio_delivery_tests)
+add_custom_target(jam2_tests_delivery DEPENDS jam2 jam2_delivery_delay_envelope_tests
+    jam2_asio_delivery_tests jam2_udp_candidate_network_tests jam2_four_metronome_impairment jam2_audio_flow_interaction_tests
+    jam2_udp_transport_comparison_tests)
+add_executable(jam2_audio_baseline_analysis_tests EXCLUDE_FROM_ALL unit/support/AudioBaselineAnalysisTests.cpp)
+jam2_configure_test_target(jam2_audio_baseline_analysis_tests)
+add_test(NAME jam2_audio_baseline_analysis_units COMMAND $<TARGET_FILE:jam2_audio_baseline_analysis_tests>)
+set_tests_properties(jam2_audio_baseline_analysis_units PROPERTIES LABELS "unit;support;audio;delivery" TIMEOUT 15)
+add_dependencies(jam2_tests_delivery jam2_audio_baseline_analysis_tests)
+add_dependencies(jam2_tests_delivery jam2_cli_boundary_tests)
+set_property(TEST jam2_cli_boundary_units APPEND PROPERTY LABELS delivery)
+add_dependencies(jam2_tests_unit jam2_audio_baseline_analysis_tests)
+add_dependencies(jam2_tests_all jam2_audio_baseline_analysis_tests)
+add_executable(jam2_authority_phase_tracker_tests EXCLUDE_FROM_ALL unit/core/AuthorityPhaseTrackerTests.cpp)
+jam2_configure_test_target(jam2_authority_phase_tracker_tests)
+target_link_libraries(jam2_authority_phase_tracker_tests PRIVATE jam2_core)
+add_test(NAME jam2_authority_phase_tracker_units COMMAND $<TARGET_FILE:jam2_authority_phase_tracker_tests>)
+add_test(NAME jam2_grid_beacon_delayed_control COMMAND $<TARGET_FILE:jam2_server_grid_beacon_simulation> --delayed-control)
+set_tests_properties(jam2_grid_beacon_delayed_control PROPERTIES WILL_FAIL TRUE LABELS "integration;core;network;metronome;four-peer;delivery" TIMEOUT 90)
+set_tests_properties(jam2_authority_phase_tracker_units PROPERTIES LABELS "unit;core;network;metronome;four-peer;delivery" TIMEOUT 15)
+add_dependencies(jam2_tests_delivery jam2_authority_phase_tracker_tests jam2_core_boundary_tests jam2_core_input_tests jam2_audio_device_processing_tests
+    jam2_server_grid_beacon_simulation jam2_server_grid_assignment_simulation)
+add_dependencies(jam2_tests_unit jam2_authority_phase_tracker_tests)
+add_dependencies(jam2_tests_network jam2_authority_phase_tracker_tests jam2_server_grid_beacon_simulation)
+add_dependencies(jam2_tests_all jam2_authority_phase_tracker_tests)
+set_property(TEST jam2_delivery_delay_envelope_units jam2_oct30_four_peer_delivery_integration APPEND PROPERTY LABELS delivery)
+if(WIN32)
+    set_property(TEST jam2_asio_oct30_delivery_hardware APPEND PROPERTY LABELS delivery)
+endif()
+
+add_executable(jam2_udp_transport_comparison_tests EXCLUDE_FROM_ALL integration/network/UdpTransportComparisonTests.cpp
+    "${CMAKE_SOURCE_DIR}/app/application/UdpMultiplexTransport.cpp"
+    "${CMAKE_SOURCE_DIR}/app/application/UdpStreamConnection.cpp"
+    "${CMAKE_SOURCE_DIR}/app/application/PeerBootstrap.cpp"
+    "${CMAKE_SOURCE_DIR}/app/application/PeerIntroductionCoordinator.cpp"
+    "${CMAKE_SOURCE_DIR}/app/application/ControlClient.cpp"
+    "${CMAKE_SOURCE_DIR}/app/application/ControlServer.cpp"
+    "${CMAKE_SOURCE_DIR}/app/application/ControlProtocol.cpp")
+jam2_configure_test_target(jam2_udp_transport_comparison_tests)
+target_include_directories(jam2_udp_transport_comparison_tests PRIVATE "${CMAKE_SOURCE_DIR}/app/application" "${CMAKE_CURRENT_SOURCE_DIR}/support")
+target_link_libraries(jam2_udp_transport_comparison_tests PRIVATE jam2_core jam2_control_wire Qt6::Core Qt6::Network)
+add_test(NAME jam2_udp_transport_comparison COMMAND $<TARGET_FILE:jam2_udp_transport_comparison_tests>)
+set_tests_properties(jam2_udp_transport_comparison PROPERTIES LABELS "integration;network;four-peer;udp-multiplex;network-impairment;delivery" TIMEOUT 180 RUN_SERIAL TRUE)
+if(WIN32)
+    target_link_libraries(jam2_udp_transport_comparison_tests PRIVATE Winmm)
+    set_tests_properties(jam2_udp_transport_comparison PROPERTIES ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
+endif()
+add_dependencies(jam2_tests_network jam2_udp_transport_comparison_tests)
+add_dependencies(jam2_tests_all jam2_udp_transport_comparison_tests)

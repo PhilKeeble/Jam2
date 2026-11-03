@@ -415,6 +415,9 @@ struct StreamControl {
     std::atomic<int> output_level_ppm{1000000};
     std::atomic<int> playback_ratio_ppm{1000000};
     std::atomic<int> playback_ratio_applied_ppm{1000000};
+    // Actual extra source advances on fully supplied callbacks. Interpolation
+    // prefetch and concealed underrun frames are excluded; cumulative per device.
+    std::atomic<std::uint64_t> playback_extra_consumed_frames{0};
     std::atomic<bool> playback_ratio_ramping{false};
     std::atomic<std::uint64_t> playback_ratio_ramp_frames{0};
     // Zero leaves the general ramp unchanged for standalone/custom backends.

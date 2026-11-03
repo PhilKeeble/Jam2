@@ -70,12 +70,16 @@ public:
 
     void setResamplerRatio(double value) noexcept override { ratio = value; }
     std::uint64_t underrunFrames() const noexcept override { return underruns; }
+    std::size_t callbackFrames() const noexcept override { return callback; }
+    void observeDeliveryGap(const jam2::PeerDeliveryGap&) noexcept override { ++deliveryGaps; }
 
     std::size_t depth = 0;
     std::size_t pushed = 0;
     std::size_t requestedDrops = 0;
     std::uint64_t underruns = 0;
     double ratio = 1.0;
+    std::uint64_t deliveryGaps = 0;
+    std::size_t callback = 0;
 };
 
 class CollectingSink final : public jam2::PeerStreamPlayback {
@@ -471,6 +475,170 @@ void testProtocolPeerAndMixerBoundaries()
             recoveryMixer.stats().deadline_slots > 0 &&
             recoveryMixer.stats().adaptive_raise_events > 0,
         "idle mixer gate still observes asynchronous output underruns and advances recovery");
+}
+
+void testInterpolationWorkerRunway()
+{
+    BufferSink sink;sink.callback=32;
+    jam2::PeerMixerConfig config;config.frames_per_block=128;config.sample_rate=48000;
+    config.adaptive_playback_cushion=true;config.adaptive_min_frames=config.adaptive_target_frames=64;
+    config.adaptive_max_frames=config.output_max_frames=512;
+    jam2::PeerMixer mixer(config,&sink);
+    std::array<jam2::PeerStreamPlayback*,3> sources{};std::array<std::int32_t,128> block{};block.fill(1000000);
+    for (std::size_t i=0;i<sources.size();++i) {
+        sources[i]=mixer.addPeer(i+1,2048);mixer.setPeerActive(i+1,true);
+        sources[i]->setResamplerRatio(.99998);sources[i]->pushFrames(block);
+    }
+    mixer.advance(1000);
+    expect(sink.depth==128,"four-peer interpolation fixture established one complete output block");
+    // A fractional callback consumed 33 input frames. The next network turn
+    // can be 96 frames away even though the callback quantum is only 32.
+    sink.depth=95;mixer.advance(3000);
+    expect(mixer.stats().worker_runway_frames==96,"fixture models the measured ASIO worker runway");
+    expect(sink.depth==96 && mixer.stats().lookahead_hold_frames==3,
+        "held interpolation neighbours reach the callback before worker runway expires");
+    expect(mixer.stats().adaptive_padding_frames==0 && mixer.stats().adaptive_target_frames==64,
+        "interpolation runway adds neither silence nor a higher latency target");
+    for (auto* source:sources) source->pushFrames(block);
+    mixer.advance(4000);
+    expect(mixer.stats().output_frames==256,"early interpolation neighbour is not replayed when the next packet arrives");
+    BufferSink readySink;readySink.callback=32;jam2::PeerMixer ready(config,&readySink);
+    std::array<jam2::PeerStreamPlayback*,3> readySources{};
+    for (std::size_t i=0;i<readySources.size();++i) {
+        readySources[i]=ready.addPeer(i+1,2048);ready.setPeerActive(i+1,true);
+        readySources[i]->setResamplerRatio(.99998);readySources[i]->pushFrames(block);
+    }
+    ready.advance(1000);readySink.depth=95;
+    for (auto* source:readySources) source->pushFrames(std::span(block).first(40));
+    ready.advance(3000);
+    expect(ready.stats().lookahead_hold_frames==0 && readySink.depth>=96,
+        "available real frames cover worker runway without predicting an unnecessary neighbour");
+    for (const auto depth : {64U, 96U}) {
+        BufferSink coveredSink;
+        coveredSink.callback = 32;
+        jam2::PeerMixer covered(config, &coveredSink);
+        for (std::size_t i = 0; i < sources.size(); ++i) {
+            sources[i] = covered.addPeer(i + 1, 2048);
+            covered.setPeerActive(i + 1, true);
+            sources[i]->setResamplerRatio(.99998);
+            sources[i]->pushFrames(block);
+        }
+        covered.advance(1000);
+        coveredSink.depth = depth;
+        covered.advance(3000);
+        expect(covered.stats().lookahead_hold_frames == 0,
+            "early interpolation fallback covers only a one/two-frame shortfall, never an adequate or whole-callback path");
+    }
+}
+
+void testMinimumTargetCallbackSurplus()
+{
+    BufferSink sink;
+    sink.callback = 32;
+    jam2::PeerMixerConfig config;
+    config.sample_rate = 48000;
+    config.frames_per_block = 128;
+    config.adaptive_playback_cushion = true;
+    config.adaptive_min_frames = config.adaptive_target_frames = 64;
+    config.adaptive_max_frames = config.output_max_frames = 1024;
+    config.adaptive_surplus_stable_us = 1000;
+    jam2::PeerMixer mixer(config, &sink);
+    std::array<jam2::PeerStreamPlayback*, 3> sources{};
+    std::array<std::int32_t, 128> block{};
+    for (std::size_t i = 0; i < sources.size(); ++i) {
+        sources[i] = mixer.addPeer(i + 1, 2048);
+        mixer.setPeerActive(i + 1, true);
+        sources[i]->pushFrames(block);
+    }
+    mixer.advance(1000);
+    // Model stable real audio at six callback quanta: below two packets, but
+    // comfortably above the observed 96-frame worker runway and 64-frame target.
+    sink.depth = 192;
+    mixer.advance(3000);
+    for (auto* source : sources) source->pushFrames(std::span(block).first(64));
+    mixer.advance(4000); // Complete the explicit 1000 us stable interval at 192 frames.
+    expect(sink.ratio > 1.0,
+        "minimum target retires sustained callback surplus below two packet blocks");
+    expect(mixer.stats().adaptive_target_frames == 64 && mixer.stats().adaptive_padding_frames == 0,
+        "callback surplus release needs neither padding nor a higher target");
+    sink.depth = 64;
+    mixer.advance(4500);
+    expect(sink.ratio == 1.0, "release stops when measured worker runway is no longer covered");
+
+    BufferSink runwaySink;
+    runwaySink.callback = 32;
+    jam2::PeerMixer guarded(config, &runwaySink);
+    for (std::size_t i = 0; i < sources.size(); ++i) {
+        sources[i] = guarded.addPeer(i + 1, 2048);
+        guarded.setPeerActive(i + 1, true);
+        sources[i]->pushFrames(block);
+    }
+    guarded.advance(1000);
+    runwaySink.depth = 96;
+    guarded.advance(3000);
+    runwaySink.depth = 96;
+    for (auto* source : sources) source->pushFrames(std::span(block).first(64));
+    guarded.advance(5000);
+    expect(guarded.stats().worker_runway_frames == 96 && runwaySink.ratio == 1.0,
+        "a stable-surplus interval must cover worker runway plus a callback, not just two callbacks");
+
+    auto smallConfig = config;
+    smallConfig.frames_per_block = 64;
+    BufferSink changingWorkerSink;
+    changingWorkerSink.callback = 32;
+    jam2::PeerMixer changingWorker(smallConfig, &changingWorkerSink);
+    for (std::size_t i = 0; i < sources.size(); ++i) {
+        sources[i] = changingWorker.addPeer(i + 1, 2048);
+        changingWorker.setPeerActive(i + 1, true);
+        sources[i]->pushFrames(std::span(block).first(64));
+    }
+    changingWorker.advance(1000);
+    changingWorkerSink.depth = 112;
+    changingWorker.advance(2000);
+    for (auto* source : sources) source->pushFrames(std::span(block).first(64));
+    changingWorker.advance(3500);
+    expect(changingWorkerSink.ratio == 1.0,
+        "two-callback packets retain their original stable-surplus margin as worker timing changes");
+
+    BufferSink nonDivisorSink;
+    nonDivisorSink.callback = 96;
+    jam2::PeerMixer nonDivisor(config, &nonDivisorSink);
+    for (std::size_t i = 0; i < sources.size(); ++i) {
+        sources[i] = nonDivisor.addPeer(i + 1, 2048);
+        nonDivisor.setPeerActive(i + 1, true);
+        sources[i]->pushFrames(block);
+    }
+    nonDivisor.advance(1000);
+    nonDivisorSink.depth = 272;
+    nonDivisor.advance(5000);
+    for (auto* source : sources) source->pushFrames(block);
+    nonDivisor.advance(6000);
+    expect(nonDivisorSink.ratio > 1.0,
+        "a callback quantum that does not divide the packet cannot raise the original surplus floor");
+}
+
+void testShortDeliveryGapQualification()
+{
+    BufferSink sink;auto config=peerConfig();config.sample_time_playout=false;config.playback_max_frames=0;
+    config.drift_correction=false;
+    auto invalid=config;invalid.adaptive_delivery_gap_confirmations=0;
+    expectThrows([&] {jam2::PeerStream bad(invalid,0,&sink);},"zero gap confirmations rejected");
+    invalid=config;invalid.adaptive_delivery_gap_confirmation_window_us=0;
+    expectThrows([&] {jam2::PeerStream bad(invalid,0,&sink);},"zero gap observation window rejected");
+    jam2::PeerStream stream(config,0,&sink);std::array<std::uint8_t,128> payload{};std::uint32_t sequence=0;
+    const auto send=[&](std::uint64_t now) {
+        ++sequence;const jam2::protocol::Header header{jam2::protocol::PacketType::Audio,1,sequence,
+            std::uint64_t(sequence)*64,std::uint16_t(payload.size()),0};
+        expect(stream.receiveAudio(header,payload,now)==jam2::PeerAudioResult::Accepted,"gap fixture packet accepted");
+    };
+    send(1000);send(5000);send(5001);send(9000);
+    expect(sink.deliveryGaps==0,"isolated short gaps do not select additional protection");
+    send(9001);send(13000);
+    expect(sink.deliveryGaps==1,"repeated short batching is reported after explicit confirmation count");
+    send(64000);
+    expect(sink.deliveryGaps==2,"a large delivery interruption retains immediate reporting");
+    send(2200000);const auto before=sink.deliveryGaps;send(2204000);
+    expect(sink.deliveryGaps==before,"expired short-gap evidence cannot qualify an isolated later gap");
 }
 
 void testPeerStreamDriftCalibrationRejectsDequeuedBurst()
@@ -1156,6 +1324,9 @@ int main()
         testPreparedAndRecorderBoundaries();
         testProtocolPeerAndMixerBoundaries();
         testPeerStreamDriftCalibrationRejectsDequeuedBurst();
+        testShortDeliveryGapQualification();
+        testInterpolationWorkerRunway();
+        testMinimumTargetCallbackSurplus();
         testJitterBufferTracksOccupancyAcrossClockDrift();
         testJitterBufferPreservesOrderAndRebasesDiscontinuities();
         testUdpStunAndSessionBoundaries();

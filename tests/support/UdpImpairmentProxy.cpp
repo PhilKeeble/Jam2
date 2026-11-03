@@ -61,7 +61,8 @@ bool UdpImpairmentProxy::start(QString& error)
             validMilliseconds(value.fixedDelayMs) &&
             validMilliseconds(value.jitterMs) &&
             validMilliseconds(value.burstLossAfterMs) &&
-            validMilliseconds(value.burstLossDurationMs);
+            validMilliseconds(value.burstLossDurationMs) && value.deliveryDelay.valid() &&
+            validMilliseconds(value.deliveryBatchMs) && value.deliveryBatchMs<=1000;
     };
     if (serverAddress_.isNull() || serverPort_ == 0 ||
         !valid(clientToServerImpairment_) || !valid(serverToClientImpairment_)) {
@@ -271,17 +272,21 @@ void UdpImpairmentProxy::schedule(
         ++proxyStats.corrupted;
     }
 
-    double delayMs = settings.fixedDelayMs;
+    const double elapsedMs = std::chrono::duration<double, std::milli>(now - *directionState.firstPacketAt).count();
+    double delayMs = settings.fixedDelayMs + settings.deliveryDelay.delayMs(elapsedMs);
     if (settings.jitterMs > 0.0) {
         std::uniform_real_distribution<double> jitter(0.0, settings.jitterMs);
         delayMs += jitter(random_);
     }
+    delayMs=deliveryBatchDelayMs(elapsedMs,delayMs,settings.deliveryBatchMs);
     const bool reordered = chance(settings.reorderPercent);
     if (reordered) {
         delayMs += std::max(2.0, settings.jitterMs);
         ++proxyStats.reordered;
     }
     const bool duplicate = chance(settings.duplicatePercent);
+    proxyStats.requestedDelayMaxUs = std::max(proxyStats.requestedDelayMaxUs,
+        static_cast<std::uint64_t>(delayMs * 1000.));
     const bool timed = delayMs > 0.0 || reordered;
     if (!timed) {
         if (!send(direction, destinationAddress, destinationPort, bytes, delivery)) return;
@@ -384,6 +389,10 @@ void UdpImpairmentProxy::releaseDue()
     while (!pending_.empty() && pending_.top().releaseAt <= now) {
         PendingDatagram datagram = pending_.top();
         pending_.pop();
+        auto& observed = mutableStats(datagram.direction);
+        observed.releaseLatenessMaxUs = std::max(observed.releaseLatenessMaxUs,
+            static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                now - datagram.releaseAt).count()));
         (void)send(
             datagram.direction,
             datagram.destinationAddress,
