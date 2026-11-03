@@ -77,6 +77,28 @@ latency; disconnect cancellation is not playback retirement. Delayed-beacon filt
 records 86 rejected observations; raw sampled errors reach ~89 ms, mapping-target
 errors stay below 3.90 ms. Zero sequence loss/mux drops does not imply good audio.
 
+### Follow-up: partial transfers where currently disabled
+
+Test `PeerMixer::Impl::partialReleaseFrames()` in
+`libs/jam2-core/src/peer_mixer.cpp`. It moves already decoded/resampled peer audio
+to the output ring before a full mixer block is available: e.g. 127 usable frames
+can supply a 64-frame callback while the mixer normally handles 128-frame blocks.
+The `adaptive_min_frames > mixed_output.size()` guard disables this for the
+larger profile (512 > 128); Fast already permits it subject to other guards.
+
+Add focused native CTests comparing current behavior with a narrowly enabled
+candidate: 48 kHz, 128-frame packets/64-frame callbacks, resampler remainders,
+small worker delays, returning bursts and raised targets. Cover active hard
+recovery/debt, insufficient callback runway and output-cap conditions separately;
+establish why those guards are needed before relaxing any. Preserve four-peer
+coverage and compare Direct/server with real CoreAudio and Windows ASIO follow-up.
+Measure peer/output depth and valid frames available **at the underrun**, partial
+releases, padding, trimming and subsequent target growth. Moving audio must respect
+the existing shared buffer budget, with no additional clean latency or quality
+failures. Two-second Wi-Fi snapshots do not establish benefit: larger-profile
+Windows had 0 steady underrun frames over 98 s server / 229 over 52 s Direct.
+Do not attribute the ~65 ms cushion to this restriction without reproducing it.
+
 ### macOS investigation / native test entry points
 
 - Read `AGENTS.md` and applicable macOS test instructions; use optimized Release
