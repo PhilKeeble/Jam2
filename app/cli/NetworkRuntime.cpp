@@ -1356,6 +1356,9 @@ void print_optional_audio_stats(const OptionalAudioStream& audio, const Options&
             << "WASAPI invalid timestamps: " << device.invalid_timestamps << "\n"
             << "WASAPI device error: " << device.error << "\n";
         std::cout << "WASAPI input: " << stream_info.input_device_name << "\n"
+            << "WASAPI recovery padding policy: "
+            << (stream_info.recovery_padding_policy == jam2::audio::RecoveryPaddingPolicy::MeasuredShortage
+                ? "measured-shortage" : "learned-cushion") << "\n"
             << "WASAPI shared low-period active: " << stream_info.low_latency_shared << "\n"
             << "WASAPI compatibility reason HRESULT: " << stream_info.shared_fallback_error << "\n"
             << "WASAPI input/output mix rates: " << stream_info.input_mix_sample_rate << "/" << stream_info.output_mix_sample_rate << "\n"

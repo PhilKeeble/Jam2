@@ -1831,9 +1831,10 @@ std::size_t Engine::networkPlaybackCallbackFrames() const noexcept
 
 audio::PlaybackRecoveryState Engine::networkPlaybackRecoveryState() const noexcept
 {
-    return impl_ != nullptr && impl_->control != nullptr
-        ? audio::device_processing::read_playback_recovery_state(*impl_->control)
-        : audio::PlaybackRecoveryState{};
+    if (impl_ == nullptr || impl_->control == nullptr) return {};
+    auto state = audio::device_processing::read_playback_recovery_state(*impl_->control);
+    state.padding_policy = impl_->stream_info.recovery_padding_policy;
+    return state;
 }
 
 NetworkPlaybackTimelineSnapshot Engine::networkPlaybackTimelineSnapshot() const noexcept

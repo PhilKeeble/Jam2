@@ -113,6 +113,9 @@ int main(int argc, char** argv) {
             config.audio_buffer_frames = block;
             engine.start(config);
             const auto stream = engine.coldSnapshot().stream;
+            require(stream.recovery_padding_policy == jam2::audio::RecoveryPaddingPolicy::MeasuredShortage &&
+                engine.networkPlaybackRecoveryState().padding_policy == stream.recovery_padding_policy,
+                QStringLiteral("WASAPI must publish its bounded recovery policy through the real engine"));
             engine.requestStop(); engine.join();
             require(stream.output_period_frames > 0, QStringLiteral("automatic WASAPI period must be reported"));
             if (stream.low_latency_shared) {

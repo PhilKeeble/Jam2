@@ -714,6 +714,7 @@ struct StreamInfo {
     long shared_fallback_error = 0;
     bool realtime_scheduling_active = false;
     long realtime_scheduling_error = 0;
+    RecoveryPaddingPolicy recovery_padding_policy = RecoveryPaddingPolicy::LearnedCushion;
 };
 
 struct DeviceStreamStatus {

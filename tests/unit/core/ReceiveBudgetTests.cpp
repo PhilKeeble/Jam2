@@ -76,7 +76,7 @@ struct Sink final : jam2::PeerStreamPlayback {
     std::size_t callbackFrames() const noexcept override { return 32; }
     std::uint64_t underrunFrames() const noexcept override { return underruns; }
     std::size_t pushFrames(std::span<const std::int32_t> input) noexcept override {
-        const auto count = std::min(input.size(), frames.size() - depth);
+        const auto count = (std::min)(input.size(), frames.size() - depth);
         std::copy_n(input.begin(), count, frames.begin() + depth); depth += count; return count;
     }
     void requestDropFrames(std::size_t) noexcept override {}

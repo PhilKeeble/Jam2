@@ -68,6 +68,12 @@ stream maximum is retained separately. Use physical calibration for actual
 round-trip latency. Endpoint loss stops the stream with an error; Jam2 does not
 silently select another microphone or output.
 
+WASAPI recovery silence is bounded by the measured missing frames, rather than
+refilling the whole learned playback cushion. Real audio arriving in a deferred
+receive batch satisfies that recovery first. Startup prefill and the learned
+real-audio retention target remain separately measured; diagnostics print the
+active recovery padding policy. Other backends retain their existing policy.
+
 ## CLI Help
 
 Use `-h` or `--help` for the command menu, then apply it to a command or network/debug subcommand for its accepted options and ranges:

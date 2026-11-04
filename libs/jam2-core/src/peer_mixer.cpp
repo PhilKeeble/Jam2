@@ -342,7 +342,7 @@ struct PeerMixer::Impl {
     std::vector<std::int32_t> mixed_output;
     std::vector<std::int32_t> silence_output;
     bool started = false;
-    std::size_t pending_recovery_padding_goal = 0;
+    std::size_t pending_recovery_padding_frames = 0;
     std::size_t slot_frames_released = 0;
     bool slot_had_missing = false;
     std::uint64_t next_deadline_us = 0;
@@ -846,7 +846,7 @@ struct PeerMixer::Impl {
         stats.receive_recovery_debt_frames = 0;
         receive_catchup_active = false;
         receive_rebase_started = false;
-        pending_recovery_padding_goal = 0;
+        pending_recovery_padding_frames = 0;
         slot_frames_released = 0;
         slot_had_missing = false;
         receive_recovery_stable_until_us = 0;
@@ -889,7 +889,7 @@ struct PeerMixer::Impl {
         if (contributing == 0) {
             slot_frames_released = 0;
             slot_had_missing = false;
-            pending_recovery_padding_goal = 0;
+            pending_recovery_padding_frames = 0;
         }
         stats.active_peers = active;
         stats.contributing_peers = contributing;
@@ -944,25 +944,30 @@ struct PeerMixer::Impl {
 
     enum class CushionPurpose { InitialPrefill, UnderrunRecovery };
 
-    void padOutputTo(std::uint64_t cushion_goal, CushionPurpose purpose) noexcept
+    void padOutputTo(std::uint64_t cushion_goal, CushionPurpose purpose,
+        std::uint64_t maximum_padding_frames = (std::numeric_limits<std::uint64_t>::max)()) noexcept
     {
         if (!config.adaptive_playback_cushion || output == nullptr) return;
         std::size_t work = 0;
+        std::uint64_t padded = 0;
         while (output->depthFrames() < cushion_goal &&
-               work < config.max_blocks_per_advance) {
+               work < config.max_blocks_per_advance && padded < maximum_padding_frames) {
             const std::size_t missing = static_cast<std::size_t>(
                 cushion_goal - output->depthFrames());
-            const std::size_t count = std::min(missing, silence_output.size());
+            const std::size_t count = std::min<std::uint64_t>(
+                std::min(missing, silence_output.size()), maximum_padding_frames - padded);
             const std::size_t pushed = pushOutput(
                 std::span<const std::int32_t>(silence_output.data(), count));
             stats.adaptive_padding_frames += pushed;
+            padded += pushed;
             if (purpose == CushionPurpose::UnderrunRecovery) creditRecoveryFrames(pushed);
             if (pushed < count) {
                 break;
             }
             ++work;
         }
-        if (work == config.max_blocks_per_advance && output->depthFrames() < cushion_goal) {
+        if (work == config.max_blocks_per_advance && padded < maximum_padding_frames &&
+            output->depthFrames() < cushion_goal) {
             ++stats.work_budget_yields;
         }
     }
@@ -1464,7 +1469,7 @@ struct PeerMixer::Impl {
             : ContributorReadiness{cached_all_ready, cached_any_ready};
         if (stats.contributing_peers == 0) {
             cancelRecoveryBudget();
-            pending_recovery_padding_goal = 0;
+            pending_recovery_padding_frames = 0;
             slot_frames_released = 0;
             slot_had_missing = false;
             stats.release_worker_guard_active = false;
@@ -1567,12 +1572,16 @@ struct PeerMixer::Impl {
                 }
             }
         }
-        // Fill the measured runway goal after the batch; real audio
-        // arriving in this batch counts toward that goal.
+        // WASAPI retains its learned target for real audio, but replaces only
+        // measured shortages with silence. Other device backends retain their
+        // established cushion recovery policy.
         if (!readiness.any_ready && work == 0 && actual_output_underrun && output != nullptr) {
             const std::size_t goal = adaptive_target_frames > mixed_output.size()
                 ? static_cast<std::size_t>(adaptive_target_frames - mixed_output.size()) : 0;
-            pending_recovery_padding_goal = std::max(pending_recovery_padding_goal, goal);
+            const auto padding = output->playbackRecoveryState().padding_policy ==
+                    audio::RecoveryPaddingPolicy::MeasuredShortage
+                ? static_cast<std::size_t>(std::min<std::uint64_t>(goal, missing_frames)) : goal;
+            pending_recovery_padding_frames = std::max(pending_recovery_padding_frames, padding);
         }
         trimLivePathToTarget();
         if (work == config.max_blocks_per_advance &&
@@ -1584,13 +1593,17 @@ struct PeerMixer::Impl {
     void finishReceiveBatch(bool receive_budget_exhausted) noexcept
     {
         if (stats.contributing_peers == 0 || output == nullptr || !output->acceptsFrames()) {
-            pending_recovery_padding_goal = 0;
+            pending_recovery_padding_frames = 0;
         }
-        if (pending_recovery_padding_goal && !receive_budget_exhausted &&
+        if (pending_recovery_padding_frames && !receive_budget_exhausted &&
             !receive_catchup_active) {
-            padOutputTo(std::min<std::uint64_t>(normalOutputLimitFrames(),
-                pending_recovery_padding_goal), CushionPurpose::UnderrunRecovery);
-            pending_recovery_padding_goal = 0;
+            // Real frames delivered during a deferred batch cover this same
+            // shortage. Do not put recovery silence behind those frames.
+            padOutputTo(std::min<std::uint64_t>(normalOutputLimitFrames(), pending_recovery_padding_frames),
+                CushionPurpose::UnderrunRecovery,
+                output->playbackRecoveryState().padding_policy == audio::RecoveryPaddingPolicy::MeasuredShortage
+                    ? pending_recovery_padding_frames : (std::numeric_limits<std::uint64_t>::max)());
+            pending_recovery_padding_frames = 0;
         }
         if (!receive_catchup_active) {
             return;

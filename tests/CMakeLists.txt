@@ -256,7 +256,7 @@ add_executable(jam2_audio_flow_interaction_tests EXCLUDE_FROM_ALL
     integration/network/AudioFlowInteractionTests.cpp)
 jam2_configure_test_target(jam2_audio_flow_interaction_tests)
 target_link_libraries(jam2_audio_flow_interaction_tests PRIVATE jam2_core)
-foreach(experiment capture interruption clock wasapi coalescing gap-learning callback-phases callback-runway asio-cadence bounded-jitter startup-recovery repeated-recovery large-recovery ingress-timing)
+foreach(experiment capture interruption clock wasapi wasapi-fast coalescing gap-learning callback-phases callback-runway asio-cadence bounded-jitter startup-recovery repeated-recovery large-recovery ingress-timing)
     add_test(NAME jam2_audio_flow_${experiment}
         COMMAND $<TARGET_FILE:jam2_audio_flow_interaction_tests> ${experiment})
     set_tests_properties(jam2_audio_flow_${experiment} PROPERTIES
@@ -265,6 +265,7 @@ foreach(experiment capture interruption clock wasapi coalescing gap-learning cal
 endforeach()
 set_property(TEST jam2_audio_flow_ingress-timing APPEND PROPERTY LABELS "four-peer;fake-audio;network-impairment")
 set_property(TEST jam2_audio_flow_wasapi APPEND PROPERTY LABELS "wasapi;four-peer;fake-audio;network-impairment")
+set_property(TEST jam2_audio_flow_wasapi-fast APPEND PROPERTY LABELS "wasapi;four-peer;fake-audio;network-impairment;recovery")
 set_property(TEST jam2_audio_flow_interruption jam2_audio_flow_clock
     APPEND PROPERTY LABELS "four-peer")
 set_property(TEST jam2_audio_flow_coalescing APPEND PROPERTY LABELS "four-peer;fake-audio;network-impairment;delivery")
@@ -462,6 +463,13 @@ add_test(NAME jam2_audio_device_processing_units
 set_tests_properties(jam2_audio_device_processing_units PROPERTIES
     LABELS "unit;core;audio;performance;metronome"
     TIMEOUT 30)
+
+add_executable(jam2_peer_mixer_recovery_padding_tests EXCLUDE_FROM_ALL unit/core/PeerMixerRecoveryPaddingTests.cpp)
+jam2_configure_test_target(jam2_peer_mixer_recovery_padding_tests)
+target_link_libraries(jam2_peer_mixer_recovery_padding_tests PRIVATE jam2_core)
+add_test(NAME jam2_peer_mixer_recovery_padding_units COMMAND $<TARGET_FILE:jam2_peer_mixer_recovery_padding_tests>)
+set_tests_properties(jam2_peer_mixer_recovery_padding_units PROPERTIES
+    LABELS "unit;core;audio;wasapi;four-peer;fake-audio;delivery;recovery" TIMEOUT 30)
 
 add_executable(jam2_wasapi_processing_tests EXCLUDE_FROM_ALL unit/core/WasapiProcessingTests.cpp)
 jam2_configure_test_target(jam2_wasapi_processing_tests)
@@ -2487,7 +2495,7 @@ if(WIN32)
     add_custom_target(jam2_tests_wasapi DEPENDS jam2 jam2_wasapi_processing_tests jam2_wasapi_gui_tests
         jam2_wasapi_hardware_tests jam2_audio_device_processing_tests jam2_gui_widget_boundary_tests
         jam2_recording_calibration_tests jam2_user_preferences_tests jam2_cli_boundary_tests
-        jam2_audio_flow_interaction_tests)
+        jam2_audio_flow_interaction_tests jam2_peer_mixer_recovery_padding_tests)
 endif()
 
 add_executable(jam2_coreaudio_device_setup_tests EXCLUDE_FROM_ALL unit/core/CoreAudioDeviceSetupTests.cpp)
@@ -2621,7 +2629,10 @@ add_dependencies(jam2_tests_hardware jam2_asio_delivery_tests)
 add_dependencies(jam2_tests_all jam2_delivery_delay_envelope_tests jam2_asio_delivery_tests)
 add_custom_target(jam2_tests_delivery DEPENDS jam2 jam2_delivery_delay_envelope_tests
     jam2_asio_delivery_tests jam2_udp_candidate_network_tests jam2_four_metronome_impairment jam2_audio_flow_interaction_tests
-    jam2_udp_transport_comparison_tests)
+    jam2_udp_transport_comparison_tests jam2_receive_budget_tests)
+add_dependencies(jam2_tests_unit jam2_peer_mixer_recovery_padding_tests)
+add_dependencies(jam2_tests_all jam2_peer_mixer_recovery_padding_tests)
+add_dependencies(jam2_tests_delivery jam2_peer_mixer_recovery_padding_tests)
 add_dependencies(jam2_tests_unit jam2_peer_drift_delay_step_tests)
 add_dependencies(jam2_tests_unit jam2_peer_mixer_larger_prefix_tests)
 add_dependencies(jam2_tests_network jam2_peer_drift_delay_step_tests)

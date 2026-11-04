@@ -273,6 +273,7 @@ private:
         info_.wasapi = config_; info_.input_device_name = input ? endpoint_name(input->device.Get()) : "None";
         info_.sample_rate = rate_; info_.buffer_size = output.period;
         info_.maximum_callback_frames = quantum_; info_.variable_callback_frames = true;
+        info_.recovery_padding_policy = RecoveryPaddingPolicy::MeasuredShortage;
         info_.input_mix_sample_rate = input ? input->mixRate : 0; info_.output_mix_sample_rate = output.mixRate;
         info_.input_period_frames = input ? input->period : 0; info_.output_period_frames = output.period;
         info_.input_buffer_frames = input ? input->capacity : 0; info_.output_buffer_frames = output.capacity;

@@ -9,12 +9,15 @@ struct DeviceClockSample {
     std::uint64_t time_us = 0;
 };
 
+enum class RecoveryPaddingPolicy : std::uint8_t { LearnedCushion, MeasuredShortage };
+
 // Published playback-clock state used by the receive worker's recovery gate.
 struct PlaybackRecoveryState {
     bool unity = true;
     std::uint64_t stopping_frames = 0;
     bool consumption_accounting = false;
     std::uint64_t extra_consumed_frames = 0;
+    RecoveryPaddingPolicy padding_policy = RecoveryPaddingPolicy::LearnedCushion;
 };
 
 struct DeviceClockStats {
