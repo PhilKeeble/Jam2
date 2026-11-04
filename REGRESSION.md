@@ -1,10 +1,155 @@
 ﻿# Latency stability regression — 2026-11-03
 
 Introducing commit **unproven**; rollback tests also failed. Oct 27's good-run
-commit was inferred, not verified. Current fixes are committed in `c553a14`
+commit was inferred, not verified. Earlier baseline fixes are committed in `c553a14`
 but remain provisional; **user decides keep/revert**, no automatic decision.
 
+## A2 + B + C implemented for testing — Nov 4
+
+The user selected all three candidates. They are now active together in the
+working tree and optimized public Mac build, on top of the existing baseline:
+
+- A2 retains the lifetime clock estimate and accounts for arrival-offset
+  residuals of at least 2000 us. CSVs expose the threshold, adjustment count
+  and signed offset; the packet format and audio callback are unchanged.
+- B counts real audio received in the batch toward the absolute recovery goal
+  before adding silence. Native tests now require this chosen behavior while
+  checking remaining deficits, saturated batches, repeated idle completion and
+  cancellation. They no longer require redundant post-arrival padding.
+- C permits common real prefixes at larger configured minimums, retaining the
+  output cap, callback, catch-up and recovery-debt guards.
+
+The new drift-resume and established-empty-contributor checks pass with the
+other focused tests. The Nov 3 isolated-candidate results remain historical evidence;
+their statements that all candidates were reverted no longer describe the
+current build. No Windows build or full suite has been run in this Mac session.
+
+Combined optimized Release validation passes **15 of 19 targeted CTests**:
+all seven focused drift/padding/prefix/boundary/CSV checks, clock and callback
+flow, repeated/large recovery, and all four exactly-four-peer lifecycle,
+impairment-delivery, mode-latency and receive-model workflows.
+The mode test records Direct/Server medians **6.4/6.2 ms** and both p95 values
+**8.1 ms**, inside the unchanged 1.333/2.667 ms comparison bounds. This run uses
+synthetic 128-frame callbacks; it does not establish real-device or WAN latency.
+
+Four known tests remain red, with no new failure category:
+
+| Test | Remaining observed failure |
+| --- | --- |
+| `jam2_audio_flow_startup-recovery` | Six empty-batch retirement comparisons retain 34 frames beyond the control; same-batch comparisons now retain zero. The one-frame bound remains. |
+| `jam2_core_low_skew_units` | 92 short-batch/learning assertions and four settled starvation/continuity assertions, matching the prior baseline counts. |
+| `jam2_core_playback_recovery_units` | Three hold-clear and three return-to-baseline assertions, matching the prior baseline counts. |
+| `jam2_core_release_return_units` | 18 short-batch/learning assertions, matching the prior baseline count. |
+
+Their latency, continuity and hold-expiry assertions were not relaxed. B's
+five old quantity/policy assertions were updated to the explicitly selected
+absolute-goal contract, with stricter real-sample and remaining-padding checks.
+The combined implementation has not repeated the Nov 3 physical-device matrices.
+
+Public tested app: `release/Jam2.app/Contents/MacOS/jam2`, SHA-256
+`b750f1962b01d5af98218f2ccd6524e58ec1c84414c9167c5f0eb8f548bf984b`.
+[Build](artifacts/mac-combined-20261104/release-build.log),
+[focused tests](artifacts/mac-combined-20261104/focused-unit-tests.log),
+[combined regression tests](artifacts/mac-combined-20261104/combined-regression-tests.log),
+[provenance and assertion counts](artifacts/mac-combined-20261104/validation.json).
+
+## Connected Focusrite and isolated Mac candidates — Nov 3
+
+The [extended report](docs/MacAudioInvestigation-2026-11-03.md#connected-focusrite-controlled-candidate-experiments)
+now includes Focusrite and Aggregate, 16 actual visible GUI sessions, 36 paired
+CLI hardware cases, separate-device clocks and individually tested patches.
+All experimental audio changes are **reverted to baseline**; patches and native
+diagnostics remain for review. The existing provisional `c553a14` is unchanged.
+
+- **HAL overloads remain unexplained.** Both devices pass the real GUI lifecycle
+  matrices with zero overloads, invalid timestamps or steady shortage/trim growth.
+  The accepted GUI interval also has no OS-log overload messages. Local tests
+  do not reproduce the original connected Wi-Fi misses.
+- **Source drift is independently actionable.** In matched +3 ms arrival-step
+  recordings, the offset-accounting A2 prototype reduces Aggregate/Focusrite
+  steady trims **338/155 to 0/0**, and waveform large steps **3/1 to 0/0**.
+  Known-clock and quantized-worker controls remain passing. A clean waveform
+  discontinuity and startup queue retention still occur; it is not a complete
+  recovery or latency-stability fix.
+- **A short recent-slope estimator is rejected:** it loses real 17 ppm skew.
+  **Absolute padding is partial:** its deterministic same-batch penalty drops
+  34 frames to zero, but empty-batch retention and five existing policy
+  assertions remain. **Larger partial release passes its nine new native cases**
+  without new selected-control failures; no total-latency benefit is established.
+- Focusrite Fast recorded pulse RTTs span **3.35..10.73 ms Direct** and
+  **8.08..10.75 ms Server** on baseline. A2 still varies: **2.77..9.42 ms Direct**,
+  **6.73..6.75 ms Server**. Moderate baseline is **82.35..83.64 ms** across modes.
+  These exclude analog converters and separate reported driver paths.
+- A2 passes seven of eight final four-peer/recovery/CSV/drift checks. The
+  symmetric mode-p95 gate fails on **both A2 and a restored-baseline repeat**:
+  Server minus Direct is -3.5/-3.0 ms against a 2.667 ms absolute bound.
+  Thresholds are unchanged; this does not prove a Server regression or an A2 cause.
+
+Reviewable patches: [A2 offset accounting](docs/experiments/mac-audio-2026-11-03/A2-arrival-offset-accounting.patch),
+[C partial prefixes](docs/experiments/mac-audio-2026-11-03/C-larger-partial-release.patch),
+[B padding](docs/experiments/mac-audio-2026-11-03/B-absolute-startup-padding.patch),
+[rejected A](docs/experiments/mac-audio-2026-11-03/A-recent-drift.patch).
+Raw CSVs, WAVs, profiles, build hashes and failed assertions are linked in the
+report. Final Release build/setup/CSV checks pass; desired baseline reproductions
+remain red. No full suite, Windows validation or analog-loopback measurement ran.
+
+## Initial Aggregate-only macOS controlled follow-up — Nov 3
+
+Full measurements, causes versus hypotheses, native test results and repeat
+instructions: [Mac audio investigation](docs/MacAudioInvestigation-2026-11-03.md).
+Production code and existing acceptance thresholds are unchanged.
+
+Current Release, 48 kHz/PCM16, two localhost CoreAudio streams on the existing
+Aggregate Device, matching local Go signaller. Fresh Direct/server/server/Direct
+tone/pulse matrices plus persistent-engine stop/rejoin and controlled holds.
+The CoreAudio hardware-harness gap described in the earlier handoff is now
+covered by explicit UID profiles and native CTests; it is not full GUI-painting
+or independent-device/WAN coverage.
+
+| Contract | Recorded render round trip, Direct | Jam2 Server |
+|---|---:|---:|
+| Fast, 32 callbacks / 64 packets | 2.729–2.875 ms | 2.813–4.083 ms |
+| Larger, 64 callbacks / 128 packets | 80.125–80.208 ms | 80.042–80.083 ms |
+
+These exclude physical input/converters and reported driver output paths.
+All 16 fresh cases have zero CoreAudio overloads. Nevertheless, each matrix
+fails 5/6 strict comparisons, including Direct repeats: Fast startup/queue
+variation, and a larger server tone run with **70 valid frames trimmed and one
+extra waveform step**. Several larger pulse failures concern p99 queue
+differences just beyond a callback, despite nearly identical recorded round
+trips. Do not describe these matrices as accepted or treat every failure as a
+consistent server penalty.
+
+**New reproducible estimator weakness:** a sustained 3 ms arrival-delay step
+with identical clocks produces about −321 ppm correction at 10 s and −102 ppm
+at 30 s. Zero and genuine ±200 ppm controls pass. The new
+`jam2_peer_drift_delay_step_units` intentionally remains red at its desired
+25 ppm settling bound. The real larger trim case has the matching false-drift
+and queue-growth pattern, without overloads or underruns. The lifetime-baseline
+formula dates to August `8d08ee0`; this is not proof of a UDP introducing commit.
+A controlled real-CoreAudio +3 ms delay case also reproduces false drift,
+**264 trimmed frames and one extra waveform step**, versus zero in its
+no-delay control, and retains ~3.25 ms more software queue after delay removal.
+Both have zero overloads and zero steady shortages. The corresponding hardware
+comparison remains a visible failing CTest alongside the new estimator unit.
+
+**Original CoreAudio events confirmed by OS logs:** 45 / 0 / 7 / 0 / 0 skipped
+cycles across A/B/C/D/E connected windows. A/C events follow a near-524.288 ms
+grid. Periodic wireless/OS scheduling is a hypothesis to trace, not a confirmed
+cause; no wireless settings were changed. Local fresh and reused-engine runs
+have not reproduced that deadline failure.
+
+Five constructed 95 ms holds followed by over two minutes clean pass both
+hardware recovery gates. Larger buffering returns near its ~39 ms baseline;
+Fast settles around 2.67 ms versus ~0.77 ms initially, despite target 64 and an
+expired hold. Target statistics alone do not establish latency retirement.
+Four-peer mode/receive-model/delivery/lifecycle checks and private-aggregate
+cleanup pass. The documented startup/recovery native failures remain.
+
 ## macOS handoff: Nov 3 Wi-Fi and local Direct/server comparison
+
+This handoff records the investigation state before the controlled follow-up
+above; its harness coverage gaps and test-configuration notes are historical.
 
 User reports the same Wi-Fi setup worked better before UDP multiplexing; expected
 Wi-Fi/Fast underruns do not settle that regression question. Investigate Mac

@@ -1,0 +1,170 @@
+{
+  "schema": "jam2-coreaudio-delivery-profile-v1",
+  "sample_rate": 48000,
+  "callback_frames": 32,
+  "packet_frames": 64,
+  "clean_duration_ms": 0,
+  "impaired_duration_ms": 180000,
+  "base_one_way_delay_ms": 0,
+  "forward_jitter_ms": 0,
+  "reverse_jitter_ms": 0,
+  "repeat_ms": 0,
+  "delay_points": [
+    [
+      0,
+      0
+    ],
+    [
+      8000,
+      0
+    ],
+    [
+      8001,
+      4
+    ],
+    [
+      8005,
+      4
+    ],
+    [
+      8006,
+      0
+    ],
+    [
+      12000,
+      0
+    ],
+    [
+      12001,
+      8
+    ],
+    [
+      12009,
+      8
+    ],
+    [
+      12010,
+      0
+    ],
+    [
+      16000,
+      0
+    ],
+    [
+      16001,
+      16
+    ],
+    [
+      16017,
+      16
+    ],
+    [
+      16018,
+      0
+    ],
+    [
+      22000,
+      0
+    ],
+    [
+      22001,
+      95
+    ],
+    [
+      22096,
+      95
+    ],
+    [
+      22097,
+      0
+    ],
+    [
+      24000,
+      0
+    ],
+    [
+      24001,
+      95
+    ],
+    [
+      24096,
+      95
+    ],
+    [
+      24097,
+      0
+    ],
+    [
+      26000,
+      0
+    ],
+    [
+      26001,
+      95
+    ],
+    [
+      26096,
+      95
+    ],
+    [
+      26097,
+      0
+    ],
+    [
+      28000,
+      0
+    ],
+    [
+      28001,
+      95
+    ],
+    [
+      28096,
+      95
+    ],
+    [
+      28097,
+      0
+    ],
+    [
+      30000,
+      0
+    ],
+    [
+      30001,
+      95
+    ],
+    [
+      30096,
+      95
+    ],
+    [
+      30097,
+      0
+    ]
+  ],
+  "recovered_buffer_limit_ms": 40,
+  "description": "Real CoreAudio with deterministic localhost delivery proxy. Short 4/8/16 ms holds followed by repeated 95 ms holds/bursts, then over two minutes of clean delivery. Records hold expiry, target decay, actual queue retirement and callback audio. An aggregate approximation, not a packet capture replay.",
+  "diagnostic_cases": [
+    {
+      "name": "fast-holds"
+    },
+    {
+      "name": "larger-holds",
+      "tuning_profile": "moderate",
+      "callback_frames": 64,
+      "packet_frames": 128,
+      "recovered_buffer_limit_ms": 140
+    }
+  ],
+  "record_audio": true,
+  "delay_scope": "audio",
+  "network_audio_format": "pcm16",
+  "device_uids": [
+    "~:AMS2_Aggregate:0",
+    "~:AMS2_Aggregate:0"
+  ],
+  "connection_mode": "proxied-direct",
+  "test_input": "tone-440",
+  "assert_quiet_after_ms": 120000
+}

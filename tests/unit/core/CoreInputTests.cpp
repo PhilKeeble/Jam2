@@ -2084,9 +2084,13 @@ void test_isolated_recovery_escalates_repeated_shortages()
         peer->pushFrames(audio); mixer.advance(1000); mixer.finishReceiveBatch(false);
         const auto increase = missing == 1 ? 1U : 64U;
         expect(mixer.stats().adaptive_target_frames == 64 + increase &&
-                mixer.stats().adaptive_padding_frames == increase &&
+                mixer.stats().adaptive_padding_frames == 0 && sink.depth == 64 &&
                 mixer.stats().isolated_recovery_events == (missing == 1 ? 1U : 0U),
-            "only an isolated one-frame shortage receives one-frame recovery");
+            "isolated shortages raise the target while same-batch real audio satisfies the recovery goal");
+        expect(sink.samples.size() == 128 &&
+                std::all_of(sink.samples.begin() + 64, sink.samples.end(),
+                    [](auto value) { return value == 42; }),
+            "same-batch recovery renders the received block without appending redundant silence");
         const auto padding = mixer.stats().adaptive_padding_frames;
         for (int i = 0; i < 100; ++i) mixer.finishReceiveBatch(false);
         expect(mixer.stats().adaptive_padding_frames == padding, "idle batches cannot grow isolated recovery buffers");
@@ -2213,52 +2217,62 @@ void test_four_peer_worker_margin_tracks_service_gaps()
 
 void test_recovery_padding_waits_for_receive_batch()
 {
-    MarkerMixerSink sink;
-    jam2::PeerMixerConfig config;
-    config.frames_per_block = 64;
-    config.deadline_frames = 1024;
-    config.output_max_frames = config.adaptive_max_frames = 512;
-    config.adaptive_playback_cushion = true;
-    config.adaptive_target_frames = config.adaptive_min_frames = 64;
-    jam2::PeerMixer mixer(config, &sink);
-    auto* peer = mixer.addPeer(1, 1024);
-    expect(peer != nullptr && mixer.setPeerActive(1, true), "batch-padding fixture activates source");
-    if (!peer) return;
-    std::array<std::int32_t, 64> audio{};
-    audio.fill(42);
-    peer->pushFrames(audio);
-    mixer.advance(0);
-    sink.consume(96);
-    mixer.advance(1000);
-    expect(sink.depth == 0 && mixer.stats().adaptive_padding_frames == 0,
-        "pre-receive maintenance records starvation without inserting silence ahead of ready packets");
-    peer->pushFrames(audio);
-    mixer.advance(1000);
-    mixer.finishReceiveBatch(false);
-    expect(sink.depth == 128 && mixer.stats().adaptive_padding_frames == 64,
-        "real audio arriving in the same wake precedes the preserved bounded recovery runway");
-    expect(sink.samples.size() == 192 && sink.samples[64] == 42 &&
-            sink.samples[127] == 42 && sink.samples[128] == 0 && sink.samples.back() == 0,
-        "the real received block is rendered before the deferred recovery silence");
-    sink.consume(129);
-    mixer.advance(2000);
-    mixer.finishReceiveBatch(true);
-    expect(sink.depth == 0 && mixer.stats().adaptive_padding_frames == 64,
-        "a saturated receive batch defers padding until queued datagrams are drained");
-    mixer.advance(2001);
-    mixer.finishReceiveBatch(false);
-    const auto padded = mixer.stats().adaptive_padding_frames;
-    expect(padded > 0 && sink.depth <= config.adaptive_max_frames,
-        "genuine starvation still permits bounded recovery silence after an empty receive batch");
-    mixer.finishReceiveBatch(false);
-    expect(mixer.stats().adaptive_padding_frames == padded,
-        "finishing an idle batch repeatedly cannot grow the recovery buffer");
-    sink.consume(sink.depth + 1);
-    mixer.advance(3000);
-    expect(mixer.setPeerActive(1, false), "padding fixture removes its final contributing source");
-    mixer.finishReceiveBatch(false);
-    expect(mixer.stats().adaptive_padding_frames == padded,
-        "deactivation cancels pending padding instead of reviving a stopped output");
+    for (const bool packetAfterBudget : {false, true}) {
+        MarkerMixerSink sink;
+        jam2::PeerMixerConfig config;
+        config.frames_per_block = 64;
+        config.deadline_frames = 1024;
+        config.output_max_frames = config.adaptive_max_frames = 512;
+        config.adaptive_playback_cushion = true;
+        config.adaptive_target_frames = config.adaptive_min_frames = 64;
+        jam2::PeerMixer mixer(config, &sink);
+        auto* peer = mixer.addPeer(1, 1024);
+        expect(peer != nullptr && mixer.setPeerActive(1, true), "batch-padding fixture activates source");
+        if (!peer) return;
+        std::array<std::int32_t, 64> audio{};
+        audio.fill(42);
+        peer->pushFrames(audio);
+        mixer.advance(0);
+        sink.consume(96);
+        mixer.advance(1000);
+        expect(sink.depth == 0 && mixer.stats().adaptive_padding_frames == 0,
+            "pre-receive maintenance records starvation without inserting silence ahead of ready packets");
+        peer->pushFrames(audio);
+        mixer.advance(1000);
+        mixer.finishReceiveBatch(false);
+        expect(sink.depth == 64 && mixer.stats().adaptive_padding_frames == 0,
+            "real audio in the same drained batch satisfies the absolute recovery goal");
+        expect(sink.samples.size() == 128 &&
+                std::all_of(sink.samples.begin() + 64, sink.samples.end(),
+                    [](auto value) { return value == 42; }),
+            "same-batch recovery preserves real samples without appending silence");
+        sink.consume(sink.depth + 1);
+        mixer.advance(2000);
+        mixer.finishReceiveBatch(true);
+        expect(sink.depth == 0 && mixer.stats().adaptive_padding_frames == 0,
+            "a saturated receive batch defers padding until queued datagrams are drained");
+        if (packetAfterBudget) peer->pushFrames(audio);
+        mixer.advance(2001);
+        mixer.finishReceiveBatch(false);
+        const std::size_t expectedPadding = packetAfterBudget ? 64 : 128;
+        const auto padded = mixer.stats().adaptive_padding_frames;
+        expect(padded == expectedPadding && sink.depth == 128 && sink.samples.size() == 256,
+            "drained batches pad only the unsatisfied part of the bounded recovery goal");
+        expect(std::all_of(sink.samples.begin() + 128, sink.samples.begin() + 192,
+                   [packetAfterBudget](auto value) { return value == (packetAfterBudget ? 42 : 0); }) &&
+                std::all_of(sink.samples.begin() + 192, sink.samples.end(),
+                    [](auto value) { return value == 0; }),
+            "real audio arriving after a saturated batch precedes only the remaining recovery silence");
+        mixer.finishReceiveBatch(false);
+        expect(mixer.stats().adaptive_padding_frames == padded,
+            "finishing an idle batch repeatedly cannot grow the recovery buffer");
+        sink.consume(sink.depth + 1);
+        mixer.advance(3000);
+        expect(mixer.setPeerActive(1, false), "padding fixture removes its final contributing source");
+        mixer.finishReceiveBatch(false);
+        expect(mixer.stats().adaptive_padding_frames == padded,
+            "deactivation cancels pending padding instead of reviving a stopped output");
+    }
 }
 
 void test_peer_mixer_batches_wrapped_queue_operations()
@@ -3878,6 +3892,12 @@ void test_profiled_recurring_wifi_bursts_match_observed_session()
 
 int main(int argc, char** argv)
 {
+    if (argc == 2 && std::string_view(argv[1]) == "--startup-padding") {
+        test_recovery_padding_waits_for_receive_batch();
+        test_isolated_recovery_escalates_repeated_shortages();
+        if (failures == 0) std::cout << "Jam2 startup padding tests passed\n";
+        return failures == 0 ? 0 : 1;
+    }
     if (argc == 2 && std::string_view(argv[1]) == "--recovery-accounting") {
         test_four_peer_recovery_consumption_accounting();
         return failures == 0 ? 0 : 1;

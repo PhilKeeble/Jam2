@@ -817,6 +817,57 @@ void GuiTestAgent::handle(const QJsonObject& command)
         emitEvent(QStringLiteral("command_applied"), std::move(fields));
         return;
     }
+    if (type == QStringLiteral("jam.hardware-runtime.status")) {
+        if (!onlyFields(command, {"format","type","id"})) {
+            reject(command, QStringLiteral("unsupported hardware status field")); return;
+        }
+        const auto engine=window_.jam2_.engineSnapshot();
+        const auto cold=window_.jam2_.engineColdSnapshot();
+        emitEvent(QStringLiteral("command_applied"), {
+            {"id",command.value("id")},{"device_uid",QString::fromStdString(jam2::audio::stable_device_id(cold.stream.device))},
+            {"headless_audio",engine.backend==jam2::EngineAudioBackend::Headless},
+            {"engine_starts",qint64(window_.jam2_.engineStarts())},{"engine_restarts",qint64(window_.jam2_.engineRestarts())},
+            {"engine_reuses",qint64(window_.jam2_.engineReuses())},{"callbacks",qint64(engine.callbacks)},
+            {"engine_frame",qint64(engine.engine_frame)},{"callback_frames",qint64(engine.audio_buffer_frames)},
+            {"processor_overloads",qint64(engine.callback_timing.processor_overloads)},
+            {"callback_interval_max_us",qint64(engine.callback_timing.interval_max_us)},
+            {"callback_interval_samples",qint64(engine.callback_timing.interval_samples)},
+            {"callback_gap_over_2x",qint64(engine.callback_timing.gap_over_2x_count)},
+            {"callback_work_max_us",qint64(engine.callback_timing.work_max_us)},
+            {"callback_work_sum_us",qint64(engine.callback_timing.work_sum_us)},
+            {"callback_work_samples",qint64(engine.callback_timing.work_samples)},
+            {"invalid_timestamps",qint64(engine.callback_timing.timestamp_invalid_callbacks)}});
+        return;
+    }
+    if (type == QStringLiteral("jam.hardware-runtime.prepare")) {
+        if (!onlyFields(command, {"format","type","id","rendezvous"}) ||
+            !command.value("rendezvous").isString()) {
+            reject(command, QStringLiteral("hardware preparation requires a local rendezvous endpoint")); return;
+        }
+        const auto role=window_.sessionController_.snapshot().role;
+        if (role==SharedSessionController::Role::Creator || role==SharedSessionController::Role::Joiner) {
+            reject(command, QStringLiteral("cannot prepare hardware during an active jam")); return;
+        }
+        try {
+            auto endpoint=jam2::parse_endpoint(command.value("rendezvous").toString().toStdString());
+            if (endpoint.host!="127.0.0.1" || endpoint.port==0)
+                throw std::runtime_error("hardware GUI test requires localhost rendezvous");
+            window_.sessionRuntimeDraft_.configuration.rendezvousServer=endpoint;
+            // The real Start dialog takes its initial state from preferences.
+            // This changes only the isolated agent's in-memory test settings.
+            window_.preferences_.create.rendezvousServer=std::move(endpoint);
+        } catch(const std::exception& error) {
+            reject(command, QString::fromUtf8(error.what())); return;
+        }
+        window_.automationHeadlessAudio_=false;
+        window_.automationSuppressDialogs_=true;
+        emitEvent(QStringLiteral("command_applied"), {
+            {"id",command.value("id")},{"headless_audio",false},
+            {"engine_starts",qint64(window_.jam2_.engineStarts())},
+            {"engine_restarts",qint64(window_.jam2_.engineRestarts())},
+            {"engine_reuses",qint64(window_.jam2_.engineReuses())}});
+        return;
+    }
     if (type == QStringLiteral("jam.dialog-runtime.prepare")) {
         if (!onlyFields(command, {"format", "type", "id", "test_input"})) {
             reject(command, QStringLiteral(

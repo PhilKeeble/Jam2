@@ -20,7 +20,9 @@
 #include <cmath>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <stdexcept>
+#include <utility>
 
 namespace {
 using namespace jam2::test;
@@ -45,6 +47,12 @@ struct Config {
     GridMode gridMode=GridMode::SharedGrid;
     jam2::NetworkAudioFormat format=jam2::NetworkAudioFormat::Pcm24Mono;
     QStringList devices;
+    // Hardware identities are explicit: ASIO names or stable CoreAudio UIDs.
+    enum class Backend { Asio, CoreAudio };
+    Backend backend=Backend::Asio;
+    int jitterFrames=-1, adaptiveTarget=-1, adaptiveMin=-1, adaptiveMax=-1;
+    std::optional<bool> driftCorrection;
+    int statsIntervalMs=250;
     bool recordAudio=false;
     QString testInput="tone-440";
     double mappingErrorLimitMs=0;
@@ -54,10 +62,27 @@ struct Config {
     enum class ConnectionMode { ProxiedDirect, Direct, Server };
     ConnectionMode connectionMode=ConnectionMode::ProxiedDirect;
     QString signaller;
+    QString tuningProfile="fast";
 };
 Config configuration(const QJsonObject& p) {
-    require(p.value("schema")=="jam2-asio-delivery-profile-v1","unexpected hardware profile schema");
+    require(p.value("schema")=="jam2-asio-delivery-profile-v1" ||
+        p.value("schema")=="jam2-coreaudio-delivery-profile-v1","unexpected hardware profile schema");
     Config c;
+    if (p.contains("drift_correction")) {
+        require(p.value("drift_correction").isBool(),"drift_correction must be a boolean");
+        c.driftCorrection=p.value("drift_correction").toBool();
+    }
+    c.statsIntervalMs=p.value("stats_interval_ms").toInt(250);
+    require(c.statsIntervalMs>=100 && c.statsIntervalMs<=2000,"invalid stats interval");
+    c.backend=p.value("schema")=="jam2-coreaudio-delivery-profile-v1" ? Config::Backend::CoreAudio : Config::Backend::Asio;
+    c.tuningProfile=p.value("tuning_profile").toString("fast");
+    require(c.tuningProfile=="fast" || c.tuningProfile=="moderate","invalid tuning profile");
+    c.jitterFrames=p.value("jitter_buffer_frames").toInt(-1);
+    c.adaptiveTarget=p.value("adaptive_playback_target_frames").toInt(-1);
+    c.adaptiveMin=p.value("adaptive_playback_min_frames").toInt(-1);
+    c.adaptiveMax=p.value("adaptive_playback_max_frames").toInt(-1);
+    for (const auto frames:{c.jitterFrames,c.adaptiveTarget,c.adaptiveMin,c.adaptiveMax})
+        require(frames>=-1 && frames<=4096,"invalid explicit buffer setting");
     const auto connection=p.value("connection_mode").toString("proxied-direct");
     require(connection=="proxied-direct" || connection=="direct" || connection=="server","invalid connection_mode");
     c.connectionMode=connection=="server" ? Config::ConnectionMode::Server :
@@ -91,7 +116,7 @@ Config configuration(const QJsonObject& p) {
         const auto a=value.toArray(); require(a.size()==2 && a[0].isDouble() && a[1].isDouble(),"delay point requires [time_ms, additional_delay_ms]");
         c.envelope.points.push_back({a[0].toDouble(),a[1].toDouble()});
     }
-    for (const auto& value : p.value("device_names").toArray()) c.devices<<value.toString();
+    for (const auto& value : p.value(c.backend==Config::Backend::CoreAudio ? "device_uids" : "device_names").toArray()) c.devices<<value.toString();
     require(c.rate>=8000 && c.rate<=192000 && c.callback>=16 && c.callback<=1024 &&
         (c.packet==64 || c.packet==128) && (c.cleanMs==0 || c.cleanMs>=15000) && c.cleanMs<=60000 &&
         c.impairedMs>=15000 && c.impairedMs<=600000 && c.baseMs>=0 && c.baseMs<=100 &&
@@ -99,7 +124,8 @@ Config configuration(const QJsonObject& p) {
         c.recoveredLimitMs>0 && std::isfinite(c.underrunRateLimitMs) && c.underrunRateLimitMs>=-1 &&
         std::isfinite(c.trimRateLimitMs) && c.trimRateLimitMs>=-1 &&
         c.releasePpm>=-1 && c.releasePpm<=1000000 && c.batchMs>=0 && c.batchMs<=1000 && c.envelope.valid() && !c.envelope.points.empty() &&
-        c.devices.size()==2 && !c.devices[0].isEmpty() && c.devices[0]!=c.devices[1],"invalid bounded delivery/device profile");
+        c.devices.size()==2 && !c.devices[0].isEmpty() && !c.devices[1].isEmpty() &&
+        (c.backend==Config::Backend::CoreAudio || c.devices[0]!=c.devices[1]),"invalid bounded delivery/device profile");
     if (c.connectionMode!=Config::ConnectionMode::ProxiedDirect)
         require(c.scope==DeliveryDelayScope::None && c.baseMs==0 && c.forwardJitterMs==0 && c.reverseJitterMs==0 &&
             c.batchMs==0 && std::all_of(c.envelope.points.begin(),c.envelope.points.end(),[](const auto& p){return p.delayMs==0;}),
@@ -151,8 +177,18 @@ QJsonObject csvEvidence(const Child& child, const Config& c, int count, bool har
     require(csv.integer(f,"active_sample_rate")==c.rate && csv.integer(f,"active_audio_buffer_frames")==c.callback &&
         csv.integer(f,"session_frames_per_packet")==c.packet && csv.yes(f,"capture_clock_packet_pacing_active"),
         "test must exercise requested sample rate, small callbacks and capture-clock pacing");
-    if (hardware) require(csv.value(f,"device_backend")=="ASIO" && csv.value(f,"device_name")==expectedDevice,
-        "hardware test did not use its explicitly named ASIO device");
+    if (c.driftCorrection) require(csv.yes(f,"drift_correction")==*c.driftCorrection,
+        "test did not apply its explicit drift-correction setting");
+    if (c.releasePpm>=0) require(csv.integer(f,"adaptive_playback_release_ppm")==c.releasePpm,
+        "test did not apply its explicit playback release setting");
+    if (hardware) {
+        const bool core=c.backend==Config::Backend::CoreAudio;
+        require(csv.value(f,"device_backend")== (core ? "CoreAudio" : "ASIO"),"hardware backend differs from profile");
+        require(core ? csv.value(f,"device_driver_id")==expectedDevice : csv.value(f,"device_name")==expectedDevice,
+            "hardware test did not use its explicitly profiled device");
+        if (core) require(csv.integer(f,"actual_audio_callback_frames_min")==c.callback &&
+            csv.integer(f,"actual_audio_callback_frames_max")==c.callback,"actual hardware callback sizes differ from profile");
+    }
     QVector<qsizetype> rows;
     for (auto r : csv.rowsOfType("periodic")) if (csv.integer(r,"network_active_peer_count")==count-1) rows.push_back(r);
     require(rows.size()>=10,"insufficient fully connected observations");
@@ -175,10 +211,19 @@ QJsonObject csvEvidence(const Child& child, const Config& c, int count, bool har
                 "raw_drift_ppm","drift_ppm","sequence_lost","mix_receive_recovery_completions",
                 "audio_packet_gap_over_2x_count","audio_packet_gap_over_4x_count","jitter_avg_ms",
                 "mix_worker_service_gap_us","mix_playback_stopping_frames","mix_adaptive_release_alignment_margin_frames",
-                "audio_control_playback_ratio","audio_applied_playback_ratio","resampler_ratio"}) {
+                "audio_control_playback_ratio","audio_applied_playback_ratio","resampler_ratio",
+                "jitter_buffer_depth_frames","playback_ring_readable_frames","mix_worker_runway_frames",
+                "adaptive_playback_target_frames","adaptive_playback_padding_frames",
+                "adaptive_delivery_gap_hold_remaining_ms","mix_partial_release_events","mix_partial_release_frames",
+                "mix_recovery_safe_depth_frames","mix_recovery_low_water_frames",
+                "mix_recovery_release_events","mix_recovery_retired_frames",
+                "coreaudio_processor_overloads","coreaudio_timestamp_invalid_callbacks",
+                "audio_callback_work_max_us","actual_audio_callback_frames_min","actual_audio_callback_frames_max"}) {
             require(!csv.value(r,k).isEmpty(),QString("missing measurement column: ")+k);
             item[k]=csv.number(r,k);
         }
+        for (const char* k : {"drift_arrival_step_threshold_us", "drift_arrival_offset_adjustments", "drift_arrival_offset_us"})
+            if (!csv.value(r,k).isEmpty()) item[k]=csv.number(r,k);
         item["mix_release_worker_guard_active"]=csv.yes(r,"mix_release_worker_guard_active");
         timeline.push_back(item);
         mappingErrorPeak=std::max(mappingErrorPeak,std::abs(csv.number(r,"grid_mapping_error_frames"))*1000./c.rate);
@@ -411,12 +456,18 @@ void runCase(const QString& executable, const QString& root, const Config& c,
         auto peer=std::make_unique<Child>(); peer->root=QDir(root).filePath(QString("peer-%1").arg(i));
         require(QDir().mkpath(peer->root),"create peer artifacts");
         QJsonObject runtime{{"headless_audio",!hardware},{"sample_rate",c.rate},{"audio_buffer_size",c.callback},
-            {"frame_size",c.packet},{"network_audio_format",c.format==jam2::NetworkAudioFormat::Pcm24Mono ? "pcm24" : "pcm16"},{"stats",true},{"stats_interval_ms",250},
+            {"frame_size",c.packet},{"network_audio_format",c.format==jam2::NetworkAudioFormat::Pcm24Mono ? "pcm24" : "pcm16"},{"stats",true},{"stats_interval_ms",c.statsIntervalMs},
             {"stats_warmup_ms",0},{"stream_ms",0},{"test_input",c.testInput},{"os_priority","high"},
             {"metronome",true},{"metronome_mode",c.gridMode==Config::GridMode::SharedGrid ? "shared-grid" : "leader-audio"},{"metronome_level",0.05},
             {"bpm",c.bpm},
             {"remote_level",0.1},{"input_channels","1,2"},{"output_channels","1,2"}};
         if (hardware) runtime["audio_device"]=devices[i];
+        if (c.driftCorrection) runtime["drift_correction"]=*c.driftCorrection;
+        if (c.backend==Config::Backend::CoreAudio) runtime["input_channels"]="1";
+        for (const auto& [name,frames]:{std::pair{"jitter_buffer_frames",c.jitterFrames},
+                {"adaptive_playback_target_frames",c.adaptiveTarget},{"adaptive_playback_min_frames",c.adaptiveMin},
+                {"adaptive_playback_max_frames",c.adaptiveMax}})
+            if (frames>=0) runtime[name]=frames;
         if (c.releasePpm>=0) runtime["adaptive_playback_release_ppm"]=c.releasePpm;
         QJsonObject net{{"name",i==0 ? "Creator" : QString("Peer%1").arg(QChar('A'+i))},
             {"bind",QString("127.0.0.1:%1").arg(localPorts[i])},{"no_stun",true},
@@ -433,7 +484,7 @@ void runCase(const QString& executable, const QString& root, const Config& c,
             actions.prepend(start);actions.insert(1,action("recording.stop",duration-1500));
         }
         QJsonObject scenario{{"schema","jam2-debug-scenario"},{"run_id",QString("delivery-peer-%1").arg(i)},
-            {"operation",i==0 ? "network.create" : "network.join"},{"profile","fast"},
+            {"operation",i==0 ? "network.create" : "network.join"},{"profile",c.tuningProfile},
             {"runtime",runtime},{"network",net},{"artifacts",QJsonObject{{"root",peer->root}}},
             {"actions",actions}};
         const auto path=QDir(peer->root).filePath("scenario.json"); writeJson(path,scenario);
@@ -447,15 +498,22 @@ void runCase(const QString& executable, const QString& root, const Config& c,
             arguments={"network",i==0 ? "create" : "join"};
             if (i!=0) arguments<<invite;
             arguments<<"--name"<<(i==0 ? "Creator" : QString("Peer%1").arg(QChar('A'+i)))
-                <<"--profile"<<"fast"<<"--no-stun"<<"--bind"<<QString("127.0.0.1:%1").arg(localPorts[i])
+                <<"--profile"<<c.tuningProfile<<"--no-stun"<<"--bind"<<QString("127.0.0.1:%1").arg(localPorts[i])
                 <<"--sample-rate"<<QString::number(c.rate)<<"--audio-buffer-size"<<QString::number(c.callback)
                 <<"--frame-size"<<QString::number(c.packet)<<"--network-audio-format"<<(c.format==jam2::NetworkAudioFormat::Pcm24Mono ? "pcm24" : "pcm16")
                 <<"--test-input"<<c.testInput<<"--os-priority"<<"high"<<"--stats"<<"enabled"
-                <<"--stats-interval-ms"<<"250"<<"--stats-warmup-ms"<<"0"<<"--log-stats"<<QDir(peer->root).filePath("logs")
+                <<"--stats-interval-ms"<<QString::number(c.statsIntervalMs)<<"--stats-warmup-ms"<<"0"<<"--log-stats"<<QDir(peer->root).filePath("logs")
                 <<"--stream-ms"<<QString::number(duration)<<"--metronome"<<"on"<<"--metronome-level"<<"0.05"
-                <<"--bpm"<<QString::number(c.bpm)<<"--remote-level"<<"0.1"<<"--input-channels"<<"1,2"<<"--output-channels"<<"1,2";
+                <<"--bpm"<<QString::number(c.bpm)<<"--remote-level"<<"0.1"<<"--input-channels"
+                <<(c.backend==Config::Backend::CoreAudio ? "1" : "1,2")<<"--output-channels"<<"1,2";
+            for (const auto& [flag,frames]:{std::pair{"--jitter-buffer-frames",c.jitterFrames},
+                    {"--adaptive-playback-target-frames",c.adaptiveTarget},{"--adaptive-playback-min-frames",c.adaptiveMin},
+                    {"--adaptive-playback-max-frames",c.adaptiveMax}})
+                if (frames>=0) arguments<<flag<<QString::number(frames);
             if (hardware) arguments<<"--audio-device"<<QString::number(devices[i]);
             else arguments<<"--headless-audio"<<"on";
+            if (c.driftCorrection) arguments<<"--drift-correction"<<(*c.driftCorrection ? "on" : "off");
+            if (c.releasePpm>=0) arguments<<"--adaptive-playback-release-ppm"<<QString::number(c.releasePpm);
             if (i==0) {
                 arguments<<"--session-id"<<sid<<"--session-key"<<key<<"--max-peers"<<QString::number(count)
                     <<"--connection-strategy"<<(serverMode ? "server" : "direct");
@@ -531,7 +589,7 @@ int main(int argc,char** argv) {
     QCoreApplication app(argc,argv);
     if (argc<3) { std::cerr<<"usage: test public-jam2-executable profile.json | --fake-four\n";return 2; }
     const bool fake=QString::fromLocal8Bit(argv[2])=="--fake-four";
-    if (!fake && QString::fromLocal8Bit(argv[2]).isEmpty()) { std::cout<<"Set JAM2_ASIO_DELIVERY_PROFILE for two real ASIO devices.\n";return 77; }
+    if (!fake && QString::fromLocal8Bit(argv[2]).isEmpty()) { std::cout<<"Set an explicit ASIO or CoreAudio delivery hardware profile.\n";return 77; }
     QString root;
     try {
         if (QString::fromLocal8Bit(argv[1])=="--review-recorded") {
@@ -564,7 +622,10 @@ int main(int argc,char** argv) {
         const auto executable=QFileInfo(QString::fromLocal8Bit(argv[1])).absoluteFilePath();
         QFile binary(executable);require(binary.open(QIODevice::ReadOnly),binary.errorString());
         QCryptographicHash hash(QCryptographicHash::Sha256);require(hash.addData(&binary),"hash tested executable");
-        root=QDir::current().absoluteFilePath(QString("artifacts/asio-delivery/%1-%2").arg(QDateTime::currentDateTimeUtc().toString("yyyyMMdd-HHmmss-zzz"),fake ? "four-fake" : "two-asio"));
+        root=QDir::current().absoluteFilePath(QString("artifacts/%1/%2-%3")
+            .arg(c.backend==Config::Backend::CoreAudio ? "coreaudio-delivery" : "asio-delivery",
+                QDateTime::currentDateTimeUtc().toString("yyyyMMdd-HHmmss-zzz"),fake ? "four-fake" :
+                    c.backend==Config::Backend::CoreAudio ? "two-coreaudio" : "two-asio"));
         require(QDir().mkpath(root),"create run artifacts");
         writeJson(QDir(root).filePath("profile.json"),profile);
         writeJson(QDir(root).filePath("provenance.json"),{{"executable",executable},{"sha256",QString::fromLatin1(hash.result().toHex())},
@@ -574,8 +635,11 @@ int main(int argc,char** argv) {
         else {
             const auto available=jam2::audio::list_devices();
             for (const auto& name:c.devices) {
-                const auto found=std::find_if(available.begin(),available.end(),[&](const auto& d){return d.backend=="ASIO" && QString::fromStdString(d.name)==name;});
-                require(found!=available.end(),"profiled ASIO device missing: "+name); devices.push_back(found->id);
+                const bool core=c.backend==Config::Backend::CoreAudio;
+                const auto found=std::find_if(available.begin(),available.end(),[&](const auto& d){
+                    return d.backend==(core ? "CoreAudio" : "ASIO") &&
+                        QString::fromStdString(core ? jam2::audio::stable_device_id(d) : d.name)==name;});
+                require(found!=available.end(),"profiled hardware device missing: "+name); devices.push_back(found->id);
             }
         }
         if (!fake && c.cleanMs>0) runCase(executable,QDir(root).filePath("clean"),c,devices,false,true);

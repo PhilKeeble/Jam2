@@ -1,0 +1,293 @@
+diff --git a/app/cli/CliStats.cpp b/app/cli/CliStats.cpp
+index 299137a..184adef 100644
+--- a/app/cli/CliStats.cpp
++++ b/app/cli/CliStats.cpp
+@@ -180,6 +180,9 @@ void copy_peer_stream_stats(
+     JAM2_COPY_PEER_STAT(drift_baseline_calibration_packets);
+     JAM2_COPY_PEER_STAT(drift_baseline_delay_improvement_us);
+     JAM2_COPY_PEER_STAT(raw_drift_ppm);
++    JAM2_COPY_PEER_STAT(drift_arrival_step_threshold_us);
++    JAM2_COPY_PEER_STAT(drift_arrival_offset_adjustments);
++    JAM2_COPY_PEER_STAT(drift_arrival_offset_us);
+     JAM2_COPY_PEER_STAT(drift_ppm);
+     JAM2_COPY_PEER_STAT(resampler_ratio);
+     JAM2_COPY_PEER_STAT(resampler_ratio_min);
+@@ -304,6 +307,11 @@ void add_peer_stream_stats(
+         target.drift_ppm = source.drift_ppm;
+         target.resampler_ratio = source.resampler_ratio;
+     }
++    target.drift_arrival_step_threshold_us = std::max(
++        target.drift_arrival_step_threshold_us, source.drift_arrival_step_threshold_us);
++    target.drift_arrival_offset_adjustments += source.drift_arrival_offset_adjustments;
++    if (std::abs(source.drift_arrival_offset_us) > std::abs(target.drift_arrival_offset_us))
++        target.drift_arrival_offset_us = source.drift_arrival_offset_us;
+     target.drift_baseline_calibrating =
+         target.drift_baseline_calibrating || source.drift_baseline_calibrating;
+     target.drift_baseline_calibration_packets +=
+diff --git a/app/cli/CliStats.hpp b/app/cli/CliStats.hpp
+index a338e36..86fc7a2 100644
+--- a/app/cli/CliStats.hpp
++++ b/app/cli/CliStats.hpp
+@@ -299,6 +299,9 @@ struct AudioPacketStats {
+     std::uint64_t drift_baseline_calibration_packets = 0;
+     std::uint64_t drift_baseline_delay_improvement_us = 0;
+     double raw_drift_ppm = 0.0;
++    std::uint64_t drift_arrival_step_threshold_us = 0;
++    std::uint64_t drift_arrival_offset_adjustments = 0;
++    std::int64_t drift_arrival_offset_us = 0;
+     double drift_ppm = 0.0;
+     double resampler_ratio = 1.0;
+     double resampler_ratio_min = 0.0;
+@@ -744,7 +747,7 @@ public:
+                 "adaptive_delivery_gap_required_frames,"
+                 "adaptive_delivery_gap_required_max_frames,mix_live_tail_batch_tolerance_frames,"
+                 "mix_normal_output_limit_frames,mix_normal_path_limit_frames,"
+-                "mix_live_tail_rounding_tolerance_frames,mix_adaptive_release_alignment_margin_frames,mix_partial_release_events,mix_partial_release_frames,mix_lookahead_hold_events,mix_lookahead_hold_frames,mix_lookahead_hold_max_fraction_ppm,mix_isolated_recovery_events,mix_worker_service_gap_us,mix_worker_runway_frames,mix_playback_stopping_frames,mix_release_worker_guard_active,wasapi_capture_depth_frames,wasapi_render_padding_frames,wasapi_capture_correction_ppm,wasapi_capture_underrun_frames,wasapi_capture_overrun_frames,wasapi_capture_discontinuities,wasapi_capture_resets,wasapi_invalid_timestamps,audio_device_error,grid_phase_accepted,grid_phase_delayed,grid_phase_reordered,grid_phase_raw_error_frames,grid_phase_tolerance_frames,grid_phase_maximum_drift_ppm,grid_phase_last_accepted_age_us,mix_adaptive_path_high_water_frames,mix_delivery_gap_guard_active,mix_recovery_pending_frames,mix_recovery_retired_frames,mix_recovery_cancelled_frames,mix_recovery_safe_depth_frames,mix_recovery_low_water_frames,mix_recovery_release_events,mix_recovery_release_active\n";
++                "mix_live_tail_rounding_tolerance_frames,mix_adaptive_release_alignment_margin_frames,mix_partial_release_events,mix_partial_release_frames,mix_lookahead_hold_events,mix_lookahead_hold_frames,mix_lookahead_hold_max_fraction_ppm,mix_isolated_recovery_events,mix_worker_service_gap_us,mix_worker_runway_frames,mix_playback_stopping_frames,mix_release_worker_guard_active,wasapi_capture_depth_frames,wasapi_render_padding_frames,wasapi_capture_correction_ppm,wasapi_capture_underrun_frames,wasapi_capture_overrun_frames,wasapi_capture_discontinuities,wasapi_capture_resets,wasapi_invalid_timestamps,audio_device_error,grid_phase_accepted,grid_phase_delayed,grid_phase_reordered,grid_phase_raw_error_frames,grid_phase_tolerance_frames,grid_phase_maximum_drift_ppm,grid_phase_last_accepted_age_us,mix_adaptive_path_high_water_frames,mix_delivery_gap_guard_active,mix_recovery_pending_frames,mix_recovery_retired_frames,mix_recovery_cancelled_frames,mix_recovery_safe_depth_frames,mix_recovery_low_water_frames,mix_recovery_release_events,mix_recovery_release_active,drift_arrival_step_threshold_us,drift_arrival_offset_adjustments,drift_arrival_offset_us\n";
+     }
+ 
+     explicit operator bool() const { return out_.is_open(); }
+@@ -1330,7 +1333,10 @@ public:
+              << ',' << stats.mix_recovery_pending_frames << ',' << stats.mix_recovery_retired_frames
+              << ',' << stats.mix_recovery_cancelled_frames << ',' << stats.mix_recovery_safe_depth_frames
+              << ',' << stats.mix_recovery_low_water_frames << ',' << stats.mix_recovery_release_events
+-             << ',' << (stats.mix_recovery_release_active ? "yes" : "no");
++             << ',' << (stats.mix_recovery_release_active ? "yes" : "no")
++             << ',' << stats.drift_arrival_step_threshold_us
++             << ',' << stats.drift_arrival_offset_adjustments
++             << ',' << stats.drift_arrival_offset_us;
+         out_ << '\n';
+         if (row_type == "final") {
+             out_.flush();
+@@ -1346,7 +1352,7 @@ public:
+         if (!out_) {
+             return;
+         }
+-        std::vector<std::string> fields(542);
++        std::vector<std::string> fields(545);
+         auto set = [&](std::size_t index, auto value) {
+             std::ostringstream text;
+             text << value;
+@@ -1870,6 +1876,9 @@ public:
+         set(539, stats.mix_recovery_low_water_frames);
+         set(540, stats.mix_recovery_release_events);
+         set(541, stats.mix_recovery_release_active ? "yes" : "no");
++        set(542, stats.drift_arrival_step_threshold_us);
++        set(543, stats.drift_arrival_offset_adjustments);
++        set(544, stats.drift_arrival_offset_us);
+         for (std::size_t i = 0; i < fields.size(); ++i) {
+             if (i != 0) {
+                 out_ << ',';
+diff --git a/libs/jam2-core/include/jam2/peer_stream.hpp b/libs/jam2-core/include/jam2/peer_stream.hpp
+index 2a5a688..7473fcf 100644
+--- a/libs/jam2-core/include/jam2/peer_stream.hpp
++++ b/libs/jam2-core/include/jam2/peer_stream.hpp
+@@ -31,6 +31,8 @@ struct PeerStreamConfig {
+     double drift_smoothing = 0.02;
+     int drift_deadband_ppm = 0;
+     int drift_max_correction_ppm = 500;
++    // Experimental arrival-offset accounting. Zero retains lifetime estimation.
++    std::uint64_t drift_arrival_step_threshold_us = 2000;
+     // Gaps remain relative to the packet interval. The mixer associates them
+     // with real starvation before raising a target; arrivals alone add no delay.
+     std::uint64_t adaptive_delivery_gap_minimum_us = 0;
+@@ -130,6 +132,9 @@ struct PeerStreamStats {
+     std::uint64_t drift_baseline_calibration_packets = 0;
+     std::uint64_t drift_baseline_delay_improvement_us = 0;
+     double raw_drift_ppm = 0.0;
++    std::uint64_t drift_arrival_step_threshold_us = 0;
++    std::uint64_t drift_arrival_offset_adjustments = 0;
++    std::int64_t drift_arrival_offset_us = 0;
+     double local_device_drift_ppm = 0.0;
+     double relative_drift_ppm = 0.0;
+     double drift_ppm = 0.0;
+diff --git a/libs/jam2-core/src/peer_stream.cpp b/libs/jam2-core/src/peer_stream.cpp
+index 18013e5..54115bd 100644
+--- a/libs/jam2-core/src/peer_stream.cpp
++++ b/libs/jam2-core/src/peer_stream.cpp
+@@ -171,6 +171,9 @@ struct PeerStream::Impl {
+     std::uint64_t drift_observation_best_receive_time_us = 0;
+     long double drift_observation_best_offset_us = 0.0L;
+     std::uint64_t drift_observation_packets = 0;
++    std::uint64_t drift_previous_remote_sample_time = 0;
++    std::uint64_t drift_previous_receive_time_us = 0;
++    double drift_arrival_offset_us = 0.0;
+     std::uint64_t last_audio_delivery_receive_us = 0;
+     std::uint64_t short_gap_window_start_us = 0;
+     std::uint32_t short_gap_observations = 0;
+@@ -266,6 +269,7 @@ struct PeerStream::Impl {
+         stats.adaptive_playback_target_frames = adaptive_target_frames;
+         stats.adaptive_playback_min_frames = config.adaptive_playback_min_frames;
+         stats.adaptive_playback_max_frames = config.adaptive_playback_max_frames;
++        stats.drift_arrival_step_threshold_us = config.drift_arrival_step_threshold_us;
+     }
+ 
+     std::uint64_t currentPlayoutDelayFrames() const noexcept
+@@ -314,8 +318,33 @@ struct PeerStream::Impl {
+             drift_observation_best_remote_sample_time - first_remote_sample_time);
+         const double remote_elapsed_us = remote_elapsed_samples * 1000000.0 /
+             static_cast<double>(config.sample_rate);
++        // Candidate A2: retain the lifetime frequency baseline, accounting only
++        // abrupt arrival-offset residuals between low-delay observations. Small
++        // quantized timing changes still contribute to long-term clock rate.
++        if (config.drift_arrival_step_threshold_us != 0 &&
++            drift_previous_receive_time_us != 0 &&
++            drift_observation_best_receive_time_us > drift_previous_receive_time_us &&
++            drift_observation_best_remote_sample_time > drift_previous_remote_sample_time) {
++            const double clock_scale = 1.0 + stats.drift_ppm / 1000000.0;
++            if (clock_scale > 0.5 && clock_scale < 2.0) {
++                const double remote_interval_us = static_cast<double>(
++                    drift_observation_best_remote_sample_time - drift_previous_remote_sample_time) *
++                    1000000.0 / config.sample_rate;
++                const double local_interval_us = static_cast<double>(
++                    drift_observation_best_receive_time_us - drift_previous_receive_time_us);
++                const double residual = local_interval_us - remote_interval_us / clock_scale;
++                if (std::abs(residual) >= config.drift_arrival_step_threshold_us) {
++                    drift_arrival_offset_us += residual;
++                    ++stats.drift_arrival_offset_adjustments;
++                    stats.drift_arrival_offset_us = static_cast<std::int64_t>(std::llround(drift_arrival_offset_us));
++                }
++            }
++        }
++        drift_previous_remote_sample_time = drift_observation_best_remote_sample_time;
++        drift_previous_receive_time_us = drift_observation_best_receive_time_us;
+         const double local_elapsed_us = static_cast<double>(
+-            drift_observation_best_receive_time_us - first_receive_time_us);
++            drift_observation_best_receive_time_us - first_receive_time_us) - drift_arrival_offset_us;
++        if (local_elapsed_us <= 0) return;
+         stats.raw_drift_ppm =
+             ((remote_elapsed_us / local_elapsed_us) - 1.0) * 1000000.0;
+         if (!drift_smoothed || config.drift_smoothing >= 1.0) {
+@@ -464,6 +493,9 @@ struct PeerStream::Impl {
+             // clock baseline. Recalibrate without contaminating the lifetime
+             // estimate with the interruption's scheduling delay.
+             drift_started = drift_calibrating = drift_smoothed = drift_observation_active = false;
++            drift_previous_remote_sample_time = drift_previous_receive_time_us = 0;
++            drift_arrival_offset_us = 0;
++            stats.drift_arrival_offset_us = 0;
+             stats.drift_valid = stats.drift_baseline_calibrating = false;
+             smoothed_drift_ppm = 0;
+             stats.raw_drift_ppm = stats.drift_ppm = 0;
+diff --git a/tests/unit/application/CliBoundaryTests.cpp b/tests/unit/application/CliBoundaryTests.cpp
+index 1d8bfb5..de443f1 100644
+--- a/tests/unit/application/CliBoundaryTests.cpp
++++ b/tests/unit/application/CliBoundaryTests.cpp
+@@ -274,6 +274,9 @@ void testOptionAndStatsContracts()
+     source.jitter_buffer_target_releases = 8;
+     source.jitter_buffer_timeout_releases = 9;
+     source.jitter_buffer_rebases = 10;
++    source.drift_arrival_step_threshold_us = 2000;
++    source.drift_arrival_offset_adjustments = 2;
++    source.drift_arrival_offset_us = -3000;
+     jam2::cli::stats::AudioPacketStats copied;
+     jam2::cli::stats::copy_peer_stream_stats(copied, source);
+     expect(copied.udp_replay_rejects == 3 && copied.sequence.lost == 4 &&
+@@ -285,6 +288,10 @@ void testOptionAndStatsContracts()
+             copied.jitter_buffer_rebases == 10,
+         "CLI diagnostics copy the complete peer-stream snapshot categories");
+ 
++    expect(copied.drift_arrival_step_threshold_us == 2000 &&
++        copied.drift_arrival_offset_adjustments == 2 && copied.drift_arrival_offset_us == -3000,
++        "CLI diagnostics retain the experimental arrival-offset threshold and signed correction");
++
+     jam2::PeerMixerStats mixerSource;
+     mixerSource.receive_recovery_active = true;
+     mixerSource.receive_recovery_events = 11;
+@@ -362,6 +369,9 @@ void testOptionAndStatsContracts()
+     firstGap.audio_packet_gap_max_us = 2800;
+     firstGap.audio_packet_gap_samples = 2;
+     firstGap.audio_packet_gap_over_2x_count = 1;
++    firstGap.drift_arrival_step_threshold_us = 2000;
++    firstGap.drift_arrival_offset_adjustments = 2;
++    firstGap.drift_arrival_offset_us = -3000;
+     jam2::PeerStreamStats secondGap;
+     secondGap.audio_packet_gap_min_us = 900;
+     secondGap.audio_packet_gap_sum_us = 5900;
+@@ -369,6 +379,9 @@ void testOptionAndStatsContracts()
+     secondGap.audio_packet_gap_samples = 2;
+     secondGap.audio_packet_gap_over_2x_count = 1;
+     secondGap.audio_packet_gap_over_4x_count = 1;
++    secondGap.drift_arrival_step_threshold_us = 2000;
++    secondGap.drift_arrival_offset_adjustments = 3;
++    secondGap.drift_arrival_offset_us = 1000;
+     jam2::cli::stats::AudioPacketStats aggregated;
+     jam2::cli::stats::add_peer_stream_stats(aggregated, firstGap);
+     jam2::cli::stats::add_peer_stream_stats(aggregated, secondGap);
+@@ -379,6 +392,9 @@ void testOptionAndStatsContracts()
+             aggregated.audio_packet_gap_over_2x_count == 2 &&
+             aggregated.audio_packet_gap_over_4x_count == 1,
+         "mesh diagnostics aggregate exact packet-gap timing across peers");
++    expect(aggregated.drift_arrival_step_threshold_us == 2000 &&
++        aggregated.drift_arrival_offset_adjustments == 5 && aggregated.drift_arrival_offset_us == -3000,
++        "mesh diagnostics sum offset events and retain the signed largest-magnitude peer offset");
+ 
+     jam2::cli::stats::ReceiveLoopDiagnostics receiveLoop;
+     receiveLoop.beginWake(1000);
+@@ -495,9 +511,9 @@ void testOptionAndStatsContracts()
+         const bool schemaMatches = opened && lines.size() == 3 &&
+                 csvFieldCount(header) == csvFieldCount(finalRow) &&
+                 csvFieldCount(header) == csvFieldCount(periodicRow) &&
+-                header.endsWith("mix_live_tail_rounding_tolerance_frames,mix_adaptive_release_alignment_margin_frames,mix_partial_release_events,mix_partial_release_frames,mix_lookahead_hold_events,mix_lookahead_hold_frames,mix_lookahead_hold_max_fraction_ppm,mix_isolated_recovery_events,mix_worker_service_gap_us,mix_worker_runway_frames,mix_playback_stopping_frames,mix_release_worker_guard_active,wasapi_capture_depth_frames,wasapi_render_padding_frames,wasapi_capture_correction_ppm,wasapi_capture_underrun_frames,wasapi_capture_overrun_frames,wasapi_capture_discontinuities,wasapi_capture_resets,wasapi_invalid_timestamps,audio_device_error,grid_phase_accepted,grid_phase_delayed,grid_phase_reordered,grid_phase_raw_error_frames,grid_phase_tolerance_frames,grid_phase_maximum_drift_ppm,grid_phase_last_accepted_age_us,mix_adaptive_path_high_water_frames,mix_delivery_gap_guard_active,mix_recovery_pending_frames,mix_recovery_retired_frames,mix_recovery_cancelled_frames,mix_recovery_safe_depth_frames,mix_recovery_low_water_frames,mix_recovery_release_events,mix_recovery_release_active") &&
+-                periodicRow.endsWith(",17,256,yes,18,19,20,21,22,128,256,320,64,64,23,63,31,32,33,34,35,36,37,yes,111,222,-333,444,555,6,7,8,-9,0,0,0,0,0,0,0,0,no,38,39,40,41,42,43,yes") &&
+-                finalRow.endsWith(",17,256,yes,18,19,20,21,22,128,256,320,64,64,23,63,31,32,33,34,35,36,37,yes,111,222,-333,444,555,6,7,8,-9,0,0,0,0,0,0,0,0,no,38,39,40,41,42,43,yes");
++                header.endsWith("mix_live_tail_rounding_tolerance_frames,mix_adaptive_release_alignment_margin_frames,mix_partial_release_events,mix_partial_release_frames,mix_lookahead_hold_events,mix_lookahead_hold_frames,mix_lookahead_hold_max_fraction_ppm,mix_isolated_recovery_events,mix_worker_service_gap_us,mix_worker_runway_frames,mix_playback_stopping_frames,mix_release_worker_guard_active,wasapi_capture_depth_frames,wasapi_render_padding_frames,wasapi_capture_correction_ppm,wasapi_capture_underrun_frames,wasapi_capture_overrun_frames,wasapi_capture_discontinuities,wasapi_capture_resets,wasapi_invalid_timestamps,audio_device_error,grid_phase_accepted,grid_phase_delayed,grid_phase_reordered,grid_phase_raw_error_frames,grid_phase_tolerance_frames,grid_phase_maximum_drift_ppm,grid_phase_last_accepted_age_us,mix_adaptive_path_high_water_frames,mix_delivery_gap_guard_active,mix_recovery_pending_frames,mix_recovery_retired_frames,mix_recovery_cancelled_frames,mix_recovery_safe_depth_frames,mix_recovery_low_water_frames,mix_recovery_release_events,mix_recovery_release_active,drift_arrival_step_threshold_us,drift_arrival_offset_adjustments,drift_arrival_offset_us") &&
++                periodicRow.endsWith(",17,256,yes,18,19,20,21,22,128,256,320,64,64,23,63,31,32,33,34,35,36,37,yes,111,222,-333,444,555,6,7,8,-9,0,0,0,0,0,0,0,0,no,38,39,40,41,42,43,yes,2000,2,-3000") &&
++                finalRow.endsWith(",17,256,yes,18,19,20,21,22,128,256,320,64,64,23,63,31,32,33,34,35,36,37,yes,111,222,-333,444,555,6,7,8,-9,0,0,0,0,0,0,0,0,no,38,39,40,41,42,43,yes,2000,2,-3000");
+         expect(schemaMatches,
+             "final CSV preserves the capture-clock pacing field and schema width");
+     }
+--- a/tests/unit/core/PeerDriftDelayStepTests.cpp
++++ b/tests/unit/core/PeerDriftDelayStepTests.cpp
+@@ -22,7 +22,7 @@
+ void expect(bool condition,const char* reason) {
+     if(!condition) {std::cerr<<"FAIL: "<<reason<<'\n';++failures;}
+ }
+-template<int packet=128> void run(int stepUs,int clockPpm,bool jitter=false) {
++template<int packet=128> void run(int stepUs,int clockPpm,bool jitter=false,bool accountOffsets=true) {
+     constexpr int rate=48000;
+     Sink sink;
+     jam2::PeerStreamConfig config;
+@@ -31,6 +31,7 @@
+     config.sample_time_playout=false;config.playback_max_frames=0;
+     config.stats_warmup_us=0;config.drift_smoothing=.02;
+     config.drift_deadband_ppm=0;config.drift_max_correction_ppm=500;
++    config.drift_arrival_step_threshold_us=accountOffsets ? 2000 : 0;
+     jam2::PeerStream stream(config,0,&sink);
+     std::array<std::uint8_t,packet*2> bytes{};
+     std::uint64_t previous=0;
+@@ -53,16 +54,23 @@
+             const auto& stats=stream.stats();
+             std::cout<<"METRIC drift_delay_step packet_frames="<<packet<<" step_us="<<stepUs<<" clock_ppm="<<clockPpm
+                 <<" jitter="<<jitter
+-                <<" elapsed_s="<<nextCheckpoint<<" raw_ppm="<<stats.raw_drift_ppm
++                <<" elapsed_s="<<nextCheckpoint<<" offset_adjustments="<<stats.drift_arrival_offset_adjustments
++                <<" offset_us="<<stats.drift_arrival_offset_us<<" raw_ppm="<<stats.raw_drift_ppm
+                 <<" smoothed_ppm="<<stats.drift_ppm<<" requested_ratio="<<sink.ratio
+                 <<" reordered_lost="<<stats.reordered_lost<<'\n';
+             expect(stats.drift_valid && stats.reordered_lost==0,"fixture must retain valid drift observations and contiguous packets");
+             // A constant added transit delay changes offset, not oscillator
+             // frequency. After seven seconds at that delay, correction should
+             // again describe the known source clock within 25 ppm.
+-            expect(std::abs(stats.drift_ppm-clockPpm)<=25,
+-                "settled constant delivery delay must not remain interpreted as source clock drift");
+-            const auto expectedCorrection=std::clamp(double(clockPpm),-500.0,500.0);
++            if (accountOffsets || stepUs==0 || nextCheckpoint>=40)
++                expect(std::abs(stats.drift_ppm-clockPpm)<=25,
++                    "settled constant delivery delay must not remain interpreted as source clock drift");
++            else expect(std::abs(stats.drift_ppm-clockPpm)>25,
++                "disabled offset accounting retains the measured lifetime-estimator negative control");
++            expect(stats.drift_arrival_offset_adjustments ==
++                (accountOffsets && stepUs!=0 ? (nextCheckpoint<40 ? 1U : 2U) : 0U),
++                "offset counters distinguish real frequency, added/removed delay and disabled accounting");
++            const auto expectedCorrection=std::clamp(accountOffsets ? double(clockPpm) : stats.drift_ppm,-500.0,500.0);
+             expect(std::abs((sink.ratio-1)*1000000-expectedCorrection)<=25,
+                 "actual source correction must follow the known clock and its configured correction cap");
+             nextCheckpoint=nextCheckpoint==10 ? 30 : 50;
+@@ -79,6 +87,7 @@
+         run<64>(0,0);run<64>(0,200);run<64>(0,-200);
+         run<64>(3000,0);run<64>(-3000,0);
+         run<64>(3000,200);run<64>(-3000,-200);run<64>(3000,0,true);
++        run(3000,0,false,false);
+     } catch(const std::exception& error) {std::cerr<<error.what()<<'\n';return 1;}
+     return failures ? 1 : 0;
+ }

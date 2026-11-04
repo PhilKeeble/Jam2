@@ -171,6 +171,9 @@ struct PeerStream::Impl {
     std::uint64_t drift_observation_best_receive_time_us = 0;
     long double drift_observation_best_offset_us = 0.0L;
     std::uint64_t drift_observation_packets = 0;
+    std::uint64_t drift_previous_remote_sample_time = 0;
+    std::uint64_t drift_previous_receive_time_us = 0;
+    double drift_arrival_offset_us = 0.0;
     std::uint64_t last_audio_delivery_receive_us = 0;
     std::uint64_t short_gap_window_start_us = 0;
     std::uint32_t short_gap_observations = 0;
@@ -266,6 +269,7 @@ struct PeerStream::Impl {
         stats.adaptive_playback_target_frames = adaptive_target_frames;
         stats.adaptive_playback_min_frames = config.adaptive_playback_min_frames;
         stats.adaptive_playback_max_frames = config.adaptive_playback_max_frames;
+        stats.drift_arrival_step_threshold_us = config.drift_arrival_step_threshold_us;
     }
 
     std::uint64_t currentPlayoutDelayFrames() const noexcept
@@ -314,8 +318,33 @@ struct PeerStream::Impl {
             drift_observation_best_remote_sample_time - first_remote_sample_time);
         const double remote_elapsed_us = remote_elapsed_samples * 1000000.0 /
             static_cast<double>(config.sample_rate);
+        // Retain the lifetime frequency baseline, accounting only
+        // abrupt arrival-offset residuals between low-delay observations. Small
+        // quantized timing changes still contribute to long-term clock rate.
+        if (config.drift_arrival_step_threshold_us != 0 &&
+            drift_previous_receive_time_us != 0 &&
+            drift_observation_best_receive_time_us > drift_previous_receive_time_us &&
+            drift_observation_best_remote_sample_time > drift_previous_remote_sample_time) {
+            const double clock_scale = 1.0 + stats.drift_ppm / 1000000.0;
+            if (clock_scale > 0.5 && clock_scale < 2.0) {
+                const double remote_interval_us = static_cast<double>(
+                    drift_observation_best_remote_sample_time - drift_previous_remote_sample_time) *
+                    1000000.0 / config.sample_rate;
+                const double local_interval_us = static_cast<double>(
+                    drift_observation_best_receive_time_us - drift_previous_receive_time_us);
+                const double residual = local_interval_us - remote_interval_us / clock_scale;
+                if (std::abs(residual) >= config.drift_arrival_step_threshold_us) {
+                    drift_arrival_offset_us += residual;
+                    ++stats.drift_arrival_offset_adjustments;
+                    stats.drift_arrival_offset_us = static_cast<std::int64_t>(std::llround(drift_arrival_offset_us));
+                }
+            }
+        }
+        drift_previous_remote_sample_time = drift_observation_best_remote_sample_time;
+        drift_previous_receive_time_us = drift_observation_best_receive_time_us;
         const double local_elapsed_us = static_cast<double>(
-            drift_observation_best_receive_time_us - first_receive_time_us);
+            drift_observation_best_receive_time_us - first_receive_time_us) - drift_arrival_offset_us;
+        if (local_elapsed_us <= 0) return;
         stats.raw_drift_ppm =
             ((remote_elapsed_us / local_elapsed_us) - 1.0) * 1000000.0;
         if (!drift_smoothed || config.drift_smoothing >= 1.0) {
@@ -464,6 +493,9 @@ struct PeerStream::Impl {
             // clock baseline. Recalibrate without contaminating the lifetime
             // estimate with the interruption's scheduling delay.
             drift_started = drift_calibrating = drift_smoothed = drift_observation_active = false;
+            drift_previous_remote_sample_time = drift_previous_receive_time_us = 0;
+            drift_arrival_offset_us = 0;
+            stats.drift_arrival_offset_us = 0;
             stats.drift_valid = stats.drift_baseline_calibrating = false;
             smoothed_drift_ppm = 0;
             stats.raw_drift_ppm = stats.drift_ppm = 0;

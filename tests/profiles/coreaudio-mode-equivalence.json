@@ -1,0 +1,75 @@
+{
+  "schema": "jam2-coreaudio-delivery-profile-v1",
+  "sample_rate": 48000,
+  "callback_frames": 32,
+  "packet_frames": 64,
+  "clean_duration_ms": 0,
+  "impaired_duration_ms": 60000,
+  "base_one_way_delay_ms": 0,
+  "forward_jitter_ms": 0,
+  "reverse_jitter_ms": 0,
+  "repeat_ms": 0,
+  "delay_points": [
+    [
+      0,
+      0
+    ]
+  ],
+  "recovered_buffer_limit_ms": 40,
+  "description": "Explicit MacBook Air Aggregate Device, two localhost CoreAudio instances; fresh engines, Direct/server ABBA at 48 kHz/32 callbacks/64 PCM16. Requires a matching local Go signaller. Tone 60 s, pulse 40 s; unchanged per-callback mode and audio quality gates. Replace both UIDs to use another device; two instances may intentionally share one device clock.",
+  "diagnostic_cases": [
+    {
+      "name": "direct-tone-a",
+      "connection_mode": "direct"
+    },
+    {
+      "name": "server-tone-a",
+      "connection_mode": "server",
+      "mode_reference_case": "direct-tone-a"
+    },
+    {
+      "name": "server-tone-b",
+      "connection_mode": "server",
+      "mode_reference_case": "direct-tone-a"
+    },
+    {
+      "name": "direct-tone-b",
+      "connection_mode": "direct",
+      "mode_reference_case": "direct-tone-a"
+    },
+    {
+      "name": "direct-pulse-a",
+      "connection_mode": "direct",
+      "test_input": "pulse-1s",
+      "impaired_duration_ms": 40000
+    },
+    {
+      "name": "server-pulse-a",
+      "connection_mode": "server",
+      "test_input": "pulse-1s",
+      "impaired_duration_ms": 40000,
+      "mode_reference_case": "direct-pulse-a"
+    },
+    {
+      "name": "server-pulse-b",
+      "connection_mode": "server",
+      "test_input": "pulse-1s",
+      "impaired_duration_ms": 40000,
+      "mode_reference_case": "direct-pulse-a"
+    },
+    {
+      "name": "direct-pulse-b",
+      "connection_mode": "direct",
+      "test_input": "pulse-1s",
+      "impaired_duration_ms": 40000,
+      "mode_reference_case": "direct-pulse-a"
+    }
+  ],
+  "record_audio": true,
+  "delay_scope": "none",
+  "network_audio_format": "pcm16",
+  "device_uids": [
+    "~:AMS2_Aggregate:0",
+    "~:AMS2_Aggregate:0"
+  ]
+}

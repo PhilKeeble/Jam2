@@ -1,0 +1,64 @@
+{
+  "schema": "jam2-coreaudio-delivery-profile-v1",
+  "sample_rate": 48000,
+  "callback_frames": 64,
+  "packet_frames": 128,
+  "clean_duration_ms": 0,
+  "impaired_duration_ms": 60000,
+  "base_one_way_delay_ms": 0,
+  "forward_jitter_ms": 0,
+  "reverse_jitter_ms": 0,
+  "repeat_ms": 0,
+  "delay_points": [
+    [
+      0,
+      0
+    ]
+  ],
+  "recovered_buffer_limit_ms": 140,
+  "description": "Two streams on one explicit CoreAudio aggregate clock. Compare identical clean proxy delivery with a sustained +3 ms audio-arrival offset at 3 s, removed at 40 s. No oscillator skew injected. Tests the arrival-offset/drift-estimation lead found in the unproxied larger server-tone-b run. Retain original quality and latency gates.",
+  "diagnostic_cases": [
+    {
+      "name": "no-step-control"
+    },
+    {
+      "name": "three-ms-step",
+      "delay_points": [
+        [
+          0,
+          0
+        ],
+        [
+          3000,
+          0
+        ],
+        [
+          3001,
+          3
+        ],
+        [
+          40000,
+          3
+        ],
+        [
+          40001,
+          0
+        ]
+      ],
+      "mode_reference_case": "no-step-control"
+    }
+  ],
+  "record_audio": true,
+  "delay_scope": "audio",
+  "network_audio_format": "pcm16",
+  "device_uids": [
+    "~:AMS2_Aggregate:0",
+    "~:AMS2_Aggregate:0"
+  ],
+  "jitter_buffer_frames": 1536,
+  "adaptive_playback_target_frames": 512,
+  "adaptive_playback_min_frames": 512,
+  "adaptive_playback_max_frames": 4096,
+  "tuning_profile": "moderate",
+  "connection_mode": "proxied-direct"
+}

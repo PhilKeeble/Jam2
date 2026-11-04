@@ -1,0 +1,10 @@
+--- a/libs/jam2-core/src/peer_mixer.cpp
++++ b/libs/jam2-core/src/peer_mixer.cpp
+@@ -1298,7 +1298,6 @@
+         // receive worker sleeps. Keep the same output cap and catch-up/debt
+         // protections; moving real frames does not add recovery padding.
+         if (!config.adaptive_playback_cushion || output == nullptr ||
+-            config.adaptive_min_frames > mixed_output.size() ||
+             output->callbackFrames() == 0 || receive_catchup_active ||
+             receiveRecoveryDebtFrames() != 0) return 0;
+         const std::size_t output_depth = output->depthFrames();

@@ -299,6 +299,9 @@ struct AudioPacketStats {
     std::uint64_t drift_baseline_calibration_packets = 0;
     std::uint64_t drift_baseline_delay_improvement_us = 0;
     double raw_drift_ppm = 0.0;
+    std::uint64_t drift_arrival_step_threshold_us = 0;
+    std::uint64_t drift_arrival_offset_adjustments = 0;
+    std::int64_t drift_arrival_offset_us = 0;
     double drift_ppm = 0.0;
     double resampler_ratio = 1.0;
     double resampler_ratio_min = 0.0;
@@ -744,7 +747,7 @@ public:
                 "adaptive_delivery_gap_required_frames,"
                 "adaptive_delivery_gap_required_max_frames,mix_live_tail_batch_tolerance_frames,"
                 "mix_normal_output_limit_frames,mix_normal_path_limit_frames,"
-                "mix_live_tail_rounding_tolerance_frames,mix_adaptive_release_alignment_margin_frames,mix_partial_release_events,mix_partial_release_frames,mix_lookahead_hold_events,mix_lookahead_hold_frames,mix_lookahead_hold_max_fraction_ppm,mix_isolated_recovery_events,mix_worker_service_gap_us,mix_worker_runway_frames,mix_playback_stopping_frames,mix_release_worker_guard_active,wasapi_capture_depth_frames,wasapi_render_padding_frames,wasapi_capture_correction_ppm,wasapi_capture_underrun_frames,wasapi_capture_overrun_frames,wasapi_capture_discontinuities,wasapi_capture_resets,wasapi_invalid_timestamps,audio_device_error,grid_phase_accepted,grid_phase_delayed,grid_phase_reordered,grid_phase_raw_error_frames,grid_phase_tolerance_frames,grid_phase_maximum_drift_ppm,grid_phase_last_accepted_age_us,mix_adaptive_path_high_water_frames,mix_delivery_gap_guard_active,mix_recovery_pending_frames,mix_recovery_retired_frames,mix_recovery_cancelled_frames,mix_recovery_safe_depth_frames,mix_recovery_low_water_frames,mix_recovery_release_events,mix_recovery_release_active\n";
+                "mix_live_tail_rounding_tolerance_frames,mix_adaptive_release_alignment_margin_frames,mix_partial_release_events,mix_partial_release_frames,mix_lookahead_hold_events,mix_lookahead_hold_frames,mix_lookahead_hold_max_fraction_ppm,mix_isolated_recovery_events,mix_worker_service_gap_us,mix_worker_runway_frames,mix_playback_stopping_frames,mix_release_worker_guard_active,wasapi_capture_depth_frames,wasapi_render_padding_frames,wasapi_capture_correction_ppm,wasapi_capture_underrun_frames,wasapi_capture_overrun_frames,wasapi_capture_discontinuities,wasapi_capture_resets,wasapi_invalid_timestamps,audio_device_error,grid_phase_accepted,grid_phase_delayed,grid_phase_reordered,grid_phase_raw_error_frames,grid_phase_tolerance_frames,grid_phase_maximum_drift_ppm,grid_phase_last_accepted_age_us,mix_adaptive_path_high_water_frames,mix_delivery_gap_guard_active,mix_recovery_pending_frames,mix_recovery_retired_frames,mix_recovery_cancelled_frames,mix_recovery_safe_depth_frames,mix_recovery_low_water_frames,mix_recovery_release_events,mix_recovery_release_active,drift_arrival_step_threshold_us,drift_arrival_offset_adjustments,drift_arrival_offset_us\n";
     }
 
     explicit operator bool() const { return out_.is_open(); }
@@ -1330,7 +1333,10 @@ public:
              << ',' << stats.mix_recovery_pending_frames << ',' << stats.mix_recovery_retired_frames
              << ',' << stats.mix_recovery_cancelled_frames << ',' << stats.mix_recovery_safe_depth_frames
              << ',' << stats.mix_recovery_low_water_frames << ',' << stats.mix_recovery_release_events
-             << ',' << (stats.mix_recovery_release_active ? "yes" : "no");
+             << ',' << (stats.mix_recovery_release_active ? "yes" : "no")
+             << ',' << stats.drift_arrival_step_threshold_us
+             << ',' << stats.drift_arrival_offset_adjustments
+             << ',' << stats.drift_arrival_offset_us;
         out_ << '\n';
         if (row_type == "final") {
             out_.flush();
@@ -1346,7 +1352,7 @@ public:
         if (!out_) {
             return;
         }
-        std::vector<std::string> fields(542);
+        std::vector<std::string> fields(545);
         auto set = [&](std::size_t index, auto value) {
             std::ostringstream text;
             text << value;
@@ -1870,6 +1876,9 @@ public:
         set(539, stats.mix_recovery_low_water_frames);
         set(540, stats.mix_recovery_release_events);
         set(541, stats.mix_recovery_release_active ? "yes" : "no");
+        set(542, stats.drift_arrival_step_threshold_us);
+        set(543, stats.drift_arrival_offset_adjustments);
+        set(544, stats.drift_arrival_offset_us);
         for (std::size_t i = 0; i < fields.size(); ++i) {
             if (i != 0) {
                 out_ << ',';

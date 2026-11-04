@@ -342,7 +342,7 @@ struct PeerMixer::Impl {
     std::vector<std::int32_t> mixed_output;
     std::vector<std::int32_t> silence_output;
     bool started = false;
-    std::size_t pending_recovery_padding_frames = 0;
+    std::size_t pending_recovery_padding_goal = 0;
     std::size_t slot_frames_released = 0;
     bool slot_had_missing = false;
     std::uint64_t next_deadline_us = 0;
@@ -846,7 +846,7 @@ struct PeerMixer::Impl {
         stats.receive_recovery_debt_frames = 0;
         receive_catchup_active = false;
         receive_rebase_started = false;
-        pending_recovery_padding_frames = 0;
+        pending_recovery_padding_goal = 0;
         slot_frames_released = 0;
         slot_had_missing = false;
         receive_recovery_stable_until_us = 0;
@@ -889,7 +889,7 @@ struct PeerMixer::Impl {
         if (contributing == 0) {
             slot_frames_released = 0;
             slot_had_missing = false;
-            pending_recovery_padding_frames = 0;
+            pending_recovery_padding_goal = 0;
         }
         stats.active_peers = active;
         stats.contributing_peers = contributing;
@@ -1298,7 +1298,6 @@ struct PeerMixer::Impl {
         // receive worker sleeps. Keep the same output cap and catch-up/debt
         // protections; moving real frames does not add recovery padding.
         if (!config.adaptive_playback_cushion || output == nullptr ||
-            config.adaptive_min_frames > mixed_output.size() ||
             output->callbackFrames() == 0 || receive_catchup_active ||
             receiveRecoveryDebtFrames() != 0) return 0;
         const std::size_t output_depth = output->depthFrames();
@@ -1465,7 +1464,7 @@ struct PeerMixer::Impl {
             : ContributorReadiness{cached_all_ready, cached_any_ready};
         if (stats.contributing_peers == 0) {
             cancelRecoveryBudget();
-            pending_recovery_padding_frames = 0;
+            pending_recovery_padding_goal = 0;
             slot_frames_released = 0;
             slot_had_missing = false;
             stats.release_worker_guard_active = false;
@@ -1568,15 +1567,12 @@ struct PeerMixer::Impl {
                 }
             }
         }
-        // Preserve the amount of recovery runway this deadline pass needs,
-        // then append it after real packets in this receive batch. Deferring
-        // only the old target would lose a block of recovery protection when
-        // a packet fills that target before the batch ends.
+        // Fill the measured runway goal after the batch; real audio
+        // arriving in this batch counts toward that goal.
         if (!readiness.any_ready && work == 0 && actual_output_underrun && output != nullptr) {
             const std::size_t goal = adaptive_target_frames > mixed_output.size()
                 ? static_cast<std::size_t>(adaptive_target_frames - mixed_output.size()) : 0;
-            const std::size_t depth = output->depthFrames();
-            pending_recovery_padding_frames = std::max(pending_recovery_padding_frames, goal > depth ? goal - depth : 0);
+            pending_recovery_padding_goal = std::max(pending_recovery_padding_goal, goal);
         }
         trimLivePathToTarget();
         if (work == config.max_blocks_per_advance &&
@@ -1588,13 +1584,13 @@ struct PeerMixer::Impl {
     void finishReceiveBatch(bool receive_budget_exhausted) noexcept
     {
         if (stats.contributing_peers == 0 || output == nullptr || !output->acceptsFrames()) {
-            pending_recovery_padding_frames = 0;
+            pending_recovery_padding_goal = 0;
         }
-        if (pending_recovery_padding_frames && !receive_budget_exhausted &&
+        if (pending_recovery_padding_goal && !receive_budget_exhausted &&
             !receive_catchup_active) {
             padOutputTo(std::min<std::uint64_t>(normalOutputLimitFrames(),
-                output->depthFrames() + pending_recovery_padding_frames), CushionPurpose::UnderrunRecovery);
-            pending_recovery_padding_frames = 0;
+                pending_recovery_padding_goal), CushionPurpose::UnderrunRecovery);
+            pending_recovery_padding_goal = 0;
         }
         if (!receive_catchup_active) {
             return;

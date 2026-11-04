@@ -625,7 +625,10 @@ void startupRecoveryExperiments()
                 << " format=" << (format == jam2::NetworkAudioFormat::Pcm16Mono ? "pcm16" : "pcm24")
                 << " clean_average_path=" << clean.averagePath << " ready_average_path=" << ready.averagePath
                 << " padded_average_path=" << padded.averagePath << " retained_extra_frames=" << padded.averagePath - ready.averagePath
-                << " retained_extra_ms=" << (padded.averagePath - ready.averagePath) * 1000 / rate << '\n';
+                << " retained_extra_ms=" << (padded.averagePath - ready.averagePath) * 1000 / rate
+                << " same_batch_padding_frames=" << padded.final.padding
+                << " empty_batch_padding_frames=" << deferred.final.padding
+                << " empty_batch_retained_extra_frames=" << deferred.averagePath - ready.averagePath << '\n';
             expect(padded.averagePath <= ready.averagePath + 1.0,
                 "startup recovery padding must retire after clean delivery without leaving a packet of extra latency");
             expect(deferred.averagePath <= ready.averagePath + 1.0,

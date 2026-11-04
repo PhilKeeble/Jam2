@@ -313,3 +313,104 @@ The four-peer delayed-beacon simulation covers
 one hour of drift, reordering, short bars and authority/epoch transitions.
 Its original unfiltered control is a separate expected-failure CTest; a green
 control test means the old behavior still violates the explicit error bound.
+
+## CoreAudio Direct/server and recovery investigation
+
+`coreaudio-mode-equivalence.json` runs the same fresh-engine tone/pulse ABBA
+comparison on macOS at 48 kHz, PCM16, 32-frame callbacks and 64-frame packets.
+`coreaudio-mode-equivalence-larger.json` uses Moderate's complete local tuning:
+64-frame callbacks, 128-frame packets, 1536-frame jitter target and adaptive
+512..4096 frames. The mode tolerances and recorded-audio gates above are unchanged.
+Profiles identify both devices by stable `device_uids`, currently this Mac's
+existing `~:AMS2_Aggregate:0`. Replace those UIDs explicitly on another machine.
+Two processes may share that device; this tests real HAL scheduling, but shares
+one hardware clock and does not establish independent-device drift behavior.
+Input channel 1 and output channels 1,2 are recorded in each saved command.
+
+Build the matching local Go signaller from `../Jam2-Server/src`, then configure
+the native tests through the normal Release entry point:
+
+```sh
+export JAM2_RENDEZVOUS_TEST_SERVER=/absolute/path/to/matching/jam2-server
+export JAM2_COREAUDIO_DELIVERY_PROFILE="$PWD/tests/profiles/coreaudio-mode-equivalence.json"
+export JAM2_COREAUDIO_LARGER_PROFILE="$PWD/tests/profiles/coreaudio-mode-equivalence-larger.json"
+export JAM2_COREAUDIO_RECOVERY_PROFILE="$PWD/tests/profiles/coreaudio-recovery.json"
+export JAM2_COREAUDIO_DRIFT_PROFILE="$PWD/tests/profiles/coreaudio-drift-delay-step.json"
+bash ./compile.sh --tests coreaudio --test-name jam2_coreaudio_device_setup_units
+export JAM2_COREAUDIO_OUTPUT_UID='~:AMS2_Aggregate:0'
+ctest --test-dir build --parallel 1 --output-on-failure \
+  -R '^jam2_coreaudio_(mode|larger|recovery|drift)_delivery_hardware$|^jam2_coreaudio_session_reuse_hardware$'
+```
+
+Hardware access and localhost sockets must be available to these processes.
+Missing profiles skip explicitly; a skip is not hardware validation. Run these
+measurements serially without simultaneous compilation or other test loads.
+Artifacts stay under `artifacts/coreaudio-delivery` and `artifacts/coreaudio-reuse`.
+
+The reuse test uses the GUI's production `SharedSessionController` and
+`ApplicationRuntime` owners with two real streams. For each contract it holds
+the same engines open across Direct/server/server/Direct sessions, asserting
+that network detach releases capture/playback and callbacks continue without
+engine restart. It retains lifecycle counters, CSVs and tone stems. Its pass
+means those lifecycle assertions passed; inspect audio quality separately.
+It does not exercise GUI painting or dialogs.
+
+`coreaudio-recovery.json` injects 4/8/16 ms holds and five 95 ms holds/bursts on
+one audio direction, then runs clean for over two minutes. Both profiles use
+the production engine through a deterministic localhost delivery proxy. These
+are constructed impairments, not a packet-capture replay. Tail gates require
+packet flow to recover and no underrun/trim/recovery-event growth after 120 s;
+the 40/140 ms containment limits alone do not establish return to the clean
+baseline. Compare actual component depths before/after, hold expiry, targets,
+partial releases, pending/retired recovery frames and recorded audio.
+
+`coreaudio-drift-delay-step.json` compares an identical two-peer proxy control
+with +3 ms of audio-arrival delay from 3..40 seconds, with no oscillator skew
+injected. It follows the drift/queue-growth lead found in the unproxied larger
+server tone run. The separate `jam2_peer_drift_delay_step_units` CTest isolates
+the production `PeerStream` estimator: zero and genuine ±200 ppm controls,
+then ±3 ms delay steps with equal clocks. The desired settling bound is 25 ppm
+at 10/30/50 seconds. A failing delay-step assertion is an unresolved estimator
+defect, not a hardware-test skip or permission to weaken the bound.
+
+The optional `jam2_coreaudio_real_gui_hardware` CTest exercises the real visible
+Start/Join dialogs and physical audio engine. It requires an explicit device UID
+and a matching configured local signaller; the default run skips without a UID.
+
+```sh
+JAM2_COREAUDIO_GUI_UID='~:AMS2_Aggregate:0' JAM2_COREAUDIO_GUI_SHOW=1 \
+  ctest --test-dir build --parallel 1 --verbose \
+  -R '^jam2_coreaudio_real_gui_hardware$'
+```
+
+It runs Direct/server/server/Direct for Fast and Moderate, 30 seconds per case,
+with two isolated storage roots, quiet physical microphone playback, diagnostics
+and per-case engine reuse/callback/overload snapshots. It drives the actual
+modal actions; only the localhost rendezvous override uses a debug preparation
+command. The command rejects remote endpoints and active-session changes.
+Evidence stays in `artifacts/coreaudio-gui`. It does not inject a test tone or
+measure analog round-trip latency. Separate delivery profiles provide recorded
+tones and deterministic packet impairment.
+
+For controlled variants, `JAM2_COREAUDIO_EXPERIMENT_PROFILE` registers
+`jam2_coreaudio_experiment_delivery_hardware`. Optional per-case
+`drift_correction` is a boolean override for Jam2's source clock correction, and
+`stats_interval_ms` accepts 100..2000 (default 250). A 251 ms interval helps
+avoid sampling the same callback phase. Neither setting changes Apple's HAL
+aggregate-subdevice drift compensation.
+
+The drift unit also covers genuine ±500/±1000 ppm, combined clock/arrival steps
+and deterministic arrival jitter, checking both reported drift and the actual
+bounded resampler request. The separate `jam2_peer_mixer_larger_prefix_units`
+diagnostic checks real common prefixes around 128 frames with a 512-frame
+minimum and output cap, exactly three remote contributors, preserved samples,
+no padding/drop/debt, and a full-output control. Its desired prefix assertions
+failed the Nov 3 baseline and now pass with the selected A2/B/C implementation.
+
+The implemented recovery contract counts real same-batch audio toward its
+absolute goal. `jam2_core_startup_padding_units` checks isolated shortages,
+partially satisfied and empty goals, saturated batches and cancellation;
+`jam2_audio_flow_startup-recovery` retains the separate long-term retirement
+requirements. The drift units additionally verify that suspension clears the
+old offset baseline, and the larger-prefix units retain an empty established
+contributor guard. Current combined results are recorded in `REGRESSION.md`.

@@ -31,6 +31,8 @@ struct PeerStreamConfig {
     double drift_smoothing = 0.02;
     int drift_deadband_ppm = 0;
     int drift_max_correction_ppm = 500;
+    // Arrival-offset residual required to adjust the drift baseline. Zero disables accounting.
+    std::uint64_t drift_arrival_step_threshold_us = 2000;
     // Gaps remain relative to the packet interval. The mixer associates them
     // with real starvation before raising a target; arrivals alone add no delay.
     std::uint64_t adaptive_delivery_gap_minimum_us = 0;
@@ -130,6 +132,9 @@ struct PeerStreamStats {
     std::uint64_t drift_baseline_calibration_packets = 0;
     std::uint64_t drift_baseline_delay_improvement_us = 0;
     double raw_drift_ppm = 0.0;
+    std::uint64_t drift_arrival_step_threshold_us = 0;
+    std::uint64_t drift_arrival_offset_adjustments = 0;
+    std::int64_t drift_arrival_offset_us = 0;
     double local_device_drift_ppm = 0.0;
     double relative_drift_ppm = 0.0;
     double drift_ppm = 0.0;

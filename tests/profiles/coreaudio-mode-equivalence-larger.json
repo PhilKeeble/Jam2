@@ -1,0 +1,80 @@
+{
+  "schema": "jam2-coreaudio-delivery-profile-v1",
+  "sample_rate": 48000,
+  "callback_frames": 64,
+  "packet_frames": 128,
+  "clean_duration_ms": 0,
+  "impaired_duration_ms": 60000,
+  "base_one_way_delay_ms": 0,
+  "forward_jitter_ms": 0,
+  "reverse_jitter_ms": 0,
+  "repeat_ms": 0,
+  "delay_points": [
+    [
+      0,
+      0
+    ]
+  ],
+  "recovered_buffer_limit_ms": 140,
+  "description": "Same explicit CoreAudio ABBA matrix with the larger Wi-Fi session contract: 48 kHz/64 callbacks/128 PCM16, jitter 1536, adaptive 512..4096. The 140 ms bound is a run containment limit, not a latency acceptance target; mode equality uses unchanged one-callback tolerance.",
+  "diagnostic_cases": [
+    {
+      "name": "direct-tone-a",
+      "connection_mode": "direct"
+    },
+    {
+      "name": "server-tone-a",
+      "connection_mode": "server",
+      "mode_reference_case": "direct-tone-a"
+    },
+    {
+      "name": "server-tone-b",
+      "connection_mode": "server",
+      "mode_reference_case": "direct-tone-a"
+    },
+    {
+      "name": "direct-tone-b",
+      "connection_mode": "direct",
+      "mode_reference_case": "direct-tone-a"
+    },
+    {
+      "name": "direct-pulse-a",
+      "connection_mode": "direct",
+      "test_input": "pulse-1s",
+      "impaired_duration_ms": 40000
+    },
+    {
+      "name": "server-pulse-a",
+      "connection_mode": "server",
+      "test_input": "pulse-1s",
+      "impaired_duration_ms": 40000,
+      "mode_reference_case": "direct-pulse-a"
+    },
+    {
+      "name": "server-pulse-b",
+      "connection_mode": "server",
+      "test_input": "pulse-1s",
+      "impaired_duration_ms": 40000,
+      "mode_reference_case": "direct-pulse-a"
+    },
+    {
+      "name": "direct-pulse-b",
+      "connection_mode": "direct",
+      "test_input": "pulse-1s",
+      "impaired_duration_ms": 40000,
+      "mode_reference_case": "direct-pulse-a"
+    }
+  ],
+  "record_audio": true,
+  "delay_scope": "none",
+  "network_audio_format": "pcm16",
+  "device_uids": [
+    "~:AMS2_Aggregate:0",
+    "~:AMS2_Aggregate:0"
+  ],
+  "jitter_buffer_frames": 1536,
+  "adaptive_playback_target_frames": 512,
+  "adaptive_playback_min_frames": 512,
+  "adaptive_playback_max_frames": 4096,
+  "tuning_profile": "moderate"
+}

@@ -274,6 +274,9 @@ void testOptionAndStatsContracts()
     source.jitter_buffer_target_releases = 8;
     source.jitter_buffer_timeout_releases = 9;
     source.jitter_buffer_rebases = 10;
+    source.drift_arrival_step_threshold_us = 2000;
+    source.drift_arrival_offset_adjustments = 2;
+    source.drift_arrival_offset_us = -3000;
     jam2::cli::stats::AudioPacketStats copied;
     jam2::cli::stats::copy_peer_stream_stats(copied, source);
     expect(copied.udp_replay_rejects == 3 && copied.sequence.lost == 4 &&
@@ -284,6 +287,10 @@ void testOptionAndStatsContracts()
             copied.jitter_buffer_timeout_releases == 9 &&
             copied.jitter_buffer_rebases == 10,
         "CLI diagnostics copy the complete peer-stream snapshot categories");
+
+    expect(copied.drift_arrival_step_threshold_us == 2000 &&
+        copied.drift_arrival_offset_adjustments == 2 && copied.drift_arrival_offset_us == -3000,
+        "CLI diagnostics retain the arrival-offset threshold and signed correction");
 
     jam2::PeerMixerStats mixerSource;
     mixerSource.receive_recovery_active = true;
@@ -362,6 +369,9 @@ void testOptionAndStatsContracts()
     firstGap.audio_packet_gap_max_us = 2800;
     firstGap.audio_packet_gap_samples = 2;
     firstGap.audio_packet_gap_over_2x_count = 1;
+    firstGap.drift_arrival_step_threshold_us = 2000;
+    firstGap.drift_arrival_offset_adjustments = 2;
+    firstGap.drift_arrival_offset_us = -3000;
     jam2::PeerStreamStats secondGap;
     secondGap.audio_packet_gap_min_us = 900;
     secondGap.audio_packet_gap_sum_us = 5900;
@@ -369,6 +379,9 @@ void testOptionAndStatsContracts()
     secondGap.audio_packet_gap_samples = 2;
     secondGap.audio_packet_gap_over_2x_count = 1;
     secondGap.audio_packet_gap_over_4x_count = 1;
+    secondGap.drift_arrival_step_threshold_us = 2000;
+    secondGap.drift_arrival_offset_adjustments = 3;
+    secondGap.drift_arrival_offset_us = 1000;
     jam2::cli::stats::AudioPacketStats aggregated;
     jam2::cli::stats::add_peer_stream_stats(aggregated, firstGap);
     jam2::cli::stats::add_peer_stream_stats(aggregated, secondGap);
@@ -379,6 +392,9 @@ void testOptionAndStatsContracts()
             aggregated.audio_packet_gap_over_2x_count == 2 &&
             aggregated.audio_packet_gap_over_4x_count == 1,
         "mesh diagnostics aggregate exact packet-gap timing across peers");
+    expect(aggregated.drift_arrival_step_threshold_us == 2000 &&
+        aggregated.drift_arrival_offset_adjustments == 5 && aggregated.drift_arrival_offset_us == -3000,
+        "mesh diagnostics sum offset events and retain the signed largest-magnitude peer offset");
 
     jam2::cli::stats::ReceiveLoopDiagnostics receiveLoop;
     receiveLoop.beginWake(1000);
@@ -495,9 +511,9 @@ void testOptionAndStatsContracts()
         const bool schemaMatches = opened && lines.size() == 3 &&
                 csvFieldCount(header) == csvFieldCount(finalRow) &&
                 csvFieldCount(header) == csvFieldCount(periodicRow) &&
-                header.endsWith("mix_live_tail_rounding_tolerance_frames,mix_adaptive_release_alignment_margin_frames,mix_partial_release_events,mix_partial_release_frames,mix_lookahead_hold_events,mix_lookahead_hold_frames,mix_lookahead_hold_max_fraction_ppm,mix_isolated_recovery_events,mix_worker_service_gap_us,mix_worker_runway_frames,mix_playback_stopping_frames,mix_release_worker_guard_active,wasapi_capture_depth_frames,wasapi_render_padding_frames,wasapi_capture_correction_ppm,wasapi_capture_underrun_frames,wasapi_capture_overrun_frames,wasapi_capture_discontinuities,wasapi_capture_resets,wasapi_invalid_timestamps,audio_device_error,grid_phase_accepted,grid_phase_delayed,grid_phase_reordered,grid_phase_raw_error_frames,grid_phase_tolerance_frames,grid_phase_maximum_drift_ppm,grid_phase_last_accepted_age_us,mix_adaptive_path_high_water_frames,mix_delivery_gap_guard_active,mix_recovery_pending_frames,mix_recovery_retired_frames,mix_recovery_cancelled_frames,mix_recovery_safe_depth_frames,mix_recovery_low_water_frames,mix_recovery_release_events,mix_recovery_release_active") &&
-                periodicRow.endsWith(",17,256,yes,18,19,20,21,22,128,256,320,64,64,23,63,31,32,33,34,35,36,37,yes,111,222,-333,444,555,6,7,8,-9,0,0,0,0,0,0,0,0,no,38,39,40,41,42,43,yes") &&
-                finalRow.endsWith(",17,256,yes,18,19,20,21,22,128,256,320,64,64,23,63,31,32,33,34,35,36,37,yes,111,222,-333,444,555,6,7,8,-9,0,0,0,0,0,0,0,0,no,38,39,40,41,42,43,yes");
+                header.endsWith("mix_live_tail_rounding_tolerance_frames,mix_adaptive_release_alignment_margin_frames,mix_partial_release_events,mix_partial_release_frames,mix_lookahead_hold_events,mix_lookahead_hold_frames,mix_lookahead_hold_max_fraction_ppm,mix_isolated_recovery_events,mix_worker_service_gap_us,mix_worker_runway_frames,mix_playback_stopping_frames,mix_release_worker_guard_active,wasapi_capture_depth_frames,wasapi_render_padding_frames,wasapi_capture_correction_ppm,wasapi_capture_underrun_frames,wasapi_capture_overrun_frames,wasapi_capture_discontinuities,wasapi_capture_resets,wasapi_invalid_timestamps,audio_device_error,grid_phase_accepted,grid_phase_delayed,grid_phase_reordered,grid_phase_raw_error_frames,grid_phase_tolerance_frames,grid_phase_maximum_drift_ppm,grid_phase_last_accepted_age_us,mix_adaptive_path_high_water_frames,mix_delivery_gap_guard_active,mix_recovery_pending_frames,mix_recovery_retired_frames,mix_recovery_cancelled_frames,mix_recovery_safe_depth_frames,mix_recovery_low_water_frames,mix_recovery_release_events,mix_recovery_release_active,drift_arrival_step_threshold_us,drift_arrival_offset_adjustments,drift_arrival_offset_us") &&
+                periodicRow.endsWith(",17,256,yes,18,19,20,21,22,128,256,320,64,64,23,63,31,32,33,34,35,36,37,yes,111,222,-333,444,555,6,7,8,-9,0,0,0,0,0,0,0,0,no,38,39,40,41,42,43,yes,2000,2,-3000") &&
+                finalRow.endsWith(",17,256,yes,18,19,20,21,22,128,256,320,64,64,23,63,31,32,33,34,35,36,37,yes,111,222,-333,444,555,6,7,8,-9,0,0,0,0,0,0,0,0,no,38,39,40,41,42,43,yes,2000,2,-3000");
         expect(schemaMatches,
             "final CSV preserves the capture-clock pacing field and schema width");
     }

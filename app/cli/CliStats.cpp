@@ -180,6 +180,9 @@ void copy_peer_stream_stats(
     JAM2_COPY_PEER_STAT(drift_baseline_calibration_packets);
     JAM2_COPY_PEER_STAT(drift_baseline_delay_improvement_us);
     JAM2_COPY_PEER_STAT(raw_drift_ppm);
+    JAM2_COPY_PEER_STAT(drift_arrival_step_threshold_us);
+    JAM2_COPY_PEER_STAT(drift_arrival_offset_adjustments);
+    JAM2_COPY_PEER_STAT(drift_arrival_offset_us);
     JAM2_COPY_PEER_STAT(drift_ppm);
     JAM2_COPY_PEER_STAT(resampler_ratio);
     JAM2_COPY_PEER_STAT(resampler_ratio_min);
@@ -304,6 +307,11 @@ void add_peer_stream_stats(
         target.drift_ppm = source.drift_ppm;
         target.resampler_ratio = source.resampler_ratio;
     }
+    target.drift_arrival_step_threshold_us = std::max(
+        target.drift_arrival_step_threshold_us, source.drift_arrival_step_threshold_us);
+    target.drift_arrival_offset_adjustments += source.drift_arrival_offset_adjustments;
+    if (std::abs(source.drift_arrival_offset_us) > std::abs(target.drift_arrival_offset_us))
+        target.drift_arrival_offset_us = source.drift_arrival_offset_us;
     target.drift_baseline_calibrating =
         target.drift_baseline_calibrating || source.drift_baseline_calibrating;
     target.drift_baseline_calibration_packets +=

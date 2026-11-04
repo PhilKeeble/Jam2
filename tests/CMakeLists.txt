@@ -269,6 +269,10 @@ set_tests_properties(jam2_core_low_skew_units PROPERTIES
     TIMEOUT 120)
 add_test(NAME jam2_core_callback_runway_units
     COMMAND $<TARGET_FILE:jam2_core_input_tests> --callback-runway)
+add_test(NAME jam2_core_startup_padding_units
+    COMMAND $<TARGET_FILE:jam2_core_input_tests> --startup-padding)
+set_tests_properties(jam2_core_startup_padding_units PROPERTIES
+    LABELS "unit;core;audio;network;startup;recovery;delivery" TIMEOUT 30)
 add_test(NAME jam2_core_playback_recovery_units
     COMMAND $<TARGET_FILE:jam2_core_input_tests> --playback-recovery)
 set_tests_properties(jam2_core_playback_recovery_units PROPERTIES
@@ -368,6 +372,16 @@ jam2_configure_test_target(jam2_core_boundary_tests)
 target_link_libraries(jam2_core_boundary_tests PRIVATE jam2_core)
 add_test(NAME jam2_core_boundary_units
     COMMAND $<TARGET_FILE:jam2_core_boundary_tests>)
+add_executable(jam2_peer_drift_delay_step_tests EXCLUDE_FROM_ALL unit/core/PeerDriftDelayStepTests.cpp)
+jam2_configure_test_target(jam2_peer_drift_delay_step_tests)
+target_link_libraries(jam2_peer_drift_delay_step_tests PRIVATE jam2_core)
+add_test(NAME jam2_peer_drift_delay_step_units COMMAND $<TARGET_FILE:jam2_peer_drift_delay_step_tests>)
+set_tests_properties(jam2_peer_drift_delay_step_units PROPERTIES LABELS "unit;core;audio;network;drift;delivery" TIMEOUT 30)
+add_executable(jam2_peer_mixer_larger_prefix_tests EXCLUDE_FROM_ALL unit/core/PeerMixerLargerPrefixTests.cpp)
+jam2_configure_test_target(jam2_peer_mixer_larger_prefix_tests)
+target_link_libraries(jam2_peer_mixer_larger_prefix_tests PRIVATE jam2_core)
+add_test(NAME jam2_peer_mixer_larger_prefix_units COMMAND $<TARGET_FILE:jam2_peer_mixer_larger_prefix_tests>)
+set_tests_properties(jam2_peer_mixer_larger_prefix_units PROPERTIES LABELS "unit;core;audio;four-peer;delivery" TIMEOUT 30)
 set_tests_properties(jam2_core_boundary_units PROPERTIES
     LABELS "unit;core;network"
     TIMEOUT 30)
@@ -2097,6 +2111,9 @@ add_dependencies(jam2_tests_all jam2_bootstrap_wire_tests jam2_udp_multiplex_tes
 
 
 set(JAM2_RENDEZVOUS_TEST_SERVER "" CACHE FILEPATH "Real Go rendezvous server for UDP integration tests")
+if(DEFINED ENV{JAM2_RENDEZVOUS_TEST_SERVER})
+    set(JAM2_RENDEZVOUS_TEST_SERVER "$ENV{JAM2_RENDEZVOUS_TEST_SERVER}" CACHE FILEPATH "Real Go rendezvous server for UDP integration tests" FORCE)
+endif()
 if(NOT JAM2_RENDEZVOUS_TEST_SERVER AND WIN32 AND EXISTS "${CMAKE_SOURCE_DIR}/../Jam2-Server/logs/jam2-rendezvous-native-test.exe")
     set(JAM2_RENDEZVOUS_TEST_SERVER "${CMAKE_SOURCE_DIR}/../Jam2-Server/logs/jam2-rendezvous-native-test.exe")
 endif()
@@ -2414,6 +2431,47 @@ add_custom_target(jam2_tests_coreaudio DEPENDS jam2 jam2_coreaudio_device_setup_
     jam2_multiplex_session_lifecycle_tests)
 set_property(TEST jam2_multiplex_four_session_lifecycle_integration APPEND PROPERTY LABELS coreaudio)
 if(APPLE)
+    target_sources(jam2_multiplex_session_lifecycle_tests PRIVATE integration/application/CoreAudioSessionReuseIntegration.cpp)
+    add_executable(jam2_coreaudio_hardware_gui_tests EXCLUDE_FROM_ALL integration/gui/CoreAudioHardwareGuiIntegration.cpp)
+    jam2_configure_test_target(jam2_coreaudio_hardware_gui_tests)
+    target_link_libraries(jam2_coreaudio_hardware_gui_tests PRIVATE jam2_test_process_support jam2_core Qt6::Core Qt6::Network)
+    add_dependencies(jam2_coreaudio_hardware_gui_tests jam2)
+    add_test(NAME jam2_coreaudio_real_gui_hardware COMMAND $<TARGET_FILE:jam2_coreaudio_hardware_gui_tests>
+        "${JAM2_TEST_PUBLIC_EXECUTABLE}" "${JAM2_RENDEZVOUS_TEST_SERVER}")
+    set_tests_properties(jam2_coreaudio_real_gui_hardware PROPERTIES
+        LABELS "integration;hardware;audio;coreaudio;gui;network" TIMEOUT 500
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" RUN_SERIAL TRUE SKIP_RETURN_CODE 77)
+    add_dependencies(jam2_tests_coreaudio jam2_coreaudio_hardware_gui_tests)
+    add_test(NAME jam2_coreaudio_session_reuse_hardware COMMAND $<TARGET_FILE:jam2_multiplex_session_lifecycle_tests>
+        --coreaudio-reuse "${JAM2_RENDEZVOUS_TEST_SERVER}")
+    set_tests_properties(jam2_coreaudio_session_reuse_hardware PROPERTIES
+        LABELS "integration;hardware;audio;coreaudio;network;lifecycle" TIMEOUT 400
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" RUN_SERIAL TRUE SKIP_RETURN_CODE 77)
+    set(JAM2_COREAUDIO_DELIVERY_PROFILE "" CACHE FILEPATH "Explicit two-instance CoreAudio delivery profile")
+    if(DEFINED ENV{JAM2_COREAUDIO_DELIVERY_PROFILE})
+        set(JAM2_COREAUDIO_DELIVERY_PROFILE "$ENV{JAM2_COREAUDIO_DELIVERY_PROFILE}" CACHE FILEPATH "Explicit two-instance CoreAudio delivery profile" FORCE)
+    endif()
+    add_test(NAME jam2_coreaudio_mode_delivery_hardware COMMAND $<TARGET_FILE:jam2_asio_delivery_tests>
+        "${JAM2_TEST_PUBLIC_EXECUTABLE}" "${JAM2_COREAUDIO_DELIVERY_PROFILE}")
+    set_tests_properties(jam2_coreaudio_mode_delivery_hardware PROPERTIES
+        LABELS "integration;hardware;audio;coreaudio;network;network-impairment"
+        ENVIRONMENT "JAM2_RENDEZVOUS_TEST_SERVER=${JAM2_RENDEZVOUS_TEST_SERVER}"
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 1200 RUN_SERIAL TRUE SKIP_RETURN_CODE 77)
+    foreach(kind IN ITEMS larger recovery drift experiment)
+        string(TOUPPER "${kind}" kind_upper)
+        set(profile_var "JAM2_COREAUDIO_${kind_upper}_PROFILE")
+        set(${profile_var} "" CACHE FILEPATH "Explicit CoreAudio ${kind} delivery profile")
+        if(DEFINED ENV{${profile_var}})
+            set(${profile_var} "$ENV{${profile_var}}" CACHE FILEPATH "Explicit CoreAudio ${kind} delivery profile" FORCE)
+        endif()
+        add_test(NAME jam2_coreaudio_${kind}_delivery_hardware COMMAND $<TARGET_FILE:jam2_asio_delivery_tests>
+            "${JAM2_TEST_PUBLIC_EXECUTABLE}" "${${profile_var}}")
+        set_tests_properties(jam2_coreaudio_${kind}_delivery_hardware PROPERTIES
+            LABELS "integration;hardware;audio;coreaudio;network;network-impairment"
+            ENVIRONMENT "JAM2_RENDEZVOUS_TEST_SERVER=${JAM2_RENDEZVOUS_TEST_SERVER}"
+            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 1200 RUN_SERIAL TRUE SKIP_RETURN_CODE 77)
+    endforeach()
+    add_dependencies(jam2_tests_coreaudio jam2_asio_delivery_tests jam2_peer_drift_delay_step_tests jam2_peer_mixer_larger_prefix_tests)
     add_executable(jam2_coreaudio_aggregate_tests EXCLUDE_FROM_ALL integration/core/CoreAudioAggregateIntegration.cpp)
     jam2_configure_test_target(jam2_coreaudio_aggregate_tests)
     target_link_libraries(jam2_coreaudio_aggregate_tests PRIVATE jam2_core)
@@ -2493,6 +2551,12 @@ add_dependencies(jam2_tests_all jam2_delivery_delay_envelope_tests jam2_asio_del
 add_custom_target(jam2_tests_delivery DEPENDS jam2 jam2_delivery_delay_envelope_tests
     jam2_asio_delivery_tests jam2_udp_candidate_network_tests jam2_four_metronome_impairment jam2_audio_flow_interaction_tests
     jam2_udp_transport_comparison_tests)
+add_dependencies(jam2_tests_unit jam2_peer_drift_delay_step_tests)
+add_dependencies(jam2_tests_unit jam2_peer_mixer_larger_prefix_tests)
+add_dependencies(jam2_tests_network jam2_peer_drift_delay_step_tests)
+add_dependencies(jam2_tests_all jam2_peer_drift_delay_step_tests)
+add_dependencies(jam2_tests_all jam2_peer_mixer_larger_prefix_tests)
+add_dependencies(jam2_tests_delivery jam2_peer_drift_delay_step_tests)
 add_executable(jam2_audio_baseline_analysis_tests EXCLUDE_FROM_ALL unit/support/AudioBaselineAnalysisTests.cpp)
 jam2_configure_test_target(jam2_audio_baseline_analysis_tests)
 add_test(NAME jam2_audio_baseline_analysis_units COMMAND $<TARGET_FILE:jam2_audio_baseline_analysis_tests>)

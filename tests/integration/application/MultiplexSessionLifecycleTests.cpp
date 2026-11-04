@@ -24,9 +24,16 @@ template<class Predicate> void until(Predicate predicate, const char* reason, in
 }
 QString token(int i) { return QString(32,QChar('1'+i)); }
 }
+#if defined(__APPLE__)
+int runCoreAudioSessionReuse(const QString& executable);
+#endif
 int main(int argc, char** argv)
 {
     QCoreApplication app(argc,argv);
+#if defined(__APPLE__)
+    if(argc==3 && QString::fromLocal8Bit(argv[1])=="--coreaudio-reuse")
+        return runCoreAudioSessionReuse(QString::fromLocal8Bit(argv[2]));
+#endif
     try {
         Jam2RuntimeOptions options;
         options.coreaudio.setup = jam2::audio::AudioDeviceSetup::SeparateInputOutput;
