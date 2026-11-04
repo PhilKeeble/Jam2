@@ -53,6 +53,29 @@ Public tested app: `release/Jam2.app/Contents/MacOS/jam2`, SHA-256
 [combined regression tests](artifacts/mac-combined-20261104/combined-regression-tests.log),
 [provenance and assertion counts](artifacts/mac-combined-20261104/validation.json).
 
+## Windows validation and paired Wi-Fi repeat - Nov 4
+
+`7749606` builds in Windows MSVC Release; eight focused drift/padding/prefix/
+callback/CSV native checks pass. TONEX is disconnected, so no physical ASIO
+matrix ran. Two 30 s localhost synthetic pairs (48 kHz/128 callback/64 PCM16)
+record median queues Direct 2.67/5.33 ms, Server 3.56/3.88 ms; Direct has four
+steady missing frames and 25 trimmed frames, Server zero. No loss/hard recovery.
+[Synthetic baseline](artifacts/windows-baseline-20261104/RESULTS.md).
+
+Real Server Fast repeat: Windows `*20261104_0024*pid28140*`, uploaded Mac
+`*20261104_0025*pid33379*`, same devices/48 kHz/32 callbacks/64 PCM16 as Nov 3 A.
+Missing audio ms/min Windows **3247 -> 3250**, Mac **3801 -> 3812**; trimming
+**4328 -> 4326 / 4922 -> 4969**, hard recoveries ~114-116/min on both.
+Windows A2 records eight offset adjustments (net +15.5 ms), zero source-ratio
+clamp observations; main audio failure remains. Mac has **38 HAL overloads**,
+2.90 ms max callback work and 3.69 ms max interval against a 0.667 ms budget;
+source correction often clamps despite remote drift ~-23 ppm: inspect the local
+device-clock/relative-drift inputs missing from CSV. New catch-up starts zero;
+Fast does not exercise C's newly enabled larger-minimum case. Build/tests ended
+before the jam; overlapping localhost simulations do not explain it, since the
+intervening quiet-PC slice has the same recovery/shortage rates. No acceptance
+or revert decision. [Paired review](artifacts/windows-mac-jam-review-20261104/RESULTS.md).
+
 ## Connected Focusrite and isolated Mac candidates — Nov 3
 
 The [extended report](docs/MacAudioInvestigation-2026-11-03.md#connected-focusrite-controlled-candidate-experiments)
