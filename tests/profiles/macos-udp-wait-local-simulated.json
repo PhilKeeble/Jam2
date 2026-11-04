@@ -1,0 +1,87 @@
+{
+  "schema": "jam2-asio-delivery-profile-v1",
+  "sample_rate": 44100,
+  "callback_frames": 32,
+  "packet_frames": 64,
+  "clean_duration_ms": 0,
+  "impaired_duration_ms": 20000,
+  "base_one_way_delay_ms": 0,
+  "forward_jitter_ms": 0,
+  "reverse_jitter_ms": 0,
+  "recovered_buffer_limit_ms": 40,
+  "repeat_ms": 0,
+  "delay_points": [
+    [
+      0,
+      0
+    ]
+  ],
+  "delay_scope": "none",
+  "record_audio": true,
+  "test_input": "pulse-1s",
+  "network_audio_format": "pcm16",
+  "stats_interval_ms": 250,
+  "diagnostic_cases": [
+    {
+      "name": "direct-legacy-a",
+      "connection_mode": "direct",
+      "udp_backend": "auto",
+      "udp_wait": "legacy",
+      "receive_model": "runtime"
+    },
+    {
+      "name": "direct-kqueue-a",
+      "connection_mode": "direct",
+      "udp_backend": "auto",
+      "udp_wait": "kqueue",
+      "receive_model": "runtime"
+    },
+    {
+      "name": "server-legacy-a",
+      "connection_mode": "server",
+      "udp_backend": "auto",
+      "udp_wait": "legacy",
+      "receive_model": "runtime"
+    },
+    {
+      "name": "server-kqueue-a",
+      "connection_mode": "server",
+      "udp_backend": "auto",
+      "udp_wait": "kqueue",
+      "receive_model": "runtime"
+    },
+    {
+      "name": "server-kqueue-b",
+      "connection_mode": "server",
+      "udp_backend": "auto",
+      "udp_wait": "kqueue",
+      "receive_model": "runtime"
+    },
+    {
+      "name": "server-legacy-b",
+      "connection_mode": "server",
+      "udp_backend": "auto",
+      "udp_wait": "legacy",
+      "receive_model": "runtime"
+    },
+    {
+      "name": "direct-kqueue-b",
+      "connection_mode": "direct",
+      "udp_backend": "auto",
+      "udp_wait": "kqueue",
+      "receive_model": "runtime"
+    },
+    {
+      "name": "direct-legacy-b",
+      "connection_mode": "direct",
+      "udp_backend": "auto",
+      "udp_wait": "legacy",
+      "receive_model": "runtime"
+    }
+  ],
+  "receive_timestamps": true,
+  "device_names": [
+    "fakeA",
+    "fakeB"
+  ]
+}

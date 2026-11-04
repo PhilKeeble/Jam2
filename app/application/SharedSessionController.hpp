@@ -15,6 +15,7 @@
 #include <QVector>
 
 #include <functional>
+#include <optional>
 #include <set>
 #include <utility>
 #include <string>
@@ -169,6 +170,8 @@ public:
     void setReconnectEnabled(bool enabled);
     // Select the measured Server receive experiment before starting a jam.
     bool configureServerReceiveModel(jam2::application::UdpMultiplexTransport::ReceiveModel model);
+    bool configureUdpDiagnostics(std::optional<jam2::UdpBackend> backend, jam2::UdpServiceClass service,
+        jam2::UdpWaitMode wait = jam2::UdpWaitMode::PlatformDefault);
 
     void updateLocalEndpoint(const QString& endpoint);
     void updatePeerEdgeState(
@@ -215,6 +218,9 @@ public:
 
 private:
     jam2::application::UdpMultiplexTransport::ReceiveModel serverReceiveModel_ = jam2::application::UdpMultiplexTransport::ReceiveModel::Runtime;
+    std::optional<jam2::UdpBackend> udpBackend_;
+    jam2::UdpWaitMode udpWait_ = jam2::UdpWaitMode::PlatformDefault;
+    jam2::UdpServiceClass udpService_ = jam2::UdpServiceClass::BestEffort;
     struct Peer {
         jam2::application::PeerName name;
         QString endpoint;

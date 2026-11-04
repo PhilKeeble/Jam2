@@ -1,0 +1,90 @@
+{
+  "schema": "jam2-asio-delivery-profile-v1",
+  "device_names": [
+    "fakeA",
+    "fakeB"
+  ],
+  "sample_rate": 44100,
+  "callback_frames": 32,
+  "packet_frames": 64,
+  "clean_duration_ms": 0,
+  "impaired_duration_ms": 20000,
+  "base_one_way_delay_ms": 0,
+  "forward_jitter_ms": 0,
+  "reverse_jitter_ms": 0,
+  "recovered_buffer_limit_ms": 40,
+  "repeat_ms": 0,
+  "delay_points": [
+    [
+      0,
+      0
+    ]
+  ],
+  "delay_scope": "none",
+  "record_audio": true,
+  "test_input": "pulse-1s",
+  "network_audio_format": "pcm16",
+  "stats_interval_ms": 250,
+  "diagnostic_cases": [
+    {
+      "name": "direct-a",
+      "connection_mode": "direct",
+      "udp_backend": "bsd",
+      "receive_model": "runtime"
+    },
+    {
+      "name": "server-a",
+      "connection_mode": "server",
+      "udp_backend": "bsd",
+      "receive_model": "runtime"
+    },
+    {
+      "name": "connected-a",
+      "connection_mode": "server",
+      "udp_backend": "connected",
+      "receive_model": "runtime"
+    },
+    {
+      "name": "network-a",
+      "connection_mode": "server",
+      "udp_backend": "network",
+      "receive_model": "runtime"
+    },
+    {
+      "name": "queued-a",
+      "connection_mode": "server",
+      "udp_backend": "bsd",
+      "receive_model": "queued"
+    },
+    {
+      "name": "queued-b",
+      "connection_mode": "server",
+      "udp_backend": "bsd",
+      "receive_model": "queued"
+    },
+    {
+      "name": "network-b",
+      "connection_mode": "server",
+      "udp_backend": "network",
+      "receive_model": "runtime"
+    },
+    {
+      "name": "connected-b",
+      "connection_mode": "server",
+      "udp_backend": "connected",
+      "receive_model": "runtime"
+    },
+    {
+      "name": "server-b",
+      "connection_mode": "server",
+      "udp_backend": "bsd",
+      "receive_model": "runtime"
+    },
+    {
+      "name": "direct-b",
+      "connection_mode": "direct",
+      "udp_backend": "bsd",
+      "receive_model": "runtime"
+    }
+  ]
+}

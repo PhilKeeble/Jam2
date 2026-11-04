@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <charconv>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -22,6 +23,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -246,6 +248,10 @@ struct AudioPacketStats {
     std::uint64_t receive_loop_gap_sum_us = 0;
     std::uint64_t receive_loop_gap_max_us = 0;
     std::uint64_t receive_loop_gap_samples = 0;
+    std::uint64_t receive_socket_packets = 0, receive_socket_packets_max = 0;
+    std::uint64_t receive_packet_budget_yields = 0, receive_service_budget_yields = 0;
+    std::uint64_t receive_work_packet_limit = 64, receive_service_limit_us = 1000;
+    std::uint64_t telemetry_service_samples = 0, telemetry_service_sum_us = 0, telemetry_service_max_us = 0;
     std::uint64_t receive_burst_packets_max = 0;
     std::uint64_t receive_packets_per_loop_max = 0;
     std::uint64_t receive_processing_min_us = 0;
@@ -409,7 +415,8 @@ public:
     void finishWake(
         std::size_t received_packets,
         std::uint64_t processing_start_us,
-        std::uint64_t processing_end_us) noexcept;
+        std::uint64_t processing_end_us,
+        const jam2::DatagramReceiveBudget* work = nullptr) noexcept;
     void applyTo(AudioPacketStats& target) const noexcept;
 
 private:
@@ -426,6 +433,9 @@ private:
     std::uint64_t processing_sum_us_ = 0;
     std::uint64_t processing_max_us_ = 0;
     std::uint64_t processing_samples_ = 0;
+    std::uint64_t socket_packets_ = 0, socket_packets_max_ = 0;
+    std::uint64_t packet_yields_ = 0, service_yields_ = 0;
+    std::uint64_t packet_limit_ = 64, service_limit_us_ = 1000;
 };
 
 void print_udp_parse_stats(const UdpParseStats& stats, std::ostream& out = std::cout);
@@ -747,7 +757,10 @@ public:
                 "adaptive_delivery_gap_required_frames,"
                 "adaptive_delivery_gap_required_max_frames,mix_live_tail_batch_tolerance_frames,"
                 "mix_normal_output_limit_frames,mix_normal_path_limit_frames,"
-                "mix_live_tail_rounding_tolerance_frames,mix_adaptive_release_alignment_margin_frames,mix_partial_release_events,mix_partial_release_frames,mix_lookahead_hold_events,mix_lookahead_hold_frames,mix_lookahead_hold_max_fraction_ppm,mix_isolated_recovery_events,mix_worker_service_gap_us,mix_worker_runway_frames,mix_playback_stopping_frames,mix_release_worker_guard_active,wasapi_capture_depth_frames,wasapi_render_padding_frames,wasapi_capture_correction_ppm,wasapi_capture_underrun_frames,wasapi_capture_overrun_frames,wasapi_capture_discontinuities,wasapi_capture_resets,wasapi_invalid_timestamps,audio_device_error,grid_phase_accepted,grid_phase_delayed,grid_phase_reordered,grid_phase_raw_error_frames,grid_phase_tolerance_frames,grid_phase_maximum_drift_ppm,grid_phase_last_accepted_age_us,mix_adaptive_path_high_water_frames,mix_delivery_gap_guard_active,mix_recovery_pending_frames,mix_recovery_retired_frames,mix_recovery_cancelled_frames,mix_recovery_safe_depth_frames,mix_recovery_low_water_frames,mix_recovery_release_events,mix_recovery_release_active,drift_arrival_step_threshold_us,drift_arrival_offset_adjustments,drift_arrival_offset_us\n";
+                "mix_live_tail_rounding_tolerance_frames,mix_adaptive_release_alignment_margin_frames,mix_partial_release_events,mix_partial_release_frames,mix_lookahead_hold_events,mix_lookahead_hold_frames,mix_lookahead_hold_max_fraction_ppm,mix_isolated_recovery_events,mix_worker_service_gap_us,mix_worker_runway_frames,mix_playback_stopping_frames,mix_release_worker_guard_active,wasapi_capture_depth_frames,wasapi_render_padding_frames,wasapi_capture_correction_ppm,wasapi_capture_underrun_frames,wasapi_capture_overrun_frames,wasapi_capture_discontinuities,wasapi_capture_resets,wasapi_invalid_timestamps,audio_device_error,grid_phase_accepted,grid_phase_delayed,grid_phase_reordered,grid_phase_raw_error_frames,grid_phase_tolerance_frames,grid_phase_maximum_drift_ppm,grid_phase_last_accepted_age_us,mix_adaptive_path_high_water_frames,mix_delivery_gap_guard_active,mix_recovery_pending_frames,mix_recovery_retired_frames,mix_recovery_cancelled_frames,mix_recovery_safe_depth_frames,mix_recovery_low_water_frames,mix_recovery_release_events,mix_recovery_release_active,drift_arrival_step_threshold_us,drift_arrival_offset_adjustments,drift_arrival_offset_us,"
+                "receive_socket_packets,receive_socket_packets_max,receive_packet_budget_yields,"
+                "receive_service_budget_yields,receive_work_packet_limit,receive_service_limit_us,"
+                "telemetry_service_samples,telemetry_service_sum_us,telemetry_service_max_us\n";
     }
 
     explicit operator bool() const { return out_.is_open(); }
@@ -1336,7 +1349,11 @@ public:
              << ',' << (stats.mix_recovery_release_active ? "yes" : "no")
              << ',' << stats.drift_arrival_step_threshold_us
              << ',' << stats.drift_arrival_offset_adjustments
-             << ',' << stats.drift_arrival_offset_us;
+             << ',' << stats.drift_arrival_offset_us
+             << ',' << stats.receive_socket_packets << ',' << stats.receive_socket_packets_max
+             << ',' << stats.receive_packet_budget_yields << ',' << stats.receive_service_budget_yields
+             << ',' << stats.receive_work_packet_limit << ',' << stats.receive_service_limit_us
+             << ',' << stats.telemetry_service_samples << ',' << stats.telemetry_service_sum_us << ',' << stats.telemetry_service_max_us;
         out_ << '\n';
         if (row_type == "final") {
             out_.flush();
@@ -1352,8 +1369,26 @@ public:
         if (!out_) {
             return;
         }
-        std::vector<std::string> fields(545);
+        auto& fields = periodic_fields_;
+        for (auto& field : fields) field.clear();
         auto set = [&](std::size_t index, auto value) {
+            using Value = decltype(value);
+            if constexpr (std::is_floating_point_v<Value> ||
+                (std::is_integral_v<Value> && !std::is_same_v<Value, char> &&
+                 !std::is_same_v<Value, signed char> && !std::is_same_v<Value, unsigned char>)) {
+                std::array<char, 64> buffer{};
+                const auto converted = [&] {
+                    if constexpr (std::is_floating_point_v<Value>)
+                        return std::to_chars(buffer.data(), buffer.data() + buffer.size(), value, std::chars_format::general, 6);
+                    else if constexpr (std::is_same_v<Value, bool>)
+                        return std::to_chars(buffer.data(), buffer.data() + buffer.size(), int(value));
+                    else return std::to_chars(buffer.data(), buffer.data() + buffer.size(), value);
+                }();
+                if (converted.ec == std::errc{}) {
+                    fields[index].assign(buffer.data(), converted.ptr);
+                    return;
+                }
+            }
             std::ostringstream text;
             text << value;
             fields[index] = text.str();
@@ -1879,19 +1914,31 @@ public:
         set(542, stats.drift_arrival_step_threshold_us);
         set(543, stats.drift_arrival_offset_adjustments);
         set(544, stats.drift_arrival_offset_us);
+        set(545, stats.receive_socket_packets);
+        set(546, stats.receive_socket_packets_max);
+        set(547, stats.receive_packet_budget_yields);
+        set(548, stats.receive_service_budget_yields);
+        set(549, stats.receive_work_packet_limit);
+        set(550, stats.receive_service_limit_us);
+        set(551, stats.telemetry_service_samples);
+        set(552, stats.telemetry_service_sum_us);
+        set(553, stats.telemetry_service_max_us);
+        periodic_row_.clear();
+        periodic_row_.reserve(8192);
         for (std::size_t i = 0; i < fields.size(); ++i) {
-            if (i != 0) {
-                out_ << ',';
-            }
-            out_ << csv_escape(fields[i]);
+            if (i != 0) periodic_row_ += ',';
+            periodic_row_ += csv_escape(fields[i]);
         }
-        out_ << '\n';
+        periodic_row_ += '\n';
+        out_.write(periodic_row_.data(), static_cast<std::streamsize>(periodic_row_.size()));
     }
 
 private:
     Context context_;
     std::filesystem::path path_;
     std::ofstream out_;
+    std::array<std::string, 554> periodic_fields_;
+    std::string periodic_row_;
 };
 
 CsvStatsLog::AudioSnapshot make_audio_snapshot(const jam2::Engine* engine);

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cerrno>
 #include <stdexcept>
 #include <vector>
 
@@ -18,6 +19,11 @@
 #include <sys/socket.h>
 #include <sys/uio.h>
 #include <unistd.h>
+#endif
+#if defined(__APPLE__)
+#include <mach/mach_time.h>
+#include "network_framework_udp.hpp"
+#include "macos_socket_wait.hpp"
 #endif
 
 namespace jam2 {
@@ -143,8 +149,15 @@ NetworkRuntime::~NetworkRuntime()
 #endif
 }
 
-UdpSocket::UdpSocket()
+UdpSocket::UdpSocket(UdpBackend backend, UdpServiceClass service) : requested_backend_(backend)
 {
+    if ((backend!=UdpBackend::Bsd && backend!=UdpBackend::NetworkFramework && backend!=UdpBackend::ConnectedBsd) ||
+        (service!=UdpServiceClass::BestEffort && service!=UdpServiceClass::InteractiveVoice))
+        throw std::invalid_argument("invalid UDP backend or service class");
+#if !defined(__APPLE__)
+    if (backend != UdpBackend::Bsd || service != UdpServiceClass::BestEffort)
+        throw std::runtime_error("experimental UDP backend/service options require macOS");
+#endif
     handle_ = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
 #if defined(_WIN32)
     if (handle_ == INVALID_SOCKET) {
@@ -180,6 +193,13 @@ UdpSocket::UdpSocket()
         throw std::runtime_error("failed to make UDP socket nonblocking: " + error);
     }
 #endif
+#if defined(__APPLE__)
+    const int service_type = service == UdpServiceClass::InteractiveVoice ? NET_SERVICE_TYPE_VO : NET_SERVICE_TYPE_BE;
+    if (setsockopt(handle_, SOL_SOCKET, SO_NET_SERVICE_TYPE, &service_type, sizeof(service_type)) != 0) {
+        const std::string error = socket_error_text(); close(handle_); handle_ = -1;
+        throw std::runtime_error("failed to configure UDP service type: " + error);
+    }
+#endif
 }
 
 UdpSocket::~UdpSocket()
@@ -199,7 +219,12 @@ UdpSocket::~UdpSocket()
 }
 
 UdpSocket::UdpSocket(UdpSocket&& other) noexcept
-    : handle_(other.handle_)
+    : receive_timestamps_(other.receive_timestamps_), requested_backend_(other.requested_backend_),
+      connected_peer_(other.connected_peer_), connected_endpoint_(other.connected_endpoint_)
+#if defined(__APPLE__)
+    , network_framework_(std::move(other.network_framework_))
+#endif
+    , handle_(other.handle_)
 #if defined(_WIN32)
     , receive_event_(other.receive_event_)
 #endif
@@ -228,6 +253,12 @@ UdpSocket& UdpSocket::operator=(UdpSocket&& other) noexcept
         }
 #endif
         handle_ = other.handle_;
+        receive_timestamps_ = other.receive_timestamps_;
+        requested_backend_ = other.requested_backend_;
+        connected_peer_ = other.connected_peer_; connected_endpoint_ = other.connected_endpoint_;
+#if defined(__APPLE__)
+        network_framework_ = std::move(other.network_framework_);
+#endif
 #if defined(_WIN32)
         receive_event_ = other.receive_event_;
         other.handle_ = INVALID_SOCKET;
@@ -245,6 +276,64 @@ void UdpSocket::bind(const Endpoint& endpoint)
     if (::bind(handle_, reinterpret_cast<const sockaddr*>(&addr), sizeof(addr)) != 0) {
         throw std::runtime_error("failed to bind UDP socket: " + socket_error_text());
     }
+}
+
+void UdpSocket::set_receive_timestamps(bool enabled)
+{
+#if defined(__APPLE__)
+    if (enabled) (void)receive_diagnostic_time_us(); // Initialise timebase before packet service.
+    if (network_framework_) { network_framework_->set_receive_timestamps(enabled); receive_timestamps_=enabled; return; }
+    const int value = enabled ? 1 : 0;
+    if (setsockopt(handle_, SOL_SOCKET, SO_TIMESTAMP_MONOTONIC, &value, sizeof(value)) != 0)
+        throw std::runtime_error("failed to configure UDP receive timestamps: " + socket_error_text());
+    receive_timestamps_ = enabled;
+#else
+    if (enabled) throw std::runtime_error("kernel UDP receive timestamps are supported only on macOS");
+#endif
+}
+
+void UdpSocket::activate_peer(const ResolvedUdpEndpoint& remote)
+{
+    if (requested_backend_ == UdpBackend::Bsd) return;
+#if defined(__APPLE__)
+    if (requested_backend_ == UdpBackend::ConnectedBsd) {
+        if (connected_peer_) return;
+        const auto address=to_sockaddr(remote);
+        if (::connect(handle_,reinterpret_cast<const sockaddr*>(&address),sizeof(address)))
+            throw std::runtime_error("failed to connect proven UDP peer: "+socket_error_text());
+        connected_endpoint_=remote; connected_peer_=true; return;
+    }
+    if (network_framework_) return;
+    const auto local=local_endpoint(); const auto service=service_class(); const auto timing=receive_timestamps_;
+    auto next=std::make_unique<NetworkFrameworkUdp>(service);
+    close(handle_); handle_=-1;
+    try {
+        next->bind(local,remote); next->set_receive_timestamps(timing);
+        handle_=next->duplicate_wait_handle(); network_framework_=std::move(next);
+    } catch (...) {
+        next.reset();
+        UdpSocket rollback(UdpBackend::Bsd,service); rollback.bind(local); rollback.set_receive_timestamps(timing);
+        *this=std::move(rollback);
+        throw;
+    }
+#else
+    (void)remote;
+    throw std::runtime_error("Network.framework UDP requires macOS");
+#endif
+}
+
+UdpServiceClass UdpSocket::service_class() const
+{
+#if defined(__APPLE__)
+    if (network_framework_) return network_framework_->service_class();
+    int value=0; socklen_t size=sizeof(value);
+    if (getsockopt(handle_,SOL_SOCKET,SO_NET_SERVICE_TYPE,&value,&size))
+        throw std::runtime_error("failed to read UDP service class: "+socket_error_text());
+    if (value!=NET_SERVICE_TYPE_BE && value!=NET_SERVICE_TYPE_VO) throw std::runtime_error("unexpected UDP service class");
+    return value==NET_SERVICE_TYPE_VO ? UdpServiceClass::InteractiveVoice : UdpServiceClass::BestEffort;
+#else
+    return UdpServiceClass::BestEffort;
+#endif
 }
 
 Endpoint UdpSocket::local_endpoint_for(const ResolvedUdpEndpoint& destination) const
@@ -265,6 +354,11 @@ Endpoint UdpSocket::local_endpoint_for(const ResolvedUdpEndpoint& destination) c
 void UdpSocket::waitForAny(std::span<const UdpSocket* const> sockets,
                            std::uint64_t timeout_us, RealtimeWakeSignal* command_wake)
 {
+#if defined(__APPLE__)
+    macos_thread_socket_waiter().waitUdp(sockets, (std::min<std::uint64_t>)(timeout_us, 60000000ULL),
+        command_wake, nullptr, LegacyUdpWaitStyle::Poll);
+    return;
+#else
     const int timeout_ms = static_cast<int>((std::min<std::uint64_t>)(timeout_us, 60000000ULL) + 999) / 1000;
 #if defined(_WIN32)
     if (sockets.size() + (command_wake ? 1U : 0U) <= WSA_MAXIMUM_WAIT_EVENTS) {
@@ -304,12 +398,17 @@ void UdpSocket::waitForAny(std::span<const UdpSocket* const> sockets,
     if (result < 0 && errno != EINTR) throw std::runtime_error("UDP link poll failed: " + socket_error_text());
     if (result > 0 && command_wake && (reads.back().revents & POLLIN) != 0) command_wake->consume();
 #endif
+#endif
 }
 
 void UdpSocket::waitForDatagrams(std::span<const UdpSocket* const> sockets,
                                 std::uint64_t timeout_us, RealtimeWakeSignal* capture_wake)
 {
     if (sockets.empty() || timeout_us == 0) return;
+#if defined(__APPLE__)
+    macos_thread_socket_waiter().waitUdp(sockets, (std::min<std::uint64_t>)(timeout_us, 60000000ULL), capture_wake);
+    return;
+#else
 #if defined(_WIN32)
     if (capture_wake || sockets.size() > FD_SETSIZE) {
         waitForAny(sockets, timeout_us, capture_wake); return;
@@ -342,10 +441,14 @@ void UdpSocket::waitForDatagrams(std::span<const UdpSocket* const> sockets,
 #if !defined(_WIN32)
     if (result > 0 && capture_wake && FD_ISSET(capture_wake->read_handle_, &reads)) capture_wake->consume();
 #endif
+#endif
 }
 
 Endpoint UdpSocket::local_endpoint() const
 {
+#if defined(__APPLE__)
+    if (network_framework_) return network_framework_->local_endpoint();
+#endif
     sockaddr_in addr{};
     socklen_t len = sizeof(addr);
     if (getsockname(handle_, reinterpret_cast<sockaddr*>(&addr), &len) != 0) {
@@ -356,6 +459,9 @@ Endpoint UdpSocket::local_endpoint() const
 
 void UdpSocket::set_send_buffer_size(int bytes)
 {
+#if defined(__APPLE__)
+    if (network_framework_) throw std::runtime_error("Network.framework does not expose socket buffer sizing");
+#endif
     if (bytes <= 0) {
         throw std::runtime_error("UDP send buffer size must be positive");
     }
@@ -366,6 +472,9 @@ void UdpSocket::set_send_buffer_size(int bytes)
 
 void UdpSocket::set_recv_buffer_size(int bytes)
 {
+#if defined(__APPLE__)
+    if (network_framework_) throw std::runtime_error("Network.framework does not expose socket buffer sizing");
+#endif
     if (bytes <= 0) {
         throw std::runtime_error("UDP receive buffer size must be positive");
     }
@@ -376,6 +485,9 @@ void UdpSocket::set_recv_buffer_size(int bytes)
 
 int UdpSocket::send_buffer_size() const
 {
+#if defined(__APPLE__)
+    if (network_framework_) return 0; // Unavailable, not a claimed OS buffer size.
+#endif
     int bytes = 0;
     socklen_t len = sizeof(bytes);
     if (getsockopt(handle_, SOL_SOCKET, SO_SNDBUF, reinterpret_cast<char*>(&bytes), &len) != 0) {
@@ -386,6 +498,9 @@ int UdpSocket::send_buffer_size() const
 
 int UdpSocket::recv_buffer_size() const
 {
+#if defined(__APPLE__)
+    if (network_framework_) return 0;
+#endif
     int bytes = 0;
     socklen_t len = sizeof(bytes);
     if (getsockopt(handle_, SOL_SOCKET, SO_RCVBUF, reinterpret_cast<char*>(&bytes), &len) != 0) {
@@ -398,8 +513,12 @@ UdpSendResult UdpSocket::send_to(
     const ResolvedUdpEndpoint& endpoint,
     std::span<const std::uint8_t> bytes) const noexcept
 {
+#if defined(__APPLE__)
+    if (network_framework_) return network_framework_->send_to(endpoint,bytes);
+#endif
     const sockaddr_in addr = to_sockaddr(endpoint);
-    const int sent = ::sendto(
+    if (connected_peer_ && endpoint!=connected_endpoint_) return {UdpSendOutcome::Fatal,EINVAL};
+    const int sent = connected_peer_ ? ::send(handle_,reinterpret_cast<const char*>(bytes.data()),static_cast<int>(bytes.size()),0) : ::sendto(
         handle_,
         reinterpret_cast<const char*>(bytes.data()),
         static_cast<int>(bytes.size()),
@@ -416,7 +535,7 @@ UdpSendResult UdpSocket::send_to(
     return {};
 }
 
-RealtimeWakeSignal::RealtimeWakeSignal()
+RealtimeWakeSignal::RealtimeWakeSignal(NotificationMode mode) : notification_mode_(mode)
 {
 #if defined(_WIN32)
     event_ = WSACreateEvent();
@@ -464,6 +583,7 @@ RealtimeWakeSignal::~RealtimeWakeSignal()
 
 void RealtimeWakeSignal::signalNative() noexcept
 {
+    if (notification_mode_ == NotificationMode::PollOnly) return;
 #if defined(_WIN32)
     (void)WSASetEvent(event_);
 #else
@@ -539,6 +659,8 @@ void RealtimeWakeSignal::waitFor(std::uint64_t timeout_us, RealtimeWakeSignal* a
             (i == 0 ? this : additional)->consume();
         }
     }
+#elif defined(__APPLE__)
+    macos_thread_socket_waiter().waitUdp({}, timeout_us, this, additional);
 #else
     fd_set reads;
     FD_ZERO(&reads);
@@ -585,12 +707,19 @@ std::optional<UdpSocket::ReceivedDatagram> UdpSocket::recv_from(
 std::optional<UdpSocket::ReceivedDatagram> UdpSocket::recv_from_for(
     std::span<std::uint8_t> buffer,
     std::uint64_t timeout_us,
-    RealtimeWakeSignal* wake_signal) const
+    RealtimeWakeSignal* wake_signal,
+    ReceiveAttemptTiming* attempt) const
 {
+    if (attempt) *attempt = {};
     if (timeout_us > 0) {
         constexpr std::uint64_t kMaxSelectTimeoutUs =
             24ULL * 60ULL * 60ULL * 1000000ULL;
         timeout_us = (std::min)(timeout_us, kMaxSelectTimeoutUs);
+#if defined(__APPLE__)
+        const std::array<const UdpSocket*, 1> sockets{this};
+        if (!macos_thread_socket_waiter().waitUdp(sockets, timeout_us, wake_signal).datagram)
+            return std::nullopt;
+#else
         int ready = 0;
         bool socket_ready = false;
 #if defined(_WIN32)
@@ -684,8 +813,12 @@ std::optional<UdpSocket::ReceivedDatagram> UdpSocket::recv_from_for(
         }
         if (ready == 0) return std::nullopt;
         if (!socket_ready) return std::nullopt;
+#endif
     }
 
+#if defined(__APPLE__)
+    if (network_framework_) return network_framework_->take(buffer);
+#endif
     sockaddr_in from{};
     socklen_t from_len = sizeof(from);
 #if defined(_WIN32)
@@ -705,7 +838,25 @@ std::optional<UdpSocket::ReceivedDatagram> UdpSocket::recv_from_for(
     message.msg_namelen = from_len;
     message.msg_iov = &vector;
     message.msg_iovlen = 1;
+#if defined(__APPLE__)
+    alignas(cmsghdr) std::array<std::uint8_t, CMSG_SPACE(sizeof(std::uint64_t))> ancillary;
+    if (receive_timestamps_) {
+        message.msg_control = ancillary.data();
+        message.msg_controllen = static_cast<socklen_t>(ancillary.size());
+    }
+#endif
+#if defined(__APPLE__)
+    const auto read_begin = receive_timestamps_ ? receive_clock_sample() : ReceiveClockSample{};
+    const auto read_begin_us = read_begin.wall_us;
+#endif
     const ssize_t received = ::recvmsg(handle_, &message, 0);
+    const int read_error = received < 0 ? errno : 0;
+#if defined(__APPLE__)
+    const auto read_end = receive_timestamps_ ? receive_clock_sample() : ReceiveClockSample{};
+    const auto read_end_us = read_end.wall_us;
+    if (attempt) *attempt = {read_begin_us, read_end_us,
+        received < 0 && (read_error == EAGAIN || read_error == EWOULDBLOCK)};
+#endif
     from_len = message.msg_namelen;
 #endif
     if (received < 0) {
@@ -717,11 +868,12 @@ std::optional<UdpSocket::ReceivedDatagram> UdpSocket::recv_from_for(
             return std::nullopt;
         }
 #else
-        if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR ||
-            errno == EMSGSIZE || errno == ECONNREFUSED ||
-            errno == EHOSTUNREACH || errno == ENETUNREACH) {
+        if (read_error == EAGAIN || read_error == EWOULDBLOCK || read_error == EINTR ||
+            read_error == EMSGSIZE || read_error == ECONNREFUSED ||
+            read_error == EHOSTUNREACH || read_error == ENETUNREACH) {
             return std::nullopt;
         }
+        errno = read_error;
 #endif
         throw std::runtime_error("UDP receive failed: " + socket_error_text());
     }
@@ -730,7 +882,30 @@ std::optional<UdpSocket::ReceivedDatagram> UdpSocket::recv_from_for(
         return std::nullopt;
     }
 #endif
-    return ReceivedDatagram{resolved_from_sockaddr(from), static_cast<std::size_t>(received)};
+    ReceivedDatagram result{resolved_from_sockaddr(from), static_cast<std::size_t>(received)};
+#if defined(__APPLE__)
+    if (receive_timestamps_ && (message.msg_flags & MSG_CTRUNC) == 0) {
+        for (const cmsghdr* control = CMSG_FIRSTHDR(&message); control;
+             control = CMSG_NXTHDR(&message, control)) {
+            if (control->cmsg_level != SOL_SOCKET || control->cmsg_type != SCM_TIMESTAMP_MONOTONIC ||
+                control->cmsg_len < CMSG_LEN(sizeof(std::uint64_t))) continue;
+            std::uint64_t arrival = 0;
+            std::memcpy(&arrival, CMSG_DATA(control), sizeof(arrival));
+            const auto observed_us = receive_diagnostic_time_us();
+            const auto arrival_us = receive_diagnostic_mach_us(arrival);
+            if (arrival && observed_us >= arrival_us) {
+                result.kernel_arrival_us = arrival_us;
+                result.socket_residence_us = observed_us - arrival_us;
+                result.read_begin_us = read_begin_us; result.read_end_us = read_end_us;
+                result.observed_us = observed_us;
+                result.read_cpu.valid = read_begin.cpu_valid && read_end.cpu_valid && read_end.cpu_us >= read_begin.cpu_us;
+                if (result.read_cpu.valid) result.read_cpu.us = read_end.cpu_us - read_begin.cpu_us;
+            }
+            break;
+        }
+    }
+#endif
+    return result;
 }
 
 } // namespace jam2

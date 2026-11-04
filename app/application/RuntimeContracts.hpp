@@ -38,6 +38,21 @@ enum class Jam2OsPriorityMode {
     High,
 };
 
+enum class Jam2CaptureWakeMode {
+    Native,
+    PollOnly,
+    Off,
+    Automatic,
+};
+
+constexpr Jam2CaptureWakeMode jam2_resolve_capture_wake_mode(
+    Jam2CaptureWakeMode requested, bool coreaudio) noexcept
+{
+    return requested == Jam2CaptureWakeMode::Automatic
+        ? (coreaudio ? Jam2CaptureWakeMode::PollOnly : Jam2CaptureWakeMode::Native)
+        : requested;
+}
+
 enum class Jam2ProfileApplication {
     Create,
     Join,
@@ -63,6 +78,19 @@ struct Jam2RuntimeOptions {
     bool stats_enabled = false;
     int stats_interval_ms = 0;
     int stats_warmup_ms = 3000;
+    int receive_work_packets = 64;
+    int receive_service_us = 1000; // Zero disables the elapsed service limit.
+    // CoreAudio publishes atomic readiness; its callback must not write to
+    // the native wake pipe. Other audio backends retain native notifications.
+    Jam2CaptureWakeMode capture_wake = Jam2CaptureWakeMode::Automatic;
+    int capture_poll_us = 250;
+    bool receive_timestamps = false;
+    // No override selects connected BSD for macOS Server peer sockets and
+    // ordinary BSD for shared Direct sockets and other platforms.
+    std::optional<jam2::UdpBackend> udp_backend;
+    jam2::UdpWaitMode udp_wait = jam2::UdpWaitMode::PlatformDefault;
+    jam2::UdpServiceClass udp_service = jam2::UdpServiceClass::BestEffort;
+    bool queued_receive = false;
     std::optional<std::filesystem::path> log_stats_dir;
     std::optional<std::filesystem::path> record_jam_folder;
     std::optional<int> socket_send_buffer;

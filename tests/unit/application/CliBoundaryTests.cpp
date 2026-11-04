@@ -13,10 +13,12 @@
 #include <QTemporaryDir>
 
 #include <chrono>
+#include <algorithm>
 #include <array>
 #include <exception>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -184,6 +186,95 @@ void testOptionAndStatsContracts()
         "--stream-ms", "1"};
     const Jam2RuntimeOptions options =
         jam2::cli::parse_options(valid.count(), valid.data(), 2);
+    expect(options.receive_work_packets == 64 && options.receive_service_us == 1000,
+        "receive work limits have explicit bounded defaults");
+    expect(options.capture_wake == Jam2CaptureWakeMode::Automatic, "capture notification defaults follow the actual audio backend");
+    expect(options.capture_poll_us == 250, "CoreAudio defaults to the measured 250 us polling ceiling");
+    expect(jam2_resolve_capture_wake_mode(options.capture_wake, true) == Jam2CaptureWakeMode::PollOnly,
+        "automatic CoreAudio capture must avoid native callback notifications");
+    expect(jam2_resolve_capture_wake_mode(options.capture_wake, false) == Jam2CaptureWakeMode::Native,
+        "automatic Windows and synthetic capture retain native notifications");
+    for (const auto mode : {Jam2CaptureWakeMode::Native, Jam2CaptureWakeMode::PollOnly, Jam2CaptureWakeMode::Off})
+        for (const bool coreaudio : {false, true})
+            expect(jam2_resolve_capture_wake_mode(mode, coreaudio) == mode, "explicit diagnostic wake modes override backend defaults");
+    Arguments polling{"jam2", "network", "create", "--capture-wake", "poll", "--capture-poll-us", "250"};
+    const auto pollOptions = jam2::cli::parse_options(polling.count(), polling.data(), 3);
+    expect(pollOptions.capture_wake == Jam2CaptureWakeMode::PollOnly && pollOptions.capture_poll_us == 250,
+        "capture polling exposes its numeric scheduling tradeoff");
+    for (const auto value : {"0", "49", "1001", "-1"}) {
+        Arguments invalidPoll{"jam2", "network", "create", "--capture-poll-us", value};
+        expectThrows([&] { (void)jam2::cli::parse_options(invalidPoll.count(), invalidPoll.data(), 3); },
+            "capture polling must reject unsupported wait ceilings");
+    }
+    expect(!options.receive_timestamps, "kernel receive timing is opt-in");
+    expect(options.udp_wait==jam2::UdpWaitMode::PlatformDefault,"normal macOS waits use critical kqueue deadlines");
+#if defined(__APPLE__)
+    Arguments legacyWait{"jam2","network","create","--udp-wait","legacy"};
+    expect(jam2::cli::parse_options(legacyWait.count(),legacyWait.data(),3).udp_wait==jam2::UdpWaitMode::Legacy,
+        "legacy select/poll remains an explicit comparison while critical waits are the default");
+    Arguments resetWait{"jam2","network","create","--udp-wait","legacy","--udp-wait","kqueue"};
+    expect(jam2::cli::parse_options(resetWait.count(),resetWait.data(),3).udp_wait==jam2::UdpWaitMode::PlatformDefault,
+        "explicit kqueue restores the default after a legacy comparison");
+#endif
+    Arguments badWait{"jam2","network","create","--udp-wait","invalid"};
+    expectThrows([&] { (void)jam2::cli::parse_options(badWait.count(),badWait.data(),3); },"invalid or unsupported UDP wait mode is rejected");
+    expect(!options.udp_backend && options.udp_service==jam2::UdpServiceClass::BestEffort && !options.queued_receive,
+        "UDP defaults defer to the platform and session strategy without changing service class or reader");
+    Arguments autoBackend{"jam2","network","create","--udp-backend","bsd","--udp-backend","auto"};
+    expect(!jam2::cli::parse_options(autoBackend.count(),autoBackend.data(),3).udp_backend,
+        "explicit auto restores the platform and strategy default after an override");
+    Arguments bsdBackend{"jam2","network","create","--udp-backend","bsd"};
+    expect(jam2::cli::parse_options(bsdBackend.count(),bsdBackend.data(),3).udp_backend==jam2::UdpBackend::Bsd,
+        "ordinary BSD remains an explicit reproducible comparison option");
+    Arguments udpExperiment{"jam2","network","join","--udp-backend","network","--udp-service","voice","--receive-model","queued"};
+    const auto udp=jam2::cli::parse_options(udpExperiment.count(),udpExperiment.data(),3);
+    expect(udp.udp_backend==jam2::UdpBackend::NetworkFramework && udp.udp_service==jam2::UdpServiceClass::InteractiveVoice && udp.queued_receive,
+        "UDP diagnostics must retain explicit typed choices");
+    Arguments connectedExperiment{"jam2","network","create","--udp-backend","connected"};
+    expect(jam2::cli::parse_options(connectedExperiment.count(),connectedExperiment.data(),3).udp_backend==jam2::UdpBackend::ConnectedBsd,
+        "connected BSD is an explicit control for Network.framework connection semantics");
+    for (const auto flag : {"--udp-backend","--udp-service","--receive-model"}) {
+        Arguments bad{"jam2","network","create",flag,"invalid"};
+        expectThrows([&] { (void)jam2::cli::parse_options(bad.count(),bad.data(),3); },"unknown UDP experiment values must be rejected");
+    }
+    for (const auto value : {"on", "off"}) {
+        Arguments timestamps{"jam2", "network", "create", "--receive-timestamps", value};
+        const auto parsed = jam2::cli::parse_options(timestamps.count(), timestamps.data(), 3);
+        expect(parsed.receive_timestamps == (std::string_view(value) == "on"),
+            "kernel receive timestamp diagnostics preserve the explicit CLI value");
+    }
+    Arguments badTimestamps{"jam2", "network", "create", "--receive-timestamps", "sometimes"};
+    expectThrows([&] { (void)jam2::cli::parse_options(badTimestamps.count(), badTimestamps.data(), 3); },
+        "kernel timestamp diagnostics reject unrecognized states");
+    for (const auto value : {"auto", "on", "poll", "off"}) {
+        Arguments wake{"jam2", "network", "create", "--capture-wake", value};
+        const auto parsed = jam2::cli::parse_options(wake.count(), wake.data(), 3);
+        const auto expected = std::string_view(value) == "auto" ? Jam2CaptureWakeMode::Automatic
+            : std::string_view(value) == "on" ? Jam2CaptureWakeMode::Native
+            : std::string_view(value) == "poll" ? Jam2CaptureWakeMode::PollOnly : Jam2CaptureWakeMode::Off;
+        expect(parsed.capture_wake == expected,
+            "capture wake diagnostic explicitly selects notifications or polling");
+    }
+    Arguments badWake{"jam2", "network", "create", "--capture-wake", "sometimes"};
+    expectThrows([&] { (void)jam2::cli::parse_options(badWake.count(), badWake.data(), 3); },
+        "capture wake diagnostic rejects unrecognized states");
+    Arguments budgets{"jam2", "network", "create", "--receive-work-packets", "32", "--receive-service-us", "0"};
+    const auto budgetOptions = jam2::cli::parse_options(budgets.count(), budgets.data(), 3);
+    expect(budgetOptions.receive_work_packets == 32 && budgetOptions.receive_service_us == 0,
+        "numeric controls permit an explicit packet limit and disabled elapsed limit");
+    for (const auto flag : {"--receive-work-packets", "--receive-service-us"}) {
+        Arguments bad{"jam2", "network", "create", flag, "-1"};
+        expectThrows([&] { (void)jam2::cli::parse_options(bad.count(), bad.data(), 3); },
+            "negative receive budgets must be rejected");
+    }
+    Arguments noPackets{"jam2", "network", "create", "--receive-work-packets", "0"};
+    expectThrows([&] { (void)jam2::cli::parse_options(noPackets.count(), noPackets.data(), 3); },
+        "a configured receive turn must allow at least one packet");
+    for (const auto flag : {"--receive-work-packets", "--receive-service-us"}) {
+        Arguments tooLarge{"jam2", "network", "create", flag, "10001"};
+        expectThrows([&] { (void)jam2::cli::parse_options(tooLarge.count(), tooLarge.data(), 3); },
+            "receive work limits must reject values beyond their supported numeric range");
+    }
     expect(options.bind.host == "0.0.0.0" && options.bind.port == 40440 &&
             options.rendezvous_server.host == "jam2gether.com" &&
             options.rendezvous_server.port == 40440,
@@ -418,6 +509,19 @@ void testOptionAndStatsContracts()
             receiveLoopStats.receive_processing_max_us == 800 &&
             receiveLoopStats.receive_processing_samples == 2,
         "receive-loop diagnostics expose scheduling gaps and bounded drain batches");
+    jam2::cli::stats::ReceiveLoopDiagnostics controlOnly;
+    jam2::DatagramReceiveBudget controlWork{2, 100};
+    controlWork.recordPacket(1000); controlWork.recordPacket(1010);
+    controlOnly.finishWake(0, 0, 1040, &controlWork);
+    jam2::DatagramReceiveBudget slow{64, 100}; slow.recordPacket(2000); slow.canRead(2100);
+    controlOnly.finishWake(1, 2050, 2200, &slow);
+    jam2::cli::stats::AudioPacketStats controlStats;
+    controlOnly.applyTo(controlStats);
+    expect(controlStats.recv_loop_idle_count == 0 && controlStats.receive_socket_packets == 3 &&
+            controlStats.receive_socket_packets_max == 2 && controlStats.receive_packet_budget_yields == 1 &&
+            controlStats.receive_service_budget_yields == 1 && controlStats.receive_processing_sum_us == 240 &&
+            controlStats.receive_processing_samples == 2,
+        "control classification is measured from first dequeue and cannot become an idle telemetry opportunity");
 
     receiveLoopStats.pre_receive_work_samples = 4;
     receiveLoopStats.pre_receive_advance_sum_us = 20;
@@ -474,6 +578,9 @@ void testOptionAndStatsContracts()
     audio.device_status.invalid_timestamps = 8;
     audio.device_status.error = -9;
     QTemporaryDir statsRoot;
+    copied.receive_socket_packets = 44; copied.receive_socket_packets_max = 45;
+    copied.receive_packet_budget_yields = 46; copied.receive_service_budget_yields = 47;
+    copied.receive_work_packet_limit = 128; copied.receive_service_limit_us = 500;
     expect(statsRoot.isValid(), "CLI stats test creates a temporary artifact root");
     std::filesystem::path statsCsvPath;
     if (statsRoot.isValid()) {
@@ -511,9 +618,9 @@ void testOptionAndStatsContracts()
         const bool schemaMatches = opened && lines.size() == 3 &&
                 csvFieldCount(header) == csvFieldCount(finalRow) &&
                 csvFieldCount(header) == csvFieldCount(periodicRow) &&
-                header.endsWith("mix_live_tail_rounding_tolerance_frames,mix_adaptive_release_alignment_margin_frames,mix_partial_release_events,mix_partial_release_frames,mix_lookahead_hold_events,mix_lookahead_hold_frames,mix_lookahead_hold_max_fraction_ppm,mix_isolated_recovery_events,mix_worker_service_gap_us,mix_worker_runway_frames,mix_playback_stopping_frames,mix_release_worker_guard_active,wasapi_capture_depth_frames,wasapi_render_padding_frames,wasapi_capture_correction_ppm,wasapi_capture_underrun_frames,wasapi_capture_overrun_frames,wasapi_capture_discontinuities,wasapi_capture_resets,wasapi_invalid_timestamps,audio_device_error,grid_phase_accepted,grid_phase_delayed,grid_phase_reordered,grid_phase_raw_error_frames,grid_phase_tolerance_frames,grid_phase_maximum_drift_ppm,grid_phase_last_accepted_age_us,mix_adaptive_path_high_water_frames,mix_delivery_gap_guard_active,mix_recovery_pending_frames,mix_recovery_retired_frames,mix_recovery_cancelled_frames,mix_recovery_safe_depth_frames,mix_recovery_low_water_frames,mix_recovery_release_events,mix_recovery_release_active,drift_arrival_step_threshold_us,drift_arrival_offset_adjustments,drift_arrival_offset_us") &&
-                periodicRow.endsWith(",17,256,yes,18,19,20,21,22,128,256,320,64,64,23,63,31,32,33,34,35,36,37,yes,111,222,-333,444,555,6,7,8,-9,0,0,0,0,0,0,0,0,no,38,39,40,41,42,43,yes,2000,2,-3000") &&
-                finalRow.endsWith(",17,256,yes,18,19,20,21,22,128,256,320,64,64,23,63,31,32,33,34,35,36,37,yes,111,222,-333,444,555,6,7,8,-9,0,0,0,0,0,0,0,0,no,38,39,40,41,42,43,yes,2000,2,-3000");
+                header.endsWith("mix_live_tail_rounding_tolerance_frames,mix_adaptive_release_alignment_margin_frames,mix_partial_release_events,mix_partial_release_frames,mix_lookahead_hold_events,mix_lookahead_hold_frames,mix_lookahead_hold_max_fraction_ppm,mix_isolated_recovery_events,mix_worker_service_gap_us,mix_worker_runway_frames,mix_playback_stopping_frames,mix_release_worker_guard_active,wasapi_capture_depth_frames,wasapi_render_padding_frames,wasapi_capture_correction_ppm,wasapi_capture_underrun_frames,wasapi_capture_overrun_frames,wasapi_capture_discontinuities,wasapi_capture_resets,wasapi_invalid_timestamps,audio_device_error,grid_phase_accepted,grid_phase_delayed,grid_phase_reordered,grid_phase_raw_error_frames,grid_phase_tolerance_frames,grid_phase_maximum_drift_ppm,grid_phase_last_accepted_age_us,mix_adaptive_path_high_water_frames,mix_delivery_gap_guard_active,mix_recovery_pending_frames,mix_recovery_retired_frames,mix_recovery_cancelled_frames,mix_recovery_safe_depth_frames,mix_recovery_low_water_frames,mix_recovery_release_events,mix_recovery_release_active,drift_arrival_step_threshold_us,drift_arrival_offset_adjustments,drift_arrival_offset_us,receive_socket_packets,receive_socket_packets_max,receive_packet_budget_yields,receive_service_budget_yields,receive_work_packet_limit,receive_service_limit_us,telemetry_service_samples,telemetry_service_sum_us,telemetry_service_max_us") &&
+                periodicRow.endsWith(",17,256,yes,18,19,20,21,22,128,256,320,64,64,23,63,31,32,33,34,35,36,37,yes,111,222,-333,444,555,6,7,8,-9,0,0,0,0,0,0,0,0,no,38,39,40,41,42,43,yes,2000,2,-3000,44,45,46,47,128,500,0,0,0") &&
+                finalRow.endsWith(",17,256,yes,18,19,20,21,22,128,256,320,64,64,23,63,31,32,33,34,35,36,37,yes,111,222,-333,444,555,6,7,8,-9,0,0,0,0,0,0,0,0,no,38,39,40,41,42,43,yes,2000,2,-3000,44,45,46,47,128,500,0,0,0");
         expect(schemaMatches,
             "final CSV preserves the capture-clock pacing field and schema width");
     }
@@ -866,6 +973,59 @@ void testStagedLocalRuntime(const QString& executable)
     }
 }
 
+int csvPerformance()
+{
+    // Four native writers, matching four runtime peers. Time the production
+    // serializer, including buffered file writes, with a fixed typed snapshot.
+    QTemporaryDir root;
+    if (!root.isValid()) throw std::runtime_error("CSV benchmark temporary directory failed");
+    using Log = jam2::cli::stats::CsvStatsLog;
+    std::array<std::unique_ptr<Log>, 4> logs;
+    for (int i = 0; i < 4; ++i) {
+        const auto path = root.filePath(QString::number(i)); QDir().mkpath(path);
+        logs[i] = std::make_unique<Log>(std::filesystem::path(path.toStdString()), Log::Context{});
+    }
+    Jam2RuntimeOptions options;
+    jam2::cli::stats::AudioPacketStats stats;
+    stats.sent_packets = 750000; stats.recv_packets = 2250000;
+    stats.sent_bytes = 256000000; stats.recv_bytes = 768000000;
+    stats.jitter_samples = 2250000; stats.jitter_sum_us = 63000000;
+    stats.drift_ppm = 17.123456789;
+    Log::AudioSnapshot audio;
+    std::vector<std::uint64_t> elapsed;
+    elapsed.reserve(2000);
+    const std::array<double, 8> numbers{0.0, -0.0, 1.23456789, 1e-9, 999999.5, -1e20,
+        std::numeric_limits<double>::infinity(), std::numeric_limits<double>::quiet_NaN()};
+    for (int row = 0; row < 500; ++row) for (auto& log : logs) {
+        stats.drift_ppm = numbers[std::size_t(row) % numbers.size()];
+        const auto before = jam2::monotonic_us();
+        log->write_periodic(std::uint64_t(row) * 10, stats, options, audio);
+        elapsed.push_back(jam2::monotonic_us() - before);
+    }
+    for (auto& log : logs) log->write("final", 5000, stats, options, audio);
+    for (const auto& log : logs) {
+        QFile file(QString::fromStdString(log->path().string()));
+        if (!file.open(QIODevice::ReadOnly)) throw std::runtime_error("open benchmark CSV");
+        const auto lines = file.readAll().trimmed().split('\n');
+        if (lines.size() != 502)
+            throw std::runtime_error("CSV benchmark lost rows or final flush");
+        // Text/context fields are empty in this fixed snapshot, so splitting
+        // its numeric rows is unambiguous. Preserve the established six-digit
+        // general formatting, including signs, scientific values and NaN/Inf.
+        const auto header = lines.front().split(','); const auto index = header.indexOf("drift_ppm");
+        if (index < 0) throw std::runtime_error("benchmark CSV lost its drift field");
+        for (int row = 0; row < 500; ++row) {
+            std::ostringstream expected; expected << numbers[std::size_t(row) % numbers.size()];
+            const auto values = lines[row + 1].split(',');
+            if (values.size() != header.size() || values[index] != QByteArray::fromStdString(expected.str()))
+                throw std::runtime_error("periodic CSV changed numeric precision or retained stale row values");
+        }
+    }
+    std::sort(elapsed.begin(), elapsed.end());
+    std::cout << "CSV_PERFORMANCE rows=" << elapsed.size() << " p50_us=" << elapsed[elapsed.size()/2]
+        << " p99_us=" << elapsed[elapsed.size()*99/100] << " max_us=" << elapsed.back() << '\n';
+    return 0;
+}
 } // namespace
 
 namespace jam2::cli {
@@ -898,6 +1058,7 @@ int main(int argc, char** argv)
     }
 
     try {
+        if (std::string_view(argv[1]) == "--csv-performance") return csvPerformance();
         testFrontendAndHelpContracts();
         testOptionAndStatsContracts();
         testStagedLocalRuntime(QString::fromLocal8Bit(argv[1]));

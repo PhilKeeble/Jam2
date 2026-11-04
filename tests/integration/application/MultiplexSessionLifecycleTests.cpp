@@ -27,9 +27,18 @@ QString token(int i) { return QString(32,QChar('1'+i)); }
 #if defined(__APPLE__)
 int runCoreAudioSessionReuse(const QString& executable);
 #endif
+int runNetworkIngressRuntimeInvestigation(const QString& signaller, const QString& artifactRoot);
+int runCaptureWakeRuntimeInvestigation(const QString& signaller, const QString& artifactRoot);
+int runUdpPathsRuntimeInvestigation(const QString& signaller, const QString& artifactRoot);
 int main(int argc, char** argv)
 {
     QCoreApplication app(argc,argv);
+    if (argc == 4 && QString::fromLocal8Bit(argv[1]) == "--udp-paths-runtime")
+        return runUdpPathsRuntimeInvestigation(QString::fromLocal8Bit(argv[2]),QString::fromLocal8Bit(argv[3]));
+    if (argc == 4 && QString::fromLocal8Bit(argv[1]) == "--ingress-runtime")
+        return runNetworkIngressRuntimeInvestigation(QString::fromLocal8Bit(argv[2]), QString::fromLocal8Bit(argv[3]));
+    if (argc == 4 && QString::fromLocal8Bit(argv[1]) == "--capture-wake-runtime")
+        return runCaptureWakeRuntimeInvestigation(QString::fromLocal8Bit(argv[2]), QString::fromLocal8Bit(argv[3]));
 #if defined(__APPLE__)
     if(argc==3 && QString::fromLocal8Bit(argv[1])=="--coreaudio-reuse")
         return runCoreAudioSessionReuse(QString::fromLocal8Bit(argv[2]));

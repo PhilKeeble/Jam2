@@ -61,6 +61,7 @@ add_library(jam2_core STATIC
     src/prepared_track_source.cpp
     src/protocol.cpp
     src/reliable_udp_stream.cpp
+    src/receive_diagnostics.cpp
     src/session_authority.cpp
     src/grid_assignment_delivery.cpp
     src/track_take_recorder.cpp
@@ -68,6 +69,7 @@ add_library(jam2_core STATIC
     src/transport_timing.cpp
     src/tuning_profile.cpp
     src/udp_socket.cpp
+    src/udp_wait.cpp
 )
 
 target_link_libraries(jam2_core PRIVATE aubio_pitch_minimal)
@@ -123,11 +125,15 @@ if(WIN32)
     target_link_libraries(jam2_core PUBLIC ws2_32 advapi32 ole32 bcrypt winmm avrt uuid)
 elseif(APPLE)
     target_sources(jam2_core PRIVATE
+        src/macos_socket_wait.cpp
+        src/network_framework_udp.cpp
         src/audio_device_macos.cpp
         src/midi_device_macos.mm)
     target_compile_definitions(jam2_core PUBLIC JAM2_PLATFORM_MACOS=1)
+    set_source_files_properties(src/network_framework_udp.cpp PROPERTIES COMPILE_OPTIONS "-fblocks")
     target_link_libraries(jam2_core PUBLIC
         "-framework CoreAudio"
+        "-framework Network"
         "-framework CoreMIDI"
         "-framework CoreFoundation"
         "-framework AudioToolbox"

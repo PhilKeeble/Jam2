@@ -23,6 +23,7 @@
 #include <memory>
 #include <span>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -2508,6 +2509,173 @@ void test_adaptive_release_retires_real_surplus_without_trimming()
     }
 }
 
+// Investigation of the 44.1 kHz local connected-b run: several short worker
+// gaps preceded a roughly 6 ms gap at two seconds, followed by a ~5 ms ring.
+// This is a controlled analogue, not a replay of unrecorded packet arrivals.
+// Use the real packet receiver, mixer, ring and callback resampler throughout.
+void test_short_startup_gaps_retain_raised_cushion()
+{
+    constexpr std::uint64_t rate = 44100, block = 64, callbackFrames = 32;
+    constexpr std::uint64_t endUs = 60000000;
+    const auto& profile = *jam2::find_create_profile("fast")->local;
+    for (const std::size_t remoteCount : {1U, 3U}) {
+        double cleanFinalMs = 0;
+        for (const int scenario : {0, 1, 2}) {
+            const bool impaired = scenario != 0;
+            const bool capped = scenario == 2;
+            ProfileMixerSink sink(profile.playback_ring_frames, profile.playback_prefill_frames, rate);
+            sink.callbackQuantum = callbackFrames;
+            jam2::PeerMixerConfig config;
+            config.sample_rate = rate;
+            config.frames_per_block = block;
+            config.deadline_frames = profile.jitter_buffer_max_frames;
+            config.output_max_frames = profile.playback_max_frames;
+            config.adaptive_playback_cushion = true;
+            config.adaptive_target_frames = config.adaptive_min_frames = 64;
+            config.adaptive_max_frames = capped ? 64 : profile.adaptive_playback_max_frames;
+            config.adaptive_release_ppm = profile.adaptive_playback_release_ppm;
+            jam2::PeerMixer mixer(config, &sink);
+            jam2::PeerStreamConfig streamConfig;
+            streamConfig.sample_rate = rate;
+            streamConfig.frames_per_packet = block;
+            streamConfig.audio_format = jam2::NetworkAudioFormat::Pcm16Mono;
+            streamConfig.sample_time_playout = profile.sample_time_playout;
+            streamConfig.playout_delay_frames = profile.playout_delay_frames;
+            streamConfig.playback_queue_capacity_frames = profile.playback_ring_frames;
+            streamConfig.jitter_buffer_frames = profile.jitter_buffer_frames;
+            streamConfig.jitter_buffer_max_frames = profile.jitter_buffer_max_frames;
+            streamConfig.drift_correction = profile.drift_correction;
+            streamConfig.drift_smoothing = profile.drift_smoothing;
+            streamConfig.drift_deadband_ppm = profile.drift_deadband_ppm;
+            streamConfig.drift_max_correction_ppm = profile.drift_max_correction_ppm;
+            std::vector<std::unique_ptr<jam2::PeerStream>> streams;
+            std::vector<std::uint64_t> indices(remoteCount, 1);
+            for (std::size_t peer = 0; peer < remoteCount; ++peer) {
+                auto* playback = mixer.addPeer(peer + 1,
+                    profile.playback_ring_frames + profile.jitter_buffer_max_frames);
+                expect(playback && mixer.setPeerActive(peer + 1, true), "startup-gap fixture activates its real sources");
+                if (!playback) return;
+                streams.push_back(std::make_unique<jam2::PeerStream>(streamConfig, 0, playback));
+            }
+            auto arrival = [&](std::size_t peer) {
+                return indices[peer] * block * 1000000ULL / rate + 300 + peer * 250;
+            };
+            auto dispatch = [&](std::uint64_t time) {
+                if (impaired) {
+                    for (const auto [start, length] : std::array<std::pair<std::uint64_t, std::uint64_t>, 3>{
+                             {{600000, 4000}, {1200000, 4000}, {2000000, 6000}}}) {
+                        if (time >= start && time < start + length) return start + length;
+                    }
+                }
+                return time;
+            };
+            auto nextPeer = [&]() {
+                std::size_t result = 0;
+                for (std::size_t peer = 1; peer < remoteCount; ++peer)
+                    if (arrival(peer) < arrival(result)) result = peer;
+                return result;
+            };
+            auto path = [&]() {
+                std::uint64_t maximum = 0;
+                for (std::size_t peer = 0; peer < remoteCount; ++peer)
+                    maximum = std::max(maximum, sink.depthFrames() + mixer.peerStats(peer + 1)->queue_depth_frames +
+                        streams[peer]->stats().jitter_buffer_depth_frames);
+                return maximum;
+            };
+            std::array<std::uint8_t, block * 2> payload{};
+            std::uint64_t now = 0, worker = 250, callbackIndex = 1, currentPath = 0;
+            std::uint64_t heldUs = 0, finalUs = 0, nextMetric = 5000000;
+            long double heldIntegral = 0, heldRingIntegral = 0, finalIntegral = 0;
+            std::uint64_t cleanUnderruns = 0, cleanPadding = 0, cleanTrims = 0;
+            bool accepted = true, heldAtTwenty = false, cleanSnapshot = false;
+            while (now < endUs) {
+                const auto callback = callbackIndex * callbackFrames * 1000000ULL / rate + 137;
+                const auto next = std::min({callback, worker, endUs});
+                if (now >= 10000000 && now < 20000000) {
+                    heldIntegral += currentPath * (next - now);
+                    heldRingIntegral += sink.depthFrames() * (next - now);
+                    heldUs += next - now;
+                }
+                if (now >= 50000000) { finalIntegral += currentPath * (next - now); finalUs += next - now; }
+                now = next;
+                if (!cleanSnapshot && now >= 4000000) {
+                    cleanSnapshot = true;
+                    cleanUnderruns = sink.underrunFrames();
+                    cleanPadding = mixer.stats().adaptive_padding_frames;
+                    cleanTrims = mixer.stats().live_tail_trimmed_frames;
+                }
+                if (now == callback) { sink.callback(callbackFrames); ++callbackIndex; }
+                if (now == worker) {
+                    for (auto& stream : streams) stream->advance(now);
+                    mixer.advance(now);
+                    auto peer = nextPeer();
+                    while (arrival(peer) <= now) {
+                        const auto sequence = indices[peer] - 1;
+                        for (std::size_t frame = 0; frame < block; ++frame) {
+                            const auto sample = static_cast<std::uint16_t>(static_cast<std::int16_t>(
+                                std::sin((sequence * block + frame) * 2.0 * 3.14159265358979323846 * 220.0 / rate) *
+                                    4096.0 / remoteCount));
+                            payload[2 * frame] = static_cast<std::uint8_t>(sample);
+                            payload[2 * frame + 1] = static_cast<std::uint8_t>(sample >> 8);
+                        }
+                        const jam2::protocol::Header header{jam2::protocol::PacketType::Audio, 1,
+                            static_cast<std::uint32_t>(sequence), sequence * block, static_cast<std::uint16_t>(payload.size()), 0};
+                        accepted &= streams[peer]->receiveAudio(header, payload, now) == jam2::PeerAudioResult::Accepted;
+                        ++indices[peer];
+                        peer = nextPeer();
+                    }
+                    for (auto& stream : streams) stream->advance(now);
+                    mixer.advance(now);
+                    mixer.finishReceiveBatch(false);
+                    worker = dispatch(std::min(now + 250, arrival(nextPeer())));
+                }
+                currentPath = path();
+                if (now >= nextMetric) {
+                    const auto stats = mixer.stats();
+                    std::cout << "METRIC startup_gap remotes=" << remoteCount << " scenario=" << scenario
+                              << " second=" << nextMetric / 1000000 << " path=" << currentPath
+                              << " ring=" << sink.depthFrames() << " target=" << stats.adaptive_target_frames
+                              << " hold_us=" << stats.adaptive_delivery_gap_hold_remaining_us
+                              << " batch_tolerance=" << stats.live_tail_batch_tolerance_frames
+                              << " padding=" << stats.adaptive_padding_frames << " underruns=" << sink.underrunFrames() << '\n';
+                    if (nextMetric == 20000000) heldAtTwenty = stats.adaptive_delivery_gap_hold_active;
+                    nextMetric += 5000000;
+                }
+            }
+            const double heldMs = static_cast<double>(heldIntegral / heldUs / rate * 1000);
+            const double heldRingMs = static_cast<double>(heldRingIntegral / heldUs / rate * 1000);
+            const double finalMs = static_cast<double>(finalIntegral / finalUs / rate * 1000);
+            if (scenario == 0) cleanFinalMs = finalMs;
+            const auto stats = mixer.stats();
+            std::cout << "METRIC startup_gap_result remotes=" << remoteCount << " scenario=" << scenario
+                      << " held_ms=" << heldMs << " held_ring_ms=" << heldRingMs << " final_ms=" << finalMs
+                      << " target=" << stats.adaptive_target_frames
+                      << " gap_raises=" << stats.adaptive_delivery_gap_raise_events
+                      << " missing_after_4s=" << sink.underrunFrames() - cleanUnderruns
+                      << " padding_after_4s=" << stats.adaptive_padding_frames - cleanPadding << '\n';
+            expect(accepted && !stats.adaptive_delivery_gap_hold_active && !stats.receive_recovery_active,
+                "lossless short-gap fixture finishes without stuck recovery or a renewed hold");
+            expect(sink.underrunFrames() == cleanUnderruns && stats.adaptive_padding_frames == cleanPadding &&
+                    stats.live_tail_trimmed_frames == cleanTrims,
+                "post-gap clean delivery has no fresh starvation, padding or sample cuts");
+            expect(stats.adaptive_target_frames == config.adaptive_min_frames,
+                "after the finite hold the target returns to its configured minimum");
+            if (!capped)
+                expect(finalMs <= cleanFinalMs + 2.0 * block * 1000 / rate,
+                    "actual latency after the hold returns within two packets of the clean baseline");
+            if (impaired && !capped)
+                expect(heldAtTwenty && heldRingMs > 4.0 && heldRingMs < 6.0 && stats.adaptive_delivery_gap_raise_events != 0,
+                    "qualified startup gaps retain the measured multi-block ring during the learned hold");
+            else if (capped)
+                expect(heldAtTwenty && stats.adaptive_delivery_gap_raise_events == 0,
+                    "the explicit cap prevents target growth but does not discard qualified gap evidence");
+            else
+                expect(!heldAtTwenty && stats.adaptive_delivery_gap_raise_events == 0,
+                    "clean delivery alone does not enter the learned hold");
+        }
+    }
+}
+
 void test_source_rounding_edge_is_fixed_and_bounded()
 {
     MixerSink sink;
@@ -3892,6 +4060,10 @@ void test_profiled_recurring_wifi_bursts_match_observed_session()
 
 int main(int argc, char** argv)
 {
+    if (argc == 2 && std::string_view(argv[1]) == "--short-startup-gaps") {
+        test_short_startup_gaps_retain_raised_cushion();
+        return failures == 0 ? 0 : 1;
+    }
     if (argc == 2 && std::string_view(argv[1]) == "--startup-padding") {
         test_recovery_padding_waits_for_receive_batch();
         test_isolated_recovery_escalates_repeated_shortages();

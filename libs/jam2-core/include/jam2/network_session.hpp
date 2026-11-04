@@ -291,7 +291,8 @@ public:
         bool allow_inactive = false);
     std::optional<NetworkDatagram> receiveFor(
         std::uint64_t timeout_us,
-        RealtimeWakeSignal* wake_signal = nullptr);
+        RealtimeWakeSignal* wake_signal = nullptr,
+        DatagramReceiveBudget* work_budget = nullptr);
     protocol::ParseResult parse(std::span<const std::uint8_t> packet) const noexcept;
     void setDatagramTransport(std::shared_ptr<NetworkDatagramTransport> transport);
     void close() noexcept;

@@ -818,15 +818,19 @@ std::size_t NetworkSession::sendToPeer(
 
 std::optional<NetworkDatagram> NetworkSession::receiveFor(
     std::uint64_t timeout_us,
-    RealtimeWakeSignal* wake_signal)
+    RealtimeWakeSignal* wake_signal,
+    DatagramReceiveBudget* work_budget)
 {
     if (impl_->bootstrap_state == SessionBootstrapState::Closed) return std::nullopt;
+    if (work_budget && !work_budget->canRead(monotonic_us())) return std::nullopt;
     const auto buffer = impl_->datagram_transport
         ? std::span<std::uint8_t>(*impl_->routed_receive_packet)
         : std::span<std::uint8_t>(impl_->receive_packet);
     const auto received = impl_->datagram_transport
-        ? impl_->datagram_transport->receiveFor(buffer, timeout_us, wake_signal)
+        ? (work_budget ? impl_->datagram_transport->receiveWithin(buffer, timeout_us, wake_signal, *work_budget)
+                       : impl_->datagram_transport->receiveFor(buffer, timeout_us, wake_signal))
         : impl_->socket->recv_from_for(buffer, timeout_us, wake_signal);
+    if (received && work_budget && !impl_->datagram_transport) work_budget->recordPacket(monotonic_us());
     if (!received || received->size > buffer.size()) {
         return std::nullopt;
     }

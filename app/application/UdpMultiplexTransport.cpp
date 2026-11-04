@@ -60,6 +60,8 @@ struct UdpMultiplexTransport::Impl {
         quint64 nextBootstrap = 0;
         quint64 deadline = 0, nextAction = 0;
         std::atomic<quint64> lastReceive{0};
+        quint64 lastKernelAudioArrivalUs = 0; // Runtime reader owns this under receiverMutex.
+        jam2::ReceiveReadinessEvidence readEvidence;
         std::atomic<bool> stalledNotified{false}, mediaStarted{false}, readable{false};
         std::set<quint64> challenges;
         std::map<UdpMuxChannel, std::shared_ptr<UdpStreamConnection>> streams;
@@ -81,6 +83,7 @@ struct UdpMultiplexTransport::Impl {
     struct Audio {
         jam2::ResolvedUdpEndpoint endpoint;
         std::size_t size = 0;
+        jam2::UdpSocket::ReceivedDatagram timing;
         std::array<std::uint8_t, jam2::protocol::kMaxDatagramSize> bytes{};
     };
     struct ReadRoute {
@@ -138,6 +141,13 @@ struct UdpMultiplexTransport::Impl {
     std::atomic<quint64> nativeSent{0}, nativeReceived{0}, nativeDelivered{0}, bootstrapDiscarded{0};
     std::atomic<quint64> controlQueued{0}, assetQueued{0}, invalidClassified{0}, classificationYields{0};
     std::atomic<quint64> classificationSamples{0}, classificationSumNs{0}, classificationMaxNs{0};
+    bool receiveTimestamps = false; // Configured under mutex and receiverMutex.
+    std::unique_ptr<jam2::ReceiveServiceDiagnostics> receiveTrace;
+    std::atomic<bool> traceEnabled{false};
+    std::atomic<quint64> kernelAudioGapSamples{0}, kernelAudioGapSumUs{0}, kernelAudioGapMaxUs{0};
+    std::atomic<quint64> kernelAudioGapOver10Ms{0}, kernelAudioGapOver50Ms{0}, kernelGapMaxResidenceUs{0};
+    std::atomic<quint64> socketResidenceSamples{0}, socketResidenceSumUs{0}, socketResidenceMaxUs{0};
+    std::atomic<quint64> socketResidenceOver1Ms{0}, socketResidenceOver4Ms{0};
     std::size_t receiveCursor = 0;
     quint64 classifications = 0;
     std::thread worker;
@@ -176,13 +186,28 @@ struct UdpMultiplexTransport::Impl {
     Snapshot counters;
     bool immediateSendWork = false;
     std::atomic<quint64> audioDrops{0};
+    jam2::UdpWaitDiagnostics runtimeWaitDiagnostics, workerWaitDiagnostics;
+    std::atomic<quint64> audioQueueWaitSamples{0}, audioQueueWaitSumUs{0}, audioQueueWaitMaxUs{0};
+    std::atomic<quint64> queuedDeliveryMaxUs{0}, queuedDeliveryOver1Ms{0};
+    std::atomic<quint64> frameworkHandoffSamples{0}, frameworkHandoffSumUs{0}, frameworkHandoffMaxUs{0}, frameworkCallbackDelayMaxUs{0};
     std::atomic<quint64> intentAcksSent{0},intentAcksReceived{0},intentRepeatsSuppressed{0},intentAckDeferrals{0},intentAckInvalid{0};
 
     Impl(UdpMultiplexTransport* parent, const Config& initial) : config(initial), owner(parent)
     {
+        if (!config.backend) {
+#if defined(__APPLE__)
+            config.backend = config.strategy == jam2::ConnectionStrategy::Jam2Server
+                ? jam2::UdpBackend::ConnectedBsd : jam2::UdpBackend::Bsd;
+#else
+            config.backend = jam2::UdpBackend::Bsd;
+#endif
+        }
         key = control_protocol::decodeHex(config.keyHex, 16);
         const QByteArray sid = control_protocol::decodeHex(config.sessionHex, 8);
         if (key.size() != 16 || sid.size() != 8 || !token(config.localToken) || peerId(config.localToken) == 0 ||
+            (config.waitMode != jam2::UdpWaitMode::PlatformDefault && config.waitMode != jam2::UdpWaitMode::Legacy) ||
+            (config.backend!=jam2::UdpBackend::Bsd && config.strategy!=jam2::ConnectionStrategy::Jam2Server) ||
+            (config.backend==jam2::UdpBackend::NetworkFramework && (config.socketBuffers.sendBytes || config.socketBuffers.receiveBytes)) ||
             config.maximumPeers < 0 || config.pendingAdmissionTimeoutMs < 1 || config.pendingAdmissionTimeoutMs > 60000 || config.controlBytesPerSecond < 1024 || (config.assetBytesPerSecond != 0 && config.assetBytesPerSecond < 1024) || config.linkRepairSilenceMs < 1000 || config.fastReorderUs > 2000000 ||
             (config.socketBuffers.sendBytes && *config.socketBuffers.sendBytes<=0) ||
             (config.socketBuffers.receiveBytes && *config.socketBuffers.receiveBytes<=0) ||
@@ -192,7 +217,7 @@ struct UdpMultiplexTransport::Impl {
         std::copy(key.begin(), key.end(), nativeKey.begin());
         config.sessionHex = config.sessionHex.toLower(); config.keyHex = config.keyHex.toLower();
         config.localToken = config.localToken.toLower();
-        signalSocket = std::make_shared<jam2::UdpSocket>();
+        signalSocket = std::make_shared<jam2::UdpSocket>(*config.backend,config.service);
         signalSocket->bind({config.bindHost.toStdString(),
             config.strategy==jam2::ConnectionStrategy::Jam2Server ? std::uint16_t{0} : config.bindPort});
         configureSocket(*signalSocket);
@@ -299,6 +324,7 @@ struct UdpMultiplexTransport::Impl {
     void activateLink(const std::shared_ptr<Link>& link,quint64 now)
     {
         if (link->phase==Phase::Active) return;
+        link->socket->activate_peer(link->remote);
         link->phase=Phase::Active; link->lastReceive=now;
         if (config.creator && link->hostLink)
             link->deadline=now+config.pendingAdmissionTimeoutMs*1000;
@@ -516,7 +542,41 @@ struct UdpMultiplexTransport::Impl {
             while (ns > highest && !owner->classificationMaxNs.compare_exchange_weak(highest, ns, std::memory_order_relaxed)) {}
         }
     };
-    std::optional<jam2::UdpSocket::ReceivedDatagram> receiveRuntime(std::span<std::uint8_t> buffer, quint64 timeoutUs, jam2::RealtimeWakeSignal* captureWake)
+    void recordAudioTiming(const std::shared_ptr<Link>& link, const jam2::UdpSocket::ReceivedDatagram& packet) {
+        if (packet.network_callback_us && packet.observed_us>=packet.network_callback_us) {
+            const auto delay=packet.observed_us-packet.network_callback_us;
+            ++frameworkHandoffSamples; frameworkHandoffSumUs+=delay;
+            if (delay>frameworkHandoffMaxUs.load()) frameworkHandoffMaxUs=delay;
+            if (packet.kernel_arrival_us && packet.network_callback_us>=packet.kernel_arrival_us) {
+                const auto callbackDelay=packet.network_callback_us-packet.kernel_arrival_us;
+                if (callbackDelay>frameworkCallbackDelayMaxUs.load()) frameworkCallbackDelayMaxUs=callbackDelay;
+            }
+        }
+        if (!packet.kernel_arrival_us) return;
+        if (traceEnabled.load(std::memory_order_acquire))
+            receiveTrace->observe(peerId(link->peer), packet.kernel_arrival_us, packet.read_begin_us,
+                packet.read_end_us, packet.observed_us, jam2::receive_clock_sample(), link->readEvidence, packet.read_cpu);
+        ++socketResidenceSamples; socketResidenceSumUs += packet.socket_residence_us;
+        if (packet.socket_residence_us > socketResidenceMaxUs.load()) socketResidenceMaxUs = packet.socket_residence_us;
+        if (packet.socket_residence_us > 1000) ++socketResidenceOver1Ms;
+        if (packet.socket_residence_us > 4000) ++socketResidenceOver4Ms;
+        auto& previous = link->lastKernelAudioArrivalUs;
+        if (previous && packet.kernel_arrival_us >= previous) {
+            const auto gap = packet.kernel_arrival_us - previous;
+            ++kernelAudioGapSamples; kernelAudioGapSumUs += gap;
+            if (gap > kernelAudioGapMaxUs.load()) {
+                kernelAudioGapMaxUs = gap; kernelGapMaxResidenceUs = packet.socket_residence_us;
+            }
+            if (gap > 10000) ++kernelAudioGapOver10Ms;
+            if (gap > 50000) ++kernelAudioGapOver50Ms;
+        }
+        previous = packet.kernel_arrival_us;
+    }
+    void markReceivePhase(jam2::ReceiveServicePhase phase) {
+        if (traceEnabled.load(std::memory_order_acquire)) receiveTrace->phase(phase, jam2::receive_clock_sample());
+    }
+    std::optional<jam2::UdpSocket::ReceivedDatagram> receiveRuntime(std::span<std::uint8_t> buffer, quint64 timeoutUs,
+        jam2::RealtimeWakeSignal* captureWake, jam2::DatagramReceiveBudget* budget = nullptr)
     {
         if (buffer.size() < jam2::NetworkDatagramTransport::kReceiveBufferBytes)
             throw std::invalid_argument("UDP multiplex receiver requires a 1500-byte buffer");
@@ -529,13 +589,23 @@ struct UdpMultiplexTransport::Impl {
             bool receivedAny = false;
             const auto count = routes->readerIndices.size();
             for (std::size_t checked = 0; checked < count; ++checked) {
+                if (budget && !budget->canRead(jam2::monotonic_us())) { ++classificationYields; return {}; }
                 const auto& initial = routes->routes[routes->readerIndices[receiveCursor++ % count]];
                 const ReadRoute* selected=&initial;
                 const auto& routeSocket=initial.socket;
                 if (!initial.link->readable.load(std::memory_order_acquire)) continue;
-                const auto packet = routeSocket->recv_from_for(buffer, 0);
-                if (!packet) continue;
+                markReceivePhase(jam2::ReceiveServicePhase::SocketRead);
+                jam2::UdpSocket::ReceiveAttemptTiming attempt;
+                const auto packet = routeSocket->recv_from_for(buffer, 0, nullptr,
+                    receiveTimestamps ? &attempt : nullptr);
+                markReceivePhase(jam2::ReceiveServicePhase::Classification);
+                if (!packet) {
+                    if (attempt.would_block) initial.link->readEvidence = {attempt.begin_us,attempt.end_us,0};
+                    markReceivePhase(jam2::ReceiveServicePhase::ReceiveDispatch); continue;
+                }
+                if (receiveTimestamps) ++initial.link->readEvidence.datagrams_since_would_block;
                 receivedAny = true; ++work;
+                if (budget) budget->recordPacket(jam2::monotonic_us());
                 ClassificationTimer timing((++classifications & (kClassificationTimingStride-1)) == 0 ? this : nullptr);
                 const auto payload = buffer.first(packet->size);
                 if (packet->endpoint!=initial.endpoint) {
@@ -555,8 +625,10 @@ struct UdpMultiplexTransport::Impl {
                     route.link->lastReceive.store(jam2::monotonic_us(), std::memory_order_relaxed);
                     route.link->stalledNotified.store(false, std::memory_order_relaxed);
                     if (payload.size() >= 4 && std::equal(payload.begin(),payload.begin()+4,"JAM2")) {
-                        if (payload.size() >= jam2::protocol::kHeaderSize && payload[5] == static_cast<std::uint8_t>(jam2::protocol::PacketType::Audio))
+                        if (payload.size() >= jam2::protocol::kHeaderSize && payload[5] == static_cast<std::uint8_t>(jam2::protocol::PacketType::Audio)) {
                             route.link->mediaStarted.store(true, std::memory_order_relaxed);
+                            recordAudioTiming(route.link,*packet);
+                        }
                         ++nativeReceived; ++nativeDelivered; return packet;
                     }
                     if (payload.size() >= 8 && std::equal(payload.begin(),payload.begin()+4,"J2MX")) queueIngress(route,payload,false);
@@ -564,17 +636,23 @@ struct UdpMultiplexTransport::Impl {
                 } else if (!rendezvous() && config.creator && payload.size()>=jam2::protocol::kHeaderSize &&
                     std::equal(payload.begin(),payload.begin()+4,"JAM2")) queueIngress(route,payload,false,false,true,packet->endpoint);
                 else ++invalidClassified;
-                if (work >= kClassificationPacketsPerCall) { ++classificationYields; return {}; }
+                if (!budget && work >= kClassificationPacketsPerCall) { ++classificationYields; return {}; }
             }
             if (stopping) return {};
             // A zero wait budget still drains already available packets. The
             // packet budget bounds classification before other runtime work.
-            if (receivedAny && work < kClassificationPacketsPerCall) continue;
+            if (receivedAny && (budget || work < kClassificationPacketsPerCall)) continue;
+            // Once classified work has drained, let the caller service its
+            // audio-send deadline. Waiting here would charge idle socket time
+            // to the shared service budget and delay the next runtime turn.
+            if (budget && work) return {};
             const auto now = jam2::monotonic_us();
             if (waited || now >= deadline) return {};
             waited = true;
+            markReceivePhase(jam2::ReceiveServicePhase::SocketWait);
             if (routes->sockets.empty()) audioWake.waitFor(deadline-now,captureWake);
             else jam2::UdpSocket::waitForDatagrams(routes->sockets,deadline-now,captureWake);
+            markReceivePhase(jam2::ReceiveServicePhase::ReceiveDispatch);
         }
     }
     void stop()
@@ -611,13 +689,14 @@ struct UdpMultiplexTransport::Impl {
         receiveSignal(*message, now);
     }
     void configureSocket(jam2::UdpSocket& socket) const {
+        if (receiveTimestamps) socket.set_receive_timestamps(true);
         if (config.socketBuffers.sendBytes) socket.set_send_buffer_size(*config.socketBuffers.sendBytes);
         if (config.socketBuffers.receiveBytes) socket.set_recv_buffer_size(*config.socketBuffers.receiveBytes);
     }
     std::shared_ptr<jam2::UdpSocket> candidate()
     {
         for (int index = 0; index < 100; ++index) {
-            auto socket = std::make_shared<jam2::UdpSocket>();
+            auto socket = std::make_shared<jam2::UdpSocket>(*config.backend,config.service);
             socket->bind({config.bindHost.toStdString(), 0});
             configureSocket(*socket);
             if (usedPorts.insert(socket->local_endpoint().port).second) return socket;
@@ -896,7 +975,7 @@ struct UdpMultiplexTransport::Impl {
         } else if (parsed.header.type == jam2::protocol::PacketType::HelloAck &&
                    link->challenges.contains(parsed.header.timing_value)) link->gotAck = true;
     }
-    void queueAudio(const std::shared_ptr<Link>& link, std::span<const std::uint8_t> packet)
+    void queueAudio(const std::shared_ptr<Link>& link, std::span<const std::uint8_t> packet, const jam2::UdpSocket::ReceivedDatagram& received)
     {
         if (packet.size() > jam2::protocol::kMaxDatagramSize) return;
         ++nativeReceived;
@@ -904,12 +983,12 @@ struct UdpMultiplexTransport::Impl {
         {
             std::lock_guard lock(audioMutex);
             if (audioCount == audioQueue.size()) { ++audioDrops; return; }
-            auto& slot = audioQueue[audioWrite]; slot.endpoint = link->remote; slot.size = packet.size();
+            auto& slot = audioQueue[audioWrite]; slot.endpoint = link->remote; slot.size = packet.size(); slot.timing = received;
             std::copy(packet.begin(), packet.end(), slot.bytes.begin());
             audioWrite = (audioWrite + 1) % audioQueue.size(); ++audioCount;
         }
         if (packet.size() >= jam2::protocol::kHeaderSize && packet[5] == static_cast<std::uint8_t>(jam2::protocol::PacketType::Audio))
-            link->mediaStarted = true;
+            { link->mediaStarted = true; recordAudioTiming(link,received); }
         audioWake.signal(jam2::monotonic_us());
     }
     bool muxSend(const std::shared_ptr<Link>& link, const QByteArray& packet)
@@ -1051,8 +1130,16 @@ struct UdpMultiplexTransport::Impl {
             const bool activeSocket=std::any_of(routes->routes.begin(),routes->routes.end(),[&](const ReadRoute& route) { return route.socket==socket; });
             if (activeSocket && ((!draining && receiverOwned.load(std::memory_order_acquire)) || !reader.owns_lock())) return;
             for (int count=0;count<32;++count) {
-                const auto received=socket->recv_from_for(buffer,0);
-                if (!received) break;
+                const bool traceWorker=config.receiveModel==ReceiveModel::QueuedWorker;
+                if (traceWorker) markReceivePhase(jam2::ReceiveServicePhase::SocketRead);
+                jam2::UdpSocket::ReceiveAttemptTiming attempt;
+                const auto received=socket->recv_from_for(buffer,0,nullptr,receiveTimestamps ? &attempt : nullptr);
+                if (traceWorker) markReceivePhase(jam2::ReceiveServicePhase::Classification);
+                if (!received) {
+                    if (traceWorker && attempt.would_block) for (const auto* group : {&links,&retainedLinks})
+                        for (const auto& [id,link] : *group) { (void)id; if (link->socket==socket) link->readEvidence={attempt.begin_us,attempt.end_us,0}; }
+                    break;
+                }
                 const auto packet=std::span<const std::uint8_t>(buffer.data(),received->size);
                 if (stunRequest && stunEndpoint && received->endpoint==*stunEndpoint) {
                     try {
@@ -1073,10 +1160,11 @@ struct UdpMultiplexTransport::Impl {
                     if (selected) break;
                 }
                 if (!selected) continue;
+                if (traceWorker && receiveTimestamps) ++selected->readEvidence.datagrams_since_would_block;
                 selected->lastReceive=now; selected->stalledNotified=false;
                 if (selected->phase!=Phase::Active) directProof(selected,packet,received->endpoint);
                 else if (packet.size()>=4 && std::equal(packet.begin(),packet.begin()+4,"J2MX")) muxReceive(selected,packet,now);
-                else if (packet.size()>=4 && std::equal(packet.begin(),packet.begin()+4,"JAM2")) queueAudio(selected,packet);
+                else if (packet.size()>=4 && std::equal(packet.begin(),packet.begin()+4,"JAM2")) queueAudio(selected,packet,*received);
             }
         };
         read(signalSocket);
@@ -1333,6 +1421,7 @@ struct UdpMultiplexTransport::Impl {
     void run()
     {
         try {
+            jam2::UdpWaitScope waitScope(config.waitMode, &workerWaitDiagnostics);
             if (!rendezvous()) {
                 if (config.creator) {
                     auto advertised=config.publicEndpoint.value_or(jam2::Endpoint{localHost,signalSocket->local_endpoint().port});
@@ -1365,6 +1454,7 @@ struct UdpMultiplexTransport::Impl {
                         counters.workerLoopGapMaxUs = qMax(counters.workerLoopGapMaxUs, now - previousCycle);
                     previousCycle = now;
                     updateReceiverOwnership();
+                    if (config.receiveModel==ReceiveModel::QueuedWorker) markReceivePhase(jam2::ReceiveServicePhase::Maintenance);
                     processCommands(now); processIngress(); readSockets(now,scratch); timers(now,scratch); publishReadRoutes();
                     if (ingressPending() || immediateSendWork) wait = 0;
                     if (immediateSendWork) ++counters.workerSendRepolls;
@@ -1382,6 +1472,7 @@ struct UdpMultiplexTransport::Impl {
                     counters.workerServiceSumUs += serviceUs; ++counters.workerTurns;
                     if (scratch.capacity() != previousCapacity) ++counters.workerWorkspaceGrowths;
                 }
+                if (config.receiveModel==ReceiveModel::QueuedWorker) markReceivePhase(jam2::ReceiveServicePhase::SocketWait);
                 jam2::UdpSocket::waitForAny(sockets, wait, &commandWake->signal);
             }
             // Stop wakes the receiver; wait for its final bounded socket wait
@@ -1478,6 +1569,29 @@ void UdpMultiplexTransport::receiverAttached()
     }
 }
 void UdpMultiplexTransport::receiverDetached() noexcept { if (impl_) impl_->detachReceiver(); }
+bool UdpMultiplexTransport::setReceiveTimestamps(bool enabled)
+{
+    if (!impl_) throw std::runtime_error("UDP multiplex transport has not started");
+    std::scoped_lock lock(impl_->mutex, impl_->receiverMutex);
+    if (impl_->stopping) throw std::runtime_error("UDP multiplex transport has stopped");
+    // The signal socket can also be a media socket. Future candidates inherit
+    // the option through configureSocket; existing physical epochs retain it.
+    impl_->signalSocket->set_receive_timestamps(enabled);
+    for (const auto* links : {&impl_->links, &impl_->retainedLinks})
+        for (const auto& [peer, link] : *links) {
+            (void)peer;
+            if (link->socket) link->socket->set_receive_timestamps(enabled);
+            link->lastKernelAudioArrivalUs = 0;
+        }
+    if (enabled && !impl_->receiveTrace) impl_->receiveTrace = std::make_unique<jam2::ReceiveServiceDiagnostics>();
+    impl_->receiveTimestamps = enabled;
+    impl_->traceEnabled.store(enabled, std::memory_order_release);
+    return true;
+}
+void UdpMultiplexTransport::receiveServicePhase(jam2::ReceiveServicePhase phase)
+{
+    if (impl_ && impl_->config.receiveModel == ReceiveModel::Runtime) impl_->markReceivePhase(phase);
+}
 bool UdpMultiplexTransport::introduce(const QString& a, const QString& b, const QString& request)
 {
     return impl_ && impl_->enqueue({Impl::CommandKind::Introduce, a, b, request});
@@ -1560,6 +1674,23 @@ UdpMultiplexTransport::Snapshot UdpMultiplexTransport::snapshot() const
     result.runtimeInvalidPackets = impl_->invalidClassified.load(); result.runtimeBudgetYields = impl_->classificationYields.load();
     result.classificationSamples = impl_->classificationSamples.load(); result.classificationSumNs = impl_->classificationSumNs.load();
     result.classificationMaxNs = impl_->classificationMaxNs.load();
+    result.receiveTimestamps = impl_->receiveTimestamps;
+    result.backend=*impl_->config.backend; result.service=impl_->signalSocket->service_class();
+    result.waitMode=impl_->config.waitMode;
+    result.runtimeWait=impl_->runtimeWaitDiagnostics.snapshot();
+    result.workerWait=impl_->workerWaitDiagnostics.snapshot();
+    result.audioQueueWaitSamples=impl_->audioQueueWaitSamples; result.audioQueueWaitSumUs=impl_->audioQueueWaitSumUs;
+    result.audioQueueWaitMaxUs=impl_->audioQueueWaitMaxUs; result.queuedDeliveryMaxUs=impl_->queuedDeliveryMaxUs;
+    result.queuedDeliveryOver1Ms=impl_->queuedDeliveryOver1Ms;
+    result.frameworkHandoffSamples=impl_->frameworkHandoffSamples; result.frameworkHandoffSumUs=impl_->frameworkHandoffSumUs;
+    result.frameworkHandoffMaxUs=impl_->frameworkHandoffMaxUs; result.frameworkCallbackDelayMaxUs=impl_->frameworkCallbackDelayMaxUs;
+    result.kernelAudioGapSamples = impl_->kernelAudioGapSamples.load(); result.kernelAudioGapSumUs = impl_->kernelAudioGapSumUs.load();
+    result.kernelAudioGapMaxUs = impl_->kernelAudioGapMaxUs.load(); result.kernelGapMaxResidenceUs = impl_->kernelGapMaxResidenceUs.load();
+    result.kernelAudioGapOver10Ms = impl_->kernelAudioGapOver10Ms.load(); result.kernelAudioGapOver50Ms = impl_->kernelAudioGapOver50Ms.load();
+    result.socketResidenceSamples = impl_->socketResidenceSamples.load(); result.socketResidenceSumUs = impl_->socketResidenceSumUs.load();
+    result.socketResidenceMaxUs = impl_->socketResidenceMaxUs.load(); result.socketResidenceOver1Ms = impl_->socketResidenceOver1Ms.load();
+    result.socketResidenceOver4Ms = impl_->socketResidenceOver4Ms.load();
+    if (impl_->receiveTrace) result.receiveTrace = impl_->receiveTrace->snapshot();
     { std::lock_guard ingress(impl_->ingressMutex);
         result.ingressQueueDrops = impl_->ingressDrops; result.ingressHighWater = impl_->ingressHighWater;
         result.controlIngressDepth = impl_->controlIngress.count; result.assetIngressDepth = impl_->assetIngress.count;
@@ -1613,23 +1744,11 @@ jam2::UdpSendResult UdpMultiplexTransport::sendToPeer(
     std::uint64_t id, const jam2::ResolvedUdpEndpoint&, std::span<const std::uint8_t> packet) noexcept
 {
     if (!impl_ || impl_->stopping) return {jam2::UdpSendOutcome::WouldBlock, 0};
-    if (impl_->config.receiveModel == ReceiveModel::Runtime) {
-        const auto routes = std::atomic_load_explicit(&impl_->readRoutes, std::memory_order_acquire);
-        for (const auto& route : routes->routes) if (route.peer == id && route.link->readable.load(std::memory_order_acquire)) {
-            return impl_->sendNative(route.link,route.socket,route.endpoint,packet);
-        }
-        return {jam2::UdpSendOutcome::WouldBlock, 0};
-    }
-    std::lock_guard lock(impl_->mutex);
-    auto selected = impl_->links.end();
-    for (auto it = impl_->links.begin(); it != impl_->links.end(); ++it)
-        if (peerId(it->first) == id) { selected = it; break; }
-    std::shared_ptr<Impl::Link> link;
-    if (selected != impl_->links.end() && selected->second->phase == Phase::Active) link = selected->second;
-    else for (const auto& [peer, held] : impl_->retainedLinks)
-        if (peerId(peer) == id && held->phase == Phase::Active) { link = held; break; }
-    if (link && link->socket) {
-        return impl_->sendNative(link,link->socket,link->remote,packet);
+    // Both readers publish immutable active routes. Sending must not wait for
+    // the queued worker's mutex while that worker is inside an OS receive call.
+    const auto routes = std::atomic_load_explicit(&impl_->readRoutes, std::memory_order_acquire);
+    for (const auto& route : routes->routes) if (route.peer == id && route.link->readable.load(std::memory_order_acquire)) {
+        return impl_->sendNative(route.link,route.socket,route.endpoint,packet);
     }
     return {jam2::UdpSendOutcome::WouldBlock, 0};
 }
@@ -1656,6 +1775,7 @@ std::optional<jam2::UdpSocket::ReceivedDatagram> UdpMultiplexTransport::receiveF
     std::span<std::uint8_t> buffer, std::uint64_t timeoutUs, jam2::RealtimeWakeSignal* captureWake)
 {
     if (!impl_) return {};
+    jam2::UdpWaitScope waitScope(impl_->config.waitMode, &impl_->runtimeWaitDiagnostics);
     if (impl_->config.receiveModel == ReceiveModel::Runtime) return impl_->receiveRuntime(buffer, timeoutUs, captureWake);
     auto take = [&]() -> std::optional<jam2::UdpSocket::ReceivedDatagram> {
         std::lock_guard lock(impl_->audioMutex);
@@ -1663,13 +1783,35 @@ std::optional<jam2::UdpSocket::ReceivedDatagram> UdpMultiplexTransport::receiveF
         const auto& slot = impl_->audioQueue[impl_->audioRead];
         const bool fits = slot.size <= buffer.size();
         if (fits) std::copy_n(slot.bytes.begin(), slot.size, buffer.begin());
-        const auto result = jam2::UdpSocket::ReceivedDatagram{slot.endpoint, slot.size};
+        auto result = slot.timing; result.endpoint=slot.endpoint; result.size=slot.size;
+        if (result.observed_us) {
+            const auto now=jam2::receive_diagnostic_time_us();
+            const auto waited=now>=result.observed_us ? now-result.observed_us : 0;
+            ++impl_->audioQueueWaitSamples; impl_->audioQueueWaitSumUs+=waited;
+            if (waited>impl_->audioQueueWaitMaxUs.load()) impl_->audioQueueWaitMaxUs=waited;
+            if (result.kernel_arrival_us && now>=result.kernel_arrival_us) {
+                const auto total=now-result.kernel_arrival_us;
+                if (total>impl_->queuedDeliveryMaxUs.load()) impl_->queuedDeliveryMaxUs=total;
+                if (total>1000) ++impl_->queuedDeliveryOver1Ms;
+            }
+        }
         impl_->audioRead = (impl_->audioRead + 1) % impl_->audioQueue.size(); --impl_->audioCount;
         return fits ? std::optional(result) : std::nullopt;
     };
     if (auto packet = take()) return packet;
     if (timeoutUs && !impl_->stopping) impl_->audioWake.waitFor(timeoutUs, captureWake);
     return take();
+}
+
+std::optional<jam2::UdpSocket::ReceivedDatagram> UdpMultiplexTransport::receiveWithin(
+    std::span<std::uint8_t> buffer, std::uint64_t timeoutUs, jam2::RealtimeWakeSignal* captureWake,
+    jam2::DatagramReceiveBudget& budget)
+{
+    if (!impl_) return {};
+    jam2::UdpWaitScope waitScope(impl_->config.waitMode, &impl_->runtimeWaitDiagnostics);
+    if (impl_->config.receiveModel == ReceiveModel::Runtime)
+        return impl_->receiveRuntime(buffer, timeoutUs, captureWake, &budget);
+    return NetworkDatagramTransport::receiveWithin(buffer, timeoutUs, captureWake, budget);
 }
 
 } // namespace jam2::application

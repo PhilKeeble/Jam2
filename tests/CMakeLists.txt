@@ -102,6 +102,7 @@ endif()
 
 add_executable(jam2_multiplex_session_lifecycle_tests EXCLUDE_FROM_ALL
     integration/application/MultiplexSessionLifecycleTests.cpp
+    integration/application/NetworkIngressRuntimeTests.cpp
     "${CMAKE_SOURCE_DIR}/app/application/SharedSessionController.cpp"
     "${CMAKE_SOURCE_DIR}/app/application/ControlMessageValidation.cpp"
     "${CMAKE_SOURCE_DIR}/app/application/ApplicationRuntime.cpp"
@@ -124,6 +125,28 @@ target_include_directories(jam2_multiplex_session_lifecycle_tests PRIVATE "${CMA
 target_link_libraries(jam2_multiplex_session_lifecycle_tests PRIVATE jam2_core jam2_jam_sync jam2_control_wire Qt6::Core Qt6::Network)
 add_test(NAME jam2_multiplex_four_session_lifecycle_integration COMMAND $<TARGET_FILE:jam2_multiplex_session_lifecycle_tests>)
 set_tests_properties(jam2_multiplex_four_session_lifecycle_integration PROPERTIES LABELS "integration;application;network;four-peer;udp-multiplex;identity" TIMEOUT 75 RUN_SERIAL TRUE)
+if(JAM2_RENDEZVOUS_TEST_SERVER AND EXISTS "${JAM2_RENDEZVOUS_TEST_SERVER}")
+    add_test(NAME jam2_four_udp_paths_runtime COMMAND $<TARGET_FILE:jam2_multiplex_session_lifecycle_tests>
+        --udp-paths-runtime "${JAM2_RENDEZVOUS_TEST_SERVER}" "${CMAKE_SOURCE_DIR}/artifacts/udp-paths-native")
+    set_tests_properties(jam2_four_udp_paths_runtime PROPERTIES
+        LABELS "integration;application;network;four-peer;udp-multiplex;delivery" TIMEOUT 150 RUN_SERIAL TRUE)
+    add_test(NAME jam2_four_capture_wake_runtime COMMAND $<TARGET_FILE:jam2_multiplex_session_lifecycle_tests>
+        --capture-wake-runtime "${JAM2_RENDEZVOUS_TEST_SERVER}" "${CMAKE_SOURCE_DIR}/artifacts/capture-wake-native")
+    set_tests_properties(jam2_four_capture_wake_runtime PROPERTIES
+        LABELS "integration;application;network;four-peer;udp-multiplex;delivery" TIMEOUT 120 RUN_SERIAL TRUE)
+    add_test(NAME jam2_four_ingress_runtime_investigation COMMAND $<TARGET_FILE:jam2_multiplex_session_lifecycle_tests>
+        --ingress-runtime "${JAM2_RENDEZVOUS_TEST_SERVER}" "${CMAKE_SOURCE_DIR}/artifacts/network-ingress-native")
+    set_tests_properties(jam2_four_ingress_runtime_investigation PROPERTIES
+        LABELS "integration;application;network;four-peer;udp-multiplex;performance;delivery" TIMEOUT 480 RUN_SERIAL TRUE)
+    if(WIN32)
+        set_tests_properties(jam2_four_udp_paths_runtime PROPERTIES
+            ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
+        set_tests_properties(jam2_four_capture_wake_runtime PROPERTIES
+            ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
+        set_tests_properties(jam2_four_ingress_runtime_investigation PROPERTIES
+            ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
+    endif()
+endif()
 if(WIN32)
     target_link_libraries(jam2_multiplex_session_lifecycle_tests PRIVATE Avrt Winmm)
     set_tests_properties(jam2_multiplex_four_session_lifecycle_integration PROPERTIES ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
@@ -233,13 +256,14 @@ add_executable(jam2_audio_flow_interaction_tests EXCLUDE_FROM_ALL
     integration/network/AudioFlowInteractionTests.cpp)
 jam2_configure_test_target(jam2_audio_flow_interaction_tests)
 target_link_libraries(jam2_audio_flow_interaction_tests PRIVATE jam2_core)
-foreach(experiment capture interruption clock wasapi coalescing gap-learning callback-phases callback-runway asio-cadence bounded-jitter startup-recovery repeated-recovery large-recovery)
+foreach(experiment capture interruption clock wasapi coalescing gap-learning callback-phases callback-runway asio-cadence bounded-jitter startup-recovery repeated-recovery large-recovery ingress-timing)
     add_test(NAME jam2_audio_flow_${experiment}
         COMMAND $<TARGET_FILE:jam2_audio_flow_interaction_tests> ${experiment})
     set_tests_properties(jam2_audio_flow_${experiment} PROPERTIES
         LABELS "integration;core;audio;network;performance"
         TIMEOUT 120)
 endforeach()
+set_property(TEST jam2_audio_flow_ingress-timing APPEND PROPERTY LABELS "four-peer;fake-audio;network-impairment")
 set_property(TEST jam2_audio_flow_wasapi APPEND PROPERTY LABELS "wasapi;four-peer;fake-audio;network-impairment")
 set_property(TEST jam2_audio_flow_interruption jam2_audio_flow_clock
     APPEND PROPERTY LABELS "four-peer")
@@ -271,6 +295,10 @@ add_test(NAME jam2_core_callback_runway_units
     COMMAND $<TARGET_FILE:jam2_core_input_tests> --callback-runway)
 add_test(NAME jam2_core_startup_padding_units
     COMMAND $<TARGET_FILE:jam2_core_input_tests> --startup-padding)
+add_test(NAME jam2_core_short_startup_gap_units
+    COMMAND $<TARGET_FILE:jam2_core_input_tests> --short-startup-gaps)
+set_tests_properties(jam2_core_short_startup_gap_units PROPERTIES
+    LABELS "unit;core;audio;network;four-peer;startup;recovery;delivery" TIMEOUT 60)
 set_tests_properties(jam2_core_startup_padding_units PROPERTIES
     LABELS "unit;core;audio;network;startup;recovery;delivery" TIMEOUT 30)
 add_test(NAME jam2_core_playback_recovery_units
@@ -376,6 +404,35 @@ add_executable(jam2_peer_drift_delay_step_tests EXCLUDE_FROM_ALL unit/core/PeerD
 jam2_configure_test_target(jam2_peer_drift_delay_step_tests)
 target_link_libraries(jam2_peer_drift_delay_step_tests PRIVATE jam2_core)
 add_test(NAME jam2_peer_drift_delay_step_units COMMAND $<TARGET_FILE:jam2_peer_drift_delay_step_tests>)
+add_executable(jam2_receive_budget_tests EXCLUDE_FROM_ALL unit/core/ReceiveBudgetTests.cpp)
+jam2_configure_test_target(jam2_receive_budget_tests)
+target_link_libraries(jam2_receive_budget_tests PRIVATE jam2_core)
+add_test(NAME jam2_receive_budget_units COMMAND $<TARGET_FILE:jam2_receive_budget_tests>)
+set_tests_properties(jam2_receive_budget_units PROPERTIES LABELS "unit;core;network;four-peer;delivery" TIMEOUT 15)
+add_executable(jam2_udp_receive_timing_tests EXCLUDE_FROM_ALL unit/core/UdpReceiveTimingTests.cpp)
+add_executable(jam2_udp_backend_tests EXCLUDE_FROM_ALL unit/core/UdpBackendTests.cpp)
+if(APPLE)
+    add_executable(jam2_macos_socket_wait_tests EXCLUDE_FROM_ALL unit/core/MacSocketWaitTests.cpp)
+    jam2_configure_test_target(jam2_macos_socket_wait_tests)
+    target_link_libraries(jam2_macos_socket_wait_tests PRIVATE jam2_core)
+    add_test(NAME jam2_macos_socket_wait_units COMMAND $<TARGET_FILE:jam2_macos_socket_wait_tests>)
+    add_test(NAME jam2_macos_socket_wait_timing COMMAND $<TARGET_FILE:jam2_macos_socket_wait_tests> --measure)
+    set_tests_properties(jam2_macos_socket_wait_units jam2_macos_socket_wait_timing PROPERTIES
+        LABELS "unit;core;network;macos;udp-multiplex;delivery" TIMEOUT 30 RUN_SERIAL TRUE)
+endif()
+jam2_configure_test_target(jam2_udp_backend_tests)
+target_link_libraries(jam2_udp_backend_tests PRIVATE jam2_core)
+add_test(NAME jam2_udp_backend_units COMMAND $<TARGET_FILE:jam2_udp_backend_tests>)
+set_tests_properties(jam2_udp_backend_units PROPERTIES LABELS "unit;core;network;udp-multiplex;delivery" TIMEOUT 30)
+jam2_configure_test_target(jam2_udp_receive_timing_tests)
+target_link_libraries(jam2_udp_receive_timing_tests PRIVATE jam2_core)
+add_test(NAME jam2_udp_receive_timing_units COMMAND $<TARGET_FILE:jam2_udp_receive_timing_tests>)
+set_tests_properties(jam2_udp_receive_timing_units PROPERTIES LABELS "unit;core;network;udp-multiplex;delivery" TIMEOUT 15)
+add_executable(jam2_receive_diagnostics_tests EXCLUDE_FROM_ALL unit/core/ReceiveDiagnosticsTests.cpp)
+jam2_configure_test_target(jam2_receive_diagnostics_tests)
+target_link_libraries(jam2_receive_diagnostics_tests PRIVATE jam2_core)
+add_test(NAME jam2_receive_diagnostics_units COMMAND $<TARGET_FILE:jam2_receive_diagnostics_tests>)
+set_tests_properties(jam2_receive_diagnostics_units PROPERTIES LABELS "unit;core;network;udp-multiplex;delivery" TIMEOUT 15)
 set_tests_properties(jam2_peer_drift_delay_step_units PROPERTIES LABELS "unit;core;audio;network;drift;delivery" TIMEOUT 30)
 add_executable(jam2_peer_mixer_larger_prefix_tests EXCLUDE_FROM_ALL unit/core/PeerMixerLargerPrefixTests.cpp)
 jam2_configure_test_target(jam2_peer_mixer_larger_prefix_tests)
@@ -1800,6 +1857,20 @@ add_executable(jam2_asio_delivery_tests EXCLUDE_FROM_ALL integration/network/Asi
 jam2_configure_test_target(jam2_asio_delivery_tests)
 target_link_libraries(jam2_asio_delivery_tests PRIVATE jam2_test_network_support jam2_test_process_support)
 add_dependencies(jam2_asio_delivery_tests jam2)
+if(APPLE AND JAM2_RENDEZVOUS_TEST_SERVER AND EXISTS "${JAM2_RENDEZVOUS_TEST_SERVER}")
+    add_test(NAME jam2_two_udp_backend_latency COMMAND $<TARGET_FILE:jam2_asio_delivery_tests>
+        "${JAM2_TEST_PUBLIC_EXECUTABLE}" --fake-profile "${CMAKE_CURRENT_SOURCE_DIR}/profiles/udp-backend-local-simulated.json")
+    set_tests_properties(jam2_two_udp_backend_latency PROPERTIES
+        LABELS "integration;network;two-peer;fake-audio;udp-multiplex;delivery;performance"
+        ENVIRONMENT "JAM2_RENDEZVOUS_TEST_SERVER=${JAM2_RENDEZVOUS_TEST_SERVER}"
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 400 RUN_SERIAL TRUE)
+    add_test(NAME jam2_two_macos_wait_latency COMMAND $<TARGET_FILE:jam2_asio_delivery_tests>
+        "${JAM2_TEST_PUBLIC_EXECUTABLE}" --fake-profile "${CMAKE_CURRENT_SOURCE_DIR}/profiles/macos-udp-wait-local-simulated.json")
+    set_tests_properties(jam2_two_macos_wait_latency PROPERTIES
+        LABELS "integration;network;two-peer;fake-audio;udp-multiplex;delivery;performance;macos"
+        ENVIRONMENT "JAM2_RENDEZVOUS_TEST_SERVER=${JAM2_RENDEZVOUS_TEST_SERVER}"
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 300 RUN_SERIAL TRUE)
+endif()
 add_test(NAME jam2_oct30_four_peer_delivery_integration COMMAND $<TARGET_FILE:jam2_asio_delivery_tests>
     "${JAM2_TEST_PUBLIC_EXECUTABLE}" --fake-four)
 set_tests_properties(jam2_oct30_four_peer_delivery_integration PROPERTIES
@@ -2556,6 +2627,10 @@ add_dependencies(jam2_tests_unit jam2_peer_mixer_larger_prefix_tests)
 add_dependencies(jam2_tests_network jam2_peer_drift_delay_step_tests)
 add_dependencies(jam2_tests_all jam2_peer_drift_delay_step_tests)
 add_dependencies(jam2_tests_all jam2_peer_mixer_larger_prefix_tests)
+if(APPLE)
+    add_dependencies(jam2_tests_unit jam2_macos_socket_wait_tests)
+    add_dependencies(jam2_tests_all jam2_macos_socket_wait_tests)
+endif()
 add_dependencies(jam2_tests_delivery jam2_peer_drift_delay_step_tests)
 add_executable(jam2_audio_baseline_analysis_tests EXCLUDE_FROM_ALL unit/support/AudioBaselineAnalysisTests.cpp)
 jam2_configure_test_target(jam2_audio_baseline_analysis_tests)
@@ -2595,10 +2670,37 @@ jam2_configure_test_target(jam2_udp_transport_comparison_tests)
 target_include_directories(jam2_udp_transport_comparison_tests PRIVATE "${CMAKE_SOURCE_DIR}/app/application" "${CMAKE_CURRENT_SOURCE_DIR}/support")
 target_link_libraries(jam2_udp_transport_comparison_tests PRIVATE jam2_core jam2_control_wire Qt6::Core Qt6::Network)
 add_test(NAME jam2_udp_transport_comparison COMMAND $<TARGET_FILE:jam2_udp_transport_comparison_tests>)
+add_test(NAME jam2_udp_four_ingress_boundary COMMAND $<TARGET_FILE:jam2_udp_transport_comparison_tests> --ingress-boundary)
+add_test(NAME jam2_udp_four_ingress_mixed_budget COMMAND $<TARGET_FILE:jam2_udp_transport_comparison_tests> --ingress-mixed)
+add_test(NAME jam2_udp_four_ingress_performance COMMAND $<TARGET_FILE:jam2_udp_transport_comparison_tests> --ingress-performance)
+set_tests_properties(jam2_udp_four_ingress_performance PROPERTIES
+    LABELS "integration;network;four-peer;udp-multiplex;performance;delivery" TIMEOUT 120 RUN_SERIAL TRUE)
+set_tests_properties(jam2_udp_four_ingress_boundary jam2_udp_four_ingress_mixed_budget PROPERTIES
+    LABELS "integration;network;four-peer;udp-multiplex;delivery" TIMEOUT 45 RUN_SERIAL TRUE)
 set_tests_properties(jam2_udp_transport_comparison PROPERTIES LABELS "integration;network;four-peer;udp-multiplex;network-impairment;delivery" TIMEOUT 180 RUN_SERIAL TRUE)
 if(WIN32)
     target_link_libraries(jam2_udp_transport_comparison_tests PRIVATE Winmm)
-    set_tests_properties(jam2_udp_transport_comparison PROPERTIES ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
+    set_tests_properties(jam2_udp_transport_comparison jam2_udp_four_ingress_boundary jam2_udp_four_ingress_mixed_budget jam2_udp_four_ingress_performance
+        PROPERTIES ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
 endif()
 add_dependencies(jam2_tests_network jam2_udp_transport_comparison_tests)
 add_dependencies(jam2_tests_all jam2_udp_transport_comparison_tests)
+add_dependencies(jam2_tests_unit jam2_receive_budget_tests)
+add_dependencies(jam2_tests_unit jam2_udp_receive_timing_tests)
+add_dependencies(jam2_tests_unit jam2_udp_backend_tests)
+add_dependencies(jam2_tests_network jam2_udp_backend_tests)
+add_dependencies(jam2_tests_all jam2_udp_backend_tests)
+add_dependencies(jam2_tests_unit jam2_receive_diagnostics_tests)
+add_dependencies(jam2_tests_network jam2_receive_diagnostics_tests)
+add_dependencies(jam2_tests_all jam2_receive_diagnostics_tests)
+add_dependencies(jam2_tests_network jam2_udp_receive_timing_tests)
+add_dependencies(jam2_tests_all jam2_udp_receive_timing_tests)
+add_dependencies(jam2_tests_network jam2_receive_budget_tests)
+add_dependencies(jam2_tests_network jam2_cli_boundary_tests)
+add_dependencies(jam2_tests_all jam2_receive_budget_tests)
+add_test(NAME jam2_csv_serialization_performance COMMAND $<TARGET_FILE:jam2_cli_boundary_tests> --csv-performance)
+set_tests_properties(jam2_csv_serialization_performance PROPERTIES LABELS "unit;application;network;performance;delivery" TIMEOUT 30 RUN_SERIAL TRUE)
+if(WIN32)
+    set_tests_properties(jam2_csv_serialization_performance PROPERTIES
+        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
+endif()

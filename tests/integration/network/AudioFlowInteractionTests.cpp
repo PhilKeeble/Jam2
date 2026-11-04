@@ -867,7 +867,7 @@ void largeRecoveryExperiments()
 ClockResult clockCase(int senderPpm, int receiverPpm, bool adaptive, bool interruptPeer = false,
     std::uint64_t deliveryBatchUs = 0,int releasePpm = -1,std::int64_t gapMinimumUs=-1,int durationSeconds=180,
     std::uint64_t callbackPhaseUs=137,std::uint64_t workerPeriodUs=250,int frames=int(packetFrames),
-    std::uint64_t deliveryJitterUs=0)
+    std::uint64_t deliveryJitterUs=0, std::uint64_t workerStallUs=0, bool stampArrival=false)
 {
     auto profile = *jam2::find_join_profile("fast");
     profile.adaptive_playback_cushion = adaptive;
@@ -907,6 +907,13 @@ ClockResult clockCase(int senderPpm, int receiverPpm, bool adaptive, bool interr
             ++callback;
         }
         if (now == worker) {
+            // A local runtime service pause is distinct from delaying packets
+            // on the network: callbacks keep consuming, but advance/dequeue
+            // cannot execute. No product queue or controller is substituted.
+            if (workerStallUs && now % 70000 < workerStallUs) {
+                worker += workerPeriodUs;
+                continue;
+            }
             receiver.session->advance(base + now);
             const auto packetDue = [&](std::uint64_t number) {
                 const auto random = std::uint32_t(number) * 1664525U + 1013904223U;
@@ -918,7 +925,8 @@ ClockResult clockCase(int senderPpm, int receiverPpm, bool adaptive, bool interr
                 for (std::size_t peer = 1; peer < participants; ++peer) {
                     if (interruptPeer && peer == 3 && now >= 5000000 && now < 25000000) continue;
                     const auto result = deliver(receiver.session->peerStream({peer + 1}),
-                        static_cast<std::uint32_t>(packet), (packet - 1) * std::uint64_t(frames), base + now, audio);
+                        static_cast<std::uint32_t>(packet), (packet - 1) * std::uint64_t(frames),
+                        base + (stampArrival ? packetDue(packet) : now), audio);
                     expect(result == jam2::PeerAudioResult::Accepted ||
                         (interruptPeer && peer == 3 && now >= 25000000 && now < 25010000 &&
                          result == jam2::PeerAudioResult::ForwardGapRejected),
@@ -935,7 +943,7 @@ ClockResult clockCase(int senderPpm, int receiverPpm, bool adaptive, bool interr
     }
     const auto final = observe(receiver);
     const auto& stream = receiver.session->peerStream({2}).stats();
-    if (!deliveryBatchUs && !interruptPeer && !deliveryJitterUs)
+    if (!deliveryBatchUs && !interruptPeer && !deliveryJitterUs && !workerStallUs)
         expect(receiver.session->mixStats().adaptive_delivery_gap_required_max_frames==0 &&
             !receiver.session->mixStats().delivery_gap_guard_active,
             "unimpaired delivery retains the original controller and never selects gap protection");
@@ -971,6 +979,9 @@ ClockResult clockCase(int senderPpm, int receiverPpm, bool adaptive, bool interr
         << " gap_minimum_us_override=" << gapMinimumUs
         << " callback_phase_us=" << callbackPhaseUs
         << " worker_period_us=" << workerPeriodUs
+        << " worker_stall_us=" << workerStallUs << " arrival_timestamp_ablation=" << stampArrival
+        << " observed_packet_gap_us=" << stream.audio_packet_gap_max_us
+        << " learned_gap_frames=" << mix.adaptive_delivery_gap_required_max_frames
         << " packet_frames=" << frames
         << " sample_rate=" << rate
         << " interrupted_peer=" << interruptPeer
@@ -1199,6 +1210,21 @@ int main(int argc, char** argv)
             }
         } else if (experiment == "clock") clockExperiments();
         else if (experiment == "coalescing") coalescingExperiments();
+        else if (experiment == "ingress-timing") {
+            for (std::uint64_t jitter : {0ULL, 3600ULL}) for (std::uint64_t stall : {0ULL, 3000ULL, 6000ULL}) {
+                const auto actual = clockCase(0, 0, true, false, 0, -1, -1, 180, 137, 250, 64, jitter, stall);
+                expect(actual.lateUnderruns == 0 && actual.lateTrims == 0 && actual.latePadding == 0,
+                    "actual delivery timestamps must let the production pipeline settle under the known local stalls");
+                // Diagnostic negative control only. Replacing delivery time
+                // with arrival time must not be assumed to fix a blocked
+                // runtime; its actual callback underruns/queues are retained.
+                if (stall) {
+                    const auto arrival = clockCase(0, 0, true, false, 0, -1, -1, 180, 137, 250, 64, jitter, stall, true);
+                    if (stall == 6000) expect(arrival.lateUnderruns > 0 && arrival.latePadding > 0,
+                        "arrival-time substitution must retain the measured starvation negative control for a blocked runtime");
+                }
+            }
+        }
         else if (experiment == "gap-learning") {
             for (int skew:{0,17}) for (std::uint64_t batch:{0ULL,4000ULL,8000ULL}) {
                 const auto r=clockCase(skew,0,true,false,batch,-1,0);

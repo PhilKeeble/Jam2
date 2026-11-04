@@ -424,6 +424,8 @@ bool SharedSessionController::startMultiplex(bool creator)
         : jam2::Endpoint{joiner_.host.toStdString(), joiner_.port};
     config.maximumPeers = creator ? creator_.sessionPeerLimit : 0;
     config.receiveModel = serverReceiveModel_;
+    config.backend = udpBackend_; config.service = udpService_;
+    config.waitMode = udpWait_;
     QString error;
     if (multiplex_->start(config, error)) {
         multiplexDiagnosticsTimer_.setInterval(2000);
@@ -512,6 +514,13 @@ jam2::application::UdpMultiplexTransport::Snapshot SharedSessionController::mult
 QJsonObject SharedSessionController::multiplexDiagnostics() const
 {
     const auto stats = multiplexSnapshot();
+    const auto waitStats = [](const jam2::UdpWaitSnapshot& value) {
+        return QJsonObject{{"calls",qint64(value.calls)}, {"requested_us",qint64(value.requested_us)},
+            {"elapsed_us",qint64(value.elapsed_us)}, {"max_elapsed_us",qint64(value.max_elapsed_us)},
+            {"max_overshoot_us",qint64(value.max_overshoot_us)}, {"late_over_1ms",qint64(value.late_over_1ms)},
+            {"readiness_wakes",qint64(value.readiness_wakes)}, {"deadline_wakes",qint64(value.deadline_wakes)},
+            {"interruptions",qint64(value.interruptions)}, {"errors",qint64(value.errors)}};
+    };
     QJsonArray links;
     const auto endpoint = [](const jam2::Endpoint& value) { return value.port ? QString::fromStdString(jam2::endpoint_to_string(value)) : QString{}; };
     for (const auto& link : stats.links) links.append(QJsonObject{
@@ -606,6 +615,35 @@ QJsonObject SharedSessionController::multiplexDiagnostics() const
         {QStringLiteral("classification_samples"), static_cast<qint64>(stats.classificationSamples)},
         {QStringLiteral("classification_sum_ns"), static_cast<qint64>(stats.classificationSumNs)},
         {QStringLiteral("classification_max_ns"), static_cast<qint64>(stats.classificationMaxNs)},
+        {QStringLiteral("receive_timestamps"), stats.receiveTimestamps},
+        {"udp_backend",stats.backend==jam2::UdpBackend::NetworkFramework ? "network" : stats.backend==jam2::UdpBackend::ConnectedBsd ? "connected" : "bsd"},
+        {"udp_bootstrap_backend","bsd"},
+        {"udp_wait",QString::fromLatin1(jam2::udp_wait_mode_text(stats.waitMode).data())},
+        {"udp_wait_runtime",waitStats(stats.runtimeWait)}, {"udp_wait_worker",waitStats(stats.workerWait)},
+        {"udp_service",stats.service==jam2::UdpServiceClass::BestEffort ? "best-effort" : "voice"},
+        {"receive_timing_source",stats.backend==jam2::UdpBackend::NetworkFramework ? "network-ip-metadata" : "bsd-kernel"},
+        {"audio_queue_wait_samples",static_cast<qint64>(stats.audioQueueWaitSamples)},
+        {"audio_queue_wait_sum_us",static_cast<qint64>(stats.audioQueueWaitSumUs)},
+        {"audio_queue_wait_max_us",static_cast<qint64>(stats.audioQueueWaitMaxUs)},
+        {"queued_delivery_max_us",static_cast<qint64>(stats.queuedDeliveryMaxUs)},
+        {"queued_delivery_over_1ms",static_cast<qint64>(stats.queuedDeliveryOver1Ms)},
+        {"framework_handoff_samples",static_cast<qint64>(stats.frameworkHandoffSamples)},
+        {"framework_handoff_sum_us",static_cast<qint64>(stats.frameworkHandoffSumUs)},
+        {"framework_handoff_max_us",static_cast<qint64>(stats.frameworkHandoffMaxUs)},
+        {"framework_callback_delay_max_us",static_cast<qint64>(stats.frameworkCallbackDelayMaxUs)},
+        {"framework_receive_capacity_packets",stats.backend==jam2::UdpBackend::NetworkFramework ? static_cast<qint64>(jam2::UdpSocket::kFrameworkReceivePackets) : 0},
+        {"framework_pending_send_limit",stats.backend==jam2::UdpBackend::NetworkFramework ? static_cast<qint64>(jam2::UdpSocket::kFrameworkPendingSends) : 0},
+        {QStringLiteral("kernel_audio_gap_samples"), static_cast<qint64>(stats.kernelAudioGapSamples)},
+        {QStringLiteral("kernel_audio_gap_sum_us"), static_cast<qint64>(stats.kernelAudioGapSumUs)},
+        {QStringLiteral("kernel_audio_gap_max_us"), static_cast<qint64>(stats.kernelAudioGapMaxUs)},
+        {QStringLiteral("kernel_gap_max_residence_us"), static_cast<qint64>(stats.kernelGapMaxResidenceUs)},
+        {QStringLiteral("kernel_audio_gap_over_10ms"), static_cast<qint64>(stats.kernelAudioGapOver10Ms)},
+        {QStringLiteral("kernel_audio_gap_over_50ms"), static_cast<qint64>(stats.kernelAudioGapOver50Ms)},
+        {QStringLiteral("socket_residence_samples"), static_cast<qint64>(stats.socketResidenceSamples)},
+        {QStringLiteral("socket_residence_sum_us"), static_cast<qint64>(stats.socketResidenceSumUs)},
+        {QStringLiteral("socket_residence_max_us"), static_cast<qint64>(stats.socketResidenceMaxUs)},
+        {QStringLiteral("socket_residence_over_1ms"), static_cast<qint64>(stats.socketResidenceOver1Ms)},
+        {QStringLiteral("socket_residence_over_4ms"), static_cast<qint64>(stats.socketResidenceOver4Ms)},
         {QStringLiteral("worker_loop_gap_max_us"), static_cast<qint64>(stats.workerLoopGapMaxUs)},
         {QStringLiteral("worker_service_max_us"), static_cast<qint64>(stats.workerServiceMaxUs)},
         {QStringLiteral("mux_version"),jam2::application::kUdpMuxVersion},
@@ -644,7 +682,58 @@ QJsonObject SharedSessionController::multiplexDiagnostics() const
         {QStringLiteral("peer_channels"), server_.wireDiagnostics()},
         {QStringLiteral("client"), jam2::application::control_wire::diagnostics(client_.stats().wire)},
         {QStringLiteral("asset_client"), jam2::application::control_wire::diagnostics(assetClient_.stats().wire)}});
+    const auto& trace = stats.receiveTrace;
+    QJsonArray receiveEvents;
+    for (std::size_t i = 0; i < trace.count; ++i) {
+        const auto& event = trace.events[i];
+        QJsonObject phases;
+        for (std::size_t p = 0; p < jam2::kReceivePhaseCount; ++p) if (event.phase_wall_us[p]) {
+            const auto name = jam2::receive_service_phase_text(static_cast<jam2::ReceiveServicePhase>(p));
+            phases[QString::fromLatin1(name.data(), static_cast<qsizetype>(name.size()))] = static_cast<qint64>(event.phase_wall_us[p]);
+        }
+        const auto dominant = jam2::receive_service_phase_text(event.dominant_phase);
+        receiveEvents.append(QJsonObject{
+            {"id",static_cast<qint64>(event.id)}, {"peer_id",QString::number(event.peer_id)},
+            {"kernel_us",static_cast<qint64>(event.kernel_us)}, {"read_begin_us",static_cast<qint64>(event.read_begin_us)},
+            {"read_end_us",static_cast<qint64>(event.read_end_us)}, {"observed_us",static_cast<qint64>(event.observed_us)},
+            {"trace_us",static_cast<qint64>(event.trace_us)}, {"before_read_us",static_cast<qint64>(event.before_read_us)},
+            {"receive_call_us",static_cast<qint64>(event.receive_call_us)}, {"after_read_us",static_cast<qint64>(event.after_read_us)},
+            {"receive_call_cpu_us",static_cast<qint64>(event.read_cpu.us)}, {"receive_call_cpu_valid",event.read_cpu.valid},
+            {"after_observation_us",static_cast<qint64>(event.after_observation_us)}, {"covered_us",static_cast<qint64>(event.covered_us)},
+            {"phase_wall_us",phases}, {"dominant_phase",QString::fromLatin1(dominant.data(), static_cast<qsizetype>(dominant.size()))},
+            {"dominant_span_wall_us",static_cast<qint64>(event.dominant_span_wall_us)},
+            {"dominant_span_cpu_us",static_cast<qint64>(event.dominant_span_cpu_us)},
+            {"dominant_overlap_us",static_cast<qint64>(event.dominant_overlap_us)}, {"dominant_cpu_valid",event.dominant_cpu_valid},
+            {"last_would_block_begin_us",static_cast<qint64>(event.readiness.last_would_block_begin_us)},
+            {"last_would_block_end_us",static_cast<qint64>(event.readiness.last_would_block_end_us)},
+            {"datagrams_since_would_block",static_cast<qint64>(event.readiness.datagrams_since_would_block)},
+            {"would_block_after_kernel_us",static_cast<qint64>(event.would_block_after_kernel_us)}});
+    }
+    QJsonArray serviceSpans;
+    for (std::size_t i = 0; i < trace.worst_phase_spans.size(); ++i) {
+        const auto& span = trace.worst_phase_spans[i];
+        if (!span.end_us) continue;
+        const auto name = jam2::receive_service_phase_text(static_cast<jam2::ReceiveServicePhase>(i));
+        serviceSpans.append(QJsonObject{
+            {"phase",QString::fromLatin1(name.data(),static_cast<qsizetype>(name.size()))},
+            {"begin_us",static_cast<qint64>(span.begin_us)}, {"end_us",static_cast<qint64>(span.end_us)},
+            {"wall_us",static_cast<qint64>(span.end_us-span.begin_us)},
+            {"cpu_us",static_cast<qint64>(span.cpu_us)}, {"cpu_valid",span.cpu_valid}});
+    }
+    result["receive_trace"] = QJsonObject{
+        {"slow_threshold_us",static_cast<qint64>(jam2::ReceiveServiceDiagnostics::kSlowUs)},
+        {"event_spacing_us",static_cast<qint64>(jam2::ReceiveServiceDiagnostics::kEventSpacingUs)},
+        {"slow_packets",static_cast<qint64>(trace.slow_packets)}, {"coalesced_packets",static_cast<qint64>(trace.coalesced_packets)},
+        {"overwritten_events",static_cast<qint64>(trace.overwritten_events)}, {"invalid_samples",static_cast<qint64>(trace.invalid_samples)},
+        {"publish_max_us",static_cast<qint64>(trace.publish_max_us)}, {"events",receiveEvents},
+        {"worst_phase_spans",serviceSpans}};
     return result;
+}
+bool SharedSessionController::configureUdpDiagnostics(std::optional<jam2::UdpBackend> backend, jam2::UdpServiceClass service,
+    jam2::UdpWaitMode wait)
+{
+    if (multiplex_) return false;
+    udpBackend_ = backend; udpService_ = service; udpWait_ = wait; return true;
 }
 bool SharedSessionController::configureServerReceiveModel(UdpMultiplexTransport::ReceiveModel model)
 {

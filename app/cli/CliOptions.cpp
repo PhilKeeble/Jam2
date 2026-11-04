@@ -150,6 +150,15 @@ Runtime, diagnostics, and artifacts:
   --stats <enabled|disabled>
   --stats-interval-ms <ms>            Structured CSV sampling interval; 0 disables sampling
   --stats-warmup-ms <ms>              Exclude startup packets from measurements
+  --receive-work-packets <1..4096>    Total socket packets serviced per runtime turn (default 64)
+  --receive-service-us <0..10000>     Receive processing time per turn; 0 disables (default 1000)
+  --capture-wake <auto|on|poll|off>    Default auto: CoreAudio polls; other backends notify
+  --capture-poll-us <50..1000>         Capture wait ceiling for poll/off modes (default 250)
+  --receive-timestamps <on|off>        Kernel UDP timing diagnostics (macOS, default off)
+  --udp-backend <auto|bsd|connected|network> Media backend (auto: connected on macOS Server, bsd otherwise)
+  --udp-wait <kqueue|legacy>          macOS wait (default kqueue); legacy compares select/poll
+  --udp-service <best-effort|voice>   Experimental socket service class (default best-effort)
+  --receive-model <runtime|queued>   Experimental socket reader (default runtime)
   --log-stats <folder>                Write the exact emitted CSV path there
   --record-jam-folder <folder>        Record local jam stems
   --os-priority <off|high>            Process/UDP worker scheduling (default high)
@@ -578,6 +587,56 @@ Options parse_options(
             if (options.stats_warmup_ms < 0) {
                 throw std::runtime_error("--stats-warmup-ms must be non-negative");
             }
+        } else if (arg == "--receive-work-packets") {
+            options.receive_work_packets = std::stoi(std::string(require_value(argc, argv, i, arg)));
+            if (options.receive_work_packets < 1 || options.receive_work_packets > 4096)
+                throw std::runtime_error("--receive-work-packets must be in 1..4096");
+        } else if (arg == "--receive-service-us") {
+            options.receive_service_us = std::stoi(std::string(require_value(argc, argv, i, arg)));
+            if (options.receive_service_us < 0 || options.receive_service_us > 10000)
+                throw std::runtime_error("--receive-service-us must be in 0..10000");
+        } else if (arg == "--capture-wake") {
+            const auto value = require_value(argc, argv, i, arg);
+            if (value == "auto") options.capture_wake = Jam2CaptureWakeMode::Automatic;
+            else if (value == "on") options.capture_wake = Jam2CaptureWakeMode::Native;
+            else if (value == "poll") options.capture_wake = Jam2CaptureWakeMode::PollOnly;
+            else if (value == "off") options.capture_wake = Jam2CaptureWakeMode::Off;
+            else throw std::runtime_error("--capture-wake must be auto, on, poll, or off");
+        } else if (arg == "--capture-poll-us") {
+            options.capture_poll_us = std::stoi(std::string(require_value(argc, argv, i, arg)));
+            if (options.capture_poll_us < 50 || options.capture_poll_us > 1000)
+                throw std::runtime_error("--capture-poll-us must be in 50..1000");
+        } else if (arg == "--udp-wait") {
+            const auto value = require_value(argc, argv, i, arg);
+#if defined(__APPLE__)
+            if (value == "kqueue") options.udp_wait = jam2::UdpWaitMode::PlatformDefault;
+            else if (value == "legacy") options.udp_wait = jam2::UdpWaitMode::Legacy;
+            else throw std::runtime_error("--udp-wait must be kqueue or legacy");
+#else
+            (void)value;
+            throw std::runtime_error("--udp-wait is only supported on macOS");
+#endif
+        } else if (arg == "--udp-backend") {
+            const auto value = require_value(argc, argv, i, arg);
+            if (value == "auto") options.udp_backend.reset();
+            else if (value == "bsd") options.udp_backend = jam2::UdpBackend::Bsd;
+            else if (value == "connected") options.udp_backend = jam2::UdpBackend::ConnectedBsd;
+            else if (value == "network") options.udp_backend = jam2::UdpBackend::NetworkFramework;
+            else throw std::runtime_error("--udp-backend must be auto, bsd, connected, or network");
+        } else if (arg == "--udp-service") {
+            const auto value = require_value(argc, argv, i, arg);
+            if (value == "best-effort") options.udp_service = jam2::UdpServiceClass::BestEffort;
+            else if (value == "voice") options.udp_service = jam2::UdpServiceClass::InteractiveVoice;
+            else throw std::runtime_error("--udp-service must be best-effort or voice");
+        } else if (arg == "--receive-model") {
+            const auto value = require_value(argc, argv, i, arg);
+            if (value != "runtime" && value != "queued") throw std::runtime_error("--receive-model must be runtime or queued");
+            options.queued_receive = value == "queued";
+        } else if (arg == "--receive-timestamps") {
+            const auto value = require_value(argc, argv, i, arg);
+            if (value != "on" && value != "off")
+                throw std::runtime_error(std::string(arg) + " must be on or off");
+            options.receive_timestamps = value == "on";
         } else if (arg == "--log-stats") {
             options.log_stats_dir = std::filesystem::path(std::string(require_value(argc, argv, i, arg)));
         } else if (arg == "--record-jam-folder") {

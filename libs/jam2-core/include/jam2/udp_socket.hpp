@@ -1,10 +1,13 @@
 #pragma once
 
 #include "common.hpp"
+#include "receive_diagnostics.hpp"
+#include "udp_wait.hpp"
 
 #include <atomic>
 #include <cstdint>
 #include <optional>
+#include <memory>
 #include <span>
 
 #if defined(_WIN32)
@@ -14,6 +17,13 @@
 #endif
 
 namespace jam2 {
+
+enum class UdpBackend { Bsd, NetworkFramework, ConnectedBsd };
+enum class UdpServiceClass { BestEffort, InteractiveVoice };
+#if defined(__APPLE__)
+class NetworkFrameworkUdp;
+class MacSocketWaiter;
+#endif
 
 // Numeric IPv4 endpoint used by the UDP data plane. Text parsing and DNS are
 // deliberately confined to resolve_udp_endpoint(), before an endpoint enters
@@ -50,12 +60,14 @@ public:
     NetworkRuntime& operator=(const NetworkRuntime&) = delete;
 };
 
-// A pre-created, coalescing notification that may be signalled by a real-time
-// audio callback. signal() performs no allocation, locking, or blocking; the
-// network worker consumes the notification while waiting for UDP input.
+// A pre-created, coalescing capture notification. PollOnly publishes atomic
+// state without a native notification call. Native uses a nonblocking OS
+// notification, which can still incur kernel/scheduling delays in a callback.
+// The network worker consumes the notification while waiting for UDP input.
 class RealtimeWakeSignal {
 public:
-    RealtimeWakeSignal();
+    enum class NotificationMode { Native, PollOnly };
+    explicit RealtimeWakeSignal(NotificationMode mode = NotificationMode::Native);
     ~RealtimeWakeSignal();
     RealtimeWakeSignal(const RealtimeWakeSignal&) = delete;
     RealtimeWakeSignal& operator=(const RealtimeWakeSignal&) = delete;
@@ -71,8 +83,12 @@ public:
 
 private:
     friend class UdpSocket;
+#if defined(__APPLE__)
+    friend class MacSocketWaiter;
+#endif
     void consume() noexcept;
     void signalNative() noexcept;
+    const NotificationMode notification_mode_;
 
     std::atomic<bool> pending_{false};
     std::atomic<bool> wake_requested_{false};
@@ -90,12 +106,27 @@ private:
 
 class UdpSocket {
 public:
+    static constexpr std::size_t kFrameworkReceivePackets = 256, kFrameworkPendingSends = 256;
+    struct ReceiveAttemptTiming {
+        std::uint64_t begin_us = 0, end_us = 0;
+        bool would_block = false;
+    };
     struct ReceivedDatagram {
         ResolvedUdpEndpoint endpoint;
         std::size_t size = 0;
+        // Diagnostic kernel UDP-input stamp; this can precede socket readiness.
+        // Never substitute for application delivery time in recovery.
+        std::uint64_t kernel_arrival_us = 0;
+        // Historical name: kernel stamp through post-receive observation.
+        // Read entry/return timestamps separate actual waiting from call time.
+        std::uint64_t socket_residence_us = 0;
+        std::uint64_t read_begin_us = 0, read_end_us = 0, observed_us = 0;
+        ReceiveCallCpu read_cpu{};
+        std::uint64_t network_callback_us = 0;
     };
 
-    UdpSocket();
+    explicit UdpSocket(UdpBackend backend = UdpBackend::Bsd,
+        UdpServiceClass service = UdpServiceClass::BestEffort);
     ~UdpSocket();
     UdpSocket(const UdpSocket&) = delete;
     UdpSocket& operator=(const UdpSocket&) = delete;
@@ -103,19 +134,26 @@ public:
     UdpSocket& operator=(UdpSocket&& other) noexcept;
 
     void bind(const Endpoint& endpoint);
+    // After BSD endpoint proof, retain its port in one connected diagnostic flow.
+    // This is a no-op for the default BSD backend.
+    void activate_peer(const ResolvedUdpEndpoint& endpoint);
     Endpoint local_endpoint() const;
     // Discover the outbound interface without sending a probe or connecting this media socket.
     Endpoint local_endpoint_for(const ResolvedUdpEndpoint& destination) const;
     static void waitForAny(std::span<const UdpSocket* const> sockets,
         std::uint64_t timeout_us, RealtimeWakeSignal* command_wake = nullptr);
-    // Runtime receive deadline, matching the direct socket's select path when
-    // there is no capture event. Does not read any datagram.
+    // Runtime receive deadline. macOS uses a critical absolute kqueue timer;
+    // other platforms retain their native wait. Does not read a datagram.
     static void waitForDatagrams(std::span<const UdpSocket* const> sockets,
         std::uint64_t timeout_us, RealtimeWakeSignal* capture_wake = nullptr);
     void set_send_buffer_size(int bytes);
     void set_recv_buffer_size(int bytes);
     int send_buffer_size() const;
     int recv_buffer_size() const;
+    // Explicitly optional: currently supported by macOS. Enabling on an
+    // unsupported platform reports an error rather than fabricating timing.
+    void set_receive_timestamps(bool enabled);
+    UdpServiceClass service_class() const;
     UdpSendResult send_to(
         const ResolvedUdpEndpoint& endpoint,
         std::span<const std::uint8_t> bytes) const noexcept;
@@ -123,8 +161,19 @@ public:
     std::optional<ReceivedDatagram> recv_from_for(
         std::span<std::uint8_t> buffer,
         std::uint64_t timeout_us,
-        RealtimeWakeSignal* wake_signal = nullptr) const;
+        RealtimeWakeSignal* wake_signal = nullptr,
+        ReceiveAttemptTiming* attempt = nullptr) const;
 private:
+#if defined(__APPLE__)
+    friend class MacSocketWaiter;
+#endif
+    bool receive_timestamps_ = false;
+    UdpBackend requested_backend_ = UdpBackend::Bsd;
+    bool connected_peer_ = false;
+    ResolvedUdpEndpoint connected_endpoint_{};
+#if defined(__APPLE__)
+    std::unique_ptr<NetworkFrameworkUdp> network_framework_;
+#endif
 #if defined(_WIN32)
     SOCKET handle_{INVALID_SOCKET};
     WSAEVENT receive_event_{WSA_INVALID_EVENT};
@@ -139,6 +188,29 @@ struct NetworkTransportInfo {
     int receive_buffer_bytes = 0;
 };
 
+// One network-runtime turn, shared across native and multiplex packets. The
+// service clock starts at its first dequeue, excluding an intentional wait for
+// input. Exhaustion means yield to sending/maintenance, never socket-empty.
+struct DatagramReceiveBudget {
+    std::size_t packet_limit = 64;
+    std::uint64_t service_limit_us = 1000;
+    std::size_t packets = 0;
+    std::uint64_t first_packet_us = 0;
+    bool service_exhausted = false;
+
+    bool canRead(std::uint64_t now_us) noexcept {
+        if (packets && service_limit_us && now_us >= first_packet_us &&
+            now_us - first_packet_us >= service_limit_us) service_exhausted = true;
+        return !exhausted();
+    }
+    void recordPacket(std::uint64_t now_us) noexcept {
+        if (!packets) first_packet_us = now_us;
+        ++packets;
+    }
+    bool exhausted() const noexcept { return packets >= packet_limit || service_exhausted; }
+    bool idle() const noexcept { return packets == 0 && !exhausted(); }
+};
+
 // Public sessions use multiplex-owned sockets. Native diagnostics may instead
 // give NetworkSession one owned socket directly.
 class NetworkDatagramTransport {
@@ -151,6 +223,8 @@ public:
     // leave this transport detached; replacement preserves the old receiver.
     virtual void receiverAttached() {}
     virtual void receiverDetached() noexcept {}
+    virtual bool setReceiveTimestamps(bool enabled) { return !enabled; }
+    virtual void receiveServicePhase(ReceiveServicePhase) {}
     // Optional receipt after the control owner accepts/schedules
     // a native transport intent. This is never an audio callback.
     virtual void transportIntentAccepted(std::uint64_t, std::span<const std::uint8_t>) noexcept {}
@@ -161,6 +235,16 @@ public:
     virtual std::optional<UdpSocket::ReceivedDatagram> receiveFor(
         std::span<std::uint8_t> buffer, std::uint64_t timeout_us,
         RealtimeWakeSignal* capture_wake) = 0;
+    // Transports which classify non-native traffic override this to charge
+    // every socket dequeue. The default owns exactly one datagram per call.
+    virtual std::optional<UdpSocket::ReceivedDatagram> receiveWithin(
+        std::span<std::uint8_t> buffer, std::uint64_t timeout_us,
+        RealtimeWakeSignal* capture_wake, DatagramReceiveBudget& budget) {
+        if (!budget.canRead(monotonic_us())) return std::nullopt;
+        const auto packet = receiveFor(buffer, timeout_us, capture_wake);
+        if (packet) budget.recordPacket(monotonic_us());
+        return packet;
+    }
 };
 
 } // namespace jam2

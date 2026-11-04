@@ -1516,6 +1516,12 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
     // selected process priority scoped to the active session and give this
     // packet worker the matching thread/MMCSS priority.
     OsPriorityScope os_priority_scope(options);
+    jam2::UdpWaitScope udp_wait_scope(options.udp_wait);
+    if (options.receive_work_packets < 1 || options.receive_work_packets > 4096 ||
+        options.receive_service_us < 0 || options.receive_service_us > 10000)
+        throw std::runtime_error("invalid receive work/service budget");
+    if (options.capture_poll_us < 50 || options.capture_poll_us > 1000)
+        throw std::runtime_error("invalid capture polling interval");
     if (!options.session_id || !options.session_key) {
         throw std::runtime_error("network session requires --session-id and --session-key");
     }
@@ -1544,11 +1550,14 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
     std::optional<jam2::UdpSocket> socket;
     jam2::NetworkTransportInfo transport_info;
     if (options.datagram_transport) {
+        if (!options.datagram_transport->setReceiveTimestamps(options.receive_timestamps))
+            throw std::runtime_error("network transport does not support kernel receive timestamps");
         const auto info = options.datagram_transport->transportInfo();
         if (!info) throw std::runtime_error("network transport has no active local endpoint");
         transport_info = *info;
     } else {
         socket.emplace();
+        if (options.receive_timestamps) socket->set_receive_timestamps(true);
         apply_socket_options(*socket, options);
         socket->bind(options.bind);
         transport_info = {socket->local_endpoint(), socket->send_buffer_size(), socket->recv_buffer_size()};
@@ -1584,13 +1593,24 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
     }
     std::cout << "UDP send buffer bytes: " << transport_info.send_buffer_bytes << "\n";
     std::cout << "UDP receive buffer bytes: " << transport_info.receive_buffer_bytes << "\n";
-    // Constructed before the audio attachment so it remains alive until after
-    // that attachment has been detached and acknowledged by the callback.
-    jam2::RealtimeWakeSignal capture_ready_wake;
+    // Storage precedes the audio owner: exceptions still stop the callback
+    // before destroying its notification, including during attachment.
+    std::optional<jam2::RealtimeWakeSignal> capture_ready_wake_storage;
     auto audio = start_optional_audio(options, false, &runtime_host);
+    const bool coreaudio = audio.engine && audio.engine->coldSnapshot().stream.device.backend == "CoreAudio";
+    options.capture_wake = jam2_resolve_capture_wake_mode(options.capture_wake, coreaudio);
+    auto& capture_ready_wake = capture_ready_wake_storage.emplace(options.capture_wake == Jam2CaptureWakeMode::PollOnly
+        ? jam2::RealtimeWakeSignal::NotificationMode::PollOnly
+        : jam2::RealtimeWakeSignal::NotificationMode::Native);
+    const std::string capture_mode = options.capture_wake == Jam2CaptureWakeMode::PollOnly ? "poll"
+        : options.capture_wake == Jam2CaptureWakeMode::Off ? "off" : "native";
+    const std::string capture_notice = "Capture notification: mode=" + capture_mode +
+        " poll_limit_us=" + std::to_string(options.capture_poll_us);
+    std::cout << capture_notice << '\n';
+    if (runtime_host.log) runtime_host.log(capture_notice);
     attach_network_capture(
         audio,
-        &capture_ready_wake,
+        options.capture_wake != Jam2CaptureWakeMode::Off ? &capture_ready_wake : nullptr,
         static_cast<std::size_t>(options.frame_size));
     const jam2::NetworkAudioPacing attached_audio_pacing = audio.engine
         ? jam2::capture_audio_pacing(
@@ -1958,6 +1978,7 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
     std::uint64_t mesh_work_budget_yields = 0;
     std::uint64_t mesh_receive_batch_max = 0;
     jam2::cli::stats::ReceiveLoopDiagnostics mesh_receive_loop_diagnostics;
+    std::uint64_t mesh_telemetry_samples = 0, mesh_telemetry_sum_us = 0, mesh_telemetry_max_us = 0;
     std::uint64_t mesh_ping_reply_turnaround_min_us = 0;
     std::uint64_t mesh_ping_reply_turnaround_sum_us = 0;
     std::uint64_t mesh_ping_reply_turnaround_max_us = 0;
@@ -2307,6 +2328,9 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
     AudioPacketStats retired_peer_stats;
     auto aggregate_stats = [&]() {
         AudioPacketStats stats = retired_peer_stats;
+        stats.telemetry_service_samples = mesh_telemetry_samples;
+        stats.telemetry_service_sum_us = mesh_telemetry_sum_us;
+        stats.telemetry_service_max_us = mesh_telemetry_max_us;
         stats.os_scheduling = os_priority_scope.status();
         stats.local_peer_id = network_session.localPeerId().value;
         switch (network_session.bootstrapRole()) {
@@ -3175,16 +3199,22 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
         return receipt_ready;
     };
 
+    const auto receive_phase = [&](jam2::ReceiveServicePhase phase) {
+        if (options.receive_timestamps && options.datagram_transport)
+            options.datagram_transport->receiveServicePhase(phase);
+    };
     while (jam2::monotonic_us() < receive_deadline &&
            !commands.state.quit.load(std::memory_order_relaxed) &&
            !runtime_host.stop_requested.load(std::memory_order_acquire)) {
         const std::uint64_t now = jam2::monotonic_us();
         const std::uint64_t pre_receive_work_start_us = now;
+        receive_phase(jam2::ReceiveServicePhase::Advance);
         // Expire overdue mixer slots before reading a queued catch-up batch.
         // Otherwise audio that missed the live deadline is ingested first and
         // can be replayed as permanent latency instead of being discarded.
         network_session.advance(now);
         const std::uint64_t pre_receive_advance_end_us = jam2::monotonic_us();
+        receive_phase(jam2::ReceiveServicePhase::Maintenance);
         if (now >= next_peer_liveness_check_us) {
             constexpr std::uint64_t kPeerLivenessCheckIntervalUs = 100000ULL;
             next_peer_liveness_check_us = now + kPeerLivenessCheckIntervalUs;
@@ -3419,12 +3449,14 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
             }
         }
         if (!timed_stream_audio_detached && now >= send_deadline) {
+            receive_phase(jam2::ReceiveServicePhase::Shutdown);
             capture_ready_wake.cancelWakeRequest();
             detach_network_capture(audio);
             mesh_playback.detach();
             timed_stream_audio_detached = true;
         }
         const std::uint64_t pre_receive_send_start_us = jam2::monotonic_us();
+        receive_phase(jam2::ReceiveServicePhase::CapturePack);
         int sends_this_loop = 0;
         bool audio_send_waiting_for_capture = false;
         const jam2::NetworkAudioPacing audio_pacing =
@@ -3564,11 +3596,13 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                     packed_audio_payload);
                 payload = packed_audio_payload;
             }
+            receive_phase(jam2::ReceiveServicePhase::AudioSend);
             (void)network_session.sendToActive(
                 jam2::protocol::PacketType::Audio,
                 packet_schedule.audioSequence(),
                 packet_schedule.sampleTime(),
                 payload);
+            receive_phase(jam2::ReceiveServicePhase::CapturePack);
             packet_schedule.commitAudioPacket();
             ++sends_this_loop;
             if (audio_pacing != jam2::NetworkAudioPacing::Scheduled) {
@@ -3608,6 +3642,7 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
             packet_schedule.audioSendReady(
                 now, audio_pacing, capture_deadline_override);
 
+        receive_phase(jam2::ReceiveServicePhase::ControlSend);
         if (now >= packet_schedule.nextPingUs() && now < send_deadline) {
             for (auto& entry : peers) {
                 auto& peer = entry.second;
@@ -3941,22 +3976,28 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
         std::size_t mesh_datagrams_this_wake = 0;
         std::uint64_t receive_processing_start_us = 0;
         constexpr std::uint64_t kMaximumReceiveWaitUs = 1000ULL;
+        jam2::DatagramReceiveBudget receive_work{
+            static_cast<std::size_t>(options.receive_work_packets),
+            static_cast<std::uint64_t>(options.receive_service_us)};
         const std::uint64_t first_receive_wait_us =
             audio_send_budget_exhausted || audio_send_retry_immediately
             ? 0ULL
             : audio_send_waiting_for_capture
-            ? kMaximumReceiveWaitUs
+            ? (options.capture_wake == Jam2CaptureWakeMode::Native ? kMaximumReceiveWaitUs
+                : (std::min)(kMaximumReceiveWaitUs, static_cast<std::uint64_t>(options.capture_poll_us)))
             : packet_schedule.audioSendWaitBudgetUs(
                   receive_loop_start_us, kMaximumReceiveWaitUs);
-        while (mesh_datagrams_this_wake < 64) {
+        while (mesh_datagrams_this_wake < static_cast<std::size_t>(options.receive_work_packets)) {
+            receive_phase(jam2::ReceiveServicePhase::ReceiveDispatch);
             const auto received = network_session.receiveFor(
                 received_any ? 0ULL : first_receive_wait_us,
                 !received_any && audio_send_waiting_for_capture
                     ? &capture_ready_wake
-                    : nullptr);
+                    : nullptr, &receive_work);
             if (!received) {
                 break;
             }
+            receive_phase(jam2::ReceiveServicePhase::DecodeMix);
             const std::uint64_t datagram_receive_time_us = jam2::monotonic_us();
             if (!received_any) {
                 receive_processing_start_us = datagram_receive_time_us;
@@ -4496,30 +4537,35 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
         mesh_receive_loop_diagnostics.finishWake(
             mesh_datagrams_this_wake,
             receive_processing_start_us,
-            jam2::monotonic_us());
-        if (mesh_datagrams_this_wake == 64) {
+            jam2::monotonic_us(), &receive_work);
+        if (receive_work.exhausted()) {
             ++mesh_work_budget_yields;
         }
         // Drain current packets immediately after the pre-receive deadline
         // pass classified any queued catch-up audio as stale.
+        receive_phase(jam2::ReceiveServicePhase::ReceiveFinish);
         network_session.advance(jam2::monotonic_us());
-        // A delayed UDP burst can exceed the bounded 64-datagram work budget.
+        // A delayed UDP burst can exceed the shared socket-work/service budget.
         // Keep timeline recovery active across every saturated wake, then
         // rebase the source queues and device output once the burst is drained.
-        network_session.finishReceiveBatch(mesh_datagrams_this_wake == 64);
+        network_session.finishReceiveBatch(receive_work.exhausted());
         // Runtime/GUI commands and membership can tolerate one receive wake of
         // delay. Apply them after audio so their locks and formatting cannot
         // sit in front of an already queued packet batch.
+        receive_phase(jam2::ReceiveServicePhase::RuntimeCommands);
         apply_runtime_host_commands();
         apply_membership_update();
         apply_forced_reprobe();
         const std::uint64_t stats_now = jam2::monotonic_us();
-        const bool telemetry_idle = mesh_datagrams_this_wake == 0;
+        receive_phase(jam2::ReceiveServicePhase::Telemetry);
+        bool telemetry_serviced = false;
+        const bool telemetry_idle = receive_work.idle();
         constexpr std::uint64_t kMaximumTelemetryDeferralUs = 10000ULL;
         if (stats_now >= next_operational_snapshot &&
             (telemetry_idle ||
              stats_now - next_operational_snapshot >= kMaximumTelemetryDeferralUs)) {
             publish_operational_snapshot();
+            telemetry_serviced = true;
             next_operational_snapshot = stats_now + 200000ULL;
         }
         if (next_connection_diagnostics != 0 &&
@@ -4527,14 +4573,17 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
             (telemetry_idle ||
              stats_now - next_connection_diagnostics >= kMaximumTelemetryDeferralUs)) {
             publish_connection_diagnostics(stats_now);
+            telemetry_serviced = true;
             next_connection_diagnostics = stats_now + 2000000ULL;
         }
         if (commands.state.print_stats.exchange(false, std::memory_order_relaxed) ||
             commands.state.print_status.exchange(false, std::memory_order_relaxed)) {
             print_mesh_stats(stats_now);
+            telemetry_serviced = true;
         }
         if (next_stats != 0 && stats_now >= next_stats &&
             (telemetry_idle || stats_now - next_stats >= kMaximumTelemetryDeferralUs)) {
+            telemetry_serviced = true;
             if (csv_log) {
                 csv_log->write_periodic(
                     (stats_now - start_time) / 1000ULL,
@@ -4546,6 +4595,11 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
             // elapsed time already exposes the gap and audio remains first.
             next_stats = stats_now +
                 static_cast<std::uint64_t>(options.stats_interval_ms) * 1000ULL;
+        }
+        if (telemetry_serviced) {
+            const auto elapsed = jam2::monotonic_us() - stats_now;
+            ++mesh_telemetry_samples; mesh_telemetry_sum_us += elapsed;
+            mesh_telemetry_max_us = std::max(mesh_telemetry_max_us, elapsed);
         }
     }
 

@@ -104,6 +104,11 @@ public:
         }
         parseBootstrapOptions();
         runtimeOptions_ = parseRuntimeOptions(runnerOptions_ + bootstrapRunnerOptions_);
+        if (!sessionController_.configureUdpDiagnostics(runtimeOptions_.udp_backend, runtimeOptions_.udp_service, runtimeOptions_.udp_wait) ||
+            !sessionController_.configureServerReceiveModel(runtimeOptions_.queued_receive
+                ? jam2::application::UdpMultiplexTransport::ReceiveModel::QueuedWorker
+                : jam2::application::UdpMultiplexTransport::ReceiveModel::Runtime))
+            throw std::runtime_error("could not configure UDP diagnostics before startup");
         if (!creator_) runtimeOptions_.connection_strategy = session_.strategy;
         if (creator_ && runtimeOptions_.no_stun && runtimeOptions_.connection_strategy==jam2::ConnectionStrategy::Stun)
             runtimeOptions_.connection_strategy=jam2::ConnectionStrategy::Direct;

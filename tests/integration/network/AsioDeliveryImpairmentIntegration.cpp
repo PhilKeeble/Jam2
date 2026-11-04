@@ -6,6 +6,7 @@
 #include "UdpCandidateNetwork.hpp"
 #include "UdpImpairmentProxy.hpp"
 #include "audio_device.hpp"
+#include "udp_socket.hpp"
 #include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QDateTime>
@@ -63,11 +64,30 @@ struct Config {
     ConnectionMode connectionMode=ConnectionMode::ProxiedDirect;
     QString signaller;
     QString tuningProfile="fast";
+    std::optional<jam2::UdpBackend> udpBackend;
+    bool queuedReceive=false;
+    bool receiveTimestamps=false;
+    std::optional<jam2::UdpWaitMode> udpWait;
 };
 Config configuration(const QJsonObject& p) {
     require(p.value("schema")=="jam2-asio-delivery-profile-v1" ||
         p.value("schema")=="jam2-coreaudio-delivery-profile-v1","unexpected hardware profile schema");
     Config c;
+    const auto udp=p.value("udp_backend").toString("auto");
+    require(udp=="auto" || udp=="bsd" || udp=="connected" || udp=="network","invalid diagnostic UDP backend");
+    if (udp!="auto") c.udpBackend=udp=="network" ? jam2::UdpBackend::NetworkFramework : udp=="connected" ? jam2::UdpBackend::ConnectedBsd : jam2::UdpBackend::Bsd;
+    const auto reader=p.value("receive_model").toString("runtime");
+    require(reader=="runtime" || reader=="queued","invalid diagnostic receive model");
+    c.queuedReceive=reader=="queued";
+    if (p.contains("udp_wait")) {
+        const auto mode=p.value("udp_wait").toString();
+        require(mode=="kqueue" || mode=="legacy","invalid UDP wait comparison");
+        c.udpWait=mode=="legacy" ? jam2::UdpWaitMode::Legacy : jam2::UdpWaitMode::PlatformDefault;
+    }
+    if (p.contains("receive_timestamps")) {
+        require(p.value("receive_timestamps").isBool(),"receive_timestamps must be a boolean");
+        c.receiveTimestamps=p.value("receive_timestamps").toBool();
+    }
     if (p.contains("drift_correction")) {
         require(p.value("drift_correction").isBool(),"drift_correction must be a boolean");
         c.driftCorrection=p.value("drift_correction").toBool();
@@ -469,6 +489,7 @@ void runCase(const QString& executable, const QString& root, const Config& c,
                 {"adaptive_playback_max_frames",c.adaptiveMax}})
             if (frames>=0) runtime[name]=frames;
         if (c.releasePpm>=0) runtime["adaptive_playback_release_ppm"]=c.releasePpm;
+        if (c.receiveTimestamps) runtime["receive_timestamps"]=true;
         QJsonObject net{{"name",i==0 ? "Creator" : QString("Peer%1").arg(QChar('A'+i))},
             {"bind",QString("127.0.0.1:%1").arg(localPorts[i])},{"no_stun",true},
             {"wait_ms",30000},{"peer_token",identities[i]}};
@@ -497,6 +518,10 @@ void runCase(const QString& executable, const QString& root, const Config& c,
             // is no candidate-network/proxy hop on either compared audio path.
             arguments={"network",i==0 ? "create" : "join"};
             if (i!=0) arguments<<invite;
+            if (c.receiveTimestamps) arguments<<"--receive-timestamps"<<"on";
+#if defined(__APPLE__)
+            if (c.udpWait) arguments<<"--udp-wait"<<(*c.udpWait==jam2::UdpWaitMode::Legacy ? "legacy" : "kqueue");
+#endif
             arguments<<"--name"<<(i==0 ? "Creator" : QString("Peer%1").arg(QChar('A'+i)))
                 <<"--profile"<<c.tuningProfile<<"--no-stun"<<"--bind"<<QString("127.0.0.1:%1").arg(localPorts[i])
                 <<"--sample-rate"<<QString::number(c.rate)<<"--audio-buffer-size"<<QString::number(c.callback)
@@ -512,6 +537,8 @@ void runCase(const QString& executable, const QString& root, const Config& c,
                 if (frames>=0) arguments<<flag<<QString::number(frames);
             if (hardware) arguments<<"--audio-device"<<QString::number(devices[i]);
             else arguments<<"--headless-audio"<<"on";
+            arguments<<"--udp-backend"<<(!c.udpBackend ? "auto" : c.udpBackend==jam2::UdpBackend::NetworkFramework ? "network" : c.udpBackend==jam2::UdpBackend::ConnectedBsd ? "connected" : "bsd")
+                <<"--receive-model"<<(c.queuedReceive ? "queued" : "runtime");
             if (c.driftCorrection) arguments<<"--drift-correction"<<(*c.driftCorrection ? "on" : "off");
             if (c.releasePpm>=0) arguments<<"--adaptive-playback-release-ppm"<<QString::number(c.releasePpm);
             if (i==0) {
@@ -521,7 +548,8 @@ void runCase(const QString& executable, const QString& root, const Config& c,
             }
             if (c.recordAudio) arguments<<"--record-jam-folder"<<QDir(peer->root).filePath("recording");
             QJsonArray saved;for(const auto& a:arguments) saved.append(a);
-            writeJson(QDir(peer->root).filePath("command.json"),{{"executable",executable},{"arguments",saved}});
+            writeJson(QDir(peer->root).filePath("command.json"),{{"executable",executable},{"arguments",saved},
+                {"supervisor_mach_start_us",qint64(jam2::receive_diagnostic_time_us())}});
         }
         peer->process.start(executable,arguments);
         require(peer->process.waitForStarted(5000),peer->process.errorString()); peers.push_back(std::move(peer));
@@ -587,8 +615,9 @@ void runCase(const QString& executable, const QString& root, const Config& c,
 }
 int main(int argc,char** argv) {
     QCoreApplication app(argc,argv);
-    if (argc<3) { std::cerr<<"usage: test public-jam2-executable profile.json | --fake-four\n";return 2; }
-    const bool fake=QString::fromLocal8Bit(argv[2])=="--fake-four";
+    if (argc<3) { std::cerr<<"usage: test public-jam2-executable profile.json | --fake-four | --fake-profile profile.json\n";return 2; }
+    const bool fakeProfile=argc==4 && QString::fromLocal8Bit(argv[2])=="--fake-profile";
+    const bool fake=fakeProfile || QString::fromLocal8Bit(argv[2])=="--fake-four";
     if (!fake && QString::fromLocal8Bit(argv[2]).isEmpty()) { std::cout<<"Set an explicit ASIO or CoreAudio delivery hardware profile.\n";return 77; }
     QString root;
     try {
@@ -608,7 +637,7 @@ int main(int argc,char** argv) {
             std::cout<<QJsonDocument(review.value("audio_timing").toObject()).toJson(QJsonDocument::Compact).constData()<<std::endl;return 0;
         }
         QJsonObject profile;
-        if (fake) profile={{"schema","jam2-asio-delivery-profile-v1"},{"device_names",QJsonArray{"fakeA","fakeB"}},
+        if (fake && !fakeProfile) profile={{"schema","jam2-asio-delivery-profile-v1"},{"device_names",QJsonArray{"fakeA","fakeB"}},
             {"sample_rate",44100},{"callback_frames",128},{"packet_frames",128},{"clean_duration_ms",15000},
             {"impaired_duration_ms",38000},{"base_one_way_delay_ms",7.5},{"forward_jitter_ms",3.6},
             {"reverse_jitter_ms",.5},{"repeat_ms",18000},{"recovered_buffer_limit_ms",40},
@@ -617,21 +646,21 @@ int main(int argc,char** argv) {
                 QJsonObject{{"name","all"},{"delay_scope","all"}},
                 QJsonObject{{"name","audio-only"},{"delay_scope","audio"},{"impaired_duration_ms",24000},{"repeat_ms",180000}},
                 QJsonObject{{"name","beacons-only"},{"delay_scope","beacons"},{"impaired_duration_ms",24000},{"repeat_ms",180000}}}}};
-        else profile=readJson(QString::fromLocal8Bit(argv[2]));
+        else profile=readJson(QString::fromLocal8Bit(argv[fakeProfile ? 3 : 2]));
         const auto c=configuration(profile);
         const auto executable=QFileInfo(QString::fromLocal8Bit(argv[1])).absoluteFilePath();
         QFile binary(executable);require(binary.open(QIODevice::ReadOnly),binary.errorString());
         QCryptographicHash hash(QCryptographicHash::Sha256);require(hash.addData(&binary),"hash tested executable");
         root=QDir::current().absoluteFilePath(QString("artifacts/%1/%2-%3")
             .arg(c.backend==Config::Backend::CoreAudio ? "coreaudio-delivery" : "asio-delivery",
-                QDateTime::currentDateTimeUtc().toString("yyyyMMdd-HHmmss-zzz"),fake ? "four-fake" :
+                QDateTime::currentDateTimeUtc().toString("yyyyMMdd-HHmmss-zzz"),fakeProfile ? "two-fake" : fake ? "four-fake" :
                     c.backend==Config::Backend::CoreAudio ? "two-coreaudio" : "two-asio"));
         require(QDir().mkpath(root),"create run artifacts");
         writeJson(QDir(root).filePath("profile.json"),profile);
         writeJson(QDir(root).filePath("provenance.json"),{{"executable",executable},{"sha256",QString::fromLatin1(hash.result().toHex())},
             {"model","aggregate-derived approximation, not a packet-capture replay"}});
         std::vector<int> devices;
-        if (fake) devices={-1,-1,-1,-1};
+        if (fake) devices.assign(fakeProfile ? 2 : 4,-1);
         else {
             const auto available=jam2::audio::list_devices();
             for (const auto& name:c.devices) {

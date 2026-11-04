@@ -34,15 +34,25 @@ void ReceiveLoopDiagnostics::beginWake(std::uint64_t now_us) noexcept
 void ReceiveLoopDiagnostics::finishWake(
     std::size_t received_packets,
     std::uint64_t processing_start_us,
-    std::uint64_t processing_end_us) noexcept
+    std::uint64_t processing_end_us,
+    const jam2::DatagramReceiveBudget* work) noexcept
 {
     const std::uint64_t batch = static_cast<std::uint64_t>(received_packets);
     batch_sum_ += batch;
     batch_max_ = std::max(batch_max_, batch);
-    if (batch == 0) {
+    if (work) {
+        socket_packets_ += work->packets;
+        socket_packets_max_ = std::max<std::uint64_t>(socket_packets_max_, work->packets);
+        packet_yields_ += work->packets >= work->packet_limit;
+        service_yields_ += work->service_exhausted;
+        packet_limit_ = work->packet_limit;
+        service_limit_us_ = work->service_limit_us;
+        if (work->packets) processing_start_us = work->first_packet_us;
+    }
+    if (work ? work->idle() : batch == 0) {
         ++idle_count_;
     }
-    if (batch > 0 && processing_end_us >= processing_start_us) {
+    if ((work ? work->packets > 0 : batch > 0) && processing_end_us >= processing_start_us) {
         const std::uint64_t duration = processing_end_us - processing_start_us;
         if (processing_samples_ == 0 || duration < processing_min_us_) {
             processing_min_us_ = duration;
@@ -55,6 +65,12 @@ void ReceiveLoopDiagnostics::finishWake(
 
 void ReceiveLoopDiagnostics::applyTo(AudioPacketStats& target) const noexcept
 {
+    target.receive_socket_packets = socket_packets_;
+    target.receive_socket_packets_max = socket_packets_max_;
+    target.receive_packet_budget_yields = packet_yields_;
+    target.receive_service_budget_yields = service_yields_;
+    target.receive_work_packet_limit = packet_limit_;
+    target.receive_service_limit_us = service_limit_us_;
     target.receive_loop_gap_min_us = gap_min_us_;
     target.receive_loop_gap_sum_us = gap_sum_us_;
     target.receive_loop_gap_max_us = gap_max_us_;

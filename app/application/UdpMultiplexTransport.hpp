@@ -36,6 +36,9 @@ public:
         quint64 linkRepairSilenceMs = 10000;
         quint64 pendingAdmissionTimeoutMs = 30000;
         ReceiveModel receiveModel = ReceiveModel::Runtime;
+        std::optional<jam2::UdpBackend> backend;
+        jam2::UdpWaitMode waitMode = jam2::UdpWaitMode::PlatformDefault;
+        jam2::UdpServiceClass service = jam2::UdpServiceClass::BestEffort;
         // Explicit diagnostic ablation; normal sessions reuse workspace.
         bool reuseWorkerBuffers = true;
         bool packUnsentFragments = true;
@@ -88,6 +91,20 @@ public:
         quint64 ingressQueueDrops = 0, controlIngressDepth = 0, assetIngressDepth = 0, ingressHighWater = 0;
         quint64 ingressWaitSamples = 0, ingressWaitSumUs = 0, ingressWaitMaxUs = 0;
         quint64 classificationSamples = 0, classificationSumNs = 0, classificationMaxNs = 0;
+        bool receiveTimestamps = false;
+        jam2::UdpWaitMode waitMode = jam2::UdpWaitMode::PlatformDefault;
+        jam2::UdpWaitSnapshot runtimeWait, workerWait;
+        jam2::UdpBackend backend = jam2::UdpBackend::Bsd;
+        jam2::UdpServiceClass service = jam2::UdpServiceClass::BestEffort;
+        quint64 audioQueueWaitSamples = 0, audioQueueWaitSumUs = 0, audioQueueWaitMaxUs = 0;
+        quint64 queuedDeliveryMaxUs = 0, queuedDeliveryOver1Ms = 0;
+        quint64 frameworkHandoffSamples = 0, frameworkHandoffSumUs = 0, frameworkHandoffMaxUs = 0;
+        quint64 frameworkCallbackDelayMaxUs = 0;
+        quint64 kernelAudioGapSamples = 0, kernelAudioGapSumUs = 0, kernelAudioGapMaxUs = 0;
+        quint64 kernelAudioGapOver10Ms = 0, kernelAudioGapOver50Ms = 0, kernelGapMaxResidenceUs = 0;
+        quint64 socketResidenceSamples = 0, socketResidenceSumUs = 0, socketResidenceMaxUs = 0;
+        quint64 socketResidenceOver1Ms = 0, socketResidenceOver4Ms = 0;
+        jam2::ReceiveServiceDiagnostics::Snapshot receiveTrace;
         quint64 workerTurns = 0, workerWorkspaceGrowths = 0, workerServiceSumUs = 0;
         quint64 ingressCopyBytesAvoided = 0, muxCopyBytesAvoided = 0;
         quint64 workerSendRepolls = 0;
@@ -118,11 +135,15 @@ public:
     std::optional<jam2::NetworkTransportInfo> transportInfo() const override;
     void receiverAttached() override;
     void receiverDetached() noexcept override;
+    bool setReceiveTimestamps(bool enabled) override;
+    void receiveServicePhase(jam2::ReceiveServicePhase phase) override;
     jam2::UdpSendResult sendToPeer(std::uint64_t id, const jam2::ResolvedUdpEndpoint& endpoint,
         std::span<const std::uint8_t> packet) noexcept override;
     void transportIntentAccepted(std::uint64_t id,std::span<const std::uint8_t> payload) noexcept override;
     std::optional<jam2::UdpSocket::ReceivedDatagram> receiveFor(std::span<std::uint8_t> buffer,
         std::uint64_t timeoutUs, jam2::RealtimeWakeSignal* captureWake) override;
+    std::optional<jam2::UdpSocket::ReceivedDatagram> receiveWithin(std::span<std::uint8_t> buffer,
+        std::uint64_t timeoutUs, jam2::RealtimeWakeSignal* captureWake, jam2::DatagramReceiveBudget& budget) override;
     struct SignalerFailure {
         rendezvous_wire::Error code;
         quint8 requestKind;

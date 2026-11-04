@@ -4,6 +4,39 @@ Introducing commit **unproven**; rollback tests also failed. Oct 27's good-run
 commit was inferred, not verified. Earlier baseline fixes are committed in `c553a14`
 but remain provisional; **user decides keep/revert**, no automatic decision.
 
+## Network receive / telemetry CTest investigation — Nov 4
+
+The follow-up isolated multiplex receive handling without changing WAV rate
+limiting or scheduling. See [the full report](docs/NetworkIngressInvestigation-2026-11-04.md).
+Candidates remain uncommitted for the user's keep/revert decision:
+
+- A shared 64-socket-packet budget preserves classification exhaustion through
+  recovery and telemetry decisions. The original caller consumed 72 socket
+  packets in one mixed turn, and could declare a 64-control-packet prefix
+  drained while PCM remained queued. Mixer probes avoid 1 or 64 extra silence
+  frames when the yield state is retained; 64 frames is 1.333 ms at 48 kHz.
+- Returning after draining prequeued control-only work removes a conditional
+  timeout: 1264 us median becomes 17 us. Asynchronous arrival is 16 us with
+  either caller. This is not an unconditional 1 ms audio-latency improvement.
+- Periodic CSV serialization reuses storage and faster numeric formatting:
+  matched fixed-snapshot medians fall from 33–35 us to 6–7 us; expanded final
+  precision validation measures 11 us. Normal full-runtime telemetry averages
+  9.8 us; stress sampling can still produce millisecond wall-time spikes.
+- The explicit 1000-us cooperative receive-service guard is experimental;
+  it never triggered in the final 96 peer-case observations. Zero disables it.
+- Test-only arrival-timestamp substitution hides local stalls and produces
+  underruns under recurring 6 ms pauses. No production timestamp change was kept.
+
+All seven new CTests pass. Final focused Release validation is **14/15 passing**.
+The core-input aggregate has 55 assertion failures; restoring HEAD's original
+receive implementation reproduces the **identical 55 failures/messages/counts**.
+No recovery assertion or threshold was weakened. Four-peer impairment,
+mode-latency, receive-model and lifecycle checks also passed during this work.
+The full suite, Windows build, real CoreAudio and WAN tests were not run.
+The historical regression and Mac/Windows device-latency difference remain
+unproven by these local tests. Evidence/provenance: `artifacts/network-ingress-20261104/`;
+raw four-peer 32-frame runtime CSVs: `artifacts/network-ingress-native/`.
+
 ## A2 + B + C implemented for testing — Nov 4
 
 The user selected all three candidates. They are now active together in the
@@ -40,6 +73,22 @@ Four known tests remain red, with no new failure category:
 | `jam2_core_low_skew_units` | 92 short-batch/learning assertions and four settled starvation/continuity assertions, matching the prior baseline counts. |
 | `jam2_core_playback_recovery_units` | Three hold-clear and three return-to-baseline assertions, matching the prior baseline counts. |
 | `jam2_core_release_return_units` | 18 short-batch/learning assertions, matching the prior baseline count. |
+
+Failure interpretation: the four settled-continuity assertions in the low-skew
+suite belong to two diagnostic cases with minimum-target release deliberately
+disabled. The release-return suite repeats the short-batch/no-gap-learning
+assertion; its 18 failures do not establish another independent failure mode.
+
+The playback-recovery "actual buffered latency" assertion is compound: it
+requires both a bounded target and a near-baseline measured queue. In its three
+failing cases the target stays at 304/355/338 frames (allowed: 128), with the
+learned hold active. Actual queue averages are already close to baseline:
+3.37222 to 3.37453 ms, or 4.03889 to 4.04147 ms. The observed failure there is
+stuck protection/target state; it should not be reported as a large measured
+latency increase. The worker's recurring 3 ms stalls continue after the large
+injected gaps stop, and the hold logic permits fresh gaps to extend protection
+without a new underrun. Exact triggers across the wider short-batch matrix
+remain to be isolated.
 
 Their latency, continuity and hold-expiry assertions were not relaxed. B's
 five old quantity/policy assertions were updated to the explicitly selected
@@ -407,3 +456,176 @@ passed without devices/mixer/full runtime. Wired captures are follow-up, not a
 prerequisite; user cannot arrange that run alone. Oct 30's ~200 ms GUI estimate
 can follow RTT/2; ~417 ms mapping error is not an OS clock jump:
 [GUI review](artifacts/gui-latency-review-20261103.json).
+
+### Nov 4: physical Mac Wi-Fi / 44.1 kHz follow-up
+
+Twelve real CoreAudio sessions (19 minutes of requested audio) joined the
+provided Windows jam, keeping Windows on its existing build. Both Aggregate
+and Focusrite were tested. The callback's native capture-wake pipe notification
+is a reproducible Mac contributor: Focusrite off/on/off 90-second cases gave
+**0 / 28 / 0 overloads**, with **15 / 2910 / 15 us** maximum callback time.
+Atomic-only wake publication also removed the repeated overloads, narrowing
+the contributor to native notification/scheduling rather than all wake state.
+
+Two Focusrite 32-frame cases with **250 us polling** gave **zero overloads over
+90 + 60 seconds**, **13 us** callback maxima, **163–170 us** mean dispatch and
+about **10.9% of one core** CPU, versus **34.9 us / 10.7%** in a 60-second native
+control with **15 overloads**. Aggregate polling had **zero / 8 us** over 60
+seconds; its 180-second native baseline had one startup/page-fault overload
+and none afterward. This does not erase last night's Aggregate/48 kHz evidence.
+
+Kernel timing locates a **291.150 ms incoming gap before application dequeue**,
+with only **0.683 ms** residence for that packet. Smaller local socket delays
+still exist. Polling does not cure these upstream gaps or ensuing underruns;
+the Windows sender, radio/AP and Mac lower network stack remain to separate.
+The 64-frame native test also had zero overloads but exercised **zero native
+wakes** and sampled more queued capture audio. Its retained backlog is a
+separate latency candidate, not proof that a larger callback fixes the call.
+
+Nine focused Release CTests pass, including exactly-four-peer runtime and
+impaired ordering. New behavior is exposed through diagnostic CLI controls;
+normal GUI/Windows defaults remain unchanged pending user review.
+[Full report](docs/PhysicalWifiCoreAudioInvestigation-2026-11-04.md),
+[measurements](artifacts/remote-jam-20261104/measurements.md),
+[raw summary](artifacts/remote-jam-20261104/summary.json).
+
+### Nov 4: CoreAudio polling promoted; receive-call attribution
+
+User accepted the polling change. Normal CoreAudio GUI/CLI sessions now
+automatically use atomic readiness with a **250 us polling ceiling**. Other
+backends retain native notifications; Windows policy is unchanged. Explicit
+diagnostic modes remain available. Real Focusrite and Aggregate default runs
+both had zero overloads. A clean 100 us trial reduced capture dispatch from
+about **171 to 91 us**, but did not remove receive stalls; 250 us remains the
+default.
+
+New timing separates kernel stamp, receive entry/return and post-read
+observation, and pairs slow events with worker phase and full-span thread CPU.
+One **4.108 ms** incoming delay consisted of **1.292 ms before `recvmsg` and
+2.816 ms during it**, with microsecond classification afterward. In the first
+traced run, receive-call time dominated **111/144** recorded steady slow
+episodes. This locates most observed delay at the OS-call boundary, not in
+application packet routing; it does not identify the exact kernel lock or
+exclude OS preemption. None of the recorded empty-read attempts began after
+the affected packet's kernel stamp; socket availability throughout the
+interval remains unproven.
+
+A per-call `MSG_DONTWAIT` experiment and disabling the network-worker priority
+request both left millisecond receive stalls. The flag experiment was reverted;
+priority defaults remain unchanged. Ten focused Release CTests pass; six also
+pass after restoration of the trial. The restored executable exactly matches
+the main validated binary. One stack-sampled diagnostic run had six HAL skips
+coincident with profiling and is explicitly excluded from clean comparisons.
+[Follow-up report](docs/ReceiveServiceInvestigation-2026-11-04.md),
+[case summary](artifacts/receive-service-20261104/summary.csv),
+[per-event evidence](artifacts/receive-service-20261104/events.csv).
+
+### Nov 4: connected BSD default and localhost wait gaps
+
+Connected BSD is now automatic for **macOS Server per-peer media sockets**;
+Direct keeps its shared BSD bootstrap socket and other platforms keep BSD.
+Explicit `--udp-backend auto|bsd|connected|network` comparisons remain available.
+The remote same-build A/B/A produced ordinary-BSD maxima **2.949 / 3.185 ms**
+and **7.91 / 9.39%** audio packets over 1 ms, versus connected BSD **0.605 ms /
+zero over 1 ms**. Network.framework also reduced these tails but used more CPU;
+voice service and a separate reader did not consistently remove them. An
+ordinary-BSD reverse run was also fast, so this remains context-dependent.
+The promoted public default then joined the live Windows jam for another 60 s:
+**0.534 ms maximum, zero of 40,888 packets over 1 ms, zero HAL overloads and
+capture overflows**. Windows retained its existing build.
+
+Local native pulse tests included simulated devices, Focusrite + Aggregate,
+and two sessions on the Focusrite. Several runs reached roughly 3–6 ms recorded
+callback RTT, but short-run variation remained substantial. The 12.426 ms
+outlier's ~5 ms software queue was entirely the playback ring. Startup delivery
+gaps raised a 30-second held target; its raised-cushion release stopped near
+192–226 frames. The 20-second run ended before the hold expired. A native
+production-pipeline test reproduced a **5.143 ms mean ring**, then return to
+a smaller depth after expiry without new clean-period starvation. Recovery
+policy is retained as requested; a hard 64-frame target cap was not a cure.
+
+Longer localhost runs traced matching **~8 ms socket-wait phases in both
+workers**, using only **11–17 us CPU**, while CoreAudio callbacks stayed regular.
+This occurred with Network.framework too and caused 221 / 222 missing playback
+frames plus recovery padding. Ordinary BSD separately showed ~11 ms gaps
+between kernel receive timestamps. These are local servicing/wait delays, not
+time travelling over Wi-Fi. Remote captures also contain post-timestamp waits
+and read stalls, but not yet a causal match of a particular wait to recovery.
+The exact cause of the large wait remains unresolved; connecting BSD does not
+guarantee worker scheduling deadlines.
+
+Nine final focused native CTests and the three-case physical comparison passed.
+The full suite was not run. OS logs confirm zero overload entries for 40 local
+hardware processes and clean remote cases; the kernel-traced run's one overload
+is excluded from performance comparisons.
+[Report](docs/UdpPathInvestigation-2026-11-04.md),
+[remote results](artifacts/udp-paths-20261104/summary.csv),
+[local results](artifacts/udp-paths-20261104/local-summary.csv),
+[local phase timing](artifacts/udp-paths-20261104/local-gap-summary.json).
+
+### Nov 4: timer-wait attribution and a critical-deadline candidate
+
+A further 180-second profiled Focusrite + Aggregate localhost CTest passed on
+the unchanged connected-BSD Release build. Its 3.7–4.8 ms startup wait preceded
+the administrator trace and remains unclassified. During the capture, one
+1.263 ms wait split into **1.248 ms blocked / 0.013 ms runnable**, with a timer
+expiry wake. Both HAL overloads coincided exactly with trace startup and are
+excluded from clean comparisons. Across the two runtime workers, over 500,000
+`recvmsg` calls had maxima of **51 / 52 us**, with none above 1 ms.
+
+An optimized standalone OS probe found repeatable normal-timeout overshoot.
+Requested **100 / 250 / 1000 us** waits had select medians **128 / 319 / 1260 us**,
+versus absolute critical kqueue timer medians **104 / 257 / 1021 us**. Two
+concurrent workers, reversed order and 540,000 total waits were measured.
+This supports an application-level wait experiment for both Direct and Server;
+it does not establish that the rare 4–8 ms pauses are cured. No runtime defaults
+or recovery policy changed. The next large-pause trace must start before the
+clients, and the actual Jam2 candidate still needs native and physical A/B tests.
+[Kernel-wait report](docs/KernelWaitInvestigation-2026-11-04.md),
+[probe measurements](artifacts/kernel-waits-20261104/wait-probe-summary.json).
+
+### Nov 4: critical kqueue waits implemented with legacy comparison
+
+macOS Direct and Server now default to absolute critical kqueue waits. The
+previous select/poll path remains available through `--udp-wait legacy` for
+same-build comparisons. CoreAudio retains atomic capture publication and
+250 us polling; playback recovery and radio settings were not changed.
+Runtime and background-worker stats separately expose wait counts, requested
+and elapsed time, overshoot, readiness/deadline wakes, interruptions and errors.
+
+Production-waiter CTests measured 250 us request medians of **257–259 us** with
+critical versus **317–320 us** legacy. Eight physical Focusrite + Aggregate
+localhost cases at 44.1 kHz / 32-frame callbacks / 64-frame packets gave overall
+callback pulse RTTs of **4.40–5.06 ms Direct** and **2.93–6.42 ms Server** with
+critical, versus **6.35–8.84 ms Direct** and **6.35–10.95 ms Server** legacy.
+These are per-run phase medians, excluding analog conversion, not sustained
+latency bounds. Critical Direct B rose to **8.07 ms** in its late 40–55 s window
+after a pause, despite its 4.40 ms overall result.
+
+Physical runtime waits exceeding their requested budget by at least 1 ms fell
+from **53/1,355,381** legacy to **10/1,664,633** critical. However a **10.9 ms**
+critical wait remained in both localhost workers with only **14/30 us CPU**.
+Steady missing playback frames were **112 legacy / 238 critical**, so fewer
+late waits did not establish fewer underruns. Eight simulated Direct/Server
+cases also varied; three matched pairs improved and one regressed.
+
+Eight 60-second joins to the unchanged live Windows jam passed. Focusrite
+critical maximum overshoot was **478/538 us** versus **764/1610 us** legacy;
+Aggregate retained >1 ms tails with both. Timestamp-disabled Focusrite CPU was
+**7.71% critical / 7.45% legacy** of one core, including common inspection
+overhead. Remote recovery and queue tails did not improve consistently.
+Largest gaps between receive-kernel packet stamps remained **113–155 ms**;
+the packet following each maximum was serviced in **25–51 us**. Those gaps
+preceded application routing, but these data do not identify Wi-Fi versus
+sender/driver behavior upstream of the receive timestamp.
+
+Twelve relevant Release CTests passed, including exactly-four-peer impairment,
+runtime paths, lifecycle, pressure and rotation. All 16 local hardware
+processes and eight remote processes had zero HAL overloads/capture overflows;
+macOS logs contained zero overload entries over the comparison interval.
+The full suite was not run. The new waiter improves normal deadlines; the
+rare long pause remains unresolved and requires a kernel capture that includes
+the event. Both comparison paths are retained.
+[Implementation and measurements](docs/CriticalWaitExperiment-2026-11-04.md),
+[local CSV](artifacts/critical-wait-20261104/local-summary.csv),
+[remote CSV](artifacts/critical-wait-20261104/remote-summary.csv).
