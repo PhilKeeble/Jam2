@@ -218,6 +218,14 @@ void testOptionAndStatsContracts()
 #endif
     Arguments badWait{"jam2","network","create","--udp-wait","invalid"};
     expectThrows([&] { (void)jam2::cli::parse_options(badWait.count(),badWait.data(),3); },"invalid or unsupported UDP wait mode is rejected");
+    for (const auto value : {"high-resolution", "native"}) {
+        Arguments retiredWait{"jam2", "network", "create", "--udp-wait", value};
+        expectThrows([&] { (void)jam2::cli::parse_options(retiredWait.count(), retiredWait.data(), 3); },
+            "retired Windows wait modes are rejected without changing macOS wait choices");
+    }
+    Arguments retiredCeiling{"jam2", "network", "create", "--receive-wait-us", "250"};
+    expectThrows([&] { (void)jam2::cli::parse_options(retiredCeiling.count(), retiredCeiling.data(), 3); },
+        "retired runtime receive ceiling option is rejected");
     expect(!options.udp_backend && options.udp_service==jam2::UdpServiceClass::BestEffort && !options.queued_receive,
         "UDP defaults defer to the platform and session strategy without changing service class or reader");
     Arguments autoBackend{"jam2","network","create","--udp-backend","bsd","--udp-backend","auto"};

@@ -1,3 +1,4 @@
+#include "udp_socket.hpp"
 #include "ArtifactReader.hpp"
 #include "AudioBaselineAnalysis.hpp"
 #include "LoopbackPortReservations.hpp"
@@ -6,7 +7,6 @@
 #include "UdpCandidateNetwork.hpp"
 #include "UdpImpairmentProxy.hpp"
 #include "audio_device.hpp"
-#include "udp_socket.hpp"
 #include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QDateTime>

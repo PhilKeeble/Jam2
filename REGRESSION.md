@@ -629,3 +629,159 @@ the event. Both comparison paths are retained.
 [Implementation and measurements](docs/CriticalWaitExperiment-2026-11-04.md),
 [local CSV](artifacts/critical-wait-20261104/local-summary.csv),
 [remote CSV](artifacts/critical-wait-20261104/remote-summary.csv).
+
+## Windows 250 microsecond wait comparison — Nov 4
+
+This experiment was removed after the physical ASIO comparison below. Windows
+again uses its original native waits; the macOS changes from `d4d04bf` remain.
+The removed experimental combination was:
+`--udp-wait high-resolution --receive-wait-us 250`. The runtime wait ceiling
+and timer selection are independent controls. Defaults remain native waits
+with a 1000 us ceiling. The optional thread-owned high-resolution waitable
+timer rounds logical budgets upward in 250 us quanta, retains early UDP and
+capture wakes, and cancels its timer after early readiness. No callback work,
+spin loop, new dependency or application-wide peer limit was added. Larger
+socket sets poll readiness at the configured timer quantum rather than imposing
+Windows' event-array capacity as a peer limit. Both Windows wait paths now
+populate the existing requested/elapsed/overshoot diagnostics; startup logs
+also state the runtime ceiling. These counters measure elapsed wall time,
+including scheduling, rather than identifying a kernel cause.
+
+The optimized MSVC Release timing CTest ran 2000 measured idle waits per
+condition after 100 warmups, reversing native/timer order on repetition two.
+It requested the production 1 ms timer resolution. Results below are the two
+repetitions, in microseconds; timing is observational, not a pass threshold:
+
+| Wait / requested budget | Median us | p99 us |
+|---|---:|---:|
+| Native / 1000 us | 1036 / 1035 | 2265 / 2227 |
+| Native / 250 us | 1030 / 1040 | 2199 / 2196 |
+| High-resolution / 1000 us | 1562 / 1562 | 2007 / 2042 |
+| High-resolution / 250 us | 538 / 542 | 888 / 916 |
+
+Thus lowering the request alone does not remove native timeout rounding, and
+changing timer type alone does not improve the median here. The combined
+250 us option improves normal wake timing but does not produce actual 250 us
+wakes on this machine. Its observed 250 us maxima were 1078 / 1225 us. Thread
+CPU and wall totals are retained in the raw results; the Windows CPU counters
+are coarse for these short samples and are not a physical-session CPU verdict.
+
+The exactly-four-peer production runtime matrix compared all four combinations
+in forward/reverse order, with native capture notifications and fake
+32-frame/48 kHz audio. Per-peer maximum loop gaps were 2.421–2.668 ms for native
+1000 versus 1.504–1.596 ms for high-resolution 250; median per-peer mean capture
+dispatch fell from 40.69 to 24.32 us. This did not establish an audio benefit:
+sampled queue medians were 2.47 versus 5.08 ms, and steady underruns were
+234/516384 versus 751/904272 observed frames. Synthetic callback intervals also
+changed from about 1.98 to 1.13 ms despite the nominal 0.667 ms callback period.
+Those unequal synthetic loads limit comparisons to real ASIO behavior.
+
+The separate four-peer authenticated delivery CTest received all **108000**
+expected audio packets, with zero invalid packets, duplicates, queue drops or
+send errors, including control prefixes, creator rotation and 8 ms batches.
+Eight 32-second public `release/jam2.exe` two-peer pulse cases also passed their
+existing recording/transport checks. Recorded synthetic pulse RTT was
+9.66 / 9.50 ms for native 1000 and 10.02 / 11.49 ms for high-resolution 250;
+it does not show a consistent audio latency improvement. No physical ASIO or
+Wi-Fi retest was performed, and the real jam's 3.271 ms Windows event remains
+unattributed. Keep the option explicit while investigating actual device timing.
+
+Seven focused Release CTests passed, followed by another passing ownership
+unit run after adding thread-error reporting and invalid-mode rollback coverage.
+The full suite was not run. The first attempted audio CTest lacked the Qt DLL
+search path; its registration was corrected before the passing matrix. The
+initial timer comparison also enforced a second native timeout on some early
+returns; that prototype was corrected to preserve the native single-timeout
+behavior, and all measurements above come from the corrected build.
+
+Tested public executable SHA-256:
+`005ed58630272d286c75b6f739fae64e4d85ad80ae37ce7cb594c8aceb73a9b7`.
+[Focused CTest log](artifacts/windows-wait-20261104/ctest-focused.log),
+[final build/unit log](artifacts/windows-wait-20261104/build-final.log),
+[raw measurements and per-peer evidence](artifacts/windows-wait-20261104/measurements.json),
+[analysis](artifacts/windows-wait-20261104/analyze_results.py), and
+[archived pulse profile](artifacts/windows-wait-20261104/retired-source/tests/profiles/windows-udp-wait-local-simulated.json).
+
+## Ten physical ASIO sessions per wait configuration — Nov 4
+
+The follow-up used the connected **TONEX creator and Focusrite USB ASIO joiner**,
+with real device callbacks in both public Release processes. All 40 sessions
+used 44.1 kHz, 32-frame callbacks, 64-frame PCM16 packets, generated one-second
+pulses, an unshaped localhost Direct connection and 32 seconds per session.
+Five eight-case blocks ran native-1000, native-250, high-resolution-1000,
+high-resolution-250, then the reverse order. This gives ten fresh two-process
+sessions per condition, rather than counting pulses within one session as
+independent runs. Device roles and the executable remained fixed; no rebuilds
+or profiling occurred during the measurements. These hardware results are a
+separate dataset from the earlier synthetic recordings.
+
+Recorded callback-audio pulse RTT, in milliseconds (analog converter latency
+excluded):
+
+| Wait / runtime ceiling | Sessions | Mean ± sample SD | Median | Min–max |
+|---|---:|---:|---:|---:|
+| Native / 1000 us | 10 | 5.41 ± 0.67 | 5.77 | 4.42–5.98 |
+| Native / 250 us | 10 | 6.60 ± 1.33 | 6.63 | 4.41–8.76 |
+| High-resolution / 1000 us | 10 | 6.15 ± 1.19 | 6.25 | 4.44–7.99 |
+| High-resolution / 250 us | 10 | 5.81 ± 1.03 | 5.78 | 4.32–7.30 |
+
+The primary comparison pairs high-resolution 250 with native 1000 in each
+matching forward/reverse set. The candidate was faster in **6/10** sets, with
+median paired difference **−0.125 ms**, but mean paired difference **+0.401 ms**
+(positive means slower). Individual paired differences ranged **−1.440 to
++2.676 ms**. The mean differences of the five balanced blocks were −0.130,
+−0.283, +0.113, +0.635 and +1.672 ms. A descriptive 95% block-bootstrap interval
+for the mean difference was **−0.143 to +1.074 ms** (20,000 fixed-seed resamples,
+keeping the two orderings within a block together). These sessions do not
+establish a consistent audio-latency benefit or regression. The interval is
+about this machine/device pair, not other networks or ASIO drivers.
+
+The wake-timing improvement survives the physical test: across 20 peer streams
+per main configuration, the median of per-stream receive-loop gap maxima fell
+from **1.962 to 1.396 ms**; the largest recorded maxima were **2.087 versus
+1.729 ms**. Mean actual callback intervals remained approximately **0.72562 ms**
+for all four configurations. This removes the synthetic callback-cadence
+confound from the earlier comparison, while showing that shorter worker gaps
+do not necessarily lower end-to-end callback-audio latency. Steady underrun
+totals were 83 versus 69 source frames across the respective 20 peer streams;
+steady live-tail trimming was zero in both main configurations.
+
+All five focused hardware CTest blocks passed (40/40 sessions, 80 measured ASIO
+peer streams). All sessions recorded zero sequence loss; native checks also
+passed capture-overflow, authentication, send, recording, packet-flow and
+cleanup validation. The full suite was not run. Defaults remain unchanged.
+The same public executable hash as the previous experiment was verified in
+all five provenance records. The reusable test is `jam2_two_windows_wait_asio`,
+enabled by an explicit `JAM2_WINDOWS_ASIO_WAIT_PROFILE`.
+
+[Session plot](artifacts/windows-asio-wait-10runs-20261104/comparison.png),
+[all session results and matched differences](artifacts/windows-asio-wait-10runs-20261104/results.json),
+[frozen study manifest and raw artifact roots](artifacts/windows-asio-wait-10runs-20261104/study-manifest.json),
+[first build/CTest block](artifacts/windows-asio-wait-10runs-20261104/block-1-build-and-ctest.log),
+[remaining four CTest blocks](artifacts/windows-asio-wait-10runs-20261104/blocks-2-to-5-ctest.log),
+[analysis](artifacts/windows-asio-wait-10runs-20261104/analyze_results.py), and
+[archived hardware profile](artifacts/windows-wait-20261104/retired-source/tests/profiles/windows-udp-wait-asio-repeated.json).
+
+## Windows wait experiment removal ? Nov 4
+
+At the user's request, the Windows high-resolution timer experiment and its
+`--receive-wait-us` option were removed after the ten-run ASIO comparison.
+Windows socket/event waits and the 1000 us runtime ceiling are restored to
+`d4d04bf`; macOS critical kqueue deadlines, atomic capture publication and
+250 us CoreAudio polling remain unchanged. Experimental native tests and
+profiles are removed from active suites. The existing Windows ASIO harness
+retains its necessary Winsock include-order fix. CLI regression coverage
+rejects the retired flags. Measurements, recordings, plots, profiles and the
+experiment patch remain archived under `artifacts/` for reference. Historical
+commands above describe the measured build and are not current options.
+
+The restored `release/jam2.exe` was rebuilt with MSVC Release through
+`compile.cmd`. Five focused native CTests passed: CLI boundaries (including
+retired-option rejection), ingress timing, four-peer ingress boundaries,
+mixed socket-work budgets and the four-peer capture/batched-delivery matrix.
+CTest discovery confirms zero remaining Windows wait experiment tests.
+Public executable SHA-256 after restoration:
+`897e82d032549feb0b161fcff0c824c8f08b47d9bfa0290aba36e4fc808eea7d`.
+[Build and CLI validation](artifacts/windows-wait-20261104/rollback/build-and-cli.log),
+[four-peer validation](artifacts/windows-wait-20261104/rollback/ctest-focused.log),
+and [archived experiment patch](artifacts/windows-wait-20261104/retired-source/experiment.patch).
