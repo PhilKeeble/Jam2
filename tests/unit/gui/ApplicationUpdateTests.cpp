@@ -7,6 +7,7 @@
 #include <QAbstractButton>
 #include <QDir>
 #include <QElapsedTimer>
+#include <QFile>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QLabel>
@@ -19,6 +20,7 @@
 #include <QPushButton>
 #include <QThread>
 #include <QTimer>
+#include <QTemporaryDir>
 
 #include <algorithm>
 #include <cstring>
@@ -28,6 +30,7 @@
 
 using namespace jam2::update;
 namespace {
+const bool pkgFlow = platform() == QStringLiteral("macos");
 void require(bool valid, const char* error) { if (!valid) throw std::runtime_error(error); }
 void waitFor(const std::function<bool()>& done)
 {
@@ -97,8 +100,10 @@ public:
     int cancellations = 0;
     Metadata approved;
     QByteArray encoded;
-    void start(const Metadata& metadata, const QByteArray& json, bool = false) override
+    bool staged = false;
+    void start(const Metadata& metadata, const QByteArray& json, bool reuse = false) override
     {
+        staged = reuse;
         ++starts; approved = metadata; encoded = json; running = true;
         if (statusChanged) statusChanged({PreparationPhase::Staging, QStringLiteral("Preparing update..."), -1});
     }
@@ -119,7 +124,7 @@ struct Fixture {
     FakePreparation preparation;
     QVector<LaunchOptions> installs;
     ApplicationUpdateService service;
-    Fixture() : service(QDir::currentPath(), QStringLiteral("0.9.10"), nullptr, &network, &preparation,
+    explicit Fixture(QString root = QDir::currentPath()) : service(std::move(root), QStringLiteral("0.9.10"), nullptr, &network, &preparation,
         [this](const LaunchOptions& options) -> qint64 { installs.push_back(options); return 123; }) {}
     void available()
     {
@@ -147,7 +152,7 @@ void testVersionCheck()
     require(heartbeat > 0 && fixture.network.requests.size() == 2 && fixture.preparation.starts == 0,
         "version/metadata checks are asynchronous and never download before approval");
     require(fixture.network.requests[1].contains(QStringLiteral("/v0.10.0/")) &&
-        fixture.network.requests[1].endsWith(QStringLiteral(".zip.json")), "metadata GET pins exact advertised version");
+        fixture.network.requests[1].endsWith(assetName() + QStringLiteral(".json")), "metadata GET pins exact advertised version and platform package");
     fixture.network.version = "0.9.10\n";
     const auto before = fixture.network.requests.size();
     fixture.service.check(); waitFor([&] { return fixture.service.status().state != State::Checking; });
@@ -201,9 +206,19 @@ void testDialogAndCancellation()
     require(button(dialog, "Jam2RestartUpdate")->isVisible() && button(dialog, "Jam2DeferUpdate")->isVisible() && bar->value() == 100,
         "ready popup presents explicit restart and install-on-exit choices");
     button(dialog, "Jam2DeferUpdate")->click();
-    require(!dialog.isVisible() && fixture.service.status().installOnExit && fixture.installs.isEmpty(),
+    require(!dialog.isVisible() && fixture.service.status().installOnExit == !pkgFlow && fixture.installs.isEmpty(),
         "install-on-exit defers without quitting");
     fixture.service.windowClosing();
+    if (pkgFlow) {
+        require(fixture.installs.isEmpty(), "Later must not open Installer on an unrelated normal exit");
+        dialog.show();
+        require(button(dialog, "Jam2RestartUpdate")->text() == QStringLiteral("Quit and Open Installer") &&
+                button(dialog, "Jam2DeferUpdate")->text() == QStringLiteral("Later"),
+            "macOS presents the actual Installer handoff actions");
+        button(dialog, "Jam2RestartUpdate")->click();
+        waitFor([&] { return closeRequests == 1; });
+        fixture.service.windowClosing();
+    }
     require(fixture.installs.size() == 1 && !fixture.installs.front().restart && fixture.installs.front().staged,
         "normal exit applies downloaded update without reopening");
     fixture.service.windowClosing();
@@ -231,11 +246,12 @@ void testRestartAndSaveCancellation()
     }); answer.start();
     button(dialog, "Jam2RestartUpdate")->click();
     waitFor([&] { return savePromptSeen && fixture.service.status().state == State::Ready; });
-    require(dialog.isVisible() && fixture.installs.isEmpty() && fixture.service.status().installOnExit &&
-        fixture.service.status().message.contains(QStringLiteral("Restart cancelled")),
+    require(dialog.isVisible() && fixture.installs.isEmpty() && fixture.service.status().installOnExit == !pkgFlow &&
+        fixture.service.status().message.contains(pkgFlow ? QStringLiteral("Closing cancelled") : QStringLiteral("Restart cancelled")),
         "cancelling modal save/close keeps app open and verified package queued");
     fixture.service.windowClosing();
-    require(fixture.installs.size() == 1 && !fixture.installs.front().restart, "later normal exit after cancelled restart does not reopen");
+    require(pkgFlow ? fixture.installs.isEmpty() : fixture.installs.size() == 1 && !fixture.installs.front().restart,
+        "cancelled macOS handoff is not retried on normal exit; Windows retains install-on-exit");
 
     Fixture restart;
     UpdateDialog restartDialog(restart.service, [&] { restart.service.windowClosing(); return true; });
@@ -243,7 +259,7 @@ void testRestartAndSaveCancellation()
     restartDialog.show(); restart.ready();
     button(restartDialog, "Jam2RestartUpdate")->click();
     waitFor([&] { return !restart.installs.isEmpty(); });
-    require(restart.installs.front().restart && !restartDialog.isVisible(), "restart choice launches installation with reopening enabled");
+    require(restart.installs.front().restart == !pkgFlow && !restartDialog.isVisible(), "macOS handoff keeps Jam2 closed; Windows requests reopening");
 }
 
 void testReadyCloseDiscardAndFailure()
@@ -252,7 +268,8 @@ void testReadyCloseDiscardAndFailure()
     UpdateDialog dialog(fixture.service, [] { return false; });
     fixture.service.statusChanged = [&] { dialog.refresh(); };
     dialog.show(); fixture.ready(); dialog.close();
-    require(fixture.service.status().installOnExit && fixture.preparation.cancellations == 0, "closing ready popup queues install without reopening");
+    require(fixture.service.status().installOnExit == !pkgFlow && fixture.preparation.cancellations == 0,
+        "closing a ready popup preserves preparation without implicitly opening a macOS installer");
     dialog.show(); button(dialog, "Jam2CancelUpdate")->click();
     waitFor([&] { return fixture.service.status().state == State::Cancelled; });
     fixture.service.windowClosing(); require(fixture.installs.isEmpty(), "discarded update cannot install on exit");
@@ -294,7 +311,7 @@ void testAutomaticPresenter()
     dialog->close();
     QElapsedTimer elapsed; elapsed.start();
     waitFor([&] { return elapsed.elapsed() > 650; });
-    require(!dialog->isVisible() && fixture.service.status().installOnExit, "dismissing ready popup after cancelled restart does not reopen it");
+    require(!dialog->isVisible() && fixture.service.status().installOnExit == !pkgFlow, "dismissing ready popup after cancelled close does not reopen it");
     fixture.service.cancel(); waitFor([&] { return fixture.service.status().state == State::Cancelled; });
     fixture.available(); fixture.service.download();
     fixture.preparation.complete(QStringLiteral("Expected download error"));
@@ -303,6 +320,37 @@ void testAutomaticPresenter()
         dialog->findChild<QLabel*>(QStringLiteral("Jam2UpdateMessage"))->text().contains(QStringLiteral("Expected download error")),
         "preparation failure is shown when background progress was dismissed");
 }
+
+#ifdef Q_OS_MACOS
+void testResumePreparedInstaller()
+{
+    QTemporaryDir root;
+    require(root.isValid() && QDir().mkpath(root.filePath(QStringLiteral("update"))), "create saved installer fixture");
+    Fixture fixture(root.path());
+    const auto write = [&](const QString& name, const QByteArray& bytes) {
+        QFile file(root.filePath(QStringLiteral("update/") + name));
+        require(file.open(QIODevice::WriteOnly) && file.write(bytes) == bytes.size(), "persist the previously approved package state");
+    };
+    write(QStringLiteral("package.pkg.json"), fixture.network.metadata);
+    write(QStringLiteral("prepared.json"), "prepared marker verified by the helper");
+    write(QStringLiteral("package.pkg"), "previous download");
+    fixture.service.check();
+    require(fixture.preparation.starts == 1 && fixture.preparation.staged && fixture.network.requests.isEmpty(),
+        "a fresh app session re-verifies a saved PKG without redownloading or opening Installer");
+    fixture.preparation.complete();
+    require(fixture.service.status().state == State::Ready && !fixture.service.status().installOnExit && fixture.installs.isEmpty(),
+        "restored preparation still requires explicit Quit and Open Installer approval");
+    fixture.service.check();
+    require(fixture.preparation.starts == 1 && fixture.network.requests.isEmpty(), "ready package is not silently replaced by another check");
+
+    Fixture failed(root.path());
+    failed.service.check(); failed.preparation.complete(QStringLiteral("Installer signature rejected"));
+    require(failed.service.status().state == State::Failed, "a restored package must pass verification before ready");
+    failed.service.check();
+    waitFor([&] { return failed.service.status().state == State::Available; });
+    require(failed.network.requests.size() == 2, "explicit retry after failed cached verification can check/download a fresh release");
+}
+#endif
 }
 int main(int argc, char** argv)
 {
@@ -310,6 +358,9 @@ int main(int argc, char** argv)
     try {
         testVersionCheck(); testDialogAndCancellation(); testRestartAndSaveCancellation(); testReadyCloseDiscardAndFailure();
         testAutomaticPresenter();
+#ifdef Q_OS_MACOS
+        testResumePreparedInstaller();
+#endif
         std::cout << "Application update GUI/service tests passed\n"; return 0;
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

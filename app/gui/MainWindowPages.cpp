@@ -1382,7 +1382,7 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
         *w.startArmedLaneRecordingButton_, "recording.start-stop", "looper.recording-lifecycle");
 
     w.laneRecordingState_.outputPath =
-        appReleaseFilePath(QStringLiteral("captures"), QStringLiteral("take.wav"));
+        appDataFilePath(QStringLiteral("captures"), QStringLiteral("take.wav"));
     auto* speedControl = new QWidget(page);
     speedControl->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     auto* speedLayout = new QHBoxLayout(speedControl);

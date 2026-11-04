@@ -170,7 +170,22 @@ QString platform()
     return QStringLiteral("macos");
 #endif
 }
-QString assetName() { return QStringLiteral("Jam2-%1.zip").arg(platform()); }
+QString assetName()
+{
+#ifdef Q_OS_MACOS
+    return QStringLiteral("Jam2-macos.pkg");
+#else
+    return QStringLiteral("Jam2-windows.zip");
+#endif
+}
+QString downloadRelativePath()
+{
+#ifdef Q_OS_MACOS
+    return QStringLiteral("update/package.pkg");
+#else
+    return QStringLiteral("update/package.zip");
+#endif
+}
 QString helperRelativePath()
 {
 #ifdef Q_OS_WIN

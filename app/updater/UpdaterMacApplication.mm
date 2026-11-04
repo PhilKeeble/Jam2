@@ -12,6 +12,13 @@
 #include <stdexcept>
 
 namespace jam2::update {
+bool macInstallerRunning()
+{
+    @autoreleasepool {
+        return [NSRunningApplication runningApplicationsWithBundleIdentifier:@"com.apple.installer"].count != 0;
+    }
+}
+
 void restartMacApplication(const QString& bundlePath)
 {
     @autoreleasepool {

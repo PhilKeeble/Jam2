@@ -257,4 +257,7 @@ public:
     static bool saveChecked(const UserPreferences& preferences);
     static QString filePath();
     static bool setFilePathForTesting(const QString& path, QString& error);
+    static void relocateDefaultFolders(UserPreferences& preferences,
+        const QString& oldRoot, const QString& newRoot);
+    static bool copyLegacyPreferences(const QString& source, const QString& destination, QString& error);
 };

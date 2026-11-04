@@ -190,6 +190,16 @@ if(WIN32)
         "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
 endif()
 
+add_executable(jam2_application_paths_tests EXCLUDE_FROM_ALL unit/application/ApplicationPathsTests.cpp)
+jam2_configure_test_target(jam2_application_paths_tests)
+target_include_directories(jam2_application_paths_tests PRIVATE "${CMAKE_SOURCE_DIR}/app/application")
+target_link_libraries(jam2_application_paths_tests PRIVATE Qt6::Core)
+add_test(NAME jam2_application_paths_units COMMAND $<TARGET_FILE:jam2_application_paths_tests>)
+set_tests_properties(jam2_application_paths_units PROPERTIES LABELS "unit;application;storage" TIMEOUT 15)
+if(WIN32)
+    set_tests_properties(jam2_application_paths_units PROPERTIES ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
+endif()
+
 add_executable(jam2_release_build_configuration_tests EXCLUDE_FROM_ALL
     unit/build/ReleaseBuildConfigurationTests.cpp)
 jam2_configure_test_target(jam2_release_build_configuration_tests)
@@ -210,6 +220,9 @@ add_executable(jam2_release_packaging_tests EXCLUDE_FROM_ALL
     unit/build/ReleasePackagingTests.cpp)
 jam2_configure_test_target(jam2_release_packaging_tests)
 target_link_libraries(jam2_release_packaging_tests PRIVATE Qt6::Core)
+if(APPLE)
+    target_link_libraries(jam2_release_packaging_tests PRIVATE jam2_update)
+endif()
 add_dependencies(jam2_release_packaging_tests jam2)
 add_test(NAME jam2_release_packaging_units
     COMMAND $<TARGET_FILE:jam2_release_packaging_tests>
@@ -227,6 +240,47 @@ if(WIN32)
 endif()
 
 if(APPLE)
+    add_executable(jam2_release_publication_tests EXCLUDE_FROM_ALL unit/build/ReleasePublicationTests.cpp)
+    jam2_configure_test_target(jam2_release_publication_tests)
+    target_link_libraries(jam2_release_publication_tests PRIVATE Qt6::Core)
+    add_test(NAME jam2_release_publication_units COMMAND $<TARGET_FILE:jam2_release_publication_tests>
+        "${CMAKE_COMMAND}" "${CMAKE_SOURCE_DIR}/tools/release/PublishRelease.cmake" "${CMAKE_BINARY_DIR}/test-artifacts")
+    set_tests_properties(jam2_release_publication_units PROPERTIES LABELS "unit;build;release" TIMEOUT 60)
+
+    add_executable(jam2_mac_installer_package_tests EXCLUDE_FROM_ALL unit/updater/MacInstallerPackageTests.cpp)
+    jam2_configure_test_target(jam2_mac_installer_package_tests)
+    target_link_libraries(jam2_mac_installer_package_tests PRIVATE jam2_update)
+    add_dependencies(jam2_mac_installer_package_tests jam2)
+    add_test(NAME jam2_mac_installer_package_units COMMAND $<TARGET_FILE:jam2_mac_installer_package_tests>
+        "${CMAKE_BINARY_DIR}/test-artifacts" "${JAM2_RELEASE_DIR}")
+    set_tests_properties(jam2_mac_installer_package_units PROPERTIES LABELS "unit;updater;build" TIMEOUT 60)
+
+    add_executable(jam2_mac_update_prerequisite_tests EXCLUDE_FROM_ALL
+        unit/build/MacUpdatePrerequisiteTests.cpp)
+    jam2_configure_test_target(jam2_mac_update_prerequisite_tests)
+    target_link_libraries(jam2_mac_update_prerequisite_tests PRIVATE Qt6::Core)
+    add_test(NAME jam2_mac_update_prerequisite_units
+        COMMAND $<TARGET_FILE:jam2_mac_update_prerequisite_tests>
+            "${CMAKE_SOURCE_DIR}/update.sh" "${CMAKE_BINARY_DIR}/test-artifacts")
+    set_tests_properties(jam2_mac_update_prerequisite_units PROPERTIES
+        LABELS "unit;build;updater" TIMEOUT 60)
+
+    add_executable(jam2_mac_qt_tls_probe EXCLUDE_FROM_ALL
+        "${CMAKE_SOURCE_DIR}/tools/macos/QtTlsProbe.cpp")
+    jam2_configure_test_target(jam2_mac_qt_tls_probe)
+    target_link_libraries(jam2_mac_qt_tls_probe PRIVATE Qt6::Core Qt6::Network)
+    get_target_property(jam2_qmake Qt6::qmake IMPORTED_LOCATION)
+    execute_process(COMMAND "${jam2_qmake}" -query QT_INSTALL_PLUGINS
+        OUTPUT_VARIABLE jam2_qt_plugins OUTPUT_STRIP_TRAILING_WHITESPACE
+        COMMAND_ERROR_IS_FATAL ANY)
+    add_test(NAME jam2_mac_qt_tls_runtime_units
+        COMMAND $<TARGET_FILE:jam2_mac_qt_tls_probe> "${jam2_qt_plugins}")
+    add_test(NAME jam2_mac_qt_tls_missing_units
+        COMMAND $<TARGET_FILE:jam2_mac_qt_tls_probe> "${CMAKE_CURRENT_BINARY_DIR}/missing-tls-plugins")
+    set_tests_properties(jam2_mac_qt_tls_runtime_units jam2_mac_qt_tls_missing_units PROPERTIES
+        LABELS "unit;build;updater" TIMEOUT 15)
+    set_tests_properties(jam2_mac_qt_tls_missing_units PROPERTIES WILL_FAIL TRUE)
+
     add_executable(jam2_mac_release_signing_tests EXCLUDE_FROM_ALL
         unit/build/MacReleaseSigningTests.cpp)
     jam2_configure_test_target(jam2_mac_release_signing_tests)
@@ -1981,6 +2035,7 @@ endforeach()
 add_custom_target(jam2_tests_unit
     DEPENDS
         jam2_release_build_configuration_tests
+        jam2_application_paths_tests
         jam2_release_packaging_tests
         jam2_updater_tests
         jam2_updater_restart_tests
@@ -2032,7 +2087,8 @@ add_custom_target(jam2_tests_unit
 
 if(APPLE)
     add_dependencies(jam2_tests_unit jam2_coreaudio_recording_timing_tests
-        jam2_mac_release_architecture_tests jam2_mac_release_signing_tests)
+        jam2_mac_release_architecture_tests jam2_mac_release_signing_tests
+        jam2_mac_update_prerequisite_tests jam2_mac_qt_tls_probe jam2_mac_installer_package_tests jam2_release_publication_tests)
 endif()
 
 add_custom_target(jam2_tests_plugin

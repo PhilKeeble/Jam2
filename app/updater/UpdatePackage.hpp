@@ -38,6 +38,7 @@ using Progress = std::function<void(const QString&, int)>;
 
 QString platform();
 QString assetName();
+QString downloadRelativePath();
 QString helperRelativePath();
 QString executableRelativePath();
 bool validVersion(const QString& version);

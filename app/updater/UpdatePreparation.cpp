@@ -1,6 +1,10 @@
 #include "UpdatePreparation.hpp"
 #include "UpdateLauncher.hpp"
 #include "UpdaterPlatform.hpp"
+#ifdef Q_OS_MACOS
+#include "UpdaterMacApplication.hpp"
+#endif
+#include <QDebug>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -13,11 +17,14 @@
 #include <algorithm>
 
 namespace jam2::update {
-Preparation::Preparation(QString root, QObject* parent) : QObject(parent), root_(std::move(root))
+Preparation::Preparation(QString root, QObject* parent, QString installationRoot, std::function<bool()> installerRunning)
+    : QObject(parent), root_(std::move(root)), installationRoot_(std::move(installationRoot)),
+      installerRunning_(std::move(installerRunning))
 {
     connect(&process_, &QProcess::started, this, [this] {
-        if (statusChanged) statusChanged({PreparationPhase::Downloading,
-            QStringLiteral("Checking the approved release and starting the download..."), -1});
+        if (statusChanged) statusChanged({staged_ ? PreparationPhase::Unpacking : PreparationPhase::Downloading,
+            staged_ ? QStringLiteral("Verifying the previously downloaded installer...")
+                    : QStringLiteral("Checking the approved release and starting the download..."), -1});
     });
     connect(&process_, &QProcess::readyReadStandardOutput, this, &Preparation::consumeOutput);
     connect(&process_, &QProcess::readyReadStandardError, this, [this] {
@@ -41,7 +48,11 @@ Preparation::Preparation(QString root, QObject* parent) : QObject(parent), root_
             const auto object = QJsonDocument::fromJson(marker.readAll()).object();
             if (object.value(QStringLiteral("schema")).toInt() != 1 ||
                 object.value(QStringLiteral("version")).toString() != metadata_.version ||
+#ifdef Q_OS_MACOS
+                object.value(QStringLiteral("installer_sha256")).toString().toLatin1() != metadata_.sha256)
+#else
                 object.value(QStringLiteral("manifest_sha256")).toString().size() != 64)
+#endif
                 throw std::runtime_error("The prepared update does not match the requested version.");
             end({});
         } catch (const std::exception& error) { end(QString::fromUtf8(error.what())); }
@@ -55,21 +66,34 @@ Preparation::~Preparation()
     process_.disconnect(this);
     if (process_.state() != QProcess::NotRunning) { process_.kill(); process_.waitForFinished(3000); }
     if (wasActive) {
-        try {
-            QLockFile lock(confinedPath(root_, QStringLiteral("temp/updater.lock"), true));
-            if (lock.tryLock()) {
-                for (const auto& relative : {QStringLiteral("update"), QStringLiteral("temp/updater")}) {
-                    const auto path = confinedPath(root_, relative);
-                    if (QFileInfo(path).exists()) QDir(path).removeRecursively();
-                }
-            }
-        } catch (...) {}
+        try { (void)cleanupFiles(); }
+        catch (const std::exception& error) { qWarning() << "Updater shutdown cleanup:" << error.what(); }
+        catch (...) { qWarning() << "Unexpected updater shutdown cleanup failure"; }
     }
 }
 bool Preparation::active() const { return worker_ || process_.state() != QProcess::NotRunning; }
+
+QString Preparation::cleanupFiles()
+{
+    QLockFile lock(confinedPath(root_, QStringLiteral("temp/updater.lock"), true));
+    if (!lock.tryLock()) return QStringLiteral("Another updater is still using the temporary files; they were preserved.");
+    bool retainPackage = false;
+#ifdef Q_OS_MACOS
+    retainPackage = QFileInfo::exists(confinedPath(root_, downloadRelativePath())) &&
+        (installerRunning_ ? installerRunning_() : macInstallerRunning());
+#endif
+    for (const auto& relative : {QStringLiteral("update"), QStringLiteral("temp/updater")}) {
+        if (retainPackage && relative == QStringLiteral("update")) continue;
+        const auto path = confinedPath(root_, relative);
+        if (QFileInfo(path).exists() && !QDir(path).removeRecursively())
+            throw std::runtime_error(QStringLiteral("Could not remove temporary updater files: %1").arg(path).toStdString());
+    }
+    return retainPackage ? QStringLiteral("Apple's Installer is still open; its package was preserved. Quit Installer to discard it.") : QString{};
+}
 void Preparation::start(const Metadata& metadata, const QByteArray& encoded, bool staged)
 {
     if (active()) return;
+    staged_ = staged;
     metadata_ = metadata; output_.clear(); errors_.clear(); ending_ = false; cancelled_.store(false);
     if (statusChanged) statusChanged({PreparationPhase::Staging, QStringLiteral("Preparing the update helper..."), -1});
     worker_.reset(QThread::create([this, encoded, staged] {
@@ -78,7 +102,7 @@ void Preparation::start(const Metadata& metadata, const QByteArray& encoded, boo
             QLockFile lock(confinedPath(root_, QStringLiteral("temp/updater.lock"), true));
             if (!lock.tryLock()) throw std::runtime_error("An updater is already running for this installation.");
             if (!cancelled_.load()) {
-                helper = prepareHelper(root_);
+                helper = prepareHelper(root_, installationRoot_);
                 QSaveFile file(confinedPath(root_, QStringLiteral("temp/updater/approved.json")));
                 if (!file.open(QIODevice::WriteOnly) || file.write(encoded) != encoded.size() || !file.commit())
                     throw std::runtime_error("Could not save the approved release metadata.");
@@ -91,7 +115,7 @@ void Preparation::start(const Metadata& metadata, const QByteArray& encoded, boo
             if (!error.isEmpty()) { end(error); return; }
             configureHelperProcess(process_);
             process_.setProgram(helper);
-            process_.setArguments(helperArguments({root_, metadata_.version, 0, false, staged, true}));
+            process_.setArguments(helperArguments({root_, metadata_.version, 0, false, staged, true, installationRoot_, {}}));
             process_.setWorkingDirectory(root_);
             process_.start();
         }, Qt::QueuedConnection);
@@ -127,17 +151,12 @@ void Preparation::cleanupCancelled()
 {
     if (worker_) return;
     worker_.reset(QThread::create([this] {
-        try {
-            QLockFile lock(confinedPath(root_, QStringLiteral("temp/updater.lock"), true));
-            if (lock.tryLock()) {
-                for (const auto& relative : {QStringLiteral("update"), QStringLiteral("temp/updater")}) {
-                    const auto path = confinedPath(root_, relative);
-                    if (QFileInfo(path).exists()) QDir(path).removeRecursively();
-                }
-            }
-        } catch (...) {}
-        QMetaObject::invokeMethod(this, [this] {
-            worker_->wait(); worker_.reset(); end({});
+        QString diagnostic;
+        try { diagnostic = cleanupFiles(); }
+        catch (const std::exception& error) { diagnostic = QString::fromUtf8(error.what()); }
+        catch (...) { diagnostic = QStringLiteral("Unexpected failure cleaning temporary updater files."); }
+        QMetaObject::invokeMethod(this, [this, diagnostic] {
+            worker_->wait(); worker_.reset(); end(diagnostic);
         }, Qt::QueuedConnection);
     }));
     worker_->start(QThread::LowPriority);

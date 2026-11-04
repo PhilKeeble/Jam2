@@ -63,7 +63,7 @@ JamTasterDialog::JamTasterDialog(
     layout->addWidget(introduction);
 
     modelDownload_ = std::make_unique<ModelDownloadService>(
-        service_.installationRoot(), service_.modelsPath(), nullptr, modelNetwork);
+        service_.dataRoot(), service_.modelsPath(), nullptr, modelNetwork, service_.modelManifestPath());
     auto* modelsBox = new QGroupBox(QStringLiteral("JamTaster models"), content);
     modelsPanel_ = modelsBox;
     auto* modelsLayout = new QVBoxLayout(modelsBox);
@@ -91,7 +91,7 @@ JamTasterDialog::JamTasterDialog(
     connect(downloadModelsButton_, &QPushButton::clicked, this, [this] {
         const auto answer = QMessageBox::question(this, QStringLiteral("Download JamTaster models"),
             QStringLiteral("Download %1 MB of analysis models now?\n\n"
-                "Models are saved inside this Jam2 folder. Your jam can keep playing. "
+                "Models are saved in your Jam2 data folder. Your jam can keep playing. "
                 "Closing JamTaster cancels the download.")
                 .arg(static_cast<double>(modelDownload_->downloadBytes()) / 1'000'000.0, 0, 'f', 1),
             QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Yes);
@@ -325,7 +325,7 @@ void JamTasterDialog::checkModels()
     }
     // Existing injected development/test bundles can supply their own models
     // without a release manifest. Missing models always require pinned metadata.
-    if (!QFileInfo(QDir(service_.installationRoot()).filePath(QStringLiteral("models.json"))).exists() &&
+    if (!QFileInfo(service_.modelManifestPath()).exists() &&
         service_.isAvailable()) return;
     modelsReady_ = false;
     modelDownload_->check();

@@ -7,6 +7,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QJsonObject>
+#include <QStandardPaths>
 #include <QThread>
 
 #include <array>
@@ -64,6 +65,18 @@ int main(int argc, char** argv)
 {
     try {
         QCoreApplication application(argc, argv);
+#ifdef Q_OS_MACOS
+        JamTasterService defaults;
+        const QString support = QDir(QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation))
+            .filePath(QStringLiteral("Jam2"));
+        require(defaults.dataRoot() == support && defaults.modelsPath() ==
+                QDir(support).filePath(QStringLiteral("components/jamtaster/models")),
+            "default models use per-user Application Support");
+        require(QFileInfo(defaults.modelManifestPath()).isAbsolute() &&
+                !defaults.modelManifestPath().startsWith(support + QLatin1Char('/')) &&
+                !defaults.workerPath().startsWith(support + QLatin1Char('/')),
+            "model manifest and worker remain immutable application resources");
+#endif
         if (argc != 2) {
             throw std::runtime_error(
                 "usage: jam2_jamtaster_service_tests <test-worker>");

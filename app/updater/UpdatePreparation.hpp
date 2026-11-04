@@ -14,7 +14,8 @@ struct PreparationStatus { PreparationPhase phase; QString message; int percent 
 // actually exits, so a ready update can wait indefinitely without a process.
 class Preparation : public QObject {
 public:
-    explicit Preparation(QString root, QObject* parent = nullptr);
+    explicit Preparation(QString root, QObject* parent = nullptr, QString installationRoot = {},
+        std::function<bool()> installerRunning = {});
     ~Preparation() override;
     virtual void start(const Metadata& metadata, const QByteArray& encoded, bool staged = false);
     virtual void cancel();
@@ -25,7 +26,10 @@ private:
     void consumeOutput();
     void end(const QString& error);
     void cleanupCancelled();
+    QString cleanupFiles();
     QString root_;
+    QString installationRoot_;
+    std::function<bool()> installerRunning_;
     Metadata metadata_;
     QProcess process_;
     QByteArray output_;
@@ -33,5 +37,6 @@ private:
     std::unique_ptr<QThread> worker_;
     std::atomic_bool cancelled_{false};
     bool ending_ = false;
+    bool staged_ = false;
 };
 }

@@ -6266,8 +6266,8 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
             model.hasOnlyPristineSection());
     }
     {
-        const QDir tracks(appReleaseFolderPath(QStringLiteral("tracks")));
-        const QDir songs(appReleaseFolderPath(QStringLiteral("songs")));
+        const QDir tracks(appDataFolderPath(QStringLiteral("tracks")));
+        const QDir songs(appDataFolderPath(QStringLiteral("songs")));
         const QStringList tracksBefore = tracks.entryList(
             QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name);
         const QStringList songsBefore = songs.entryList(

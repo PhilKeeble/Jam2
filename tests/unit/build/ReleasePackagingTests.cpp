@@ -1,6 +1,7 @@
 #include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QDir>
+#include <QDirIterator>
 #include <QFile>
 #include <QFileInfo>
 #include <QJsonArray>
@@ -8,6 +9,9 @@
 #include <QJsonObject>
 #include <QProcess>
 #include <QTemporaryDir>
+#ifdef Q_OS_MACOS
+#include "UpdateLauncher.hpp"
+#endif
 
 #include <iostream>
 #include <stdexcept>
@@ -71,6 +75,9 @@ int main(int argc, char** argv)
             QStringLiteral("-DJAM2_INCLUDE_MODELS=OFF"), QStringLiteral("-P"), script});
 #ifdef Q_OS_MACOS
         const QDir bundle(QFileInfo(executable).absolutePath() + QStringLiteral("/../.."));
+        const QString developmentMarker = QDir(QFileInfo(bundle.absolutePath()).absolutePath())
+            .filePath(QStringLiteral(".jam2-development-data"));
+        require(QFileInfo(developmentMarker).isFile(), "source builds retain their local-data marker after packaging");
         // Verify the private helpers independently as well as the enclosing
         // bundle: macdeployqt's own signing can omit Contents/Helpers.
         for (const QString& helper : {QStringLiteral("jamtaster-worker"), QStringLiteral("jam2-plugin-worker"), QStringLiteral("jam2-updater")}) {
@@ -83,7 +90,7 @@ int main(int argc, char** argv)
 #ifdef Q_OS_WIN
         const QString name = QStringLiteral("Jam2-windows.zip");
 #else
-        const QString name = QStringLiteral("Jam2-macos.zip");
+        const QString name = QStringLiteral("Jam2-macos.pkg");
 #endif
         const QString archive = QDir(output).filePath(name);
         const auto metadata = QJsonDocument::fromJson(read(archive + QStringLiteral(".json"))).object();
@@ -98,24 +105,52 @@ int main(int argc, char** argv)
                 metadata.value(QStringLiteral("sha256")).toString().toLatin1() == hash.result().toHex(),
             "archive metadata matches the finished ZIP bytes");
         zip.close();
-        const auto entries = run(cmake, {QStringLiteral("-E"), QStringLiteral("tar"),
+        QByteArrayList entries;
+        QString modelsManifest;
+#ifdef Q_OS_MACOS
+        const QString expanded = temporary.filePath(QStringLiteral("expanded"));
+        run(QStringLiteral("/usr/sbin/pkgutil"), {QStringLiteral("--expand-full"), archive, expanded});
+        const QString payload = QDir(expanded).filePath(QStringLiteral("Jam2.component.pkg/Payload"));
+        QDirIterator files(payload, QDir::Files | QDir::Dirs | QDir::Hidden | QDir::System | QDir::NoDotAndDotDot,
+            QDirIterator::Subdirectories);
+        while (files.hasNext()) entries << QDir(payload).relativeFilePath(files.next()).toUtf8();
+        require(entries.contains("Applications/Jam2.app/Contents/Helpers/jam2-updater") &&
+                entries.contains("Applications/Jam2.app/Contents/Resources/licenses/miniz-LICENSE.txt"),
+            "PKG installs the self-contained app and its notices into Applications");
+        for (const QByteArray& entry : entries)
+            require(!entry.contains(".jam2-development-data"), "PKG never enables source-build local data");
+        modelsManifest = QDir(payload).filePath(QStringLiteral("Applications/Jam2.app/Contents/Resources/models.json"));
+        require(QFileInfo::exists(modelsManifest), "PKG keeps the model requirement manifest inside the app");
+        require(entries.contains("Applications/Jam2.app/Contents/Frameworks/QtCore.framework/Versions/A/QtCore") &&
+                entries.contains("Applications/Jam2.app/Contents/Frameworks/QtNetwork.framework/Versions/A/QtNetwork") &&
+                (entries.contains("Applications/Jam2.app/Contents/PlugIns/tls/libqsecuretransportbackend.dylib") ||
+                 entries.contains("Applications/Jam2.app/Contents/PlugIns/tls/libqopensslbackend.dylib")),
+            "PKG carries the updater's Qt frameworks and a socket TLS backend");
+        const QString runtime = temporary.filePath(QStringLiteral("writable runtime"));
+        require(QDir().mkpath(runtime), "create independent updater staging root");
+        const QString helper = jam2::update::prepareHelper(runtime, QFileInfo(bundle.absolutePath()).absolutePath());
+        const auto helperOutput = run(helper, {QStringLiteral("--root"), runtime, QStringLiteral("--version"), version,
+            QStringLiteral("--install-staged"), QStringLiteral("--prepare-only")}, false);
+        require(helperOutput.contains("\"tls_available\":true"), "deployed PKG runtime loads TLS from its temporary helper layout");
+        const auto distribution = read(QDir(expanded).filePath(QStringLiteral("Distribution")));
+        require(distribution.contains("must-close") && distribution.contains("com.jam2.app"),
+            "Installer requires running Jam2 instances to close");
+#else
+        entries = run(cmake, {QStringLiteral("-E"), QStringLiteral("tar"),
             QStringLiteral("tf"), archive}).split('\n');
         require(entries.contains("version.txt") && entries.contains("package-manifest.json") &&
                 entries.contains("models.json"), "application ZIP carries its version and manifests");
         require(entries.contains("licenses/miniz-LICENSE.txt"), "release package includes the ZIP reader's license");
-#ifdef Q_OS_WIN
         require(entries.contains("components/updater/jam2-updater.exe") &&
                 entries.contains("tls/qschannelbackend.dll"), "Windows release carries updater and native TLS backend");
-#else
-        require(entries.contains("Jam2.app/Contents/Helpers/jam2-updater"), "Mac release carries the updater inside the app bundle");
-#endif
         const QString extracted = temporary.filePath(QStringLiteral("extracted"));
         require(QDir().mkpath(extracted), "could not create manifest inspection directory");
         run(cmake, {QStringLiteral("-E"), QStringLiteral("chdir"), extracted, cmake,
             QStringLiteral("-E"), QStringLiteral("tar"), QStringLiteral("xf"), archive,
             QStringLiteral("models.json")});
-        const auto models = QJsonDocument::fromJson(read(QDir(extracted).filePath(
-            QStringLiteral("models.json")))).object();
+        modelsManifest = QDir(extracted).filePath(QStringLiteral("models.json"));
+#endif
+        const auto models = QJsonDocument::fromJson(read(modelsManifest)).object();
         require(models.value(QStringLiteral("archive_root")).toString() == QStringLiteral("models/"),
             "application manifest pins the standalone models archive layout");
         for (const QByteArray& entry : entries) {

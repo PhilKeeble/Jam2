@@ -29,7 +29,7 @@ UpdateDialog::UpdateDialog(jam2::update::ApplicationUpdateService& service,
     }
     progress_ = new QProgressBar(this); progress_->setObjectName(QStringLiteral("Jam2UpdateProgress")); layout->addWidget(progress_);
     auto* actions = new QDialogButtonBox(this);
-    const auto button = [this, actions](const QString& text, const QString& name, QDialogButtonBox::ButtonRole role) {
+    const auto button = [actions](const QString& text, const QString& name, QDialogButtonBox::ButtonRole role) {
         auto* result = actions->addButton(text, role); result->setObjectName(name); result->setAutoDefault(false);
         jam2::gui::registerGuiControl(*result,QStringLiteral("application.update.")+name,
             QStringLiteral("application.update"),jam2::gui::GuiControlAvailability::StateGated);
@@ -41,6 +41,10 @@ UpdateDialog::UpdateDialog(jam2::update::ApplicationUpdateService& service,
     cancel_ = button(QStringLiteral("Cancel update"), QStringLiteral("Jam2CancelUpdate"), QDialogButtonBox::ActionRole);
     retry_ = button(QStringLiteral("Check again"), QStringLiteral("Jam2RetryUpdate"), QDialogButtonBox::ActionRole);
     close_ = button(QStringLiteral("Close"), QStringLiteral("Jam2CloseUpdate"), QDialogButtonBox::RejectRole);
+#ifdef Q_OS_MACOS
+    restart_->setText(QStringLiteral("Quit and Open Installer"));
+    later_->setText(QStringLiteral("Later"));
+#endif
     layout->addWidget(actions);
     connect(download_, &QPushButton::clicked, this, [this] { service_.download(); });
     connect(cancel_, &QPushButton::clicked, this, [this] { service_.cancel(); });
@@ -71,15 +75,21 @@ void UpdateDialog::refresh()
     const bool ready = state == State::Ready;
     const bool restarting = state == State::Restarting;
     if (ready || restarting) {
+#ifdef Q_OS_MACOS
+        explanation_->setText(QStringLiteral("Apple's Installer will ask you to approve installation, show progress and confirm "
+            "when it is finished. Jam2 stays closed. Reopen it from Applications afterward. "
+            "Later keeps your jam running; cancelling a save prompt also leaves Jam2 open."));
+#else
         explanation_->setText(QStringLiteral(
             "Restart and install stops the jam, updates Jam2 and reopens it. "
             "Install on exit updates when you close Jam2, without reopening it. "
             "Cancelling a save prompt leaves the update ready for later."));
+#endif
     } else if (busy) {
         explanation_->setText(QStringLiteral("Your jam can keep playing. Close this window to continue in the background, or cancel the update. Closing Jam2 during download cancels it."));
     } else if (state == State::Available) {
         explanation_->setText(QStringLiteral("Installed version: %1. Downloading will not close Jam2. You choose when to install after verification.").arg(status.installedVersion));
-    } else explanation_->setText(QStringLiteral("Update checks and downloads run in the background. Settings, models and user content stay in your Jam2 folder."));
+    } else explanation_->setText(QStringLiteral("Update checks and downloads run in the background. Settings, models and user content stay in your Jam2 data folder."));
     progress_->setVisible(busy || ready || restarting || state == State::Checking || state == State::Cancelling);
     progress_->setRange(0, status.percent < 0 ? 0 : 100);
     if (status.percent >= 0) progress_->setValue(status.percent);

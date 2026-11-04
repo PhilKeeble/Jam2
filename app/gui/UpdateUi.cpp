@@ -46,7 +46,13 @@ void UpdateUi::refresh()
     else if (status.state == State::Checking) text = QStringLiteral("Checking updates");
     else if (status.state == State::Preparing || status.state == State::Downloading || status.state == State::Unpacking)
         text = status.percent < 0 ? QStringLiteral("Updating...") : QStringLiteral("Update %1%").arg(status.percent);
-    else if (status.state == State::Restarting) text = QStringLiteral("Restarting...");
+    else if (status.state == State::Restarting) {
+#ifdef Q_OS_MACOS
+        text = QStringLiteral("Opening installer...");
+#else
+        text = QStringLiteral("Restarting...");
+#endif
+    }
     if (presentationChanged) presentationChanged(text, status.message);
     const bool preparationFailed = status.state == State::Failed &&
         (lastState_ == State::Preparing || lastState_ == State::Downloading || lastState_ == State::Unpacking);

@@ -1,4 +1,5 @@
 #include <QCoreApplication>
+#include <QDir>
 #include <QFile>
 #include <QProcess>
 #include <QTemporaryDir>
@@ -58,6 +59,25 @@ int main(int argc, char** argv) {
         }
         require(!cacheValue(cache, QStringLiteral("CMAKE_EXE_LINKER_FLAGS_RELEASE")).contains(QStringLiteral("/PROFILE")),
             "Release linking does not enable native coverage instrumentation");
+#ifdef Q_OS_MACOS
+        QTemporaryDir markerFixture;
+        require(markerFixture.isValid(), "development marker rejection has a private fixture");
+        const QString releaseRoot = markerFixture.filePath(QStringLiteral("release"));
+        require(QDir().mkpath(releaseRoot), "create marker test release directory");
+        QFile markerTarget(markerFixture.filePath(QStringLiteral("untouched")));
+        require(markerTarget.open(QIODevice::WriteOnly) && markerTarget.write("preserve") == 8,
+            "create marker symlink target"); markerTarget.close();
+        require(QFile::link(markerTarget.fileName(), QDir(releaseRoot).filePath(QStringLiteral(".jam2-development-data"))),
+            "create invalid development marker symlink");
+        const auto invalidMarker = run(cmake, {QStringLiteral("-S"), source, QStringLiteral("-B"),
+            markerFixture.filePath(QStringLiteral("build")), QStringLiteral("-G"), generator,
+            QStringLiteral("-DCMAKE_BUILD_TYPE=Release"), QStringLiteral("-DBUILD_TESTING=OFF"),
+            QStringLiteral("-DJAM2_RELEASE_DIR=") + releaseRoot}, source);
+        require(invalidMarker.exitCode != 0 && invalidMarker.output.contains(QStringLiteral("Development data marker must not be a symlink")),
+            "configuration refuses a symlink rather than overwriting an unrelated file");
+        require(markerTarget.open(QIODevice::ReadOnly) && markerTarget.readAll() == "preserve",
+            "invalid marker configuration preserves the symlink target");
+#endif
         if (configurations.isEmpty()) {
             QTemporaryDir rejectedBuild;
             require(rejectedBuild.isValid(), "rejected configuration has a private build directory");

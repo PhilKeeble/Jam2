@@ -41,6 +41,7 @@ target_compile_features(jam2_update PUBLIC cxx_std_20)
 target_include_directories(jam2_update PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/updater")
 target_link_libraries(jam2_update PUBLIC Qt6::Core Qt6::Network PRIVATE jam2_miniz)
 if(APPLE)
+    target_sources(jam2_update PRIVATE updater/MacInstallerPackage.cpp updater/MacInstallerPackage.hpp)
     target_sources(jam2_update PRIVATE updater/UpdaterMacApplication.mm updater/UpdaterMacApplication.hpp)
     set_source_files_properties(updater/UpdaterMacApplication.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
     set_target_properties(jam2_update PROPERTIES OBJCXX_STANDARD 20)
@@ -838,6 +839,12 @@ if(WIN32)
         VERBATIM)
 elseif(APPLE)
     add_custom_command(TARGET jam2 POST_BUILD
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "${JAM2_RELEASE_DIR}/models.json"
+            "$<TARGET_BUNDLE_DIR:jam2>/Contents/Resources/models.json"
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "${CMAKE_SOURCE_DIR}/LICENSE" "${CMAKE_SOURCE_DIR}/THIRD_PARTY_NOTICES.md"
+            "$<TARGET_BUNDLE_DIR:jam2>/Contents/Resources"
         COMMAND "${CMAKE_COMMAND}" -E remove_directory
             "$<TARGET_BUNDLE_DIR:jam2>/Contents/Resources/jamtaster/models"
         COMMAND "${CMAKE_COMMAND}" -E make_directory

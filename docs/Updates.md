@@ -2,8 +2,9 @@
 
 Jam2 checks the website for a newer stable version, gets that version's package
 metadata from GitHub, and offers an update. Downloading and verification happen
-asynchronously while the jam continues. A temporary updater helper replaces the
-application only after Jam2 closes.
+asynchronously while the jam continues. Windows uses a temporary ZIP updater
+after Jam2 closes; macOS opens Apple’s Installer for the verified PKG after
+the user chooses Quit and Open Installer.
 
 See [RELEASE.md](../RELEASE.md) for release preparation and publishing commands,
 and [Gui.md](Gui.md#application-updates) for the user-facing controls.
@@ -14,9 +15,9 @@ and [Gui.md](Gui.md#application-updates) for the user-facing controls.
 | --- | --- |
 | Version compiled into `jam2` | The installed version used for update comparisons; also shown by `jam2 --version`. |
 | Website `/version.txt` | The newest stable version advertised to clients. |
-| Local `version.txt` | A readable version marker and a check on downloaded packages. It does not determine the running application's version. |
-| GitHub `.zip.json` | The selected archive's URL, size, hash and model requirement. |
-| Packaged `package-manifest.json` | Platform, architectures, version and the files owned by the application package. |
+| Windows local `version.txt` | A readable version marker and a check on downloaded packages. It does not determine the running application's version. |
+| GitHub `.zip.json` (Windows) / `.pkg.json` (macOS) | The selected archive's URL, size, hash and model requirement. |
+| Windows packaged `package-manifest.json` | Platform, architectures, version and the files owned by the application package. |
 | Packaged `models.json` | The model release and model hashes required by this build. |
 
 CMake generates `BuildVersion.hpp` from its project version. A release script's
@@ -37,11 +38,11 @@ polling during the jam. The check performs:
 
    ```text
    https://github.com/PhilKeeble/Jam2/releases/download/v0.1.2/Jam2-windows.zip.json
-   https://github.com/PhilKeeble/Jam2/releases/download/v0.1.2/Jam2-macos.zip.json
+   https://github.com/PhilKeeble/Jam2/releases/download/v0.1.2/Jam2-macos.pkg.json
    ```
 
 5. Validate the metadata and show the version and download size for approval.
-   The ZIP is not downloaded during the check.
+   The package is not downloaded during the check.
 
 Requests bypass the client cache and use HTTPS with redirects that cannot
 downgrade to HTTP. Startup check failures stay quiet; opening **Updates** shows
@@ -65,8 +66,11 @@ The service GETs:
 https://api.github.com/repos/PhilKeeble/Jam2/releases/latest
 ```
 
-It checks the published release's tag and requires both `Jam2-windows.zip` and
-`Jam2-macos.zip` to be uploaded, nonempty assets. It accepts a numeric version
+**Transition requirement:** the separate website repository must change its
+Mac asset check from `Jam2-macos.zip` to `Jam2-macos.pkg` and deploy that change.
+The Mac download link also needs the PKG name. That repository is not included
+in this checkout. After deployment, the job should check the release tag and require both `Jam2-windows.zip` and
+`Jam2-macos.pkg` to be uploaded, nonempty assets. It accepts a numeric version
 tag with an optional `v`/`V` prefix and writes the bare version atomically to
 `/var/www/jam2gether/version.txt`, served as `/version.txt`:
 
@@ -76,7 +80,7 @@ tag with an optional `v`/`V` prefix and writes the bare version atomically to
 
 This server check downloads release metadata only. It does not download the
 ZIPs or inspect their contents, and currently does not check the adjacent
-`.zip.json` files. The publishing scripts perform the stronger readiness checks
+`.zip.json` / `.pkg.json` files. The publishing scripts perform the stronger readiness checks
 described below. Invalid/incomplete releases and API failures preserve the
 previous advertised version. Before the first valid release, the endpoint may
 return 404.
@@ -91,7 +95,7 @@ sudo cat /var/lib/jam2gether/version-sync-status.json
 ```
 
 Website download buttons separately point at GitHub's
-`releases/latest/download/Jam2-windows.zip` and `Jam2-macos.zip`. Jam2's updater
+`releases/latest/download/Jam2-windows.zip` and `Jam2-macos.pkg`. Jam2's updater
 uses version-specific URLs so selecting an update is independent of later
 changes to GitHub Latest. There is no website `release.json` endpoint.
 
@@ -105,8 +109,16 @@ example:
 ```
 
 ```sh
-bash ./build-release.sh --version 0.1.2 --publish
+QT_DIR="$HOME/Qt/6.x/macos" bash ./build-release.sh --version 0.1.2 \
+  --sign-identity "Developer ID Application: YOUR_NAME (YOUR_TEAM_ID)" \
+  --installer-sign-identity "Developer ID Installer: YOUR_NAME (YOUR_TEAM_ID)" \
+  --notarize-profile "jam2-notary" --include-models --publish
 ```
+
+Use a real universal Qt SDK prefix and the exact Keychain identity names.
+The [configured release Mac commands](../RELEASE.md#macos-build-and-publish-commands-on-the-configured-release-mac)
+provide the values validated on this machine. The same existing `jam2-notary`
+profile can notarize both the app and PKG.
 
 The application release tag must be `v0.1.2` for these clients. Its assets are:
 
@@ -114,12 +126,12 @@ The application release tag must be `v0.1.2` for these clients. Its assets are:
 v0.1.2
   Jam2-windows.zip
   Jam2-windows.zip.json
-  Jam2-macos.zip
-  Jam2-macos.zip.json
+  Jam2-macos.pkg
+  Jam2-macos.pkg.json
 ```
 
 Windows targets x86_64. The macOS package targets both arm64 and x86_64.
-Scripts write the ZIPs and metadata to `dist/`; without `--publish`, they remain
+Scripts write the ZIP/PKG and metadata to `dist/`; without `--publish`, they remain
 local artifacts. Publishing uses GitHub CLI authentication on the build machine.
 
 Each machine uploads its OS pair with `--clobber`, leaving the other OS assets
@@ -138,7 +150,7 @@ failed upload before advertising it: replacement removes the old asset first.
 
 ### Archive metadata and contents
 
-An application `.zip.json` has this shape. The sizes and hashes below are
+Application `.zip.json` / `.pkg.json` metadata has this shape. The sizes and hashes below are
 illustrative; the scripts calculate the real values:
 
 ```json
@@ -158,30 +170,24 @@ illustrative; the scripts calculate the real values:
 
 Jam2 validates the schema, stable channel, version, tag, fixed OS filename and
 exact expected GitHub download URL, plus the size/hash fields. The model
-manifest hash pins the `models.json` bytes carried inside the application ZIP.
+manifest hash pins `models.json` in the Windows ZIP root or the Mac app’s
+`Contents/Resources/` directory.
 Do not hand-edit generated JSON or rezip an archive without regenerating its
 metadata.
 
-Each application ZIP opens directly into the portable installation root,
-without an extra enclosing directory. It contains:
+The Windows ZIP opens directly into its portable installation root and contains
+`jam2.exe`, dependencies, private workers, notices, `version.txt`,
+`package-manifest.json` and `models.json`. Its manifest declares owned files,
+version, platform, architectures and hashes; extraction validates paths, links,
+limits and hashes before installation. Weights and user data are excluded.
 
-- `version.txt`, `package-manifest.json` and `models.json` at its root.
-- Windows: `jam2.exe`, Qt/runtime DLLs, platform/TLS plugins, component workers
-  and `components/updater/jam2-updater.exe`.
-- macOS: `Jam2.app`, including dependencies, workers and
-  `Contents/Helpers/jam2-updater` inside the app bundle.
-- The declared licenses and notices.
-
-`package-manifest.json` uses schema 1, a version, `platform` (`windows` or
-`macos`), `architectures`, `models_manifest: "models.json"` and a `files` list.
-Regular file entries have `path`, `bytes` and `sha256`; supported Mac symlinks
-record `path` and `link`. Paths are relative to the installation root. The
-manifest does not hash itself. The final ZIP's size and hash belong in its
-external `.zip.json`, not inside the ZIP.
-
-Application ZIPs exclude model weights and user data. A release without the
-helper cannot be an updater target. Users starting from a build without an
-updater must install an updater-enabled package manually once.
+The macOS PKG installs only `/Applications/Jam2.app`. It contains Qt and TLS,
+workers, ONNX Runtime, notices and `Contents/Resources/models.json` inside the
+signed app. It never installs user data or models into `/Applications`.
+The app is signed/notarized/stapled before PKG creation; the PKG receives its
+own Developer ID Installer signature, notarization and stapled ticket.
+Metadata hashes describe the final stapled PKG. The app's compiled version
+identifies the installed version.
 
 ## Models are a separate download
 
@@ -206,74 +212,87 @@ URL and per-model sizes/hashes. Opening JamTaster checks the installed models
 and offers an asynchronous download if needed, with approval, size, progress,
 cancellation and errors. Metadata comes from that pinned model release rather
 than whichever release currently has Latest. Application updates preserve the
-installed model folder; if a later app needs different models, JamTaster checks
+installed user model folder; if a later app needs different models, JamTaster checks
 and downloads them on demand. Runtime downloads use release assets, not LFS.
 
 ## Preparing and applying an update
 
-The portable root is the executable's folder on Windows, or the folder enclosing
-`Jam2.app` on macOS. Opening a JamJar workspace elsewhere does not change this
-root. Update files stay inside it:
+On Windows the writable root remains the folder containing `jam2.exe`.
+For distributed macOS apps it is `~/Library/Application Support/Jam2/`, regardless
+of where the running app lives. Source builds create `.jam2-development-data`
+beside `release/Jam2.app` and use `release/` as their writable root. The PKG
+never contains that marker or test data. App resources are read from the bundle; opening a JamJar
+elsewhere preserves that project's own directory.
 
-| Location | Contents |
+| Location under the writable root | Contents |
 | --- | --- |
-| `temp/updater/` | Temporary helper, its Qt runtime/TLS dependencies and approved metadata. |
-| `temp/updater.lock` | Lock preventing concurrent updater operations for this installation. |
-| `update/package.zip.json` | Metadata for the selected download. |
-| `update/package.zip` | Downloaded application archive. |
-| `update/package/` | Unpacked, verified replacement files. |
-| `update/prepared.json` | Marker identifying the prepared version and manifest hash. |
-| `update/status.json` / `update/result.json` | Progress and final success/error information. |
+| `settings/preferences.ini` | User preferences. |
+| `logs/`, `captures/`, `tracks/`, `songs/`, `cache/` | Runtime logs, recordings, unsaved/saved work and generated previews. |
+| `components/jamtaster/models/` | Downloaded or manually extracted model weights/sidecars/notices. |
+| `temp/jamtaster-models/` | Cancellable model ZIP staging. |
+| `temp/updater/` | Temporary helper with its own Qt/TLS runtime, approved metadata and log. |
+| `temp/updater.lock` | Concurrent update protection. |
+| `update/package.zip` / `update/package.pkg` | Windows ZIP / macOS PKG and matching `.json` metadata. |
+| `update/package/` | Windows unpacked replacement files. |
+| `update/prepared.json` | Verified package marker. |
+| `update/status.json`, `update/result.json` | Progress and outcome/handoff information. |
 
-The GUI flow has two separate helper runs:
+### macOS PKG workflow
 
-1. **Prepare while Jam2 runs.** After approval, a worker copies the installed
-   helper and its Qt dependencies into `temp/updater/`. The temporary helper
-   GETs the tagged metadata again and compares its URL, size and hashes with
-   the approved values before fetching the ZIP. A changed release requires a
-   fresh check. The helper streams the download into `update/`, checks its
-   size/SHA-256, unpacks with miniz and verifies the manifest, file hashes,
-   version, platform and architectures. Mac code signatures are also checked.
-   Unsafe paths, undeclared files and links escaping the intended root are
-   rejected. Once ready, it writes the prepared marker and exits.
-2. **Install after Jam2 closes.** A ready update defaults to installation on
-   normal exit, without reopening Jam2. **Restart and install** requests the
-   normal save/close flow and asks the helper to reopen the updated app.
-   Cancelling a save/close prompt leaves Jam2 running and the update queued for
-   a later normal exit. The installer launches from the existing temporary
-   helper copy and waits for the original Jam2 process to exit. It re-verifies
-   staged files before replacement. The wait is limited to two minutes; a
-   deferred ready update has no helper waiting in the background.
+1. The user approves the version and exact download size. The temporary helper
+   reads app/Qt/TLS files from the installed bundle and stages them only in user
+   data. It fetches the approved tagged PKG metadata again, rejecting changes
+   since approval, and streams the package into `update/`.
+2. Before marking it ready, the helper checks size/SHA-256, runs
+   `pkgutil --check-signature` requiring a Developer ID Installer signature,
+   and requires Gatekeeper's `spctl --assess --type install` acceptance.
+3. **Quit and Open Installer** runs Jam2's ordinary save/close flow. Cancellation
+   leaves Jam2 open and prepared data intact. **Later** and dismissing the dialog
+   keep the package ready without opening Installer on an unrelated normal exit.
+   On the next launch, the retained package is re-verified without redownloading it.
+4. After the original Jam2 process exits, the helper re-verifies the package and
+   opens it explicitly in Apple's Installer. Installer owns authorization,
+   progress, cancellation and its success/error screen. The PKG requires all
+   running `com.jam2.app` instances to close, installs only the app in Applications,
+   and replaces obsolete bundle files. Jam2 stays closed.
+5. Installer opening is recorded as `installer_opened`, not installation success.
+   The PKG is retained. A subsequent launch with the expected compiled version
+   confirms installation and cleans staging/helper files after Installer closes. Launching an old copy
+   explains that the user should complete Installer and open Jam2 in Applications.
 
-Windows preflights destination file locks, replaces package-owned files and
-removes obsolete files listed by the previous package manifest. macOS replaces
-the whole `Jam2.app` bundle and updates owned files beside it. The ownership
-manifest and local version marker are committed after replacement. Because the
-helper runs from `temp/updater/`, it can replace its own installed binary and Qt
-dependencies too; the next update uses the newly installed helper.
+A new download also preserves an existing PKG while Apple’s Installer is open,
+including when the package was opened manually.
 
-Qt Core/Network handles updater HTTPS and miniz handles extraction in process.
-The updater does not invoke curl, tar, PowerShell or other OS command-line tools.
-Platform code handles process checks, Windows file locks and Mac signatures.
+User settings, models and projects are outside the installer payload and survive
+updates. Installer never creates a user Library folder as root or launches Jam2
+as root. Old ZIP-only Mac updaters require one manual PKG install to transition.
 
-Settings (`settings/preferences.ini`), models (`components/jamtaster/models/`),
-tracks, songs and other user content are preserved. The implementation performs
-direct replacement without backups or rollback. Installation errors are
-reported on the next launch; if replacement was interrupted, manually extract a
-complete release to repair application files while retaining user data.
+### Windows ZIP workflow
+
+Preparation verifies the tagged archive's size/digest, manifest, file hashes,
+version, platform and architecture, then exits while Jam2 keeps playing.
+**Restart and install** or **Install on exit** launches the prepared helper only
+when Jam2 actually closes; cancelling a save prompt preserves the queued update.
+The helper re-verifies staged files, preflights locks, replaces package-owned
+files and removes obsolete owned files. The original direct replacement has no
+backups/rollback. Interrupted replacement can be repaired by extracting a full
+release while preserving user data. Only the explicit restart action reopens Jam2.
 
 ## Cancellation, cleanup and testing
 
 Closing the progress popup leaves preparation running. **Cancel update** stops
 preparation and removes its temporary files; closing Jam2 before preparation
 finishes also cancels it. Closing a ready popup defers installation; **Discard
-update** removes the queued update.
+update** removes the queued update. If Apple’s Installer is already open,
+cancellation preserves its PKG and reports that Installer must be quit before
+discarding it. Private helper files are still cleaned.
 
 There is one reusable `update/` staging folder. A new download clears stale
 staging rather than accumulating versions. The lock prevents clearing an active
-installation. After success the helper removes the staged package and ZIP; the
+installation. On Windows, after success the helper removes the staged package and ZIP; the
 next GUI launch removes the remaining result/staging files and temporary
-runtime. With **Install on exit**, that final cleanup waits until the next
+runtime. macOS retains its PKG until the expected compiled version is launched.
+With Windows **Install on exit**, that final cleanup waits until the next
 launch. Failures retain diagnostic/download files in `update/` until retry;
 startup cleanup removes the completed temporary helper runtime when possible.
 Installation logs use `temp/updater/updater.log`; download preparation reports
@@ -288,26 +307,56 @@ Common explanations for unexpected results:
 
 - **Up to date:** the server version is equal/older, the running binary was
   built with the new version already, or the nightly server refresh has not run.
-- **Missing updater:** the downloaded ZIP was built before the helper was
+- **Missing updater:** the downloaded package was built before the helper was
   included; rebuild/upload it with the current scripts.
 - **Metadata/hash mismatch:** assets were replaced during approval/download,
-  JSON does not match the ZIP, or the download is damaged. Check again after
+  JSON does not match the package, or the download is damaged. Check again after
   correcting/reuploading the release.
 - **TLS initialization failed:** required Qt TLS plugins/dependencies are
   missing. Windows needs `tls/qschannelbackend.dll` in the installed package and
-  the staged helper runtime.
+  the staged helper runtime. On macOS, source checkouts should run `update.sh`
+  with the same `QT_DIR` used to compile, or leave it unset for Homebrew Qt.
+  This checks an actual TLS backend load and installs/repairs Homebrew Qt only
+  when necessary. Distributed Mac PKGs must carry their TLS plugins in
+  `Jam2.app/Contents/PlugIns/tls`; installing developer dependencies on a
+  recipient's machine is not a replacement for a self-contained release.
 - **Cannot replace a file:** another Jam2 instance/worker still holds it, or the
   installation folder is not writable. Close it and retry.
 
-The installed local `version.txt` is currently rewritten with an LF newline
+### macOS file permissions and older data
+
+Distributed apps never write default data into the bundle or its parent. Application Support is
+created by the logged-in user, so running a downloaded app from a read-only
+translocation location does not redirect logs or workspaces there. App resources
+and workers stay in the bundle. See [Apple's App Translocation Notes](https://developer.apple.com/forums/thread/724969).
+
+Adjacent/profile preferences are copied when the new INI is absent; old default
+log/capture destinations are redirected, including stale App Translocation
+paths. Custom paths are preserved. Old recordings/projects/models remain in the
+old extraction folder; open those JamJars there or copy desired folders to the
+new data root without overwriting newer work. The new installed app cannot
+infer an arbitrary previous ZIP extraction location.
+
+To install a previously downloaded model ZIP manually, extract its `models/`
+folder into `~/Library/Application Support/Jam2/components/jamtaster/`.
+For source-build testing, extract into `release/components/jamtaster/` instead.
+The in-app model setup checks hashes against the manifest inside the app before
+using existing weights or downloading replacements. Downloads/extraction never
+write inside the signed bundle.
+
+On Windows, the installed local `version.txt` is currently rewritten with an LF newline
 after installation. A Windows package may contain CRLF, so that one file's raw
 hash can differ after a successful update. Its value is unchanged, package
 version checks trim whitespace, and future update detection uses the compiled
 version. This does not prevent later updates.
 
 Only stable update discovery is currently implemented. Separate bleeding-channel
-selection is future work. Windows installation has been exercised manually;
-macOS installation and both Mac architectures still need end-to-end validation.
+selection is future work. Native tests cover PKG payload generation, signing/notarization failure paths,
+Installer handoff policy, model ZIPs and user-data paths. Both Developer ID
+certificates and the existing `jam2-notary` profile have produced a signed,
+notarized PKG accepted by Gatekeeper. Validate the actual Installer workflow
+using the [installed-package test steps](../RELEASE.md#daily-macos-development-and-installed-package-testing)
+before distribution.
 
 Implementation owners: `app/updater/` (check, preparation, helper and package
 installation), `app/gui/UpdateDialog.*` / `UpdateUi.*` (interface),

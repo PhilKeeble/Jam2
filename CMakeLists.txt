@@ -50,6 +50,17 @@ endif()
 set(JAM2_RELEASE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/release" CACHE PATH "Directory for distributable app binaries")
 set(JAM2_BUILD_BIN_DIR "${CMAKE_BINARY_DIR}/bin" CACHE PATH "Directory for built app binaries before release staging")
 
+if(APPLE)
+    # Keep source-build data beside the staged app. The PKG contains only
+    # Jam2.app, so installed/extracted distribution apps use Application Support.
+    file(MAKE_DIRECTORY "${JAM2_RELEASE_DIR}")
+    set(development_marker "${JAM2_RELEASE_DIR}/.jam2-development-data")
+    if(IS_SYMLINK "${development_marker}")
+        message(FATAL_ERROR "Development data marker must not be a symlink: ${development_marker}")
+    endif()
+    file(WRITE "${development_marker}" "Jam2 source-build data lives in this folder. This marker is never packaged.\n")
+endif()
+
 function(jam2_create_release_dirs target)
     add_custom_command(TARGET ${target} POST_BUILD
         COMMAND "${CMAKE_COMMAND}" -E make_directory

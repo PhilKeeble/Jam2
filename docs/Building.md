@@ -21,18 +21,32 @@ Git pull, download and verify the current LFS objects, and preserve existing
 local changes. They stop with an error instead of automatically merging a
 diverged branch or discarding local work.
 
+On macOS, `update.sh` also verifies Qt 6 HTTPS/TLS support so a source build can
+download public releases through the in-app updater. It compiles a small offline
+probe with Apple tools and loads a TLS backend from the same Qt SDK that
+`compile.sh` selects. Working installations are left alone. Missing Homebrew
+Qt is installed with `brew install qtbase`; a failed check on an installed
+Homebrew Qt triggers one reinstall and a second check. A failed check stops the
+update. An explicit `QT_DIR` is checked as supplied and reports an error if it
+needs repair, without installing a different SDK. Use the same `QT_DIR` for
+updating and compiling. Probe files are temporary and removed afterward.
+
 ## Release packages
 
-For distribution, use `build-release.ps1 --version 0.8.1` on Windows or
-`bash build-release.sh --version 0.8.1` on macOS. Add `--include-models` to also
-create the separate model archive. Outputs go to `dist/`. Add `--publish` with
-an explicit version to create/reuse the GitHub releases and upload the assets;
-this requires GitHub CLI and a one-time `gh auth login` on each machine.
+For distribution, use `./build-release.ps1 --version 0.1.1` on Windows. On macOS,
+use the [signed PKG build/publish commands in RELEASE.md](../RELEASE.md#macos-build-and-publish-commands-on-the-configured-release-mac),
+including the Application identity, Installer identity, notary profile and
+universal Qt SDK. Without signing/notarization options or their environment
+settings, the Mac script makes an unsigned inspection PKG, which is not suitable
+for public updates. Add `--include-models` to prepare
+the separate model archive. Outputs go to `dist/`. `--publish` creates/reuses
+the GitHub releases and uploads the assets; it requires an explicit version,
+all Mac signing/notarization settings, and GitHub CLI authentication.
 The private updater builds with the existing Qt Core/Network dependencies and a
-vendored miniz ZIP reader; it needs no curl, OpenSSL installation or external
-archiver at runtime. Manual updater tests are documented in RELEASE.md.
-See [RELEASE.md](../RELEASE.md) for the ZIP layouts, metadata, universal Mac
-dependencies and optional signing. The release version override does not edit
+vendored miniz ZIP reader for Windows. macOS uses signed PKGs and Apple’s
+Installer; model downloads remain separate ZIPs. Manual updater tests are documented in RELEASE.md.
+See [RELEASE.md](../RELEASE.md) for the ZIP/PKG layouts, metadata, universal Mac
+dependencies and required public-release signing. The release version override does not edit
 the source checkout. Ordinary compile commands retain the development version.
 
 ## Windows
@@ -86,11 +100,10 @@ $env:ASIO_SDK_DIR = 'D:\SDKs\ASIO-SDK\ASIOSDK'
 containing `common\asio.h`. An invalid explicit path is reported rather than
 silently replaced with an automatically discovered installation.
 
-Developers who need to invoke CMake directly can use the same paths:
+For a command-line build in an existing shell, use the same entry point:
 
 ```powershell
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$env:QT_DIR" -DASIO_SDK_DIR="$env:ASIO_SDK_DIR"
-cmake --build build
+cmd.exe /d /c "call compile.cmd --in-dev-shell"
 ```
 
 Real ASIO validation must happen on a Windows host with the target audio device and ASIO driver installed. ASIO4ALL can be useful for early enumeration and rough tests, but a vendor ASIO driver is preferred for latency and stability validation.
@@ -109,7 +122,21 @@ The simplest macOS build is:
 
 ```bash
 bash ./compile.sh
+open "$PWD/release/Jam2.app"
 ```
+
+This keeps the usual development app and its test data under `release/`.
+The build creates `.jam2-development-data` beside `Jam2.app`; that marker selects
+local settings, logs, jams, recordings, model downloads and updater staging.
+It is excluded from the PKG. The installed app uses `/Applications/Jam2.app`
+and `~/Library/Application Support/Jam2/`, so compiling/testing the checkout
+does not change the installed app or its default data. Custom paths selected
+in Settings or when opening/saving a JamJar still apply.
+
+To test production behavior, build the signed PKG, open
+`dist/Jam2-macos.pkg`, finish Apple's Installer, and launch
+`/Applications/Jam2.app` explicitly. Follow the
+[development and installed-package testing workflow](../RELEASE.md#daily-macos-development-and-installed-package-testing).
 
 The script verifies the Apple developer tools, installs Homebrew from its
 official installer when necessary, and installs missing CMake, Ninja, and
@@ -131,10 +158,15 @@ the macOS desktop kit with the [Qt Online Installer](https://doc.qt.io/qt-6/maco
 and select its prefix explicitly:
 
 ```bash
-QT_DIR="$HOME/Qt/6.x/macos" bash ./build-release.sh --version 0.1.1 --publish
+QT_DIR="$HOME/Qt/6.x/macos" bash ./build-release.sh --version 0.1.1 \
+  --sign-identity "Developer ID Application: YOUR_NAME (YOUR_TEAM_ID)" \
+  --installer-sign-identity "Developer ID Installer: YOUR_NAME (YOUR_TEAM_ID)" \
+  --notarize-profile "jam2-notary"
 ```
 
-Replace `6.x` with the installed version. When switching an existing build
+See [RELEASE.md](../RELEASE.md#set-up-the-macos-installer-certificate) for
+Installer certificate and Keychain/notarization setup. Add `--publish` only
+after distribution validation. Replace `6.x` with the installed version. When switching an existing build
 between Homebrew and another Qt installation, clear CMake's cached Qt selection
 once with `cmake --fresh -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$HOME/Qt/6.x/macos"`
 before running the release script.

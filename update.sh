@@ -39,6 +39,70 @@ load_homebrew() {
     eval "$("$brew_bin" shellenv)"
 }
 
+# Check the same Qt installation compile.sh will select. Loading the backend
+# catches missing/incompatible TLS plugins and their runtime dependencies too.
+check_qt_tls() (
+    local prefix="$1"
+    local qmake="$prefix/bin/qmake"
+    local libraries=""
+    local plugins=""
+    local probe_dir=""
+
+    [[ -n "$prefix" && -x "$qmake" ]] || exit 1
+    [[ "$("$qmake" -query QT_VERSION)" == 6.* ]] || exit 1
+    for module in Qt6 Qt6Core Qt6Gui Qt6Widgets Qt6Network; do
+        [[ -f "$prefix/lib/cmake/$module/${module}Config.cmake" ]] || exit 1
+    done
+    libraries="$("$qmake" -query QT_INSTALL_LIBS)" || exit 1
+    plugins="$("$qmake" -query QT_INSTALL_PLUGINS)" || exit 1
+    [[ -d "$libraries" && -d "$plugins/tls" ]] || exit 1
+
+    probe_dir="$(mktemp -d "${TMPDIR:-/tmp}/jam2-qt-tls.XXXXXX")" || exit 1
+    trap 'rm -rf "$probe_dir"' EXIT
+    TMPDIR="$probe_dir" xcrun clang++ -std=c++17 -O2 \
+        -F "$libraries" \
+        -I "$libraries/QtCore.framework/Headers" \
+        -I "$libraries/QtNetwork.framework/Headers" \
+        "$REPO_DIR/tools/macos/QtTlsProbe.cpp" \
+        -framework QtNetwork -framework QtCore \
+        -Wl,-rpath,"$libraries" -o "$probe_dir/qt-tls-check" || exit 1
+    TMPDIR="$probe_dir" "$probe_dir/qt-tls-check" "$plugins"
+)
+
+ensure_qt_tls() {
+    local prefix="${QT_DIR:-}"
+
+    printf '\nChecking Qt 6 HTTPS/TLS support for in-app updates...\n'
+    if [[ -n "$prefix" ]]; then
+        if ! check_qt_tls "$prefix"; then
+            print_error "QT_DIR has no usable Qt 6 TLS backend: $prefix"
+            printf 'Repair this Qt SDK (including its TLS plugins), or unset QT_DIR to use Homebrew Qt.\n' >&2
+            return 1
+        fi
+        return 0
+    fi
+
+    load_homebrew
+    prefix="$(brew --prefix qtbase 2>/dev/null || true)"
+    if check_qt_tls "$prefix"; then
+        printf 'Qt HTTPS/TLS support is already available; no installation needed.\n'
+        return 0
+    fi
+
+    if brew list --versions qtbase >/dev/null 2>&1; then
+        printf '\nRepairing the Qt base installation and its TLS dependencies with Homebrew...\n'
+        brew reinstall qtbase
+    else
+        printf '\nInstalling Qt base and its TLS dependencies with Homebrew...\n'
+        brew install qtbase
+    fi
+    prefix="$(brew --prefix qtbase)"
+    if ! check_qt_tls "$prefix"; then
+        print_error "Qt 6 HTTPS/TLS support is still unavailable after installation: $prefix"
+        return 1
+    fi
+}
+
 if [[ "$(uname -s)" != "Darwin" ]]; then
     print_error "update.sh supports macOS only."
     exit 1
@@ -64,6 +128,8 @@ if ! git -C "$REPO_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     print_error "$REPO_DIR is not a Git working tree."
     exit 1
 fi
+
+ensure_qt_tls
 
 printf '\nConfiguring Git LFS...\n'
 git -C "$REPO_DIR" lfs install

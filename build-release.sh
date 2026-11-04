@@ -5,6 +5,7 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RELEASE_VERSION=""
 INCLUDE_MODELS=OFF
 SIGN_IDENTITY="${JAM2_SIGN_IDENTITY:-}"
+INSTALLER_SIGN_IDENTITY="${JAM2_INSTALLER_SIGN_IDENTITY:-}"
 NOTARY_PROFILE="${JAM2_NOTARY_PROFILE:-}"
 PUBLISH=OFF
 
@@ -28,17 +29,21 @@ while (( $# )); do
         --sign-identity)
             (( $# >= 2 )) && [[ -n "$2" ]] || { printf '%s\n' '--sign-identity requires a signing identity.' >&2; exit 2; }
             SIGN_IDENTITY="$2"; shift 2 ;;
+        --installer-sign-identity)
+            (( $# >= 2 )) && [[ -n "$2" ]] || { printf '%s\n' '--installer-sign-identity requires a Developer ID Installer identity.' >&2; exit 2; }
+            INSTALLER_SIGN_IDENTITY="$2"; shift 2 ;;
         --notarize-profile)
             (( $# >= 2 )) && [[ -n "$2" ]] || { printf '%s\n' '--notarize-profile requires a Keychain profile name.' >&2; exit 2; }
             NOTARY_PROFILE="$2"; shift 2 ;;
         --help)
-            printf '%s\n' 'Usage: ./build-release.sh [--version 0.8.1] [--include-models] [--publish] [--sign-identity "Developer ID Application: ..."] [--notarize-profile jam2-notary]' \
-                'Builds a universal Mac app and dist/Jam2-macos.zip; models are an optional separate ZIP.' \
+            printf '%s\n' 'Usage: ./build-release.sh [--version 0.8.1] [--include-models] [--publish] [--sign-identity "Developer ID Application: ..."] [--installer-sign-identity "Developer ID Installer: ..."] [--notarize-profile jam2-notary]' \
+                'Builds a universal Mac app and dist/Jam2-macos.pkg; models are an optional separate ZIP.' \
+                '--installer-sign-identity signs the PKG with a Developer ID Installer certificate.' \
                 '--publish requires an explicit version and GitHub CLI authentication (gh auth login).' \
                 'Without an identity, local test builds use ad-hoc signing.' \
                 'A Developer ID identity enables hardened runtime signing and secure timestamps.' \
-                '--notarize-profile submits to Apple, staples the ticket and creates the final ZIP before publishing.' \
-                'Defaults: JAM2_SIGN_IDENTITY and JAM2_NOTARY_PROFILE (names only; credentials stay in Keychain).' \
+                '--notarize-profile notarizes and staples the app and PKG before publishing.' \
+                'Defaults: JAM2_SIGN_IDENTITY, JAM2_INSTALLER_SIGN_IDENTITY and JAM2_NOTARY_PROFILE (names only; credentials stay in Keychain).' \
                 'One-time setup: xcrun notarytool store-credentials "jam2-notary" (interactive; never pass a password here).'
             exit 0 ;;
         *) printf 'Unknown release option: %s\n' "$1" >&2; exit 2 ;;
@@ -50,6 +55,14 @@ if [[ -n "$NOTARY_PROFILE" && ( -z "$SIGN_IDENTITY" || "$SIGN_IDENTITY" == "-" )
     printf '%s\n' 'Notarization requires --sign-identity "Developer ID Application: ..." (or JAM2_SIGN_IDENTITY).' >&2
     exit 2
 fi
+if [[ -n "$NOTARY_PROFILE" && -z "$INSTALLER_SIGN_IDENTITY" ]]; then
+    printf '%s\n' 'Notarization requires --installer-sign-identity "Developer ID Installer: ..." (or JAM2_INSTALLER_SIGN_IDENTITY).' >&2
+    exit 2
+fi
+if [[ -n "$INSTALLER_SIGN_IDENTITY" && ( -z "$SIGN_IDENTITY" || "$SIGN_IDENTITY" == "-" ) ]]; then
+    printf '%s\n' 'A signed PKG also requires --sign-identity "Developer ID Application: ...".' >&2
+    exit 2
+fi
 if [[ -n "$NOTARY_PROFILE" ]]; then
     xcrun --find notarytool >/dev/null
     xcrun --find stapler >/dev/null
@@ -58,6 +71,9 @@ if [[ -n "$NOTARY_PROFILE" ]]; then
     xcrun notarytool history --keychain-profile "$NOTARY_PROFILE" >/dev/null
 fi
 if [[ "$PUBLISH" == ON ]]; then
+    [[ -n "$SIGN_IDENTITY" && "$SIGN_IDENTITY" != "-" && -n "$INSTALLER_SIGN_IDENTITY" && -n "$NOTARY_PROFILE" ]] || {
+        printf '%s\n' 'Public macOS releases require Developer ID Application and Installer identities and a notarization Keychain profile.' >&2; exit 2;
+    }
     [[ -n "$RELEASE_VERSION" ]] || { printf '%s\n' '--publish requires an explicit --version.' >&2; exit 2; }
     command -v gh >/dev/null 2>&1 || { printf '%s\n' 'Publishing requires GitHub CLI. Install gh, then run: gh auth login' >&2; exit 1; }
     gh auth status --hostname github.com
@@ -141,6 +157,7 @@ if [[ -n "$SIGN_IDENTITY" && "$SIGN_IDENTITY" != "-" ]]; then
 fi
 "$CMAKE_BIN" "-DJAM2_PACKAGE_CONFIG=$REPO_DIR/build/release-package.cmake" \
     "-DJAM2_INCLUDE_MODELS=$INCLUDE_MODELS" "-DJAM2_SIGN_IDENTITY=$SIGN_IDENTITY" \
+    "-DJAM2_INSTALLER_SIGN_IDENTITY=$INSTALLER_SIGN_IDENTITY" \
     "-DJAM2_NOTARY_PROFILE=$NOTARY_PROFILE" "-DJAM2_RELEASE_WORK=$RELEASE_WORK" \
     "-DJAM2_MACOS_FINALIZE_SCRIPT=$FINALIZE_SCRIPT" \
     -P "$REPO_DIR/tools/release/PackageRelease.cmake"

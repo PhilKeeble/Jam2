@@ -9,7 +9,7 @@ This `UDP-Multiplex` branch uses one current typed UDP transport for Direct, STU
 ## Quick Start
 
 1. Build the current branch in Release using [Building](docs/Building.md), and use the same build on each machine.
-2. Use the resulting `release` folder on Windows or the normal app bundle on macOS.
+2. Use the resulting `release` folder: `release/jam2.exe` on Windows or `release/Jam2.app` on macOS. Source-build test data stays under `release/`.
 3. Run `jam2.exe` on Windows (or `Jam2.app` on macOS). Running `jam2` with no arguments opens the GUI.
 4. On the creator's machine, open **Start Jam**, enter your name, choose the local audio device and tuning profile, then create the jam.
 5. Send the generated `jam2://...` connection string to the other player.
@@ -19,7 +19,9 @@ Names require 1 to 8 Unicode letters; digits, spaces and symbols are rejected. D
 
 JamTaster's model weights are a separate optional download. Open JamTaster and
 choose **Download models** if they are missing; it shows the size before approval
-and installs them under `components/jamtaster/models/` inside the Jam2 folder.
+and installs them under `components/jamtaster/models/` in the writable data root:
+beside the executable on Windows, under `release/` for macOS source builds, or
+under `~/Library/Application Support/Jam2/` for the distributed macOS app.
 You can cancel or close the dialog and continue jamming. For manual installation,
 extract the pinned release's `Jam2-models.zip` into `components/jamtaster/`.
 Normal jamming does not require these models. See

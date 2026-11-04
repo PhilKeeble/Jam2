@@ -1,6 +1,9 @@
 #include "UserPreferences.hpp"
 
 #include <QCoreApplication>
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
 #include <QSettings>
 #include <QTemporaryDir>
 
@@ -23,11 +26,45 @@ int main(int argc, char** argv)
         QTemporaryDir directory;
         require(directory.isValid(), "temporary preference directory was unavailable");
         QString error;
+        const QString legacy = directory.filePath(QStringLiteral("legacy.ini"));
+        const QString imported = directory.filePath(QStringLiteral("Application Support/Jam2/settings/preferences.ini"));
+        {
+            QFile source(legacy);
+            require(source.open(QIODevice::WriteOnly) && source.write("legacy preferences") == 18, "create legacy preferences");
+        }
+        require(QFile::setPermissions(legacy, QFile::ReadOwner) &&
+                UserPreferencesStore::copyLegacyPreferences(legacy, imported, error) && QFileInfo::exists(legacy),
+            "legacy preference import preserves a read-only source");
+        {
+            QFile target(imported);
+            require(target.open(QIODevice::ReadWrite) && target.readAll() == "legacy preferences", "imported preferences are writable and complete");
+            require(target.resize(0) && target.write("new preferences") == 15, "change imported preferences");
+        }
+        require(UserPreferencesStore::copyLegacyPreferences(legacy, imported, error), "a repeated import preserves existing preferences");
+        {
+            QFile target(imported); require(target.open(QIODevice::ReadOnly) && target.readAll() == "new preferences", "existing preferences are never overwritten");
+        }
+        require(!UserPreferencesStore::copyLegacyPreferences(directory.filePath(QStringLiteral("missing")),
+                    directory.filePath(QStringLiteral("not-created.ini")), error) && !error.isEmpty(),
+            "missing legacy preferences report an error without a partial destination");
         require(UserPreferencesStore::setFilePathForTesting(
                     directory.filePath(QStringLiteral("preferences.ini")), error),
             "test preference path was rejected");
 
         UserPreferences expected;
+        UserPreferences moved;
+        moved.logging.folder = QStringLiteral("/old/release/logs");
+        moved.create.runtime.logStatsFolder = QStringLiteral("/old/release/logs");
+        moved.join.runtime.logStatsFolder = QStringLiteral("/user/custom/logs");
+        moved.recording.input.outputFolder = QStringLiteral("/old/release/captures");
+        moved.recording.loopback.outputFolder = QStringLiteral("/private/var/folders/x/AppTranslocation/token/d/captures");
+        UserPreferencesStore::relocateDefaultFolders(moved, QStringLiteral("/old/release"), QStringLiteral("/user/support/Jam2"));
+        require(moved.logging.folder == QStringLiteral("/user/support/Jam2/logs") &&
+                moved.create.runtime.logStatsFolder == QStringLiteral("/user/support/Jam2/logs") &&
+                moved.join.runtime.logStatsFolder == QStringLiteral("/user/custom/logs") &&
+                moved.recording.input.outputFolder == QStringLiteral("/user/support/Jam2/captures") &&
+                moved.recording.loopback.outputFolder == QStringLiteral("/user/support/Jam2/captures"),
+            "old and translocated defaults migrate while custom recording/log destinations remain intact");
         const auto defaults = UserPreferencesStore::load();
         require(defaults.create.port == 40440 && defaults.join.port == 40440,
             "new create and join preferences default to UDP 40440");

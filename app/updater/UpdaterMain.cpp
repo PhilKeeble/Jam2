@@ -2,6 +2,9 @@
 #include "UpdateLauncher.hpp"
 #include "UpdatePackage.hpp"
 #include "UpdaterPlatform.hpp"
+#ifdef Q_OS_MACOS
+#include "MacInstallerPackage.hpp"
+#endif
 
 #include <QCoreApplication>
 #include <QCryptographicHash>
@@ -37,14 +40,16 @@ int main(int argc, char** argv)
         bool restart = false;
         bool prepareOnly = false;
         qint64 waitPid = 0;
+        QString parentExecutable;
         const auto arguments = app.arguments();
         for (qsizetype i = 1; i < arguments.size(); ++i) {
             const auto& argument = arguments[i];
-            if (argument == QStringLiteral("--root") || argument == QStringLiteral("--version") || argument == QStringLiteral("--wait-pid")) {
+            if (argument == QStringLiteral("--root") || argument == QStringLiteral("--version") || argument == QStringLiteral("--wait-pid") || argument == QStringLiteral("--parent-executable")) {
                 if (i + 1 >= arguments.size()) throw std::runtime_error("Missing updater option value.");
                 const auto value = arguments[++i];
                 if (argument == QStringLiteral("--root")) root = QDir::cleanPath(value);
                 else if (argument == QStringLiteral("--version")) version = value;
+                else if (argument == QStringLiteral("--parent-executable")) parentExecutable = value;
                 else { bool valid = false; waitPid = value.toLongLong(&valid); if (!valid || waitPid < 0) throw std::runtime_error("Invalid process ID."); }
             } else if (argument == QStringLiteral("--restart")) restart = true;
             else if (argument == QStringLiteral("--install-staged")) staged = true;
@@ -63,7 +68,16 @@ int main(int argc, char** argv)
             .toJson(QJsonDocument::Compact) << Qt::endl;
         if (!staged && !tlsAvailable)
             throw std::runtime_error("HTTPS is unavailable in the temporary updater. Its Qt TLS backend is missing or could not load; reinstall this Jam2 build.");
+#ifdef Q_OS_MACOS
+        if (restart) throw std::runtime_error("macOS PKG updates open Apple's Installer and leave Jam2 closed. Omit --restart.");
+        if (waitPid && !QFileInfo(parentExecutable).isAbsolute())
+            throw std::runtime_error("Specify the absolute Jam2 parent executable before waiting for it to close.");
+        ParentProcess parent(waitPid, parentExecutable);
+        using PreparedPackage = Metadata;
+#else
         ParentProcess parent(waitPid, QDir(root).filePath(executableRelativePath()));
+        using PreparedPackage = Manifest;
+#endif
         QElapsedTimer statusTimer;
         statusTimer.start();
         const auto status = [&](const QString& state, const QString& message, int percent, bool force = false) {
@@ -76,16 +90,20 @@ int main(int argc, char** argv)
                 throw std::runtime_error("Could not write update/status.json.");
             QTextStream(stdout) << bytes << Qt::endl;
         };
-        const auto prepared = [&](const Manifest& manifest) {
+        const auto prepared = [&](const PreparedPackage& manifest) {
+#ifdef Q_OS_MACOS
+            prepareMacInstaller(root, manifest, cancelled);
+#else
             const auto bytes = QJsonDocument(QJsonObject{{"schema", 1}, {"version", version},
                 {"manifest_sha256", QString::fromLatin1(QCryptographicHash::hash(manifest.encoded, QCryptographicHash::Sha256).toHex())}}).toJson();
             QSaveFile file(confinedPath(root, QStringLiteral("update/prepared.json"), true));
             if (!file.open(QIODevice::WriteOnly) || file.write(bytes) != bytes.size() || !file.commit())
                 throw std::runtime_error("Could not save the prepared update marker.");
+#endif
             QFile::remove(confinedPath(root, QStringLiteral("update/result.json")));
             status(QStringLiteral("ready"), QStringLiteral("Download verified. The update is ready to install."), 100, true);
         };
-        auto install = [&](const Manifest& manifest) {
+        auto install = [&](const PreparedPackage& manifest) {
             status(QStringLiteral("waiting"), QStringLiteral("Update verified. Waiting for Jam2 to close."), 100, true);
             QElapsedTimer timeout;
             timeout.start();
@@ -100,6 +118,12 @@ int main(int argc, char** argv)
             });
             if (!parent.exited()) { timer.start(); app.exec(); }
             if (!waitError.isEmpty()) throw std::runtime_error(waitError.toStdString());
+#ifdef Q_OS_MACOS
+            openMacInstaller(root, manifest, cancelled);
+            writeResult(root, {false, false, version, {}, true});
+            status(QStringLiteral("installer-opened"),
+                QStringLiteral("Apple's Installer is open. Follow its instructions, then reopen Jam2 from Applications."), 100, true);
+#else
             status(QStringLiteral("installing"), QStringLiteral("Installing Jam2..."), 0, true);
             installPackage(root, manifest, cancelled, [&](const QString& message, int percent) {
                 status(QStringLiteral("installing"), message, percent);
@@ -112,9 +136,14 @@ int main(int argc, char** argv)
             if (restart) {
                 restartApplication(root);
             }
+#endif
         };
         if (staged) {
+#ifdef Q_OS_MACOS
+            const auto manifest = verifyPreparedMacInstaller(root, version, cancelled);
+#else
             const auto manifest = verifyPackage(root, version, cancelled);
+#endif
             if (prepareOnly) prepared(manifest); else install(manifest);
         } else {
             Download download(root);
@@ -146,9 +175,14 @@ int main(int argc, char** argv)
             if (!completed) app.exec();
             if (!downloadError.isEmpty()) throw std::runtime_error(downloadError.toStdString());
             status(QStringLiteral("unpacking"), QStringLiteral("Verifying the downloaded update..."), -1, true);
+#ifdef Q_OS_MACOS
+            const auto manifest = metadata;
+            verifyMacInstaller(root, manifest, cancelled);
+#else
             const auto manifest = extractPackage(root, metadata, cancelled, [&](const QString& message, int percent) {
                 status(QStringLiteral("unpacking"), message, percent);
             });
+#endif
             if (prepareOnly) prepared(manifest); else install(manifest);
         }
         return 0;

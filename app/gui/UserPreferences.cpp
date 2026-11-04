@@ -363,7 +363,7 @@ QString UserPreferencesStore::filePath()
     if (!preferencesFilePathOverride().isEmpty()) {
         return preferencesFilePathOverride();
     }
-    return appReleaseFilePath(QStringLiteral("settings"), QStringLiteral("preferences.ini"));
+    return appDataFilePath(QStringLiteral("settings"), QStringLiteral("preferences.ini"));
 }
 
 bool UserPreferencesStore::setFilePathForTesting(const QString& path, QString& error)
@@ -388,17 +388,28 @@ UserPreferences UserPreferencesStore::load()
 {
     UserPreferences out;
     const QString path = filePath();
-    // Preserve existing users' preferences once, without replacing a portable
-    // INI or reading the user's profile when a test has isolated its storage.
-    if (preferencesFilePathOverride().isEmpty() && appReleaseRootOverride().isEmpty() &&
+    // Import once without replacing an existing INI or reading real user
+    // preferences when a test has isolated its storage.
+    if (preferencesFilePathOverride().isEmpty() && appDataRootOverride().isEmpty() &&
         !QFileInfo::exists(path)) {
-        const QString legacyPath = QDir(QStandardPaths::writableLocation(
+        QString legacyPath = QDir(QStandardPaths::writableLocation(
             QStandardPaths::AppConfigLocation)).filePath(QStringLiteral("preferences.ini"));
+#ifdef Q_OS_MACOS
+        const QString adjacent = appReleaseDir().filePath(QStringLiteral("settings/preferences.ini"));
+        if (QFileInfo(adjacent).isFile()) legacyPath = adjacent;
+#endif
         if (QFileInfo(legacyPath).isFile()) {
             QFile legacy(legacyPath);
-            if (!legacy.rename(path)) {
-                qWarning().noquote() << "Could not move preferences from" << legacyPath
-                    << "to" << path << ':' << legacy.errorString();
+            QString migrationError;
+#ifdef Q_OS_MACOS
+            const bool migrated = copyLegacyPreferences(legacyPath, path, migrationError);
+#else
+            const bool migrated = legacy.rename(path);
+            migrationError = legacy.errorString();
+#endif
+            if (!migrated) {
+                qWarning().noquote() << "Could not migrate preferences from" << legacyPath
+                    << "to" << path << ':' << migrationError;
             }
         }
     }
@@ -674,7 +685,47 @@ UserPreferences UserPreferencesStore::load()
             ? out.create.runtime.logStatsFolder
             : out.join.runtime.logStatsFolder;
     }
+#ifdef Q_OS_MACOS
+    relocateDefaultFolders(out, appReleaseDir().absolutePath(), appDataDir().absolutePath());
+#endif
     return out;
+}
+
+void UserPreferencesStore::relocateDefaultFolders(UserPreferences& preferences,
+    const QString& oldRoot, const QString& newRoot)
+{
+    const auto relocate = [&](QString& path, const QString& folder) {
+        if (path.isEmpty()) return;
+        const QString clean = QDir::cleanPath(path);
+        if (clean == QDir(oldRoot).absoluteFilePath(folder) ||
+            (clean.contains(QStringLiteral("/AppTranslocation/")) && QDir(clean).dirName() == folder))
+            path = QDir(newRoot).absoluteFilePath(folder);
+    };
+    relocate(preferences.logging.folder, QStringLiteral("logs"));
+    relocate(preferences.create.runtime.logStatsFolder, QStringLiteral("logs"));
+    relocate(preferences.join.runtime.logStatsFolder, QStringLiteral("logs"));
+    relocate(preferences.recording.input.outputFolder, QStringLiteral("captures"));
+    relocate(preferences.recording.loopback.outputFolder, QStringLiteral("captures"));
+}
+
+bool UserPreferencesStore::copyLegacyPreferences(const QString& source, const QString& destination, QString& error)
+{
+    error.clear();
+    if (QFileInfo::exists(destination)) return true;
+    if (!QFileInfo(source).isFile() || !QDir().mkpath(QFileInfo(destination).absolutePath())) {
+        error = QStringLiteral("Could not import preferences from %1 to %2.").arg(source, destination);
+        return false;
+    }
+    QFile legacy(source);
+    if (!legacy.copy(destination)) { error = legacy.errorString(); return false; }
+    // A read-only source must not make the user's new preferences read-only.
+    if (!QFile::setPermissions(destination, QFile::permissions(destination) | QFile::ReadOwner | QFile::WriteOwner)) {
+        const bool removed = QFile::remove(destination);
+        error = QStringLiteral("Could not make imported preferences writable: %1%2").arg(destination,
+            removed ? QString{} : QStringLiteral(" (partial import could not be removed)"));
+        return false;
+    }
+    return true;
 }
 
 bool UserPreferencesStore::saveChecked(const UserPreferences& p)

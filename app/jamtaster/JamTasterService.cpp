@@ -116,6 +116,21 @@ QString JamTasterService::installationRoot() const
     return bundleRootOverride_.isEmpty() ? appReleaseDir().absolutePath() : bundleRootOverride_;
 }
 
+QString JamTasterService::dataRoot() const
+{
+    return bundleRootOverride_.isEmpty() ? appDataDir().absolutePath() : bundleRootOverride_;
+}
+
+QString JamTasterService::modelManifestPath() const
+{
+    if (!bundleRootOverride_.isEmpty()) return QDir(bundleRootOverride_).filePath(QStringLiteral("models.json"));
+#ifdef Q_OS_MACOS
+    return QDir(QCoreApplication::applicationDirPath()).absoluteFilePath(QStringLiteral("../Resources/models.json"));
+#else
+    return QDir(installationRoot()).filePath(QStringLiteral("models.json"));
+#endif
+}
+
 QString JamTasterService::workerPath() const
 {
     if (!workerPathOverride_.isEmpty()) return workerPathOverride_;
@@ -148,8 +163,12 @@ QString JamTasterService::modelsPath() const
 {
     const QString bundled = QDir(bundleRoot()).absoluteFilePath(QStringLiteral("models"));
     if (!bundleRootOverride_.isEmpty()) return bundled;
-    return resolveModelsPath(QDir(appReleaseDir()).absoluteFilePath(
+#ifdef Q_OS_MACOS
+    return QDir(dataRoot()).absoluteFilePath(QStringLiteral("components/jamtaster/models"));
+#else
+    return resolveModelsPath(QDir(dataRoot()).absoluteFilePath(
         QStringLiteral("components/jamtaster/models")), bundled);
+#endif
 }
 
 bool JamTasterService::validateBundle(QString& error) const

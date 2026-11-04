@@ -736,9 +736,20 @@ int jam2ApplicationMain(int argc, char* argv[])
     window.startAutomaticUpdateCheck();
     QTimer::singleShot(0, &window, [&window] {
         try {
-            const QString root = appReleaseDir().absolutePath();
-            const auto result = jam2::update::readResult(root);
+            const QString root = appDataDir().absolutePath();
+            auto result = jam2::update::confirmInstalledVersion(root, QCoreApplication::applicationVersion());
             if (!result) return;
+#ifdef Q_OS_MACOS
+            if (result->installerOpened) {
+                if (!result->success && !result->reported)
+                    QMessageBox::information(&window, QStringLiteral("Jam2 installer"),
+                        QStringLiteral("The installer for Jam2 %1 was opened. This copy is still %2. "
+                            "Complete installation and open Jam2 from Applications to use the update.")
+                            .arg(result->version, QCoreApplication::applicationVersion()));
+                result->reported = true;
+                jam2::update::writeResult(root, *result);
+            }
+#endif
             if (!result->success && !result->reported)
                 QMessageBox::warning(&window, QStringLiteral("Jam2 update failed"), result->error);
             auto* cleanup = new QTimer(&window);

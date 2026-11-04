@@ -1759,7 +1759,7 @@ int jam2RunGuiTestAgent(QApplication& application, int argc, char* argv[])
 
     if (!storageRoot.isEmpty()) {
         QString error;
-        if (!setAppReleaseRootForTesting(storageRoot, error)) {
+        if (!setAppDataRootForTesting(storageRoot, error)) {
             std::cerr << error.toStdString() << '\n';
             return 2;
         }

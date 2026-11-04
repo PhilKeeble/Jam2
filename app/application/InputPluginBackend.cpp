@@ -176,7 +176,7 @@ public:
         if (pluginPath.isEmpty()) return false;
 
         const QString workerPath = pluginhost::PluginHostService::workerExecutablePath();
-        const QDir temporary(appReleaseFolderPath(QStringLiteral("temp")));
+        const QDir temporary(appDataFolderPath(QStringLiteral("temp")));
         if (!temporary.exists()) {
             const QString error = QStringLiteral("Could not create Jam2's temporary scan folder: %1")
                 .arg(temporary.absolutePath());

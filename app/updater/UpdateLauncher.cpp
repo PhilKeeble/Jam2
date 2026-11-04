@@ -2,6 +2,10 @@
 #include "UpdatePackage.hpp"
 #include "UpdaterPlatform.hpp"
 #include "../application/ApplicationPaths.hpp"
+#ifdef Q_OS_MACOS
+#include "MacInstallerPackage.hpp"
+#include "UpdaterMacApplication.hpp"
+#endif
 
 #include <QCoreApplication>
 #include <QDir>
@@ -46,9 +50,23 @@ void copyTree(const QString& source, const QString& destination)
 #endif
 }
 
-QString prepareHelper(const QString& root)
+QString prepareHelper(const QString& root, const QString& installationRoot)
 {
-    const auto source = confinedPath(root, helperRelativePath());
+    QString installed = installationRoot;
+#ifdef Q_OS_MACOS
+    if (installed.isEmpty()) installed = appReleaseDir().absolutePath();
+#else
+    if (installed.isEmpty()) installed = root;
+#endif
+    QString source;
+#ifdef Q_OS_MACOS
+    const QString bundleContents = installationRoot.isEmpty() && !appBundlePath().isEmpty()
+        ? QDir(appBundlePath()).filePath(QStringLiteral("Contents"))
+        : QDir(installed).filePath(QStringLiteral("Jam2.app/Contents"));
+    source = QDir(bundleContents).filePath(QStringLiteral("Helpers/jam2-updater"));
+#else
+    source = confinedPath(installed, helperRelativePath());
+#endif
     require(QFileInfo(source).isFile(), QStringLiteral("This Jam2 build has no updater helper. Install an updater-enabled build first."));
     clearDirectory(root, QStringLiteral("temp/updater"));
     const QString runner = QDir(root).filePath(QStringLiteral("temp/updater"));
@@ -68,7 +86,6 @@ QString prepareHelper(const QString& root)
     const QString contents = QDir(runner).filePath(QStringLiteral("Contents"));
     const QString helper = QDir(contents).filePath(QStringLiteral("Helpers/jam2-updater"));
     copyFile(source, helper);
-    const QString bundleContents = QDir(root).filePath(QStringLiteral("Jam2.app/Contents"));
     for (const auto& name : {QStringLiteral("QtCore.framework"), QStringLiteral("QtNetwork.framework")}) {
         QString from = QDir(bundleContents).filePath(QStringLiteral("Frameworks/") + name);
         // Native development builds can use the already-installed Qt SDK.
@@ -102,6 +119,10 @@ QStringList helperArguments(const LaunchOptions& options)
     if (options.restart) arguments << QStringLiteral("--restart");
     if (options.staged) arguments << QStringLiteral("--install-staged");
     if (options.prepareOnly) arguments << QStringLiteral("--prepare-only");
+#ifdef Q_OS_MACOS
+    arguments << QStringLiteral("--parent-executable") << (options.parentExecutable.isEmpty()
+        ? QCoreApplication::applicationFilePath() : options.parentExecutable);
+#endif
     return arguments;
 }
 
@@ -130,7 +151,7 @@ qint64 launch(const LaunchOptions& options)
     require(validVersion(options.version) && options.waitPid >= 0, QStringLiteral("Invalid update version or process ID."));
     QLockFile lock(confinedPath(options.root, QStringLiteral("temp/updater.lock"), true));
     require(lock.tryLock(), QStringLiteral("An updater is already running for this Jam2 folder."));
-    return startHelper(options, prepareHelper(options.root));
+    return startHelper(options, prepareHelper(options.root, options.installationRoot));
 }
 
 qint64 launchPrepared(const LaunchOptions& options)
@@ -149,7 +170,8 @@ void writeResult(const QString& root, const Result& result)
     const auto path = confinedPath(root, QStringLiteral("update/result.json"), true);
     const auto bytes = QJsonDocument(QJsonObject{{QStringLiteral("schema"), 1},
         {QStringLiteral("success"), result.success}, {QStringLiteral("reported"), result.reported},
-        {QStringLiteral("version"), result.version}, {QStringLiteral("error"), result.error}}).toJson();
+        {QStringLiteral("version"), result.version}, {QStringLiteral("error"), result.error},
+        {QStringLiteral("installer_opened"), result.installerOpened}}).toJson();
     QSaveFile file(path);
     require(file.open(QIODevice::WriteOnly) && file.write(bytes) == bytes.size() && file.commit(),
         QStringLiteral("Could not save the updater result."));
@@ -167,13 +189,32 @@ std::optional<Result> readResult(const QString& root)
     require(error.error == QJsonParseError::NoError && object.value(QStringLiteral("schema")).toInt() == 1 &&
         object.value(QStringLiteral("success")).isBool(), QStringLiteral("The updater result is invalid."));
     return Result{object.value(QStringLiteral("success")).toBool(), object.value(QStringLiteral("reported")).toBool(),
-        object.value(QStringLiteral("version")).toString(), object.value(QStringLiteral("error")).toString()};
+        object.value(QStringLiteral("version")).toString(), object.value(QStringLiteral("error")).toString(),
+        object.value(QStringLiteral("installer_opened")).toBool()};
 }
 
-bool cleanupCompleted(const QString& root)
+std::optional<Result> confirmInstalledVersion(const QString& root, const QString& installedVersion)
+{
+    auto result = readResult(root);
+    if (result && result->installerOpened && !result->success && result->version == installedVersion) {
+        result->success = true;
+        writeResult(root, *result);
+    }
+    return result;
+}
+
+bool cleanupCompleted(const QString& root, const std::function<bool()>& installerRunning)
 {
     auto result = readResult(root);
     if (!result) return true;
+#ifdef Q_OS_MACOS
+    if (result->installerOpened && (installerRunning ? installerRunning() : macInstallerRunning())) return false;
+#else
+    (void)installerRunning;
+#endif
+    // Keep the PKG and its diagnostics until a subsequent app launch confirms
+    // the installed version. Opening Installer may still be cancelled.
+    if (result->installerOpened && !result->success) return true;
     QLockFile lock(confinedPath(root, QStringLiteral("temp/updater.lock"), true));
     if (!lock.tryLock()) return false;
     const QString runner = confinedPath(root, QStringLiteral("temp/updater"));
@@ -193,7 +234,7 @@ int runUpdateCommand(const QStringList& arguments)
     QTextStream error(stderr);
     try {
         LaunchOptions options;
-        options.root = appReleaseDir().absolutePath();
+        options.root = appDataFolderPath(QString{});
         options.waitPid = QCoreApplication::applicationPid();
         bool check = false;
         for (qsizetype i = 0; i < arguments.size(); ++i) {
@@ -215,8 +256,13 @@ int runUpdateCommand(const QStringList& arguments)
         require(validVersion(options.version), QStringLiteral("Specify --version major.minor.patch."));
         if (check) {
             const std::atomic_bool cancelled{false};
+#ifdef Q_OS_MACOS
+            const auto metadata = verifyPreparedMacInstaller(options.root, options.version, cancelled);
+            out << "Staged installer verified: " << metadata.version << '\n';
+#else
             const auto manifest = verifyPackage(options.root, options.version, cancelled);
             out << "Staged update verified: " << manifest.version << " (" << manifest.files.size() << " files)\n";
+#endif
             return 0;
         }
         const auto pid = launch(options);

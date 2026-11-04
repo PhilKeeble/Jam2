@@ -1,6 +1,14 @@
 #include "ApplicationUpdateService.hpp"
 #include <QCoreApplication>
 #include <QTimer>
+#ifdef Q_OS_MACOS
+#include <QDebug>
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
+#include <QJsonDocument>
+#include <QJsonObject>
+#endif
 #include <stdexcept>
 
 namespace jam2::update {
@@ -29,15 +37,26 @@ ApplicationUpdateService::ApplicationUpdateService(QString root, QString install
         set(state, progress.message, progress.percent);
     };
     preparation_->finished = [this](const QString& error, bool cancelled) {
-        if (cancelled) { status_.installOnExit = false; set(State::Cancelled, QStringLiteral("Update cancelled. Your jam can keep playing.")); return; }
+        if (cancelled) {
+            status_.installOnExit = false;
+            set(State::Cancelled, QStringLiteral("Update cancelled. Your jam can keep playing.") +
+                (error.isEmpty() ? QString{} : QLatin1Char(' ') + error));
+            return;
+        }
         if (!error.isEmpty()) {
             status_.installOnExit = false;
             try { if (auto result = readResult(root_)) { result->reported = true; writeResult(root_, *result); } } catch (...) {}
             set(State::Failed, error + QStringLiteral(" Your current Jam2 installation is unchanged. You can keep jamming and retry later.")); return;
         }
         restart_ = false;
+#ifdef Q_OS_MACOS
+        status_.installOnExit = false;
+        set(State::Ready, QStringLiteral("The update is downloaded and verified. Quit Jam2 to open Apple's Installer, "
+            "follow its instructions, then reopen Jam2 from Applications."), 100);
+#else
         status_.installOnExit = true;
         set(State::Ready, QStringLiteral("The update is downloaded and verified. Restart now, or keep jamming and install when Jam2 closes."), 100);
+#endif
     };
 }
 ApplicationUpdateService::~ApplicationUpdateService()
@@ -52,7 +71,33 @@ void ApplicationUpdateService::set(State state, QString message, int percent)
 }
 void ApplicationUpdateService::check()
 {
-    if (preparation_->active() || status_.installOnExit || status_.state == State::Restarting || status_.state == State::Checking) return;
+    if (preparation_->active() || status_.installOnExit || status_.state == State::Ready || status_.state == State::Restarting || status_.state == State::Checking) return;
+#ifdef Q_OS_MACOS
+    // Later survives an ordinary quit. Re-verify the retained installer in the
+    // same helper used for downloads, without fetching the large PKG again.
+    // Explicit retry after a failed verification checks the server afresh.
+    if (status_.state == State::Idle && QFileInfo(root_).isDir()) {
+        try {
+            const QString marker = confinedPath(root_, QStringLiteral("update/prepared.json"));
+            const QString package = confinedPath(root_, downloadRelativePath());
+            QFile file(package + QStringLiteral(".json"));
+            if (QFileInfo(marker).isFile() && QFileInfo(package).isFile() && file.open(QIODevice::ReadOnly) && file.size() <= 65536) {
+                const auto encoded = file.readAll();
+                const auto version = QJsonDocument::fromJson(encoded).object().value(QStringLiteral("version")).toString();
+                const auto metadata = parseMetadata(encoded, version);
+                if (newerVersion(version, status_.installedVersion)) {
+                    available_ = {metadata, encoded};
+                    status_.availableVersion = version; status_.bytes = metadata.bytes;
+                    set(State::Preparing, QStringLiteral("Verifying the previously downloaded installer..."));
+                    preparation_->start(metadata, encoded, true);
+                    return;
+                }
+            }
+        } catch (const std::exception& error) {
+            qWarning().noquote() << "Prepared installer metadata could not be reused:" << error.what();
+        }
+    }
+#endif
     available_ = {}; status_.availableVersion.clear(); status_.bytes = 0;
     set(State::Checking, QStringLiteral("Checking for Jam2 updates..."));
     checker_.start(status_.installedVersion);
@@ -69,7 +114,7 @@ void ApplicationUpdateService::cancel()
         checker_.cancel(); set(State::Cancelled, QStringLiteral("Update check cancelled.")); return;
     }
     if (status_.state == State::Available) { set(State::Cancelled, QStringLiteral("No update was downloaded.")); return; }
-    if (!preparation_->active() && !status_.installOnExit) return;
+    if (!preparation_->active() && !status_.installOnExit && status_.state != State::Ready) return;
     status_.installOnExit = false; restart_ = false;
     set(State::Cancelling, QStringLiteral("Cancelling the update and removing temporary files..."));
     preparation_->cancel();
@@ -77,19 +122,36 @@ void ApplicationUpdateService::cancel()
 void ApplicationUpdateService::defer()
 {
     if (status_.state != State::Ready && status_.state != State::Restarting) return;
+#ifdef Q_OS_MACOS
+    restart_ = false; status_.installOnExit = false;
+    set(State::Ready, QStringLiteral("Keep jamming. When you are ready, choose Quit and Open Installer. "
+        "The installer will not open on a normal exit."), 100);
+#else
     restart_ = false; status_.installOnExit = true;
     set(State::Ready, QStringLiteral("Keep jamming. This update will install when you close Jam2 normally; Jam2 will not reopen."), 100);
+#endif
 }
 void ApplicationUpdateService::requestRestart(std::function<bool()> closeWindow)
 {
     if (status_.state != State::Ready) return;
+#ifdef Q_OS_MACOS
+    restart_ = false; status_.installOnExit = true;
+    set(State::Restarting, QStringLiteral("Closing Jam2 to open Apple's Installer. Save your project if prompted. "
+        "Follow the installer and reopen Jam2 after it finishes."), 100);
+#else
     restart_ = true;
     set(State::Restarting, QStringLiteral("Closing Jam2 to install the update, then reopening it. Save your project if prompted."), 100);
+#endif
     QTimer::singleShot(0, this, [this, closeWindow = std::move(closeWindow)] {
         if (status_.state != State::Restarting) return;
         if (!closeWindow()) {
             restart_ = false;
+#ifdef Q_OS_MACOS
+            status_.installOnExit = false;
+            set(State::Ready, QStringLiteral("Closing cancelled. Jam2 remains open and the installer is ready for later."), 100);
+#else
             set(State::Ready, QStringLiteral("Restart cancelled. The update stays ready and will install on your next normal exit, without reopening Jam2."), 100);
+#endif
         }
     });
 }
@@ -99,7 +161,8 @@ QString ApplicationUpdateService::windowClosing()
     if (launched_) return {};
     if (status_.installOnExit && (status_.state == State::Ready || status_.state == State::Restarting)) {
         try {
-            installer_({root_, status_.availableVersion, QCoreApplication::applicationPid(), restart_, true});
+            installer_({root_, status_.availableVersion, QCoreApplication::applicationPid(), restart_, true, false, {},
+                QCoreApplication::applicationFilePath()});
             launched_ = true; status_.installOnExit = false;
         } catch (const std::exception& error) {
             status_.installOnExit = false;

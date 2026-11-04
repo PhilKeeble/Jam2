@@ -221,8 +221,9 @@ void validateZip(const QString& path, const ModelDownloadService::Manifest& mani
 } // namespace
 
 ModelDownloadService::ModelDownloadService(QString root, QString modelsDirectory,
-    QObject* parent, QNetworkAccessManager* network)
+    QObject* parent, QNetworkAccessManager* network, QString manifestPath)
     : QObject(parent), root_(QDir::cleanPath(std::move(root))),
+      manifestPath_(manifestPath.isEmpty() ? QDir(root_).filePath(QStringLiteral("models.json")) : std::move(manifestPath)),
       modelsDirectory_(QDir::cleanPath(std::move(modelsDirectory))),
       staging_(QDir(root_).filePath(QStringLiteral("temp/jamtaster-models"))),
       network_(network ? network : new QNetworkAccessManager(this))
@@ -282,7 +283,7 @@ void ModelDownloadService::check()
     if (busy()) return;
     cancelled_.store(false);
     try {
-        manifest_ = readManifest(QDir(root_).filePath(QStringLiteral("models.json")));
+        manifest_ = readManifest(manifestPath_);
         // Do not create a model directory merely to check its contents.
         const QString relative = QDir(root_).relativeFilePath(modelsDirectory_);
         require(relative != QStringLiteral("..") && !relative.startsWith(QStringLiteral("../")) &&

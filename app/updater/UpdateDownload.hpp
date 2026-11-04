@@ -15,7 +15,8 @@ class QSaveFile;
 namespace jam2::update {
 class Download final : public QObject {
 public:
-    explicit Download(QString root, QObject* parent = nullptr, QNetworkAccessManager* network = nullptr);
+    explicit Download(QString root, QObject* parent = nullptr, QNetworkAccessManager* network = nullptr,
+        std::function<bool()> installerRunning = {});
     ~Download() override;
     void start(const QString& version, std::optional<Metadata> approved = std::nullopt);
     void cancel();
@@ -27,6 +28,7 @@ private:
     bool readArchive();
     void fail(const QString& error);
     QString root_;
+    std::function<bool()> installerRunning_;
     QNetworkAccessManager* network_;
     QPointer<QNetworkReply> reply_;
     Metadata metadata_;

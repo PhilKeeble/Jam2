@@ -113,13 +113,45 @@ function(execute_process)
     elseif(invocation MATCHES "/codesign --verify")
         # Signature validation is represented by the recorded event.
     elseif(invocation MATCHES "/file -b")
-        set(output "Mach-O")
+        if(invocation MATCHES "\\.json")
+            set(output "JSON text")
+        else()
+            set(output "Mach-O")
+        endif()
     elseif(invocation MATCHES "/lipo" OR invocation MATCHES "/otool")
         # Universal portable dependency fixtures.
     elseif(invocation MATCHES "Contents/MacOS/jam2 --version")
         set(output "Jam2 1.2.3")
+    elseif(invocation MATCHES "/pkgbuild")
+        if(case STREQUAL "pkg-build-failure")
+            message(FATAL_ERROR "Fixture PKG build failure")
+        endif()
+        file(READ "${JAM2_PACKAGE_OUTPUT}/.macos-installer/components.plist" policy)
+        if(NOT policy MATCHES "BundleIsRelocatable</key><false/>" OR
+                NOT policy MATCHES "BundleOverwriteAction</key><string>upgrade</string>" OR
+                NOT invocation MATCHES "--install-location / --ownership recommended")
+            message(FATAL_ERROR "PKG must replace only /Applications/Jam2.app with normal system ownership")
+        endif()
+        file(WRITE "${JAM2_PACKAGE_OUTPUT}/.macos-installer/Jam2.component.pkg" "component fixture")
+    elseif(invocation MATCHES "/productbuild")
+        if(NOT case STREQUAL "adhoc" AND NOT invocation MATCHES "--sign Developer ID Installer: Fixture --timestamp")
+            message(FATAL_ERROR "Developer ID Installer signing missing")
+        endif()
+        if(case STREQUAL "pkg-sign-failure")
+            message(FATAL_ERROR "Fixture PKG signing failure")
+        endif()
+        file(WRITE "${JAM2_PACKAGE_OUTPUT}/.macos-installer/Jam2-macos.pkg" "signed package fixture")
+        if(EXISTS "${app}/Contents/ticket")
+            file(APPEND "${JAM2_PACKAGE_OUTPUT}/.macos-installer/Jam2-macos.pkg" " including stapled app ticket")
+        endif()
+    elseif(invocation MATCHES "/pkgutil --check-signature")
+        if(case STREQUAL "pkg-verify-failure")
+            message(FATAL_ERROR "Fixture PKG signature failure")
+        endif()
     elseif(invocation MATCHES "notarytool submit")
-        if(case STREQUAL "transport")
+        if(case STREQUAL "pkg-notary-failure" AND invocation MATCHES "Jam2-macos.pkg")
+            set(output "{\"id\":\"fixture-pkg-id\",\"status\":\"Invalid\"}")
+        elseif(case STREQUAL "transport")
             set(result 1)
         elseif(case STREQUAL "malformed")
             set(output "invalid JSON")
@@ -140,7 +172,14 @@ function(execute_process)
         if(case STREQUAL "staple-failure")
             message(FATAL_ERROR "Fixture staple failure")
         endif()
-        file(WRITE "${app}/Contents/ticket" "stapled ticket")
+        if(invocation MATCHES "Jam2-macos.pkg")
+            if(case STREQUAL "pkg-staple-failure")
+                message(FATAL_ERROR "Fixture PKG staple failure")
+            endif()
+            file(APPEND "${JAM2_PACKAGE_OUTPUT}/.macos-installer/Jam2-macos.pkg" " stapled pkg ticket")
+        else()
+            file(WRITE "${app}/Contents/ticket" "stapled ticket")
+        endif()
     elseif(invocation MATCHES "stapler validate")
         if(case STREQUAL "validate-failure")
             message(FATAL_ERROR "Fixture ticket validation failure")
@@ -196,7 +235,9 @@ int main(int argc, char** argv)
         for (const QString& scenario : {QStringLiteral("accepted"), QStringLiteral("signed-only"),
                 QStringLiteral("adhoc"), QStringLiteral("sign-failure"), QStringLiteral("rejected"), QStringLiteral("transport"),
                 QStringLiteral("malformed"), QStringLiteral("missing-id"), QStringLiteral("log-failure"),
-                QStringLiteral("staple-failure"), QStringLiteral("validate-failure"), QStringLiteral("gatekeeper-failure")}) {
+                QStringLiteral("staple-failure"), QStringLiteral("validate-failure"), QStringLiteral("gatekeeper-failure"),
+                QStringLiteral("pkg-build-failure"), QStringLiteral("pkg-sign-failure"), QStringLiteral("pkg-verify-failure"),
+                QStringLiteral("pkg-notary-failure"), QStringLiteral("pkg-staple-failure")}) {
             const QString work = temporary.filePath(scenario);
             require(QDir().mkpath(work), "scenario workspace exists");
             const bool adhoc = scenario == QStringLiteral("adhoc");
@@ -206,6 +247,7 @@ int main(int argc, char** argv)
                 QStringLiteral("-DJAM2_PACKAGE_CONFIG=") + work + QStringLiteral("/config.cmake"),
                 QStringLiteral("-DJAM2_PACKAGE_OUTPUT=") + work + QStringLiteral("/dist"),
                 QStringLiteral("-DJAM2_SIGN_IDENTITY=") + (adhoc ? QStringLiteral("-") : QStringLiteral("Developer ID Application: Fixture")),
+                QStringLiteral("-DJAM2_INSTALLER_SIGN_IDENTITY=") + (adhoc ? QString() : QStringLiteral("Developer ID Installer: Fixture")),
                 QStringLiteral("-DJAM2_NOTARY_PROFILE=") + (adhoc || signedOnly ? QString() : QStringLiteral("OFF")),
                 QStringLiteral("-DJAM2_MACOS_FINALIZE_SCRIPT=") + (adhoc ? QString() : hookPath),
                 QStringLiteral("-Dpackage_script=") + packager, QStringLiteral("-Dcase=") + scenario,
@@ -224,10 +266,11 @@ int main(int argc, char** argv)
                     "the enclosing app is signed after all nested code");
             }
             const QByteArray trace = read(work + QStringLiteral("/trace"));
-            const auto zipPosition = trace.indexOf("Jam2-macos.zip.partial");
-            require((zipPosition >= 0) == success, "no final ZIP is attempted before all checks succeed");
-            require(QFile::exists(work + QStringLiteral("/dist/Jam2-macos.zip")) == success &&
-                    QFile::exists(work + QStringLiteral("/dist/Jam2-macos.zip.json")) == success,
+            const auto packagePosition = trace.indexOf("/productbuild");
+            if (!success && !scenario.startsWith(QStringLiteral("pkg-")))
+                require(packagePosition < 0, "PKG creation waits for app signing and notarization checks");
+            require(QFile::exists(work + QStringLiteral("/dist/Jam2-macos.pkg")) == success &&
+                    QFile::exists(work + QStringLiteral("/dist/Jam2-macos.pkg.json")) == success,
                 "failed release produces neither final archive nor publication metadata");
             if (scenario == QStringLiteral("accepted")) {
                 const auto submit = trace.indexOf("notarytool submit");
@@ -235,11 +278,13 @@ int main(int argc, char** argv)
                 const auto validate = trace.indexOf("stapler validate");
                 const auto gatekeeper = trace.indexOf("/spctl");
                 require(trace.lastIndexOf("/codesign --force") < submit && submit < staple &&
-                        staple < validate && validate < gatekeeper && gatekeeper < zipPosition,
-                    "signing, notarization, stapling, validation and final ZIP occur in order");
-                require(trace.count("Jam2-macos.zip.partial") == 1,
-                    "the distribution ZIP is created only once");
-                const QString archive = work + QStringLiteral("/dist/Jam2-macos.zip");
+                        staple < validate && validate < gatekeeper && gatekeeper < packagePosition &&
+                        packagePosition < trace.lastIndexOf("notarytool submit") &&
+                        trace.lastIndexOf("notarytool submit") < trace.lastIndexOf("stapler staple") &&
+                        trace.lastIndexOf("stapler staple") < trace.lastIndexOf("/spctl --assess --type install"),
+                    "app signing/notarization precedes PKG creation, signing, notarization and install assessment");
+                require(trace.count("/productbuild") == 1, "the final PKG is built once");
+                const QString archive = work + QStringLiteral("/dist/Jam2-macos.pkg");
                 const auto metadata = QJsonDocument::fromJson(read(archive + QStringLiteral(".json"))).object();
                 const auto zipBytes = read(archive);
                 require(metadata.value(QStringLiteral("bytes")).toInteger() == zipBytes.size() &&
@@ -260,10 +305,8 @@ int main(int argc, char** argv)
                     ticketFound |= path == QStringLiteral("Jam2.app/Contents/ticket");
                 }
                 require(ticketFound, "stapled ticket enters the final manifest");
-                const auto listing = run(cmake, {QStringLiteral("-E"), QStringLiteral("tar"),
-                    QStringLiteral("tf"), work + QStringLiteral("/dist/Jam2-macos.zip")});
-                require(listing.code == 0 && listing.output.contains("Jam2.app/Contents/ticket"),
-                    "final ZIP contains the stapled ticket");
+                require(zipBytes.contains("including stapled app ticket") && zipBytes.contains("stapled pkg ticket"),
+                    "published PKG bytes include both notarization tickets before hashing");
             } else if (adhoc || signedOnly) {
                 require(!trace.contains("notarytool") && !trace.contains("stapler"),
                     "local signing paths do not submit to Apple");

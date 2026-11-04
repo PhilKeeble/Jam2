@@ -407,12 +407,12 @@ void testGuiPresentation(QApplication& app)
     QTemporaryDir releaseRoot;
     expect(releaseRoot.isValid(), "temporary release root exists");
     QString error;
-    expect(!setAppReleaseRootForTesting(QStringLiteral("relative"), error) && !error.isEmpty(),
+    expect(!setAppDataRootForTesting(QStringLiteral("relative"), error) && !error.isEmpty(),
         "relative release-root override rejects");
-    expect(setAppReleaseRootForTesting(releaseRoot.path(), error) && error.isEmpty(),
+    expect(setAppDataRootForTesting(releaseRoot.path(), error) && error.isEmpty(),
         "absolute release-root override applies");
-    expect(appReleaseFolderPath(QStringLiteral("songs")).startsWith(releaseRoot.path()) &&
-            appReleaseFilePath(QStringLiteral("captures"), QStringLiteral("one.wav")).startsWith(releaseRoot.path()),
+    expect(appDataFolderPath(QStringLiteral("songs")).startsWith(releaseRoot.path()) &&
+            appDataFilePath(QStringLiteral("captures"), QStringLiteral("one.wav")).startsWith(releaseRoot.path()),
         "release storage paths honor the test root");
 
     installJam2Style();

@@ -1,7 +1,11 @@
 #include "UpdateDownload.hpp"
+#ifdef Q_OS_MACOS
+#include "UpdaterMacApplication.hpp"
+#endif
 
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QJsonDocument>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
@@ -26,8 +30,9 @@ QNetworkRequest request(const QUrl& url)
 }
 }
 
-Download::Download(QString root, QObject* parent, QNetworkAccessManager* network)
-    : QObject(parent), root_(std::move(root)), network_(network ? network : new QNetworkAccessManager(this)) {}
+Download::Download(QString root, QObject* parent, QNetworkAccessManager* network, std::function<bool()> installerRunning)
+    : QObject(parent), root_(std::move(root)), installerRunning_(std::move(installerRunning)),
+      network_(network ? network : new QNetworkAccessManager(this)) {}
 
 Download::~Download()
 {
@@ -43,6 +48,11 @@ void Download::start(const QString& version, std::optional<Metadata> approved)
     approved_ = std::move(approved);
     try {
         if (!validVersion(version)) throw std::runtime_error("Expected a major.minor.patch update version.");
+#ifdef Q_OS_MACOS
+        if (QFileInfo::exists(QDir(root_).filePath(downloadRelativePath())) &&
+            (installerRunning_ ? installerRunning_() : macInstallerRunning()))
+            throw std::runtime_error("Finish or close Apple's Installer before downloading another Jam2 update. Its package has been preserved.");
+#endif
         clearDirectory(root_, QStringLiteral("update"));
         getMetadata(version);
     } catch (const std::exception& error) { fail(QString::fromUtf8(error.what())); }
@@ -75,7 +85,7 @@ void Download::getMetadata(const QString& version)
             if (approved_ && (metadata_.url != approved_->url || metadata_.bytes != approved_->bytes ||
                     metadata_.sha256 != approved_->sha256 || metadata_.modelsManifestSha256 != approved_->modelsManifestSha256))
                 throw std::runtime_error("This release changed since you approved it. Check for updates again before downloading.");
-            QSaveFile file(confinedPath(root_, QStringLiteral("update/package.zip.json")));
+            QSaveFile file(confinedPath(root_, downloadRelativePath() + QStringLiteral(".json")));
             if (!file.open(QIODevice::WriteOnly) || file.write(*bytes) != bytes->size() || !file.commit())
                 throw std::runtime_error("Could not save the release metadata in update/.");
             const QStorageInfo storage(QDir(root_).filePath(QStringLiteral("update")));
@@ -88,7 +98,7 @@ void Download::getMetadata(const QString& version)
 
 void Download::getArchive()
 {
-    output_ = std::make_unique<QSaveFile>(confinedPath(root_, QStringLiteral("update/package.zip")));
+    output_ = std::make_unique<QSaveFile>(confinedPath(root_, downloadRelativePath()));
     if (!output_->open(QIODevice::WriteOnly)) { fail(QStringLiteral("Could not create the update download.")); return; }
     reply_ = network_->get(request(metadata_.url));
     reply_->setReadBufferSize(1024 * 1024);
@@ -105,7 +115,7 @@ void Download::getArchive()
             fail(cancelled_ ? QStringLiteral("Update download cancelled.") :
                 QStringLiteral("The update download did not complete (HTTP %1): %2").arg(http).arg(detail)); return;
         }
-        if (!output_->commit()) { fail(QStringLiteral("Could not finish writing the update ZIP.")); return; }
+        if (!output_->commit()) { fail(QStringLiteral("Could not finish writing the update package.")); return; }
         output_.reset();
         if (finished) finished(metadata_, {});
     });

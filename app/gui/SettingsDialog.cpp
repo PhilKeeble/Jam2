@@ -1568,7 +1568,7 @@ std::optional<SettingsDialogResult> SettingsDialog::run(
     storeTuning(updated.join.tuning, joinTuning, false); storeRuntime(updated.join.runtime, joinRuntime);
     updated.logging.folder = logFolder->text().trimmed();
     if (updated.logging.folder.isEmpty()) {
-        updated.logging.folder = appReleaseFolderPath(QStringLiteral("logs"));
+        updated.logging.folder = appDataFolderPath(QStringLiteral("logs"));
     }
     updated.create.runtime.logStatsFolder = updated.logging.folder;
     updated.join.runtime.logStatsFolder = updated.logging.folder;
@@ -1586,7 +1586,7 @@ std::optional<SettingsDialogResult> SettingsDialog::run(
         jamMixIncludeMetronome->isChecked();
     updated.recording.input.outputFolder = inputFolderRow.first->text().trimmed();
     if (updated.recording.input.outputFolder.isEmpty()) {
-        updated.recording.input.outputFolder = appReleaseFolderPath(QStringLiteral("captures"));
+        updated.recording.input.outputFolder = appDataFolderPath(QStringLiteral("captures"));
     }
     updated.recording.input.recordUntilStopped = inputUntilStopped->isChecked();
     updated.recording.input.durationBars = inputDuration->value();
@@ -1595,7 +1595,7 @@ std::optional<SettingsDialogResult> SettingsDialog::run(
     updated.recording.input.latencyAdjustmentFrames = inputLatency->value();
     updated.recording.loopback.outputFolder = loopFolderRow.first->text().trimmed();
     if (updated.recording.loopback.outputFolder.isEmpty()) {
-        updated.recording.loopback.outputFolder = appReleaseFolderPath(QStringLiteral("captures"));
+        updated.recording.loopback.outputFolder = appDataFolderPath(QStringLiteral("captures"));
     }
     updated.recording.loopback.sourceId = loopSource->currentData().toString().isEmpty()
         ? loopSource->currentText().trimmed() : loopSource->currentData().toString();

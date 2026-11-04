@@ -83,7 +83,7 @@ bool containsArtifact(const QString& folder)
 
 int JamStorage::pruneEmptyUnsavedWorkspaces()
 {
-    const QDir tracks(appReleaseFolderPath(QStringLiteral("tracks")));
+    const QDir tracks(appDataFolderPath(QStringLiteral("tracks")));
     int removed = 0;
     for (const QString& name : tracks.entryList(
              QDir::Dirs | QDir::Hidden | QDir::System | QDir::NoDotAndDotDot,
@@ -270,7 +270,7 @@ bool JamStorage::moveToSongs(QString& error)
 bool JamStorage::discardUnsaved(QString& error)
 {
     if (saved_ || rootFolder_.isEmpty() || !QFileInfo::exists(rootFolder_)) return true;
-    const QString tracksRoot = QDir(appReleaseFolderPath(QStringLiteral("tracks"))).absolutePath();
+    const QString tracksRoot = QDir(appDataFolderPath(QStringLiteral("tracks"))).absolutePath();
     const QString target = QDir(rootFolder_).absolutePath();
     const QString prefix = tracksRoot + QLatin1Char('/');
     if (!target.startsWith(prefix, Qt::CaseInsensitive) || target == tracksRoot) {
@@ -288,7 +288,7 @@ bool JamStorage::discardUnsaved(QString& error)
 
 QString JamStorage::rootFor(bool saved, const QString& slug)
 {
-    const QDir parent(appReleaseFolderPath(
+    const QDir parent(appDataFolderPath(
         saved ? QStringLiteral("songs") : QStringLiteral("tracks")));
     return parent.absoluteFilePath(slug);
 }

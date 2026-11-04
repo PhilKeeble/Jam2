@@ -333,7 +333,7 @@ QString timestampedCapturePath(const QString& prefix, const QString& folder = {}
             QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-hhmmss-zzz")),
             QUuid::createUuid().toString(QUuid::WithoutBraces).left(8));
     return folder.trimmed().isEmpty()
-        ? appReleaseFilePath(QStringLiteral("captures"), fileName)
+        ? appDataFilePath(QStringLiteral("captures"), fileName)
         : QDir(folder).absoluteFilePath(fileName);
 }
 
@@ -414,7 +414,7 @@ QString resolvedManagedCaptureFolder(
     const QString configured = configuredFolder.trimmed();
     if (configured.isEmpty() ||
         QDir(configured).absolutePath() ==
-            QDir(appReleaseFolderPath(QStringLiteral("captures"))).absolutePath()) {
+            QDir(appDataFolderPath(QStringLiteral("captures"))).absolutePath()) {
         return managedFolder;
     }
     return configured;
@@ -1173,7 +1173,7 @@ MainWindow::MainWindow(
     trackTimelineTimer_.setTimerType(Qt::PreciseTimer);
     QObject::connect(&trackTimelineTimer_, &QTimer::timeout, this, [this] { updateTrackTimeline(); });
     trackTimelineTimer_.start();
-    updateUi_ = std::make_unique<UpdateUi>(this, appReleaseDir().absolutePath(),
+    updateUi_ = std::make_unique<UpdateUi>(this, appDataDir().absolutePath(),
         QString::fromLatin1(jam2::kVersion), [this] { return close(); });
     updateUi_->presentationChanged = [this](const QString& text, const QString& tooltip) {
         updatesButton_->setText(text); updatesButton_->setToolTip(tooltip);
@@ -4461,7 +4461,7 @@ void MainWindow::appendLog(const QString& line)
     if (!guiLogFile_) {
         QString root = preferences_.logging.folder.trimmed();
         if (root.isEmpty()) {
-            root = appReleaseFolderPath(QStringLiteral("logs"));
+            root = appDataFolderPath(QStringLiteral("logs"));
         }
         QDir directory(root);
         if (directory.mkpath(QStringLiteral("."))) {
@@ -5358,15 +5358,15 @@ void MainWindow::applyPreferencesToControls()
 {
     const bool firstApplication = !preferencesInitialized_;
     if (preferences_.logging.folder.trimmed().isEmpty()) {
-        preferences_.logging.folder = appReleaseFolderPath(QStringLiteral("logs"));
+        preferences_.logging.folder = appDataFolderPath(QStringLiteral("logs"));
     }
     preferences_.create.runtime.logStatsFolder = preferences_.logging.folder;
     preferences_.join.runtime.logStatsFolder = preferences_.logging.folder;
     if (preferences_.recording.input.outputFolder.trimmed().isEmpty()) {
-        preferences_.recording.input.outputFolder = appReleaseFolderPath(QStringLiteral("captures"));
+        preferences_.recording.input.outputFolder = appDataFolderPath(QStringLiteral("captures"));
     }
     if (preferences_.recording.loopback.outputFolder.trimmed().isEmpty()) {
-        preferences_.recording.loopback.outputFolder = appReleaseFolderPath(QStringLiteral("captures"));
+        preferences_.recording.loopback.outputFolder = appDataFolderPath(QStringLiteral("captures"));
     }
     applyCreateDefaultsToControls();
     if (metronomeSoundBox_) {
@@ -7218,7 +7218,7 @@ void MainWindow::exportLooperAudio()
 
     const QString slug = JamStorage::portableSlug(chordModel_.title()).isEmpty()
         ? QStringLiteral("Jam2") : JamStorage::portableSlug(chordModel_.title());
-    const QString defaultFolder = appReleaseFolderPath(QString{});
+    const QString defaultFolder = appDataFolderPath(QString{});
     QStringList outputPaths;
     if (scope == Scope::CurrentBank) {
         const QString suggested = QDir(defaultFolder).absoluteFilePath(
@@ -8345,7 +8345,7 @@ void MainWindow::createJamTasterSong(
     const QString sourceDisposition = promptJamTasterSourceDisposition();
     if (sourceDisposition.isEmpty()) return;
     const QString slug = JamStorage::portableSlug(displayName);
-    const QString destination = QDir(appReleaseFolderPath(QStringLiteral("songs")))
+    const QString destination = QDir(appDataFolderPath(QStringLiteral("songs")))
         .absoluteFilePath(slug);
     if (QFileInfo::exists(destination)) {
         QMessageBox::warning(
@@ -15862,7 +15862,7 @@ void MainWindow::openSong()
         this,
         QStringLiteral("Open JamJar"),
 
-        appReleaseFolderPath(QStringLiteral("songs")),
+        appDataFolderPath(QStringLiteral("songs")),
         QStringLiteral("JamJar (*.jamjar);;JSON files (*.json);;All files (*)"),
         nullptr,
         QFileDialog::Options{});
@@ -16596,7 +16596,7 @@ bool MainWindow::playCuratedIdeaPreview(
     // Keep extracted previews with Jam2's other managed data. The private GUI
     // agent redirects this root to its build-local storage, so native tests do
     // not leave cache artifacts in the user's profile.
-    const QString cacheRoot = appReleaseFolderPath(
+    const QString cacheRoot = appDataFolderPath(
         QStringLiteral("cache/idea-previews"));
     if (!QDir().mkpath(cacheRoot)) {
         error = QStringLiteral("The preview cache folder could not be created.");

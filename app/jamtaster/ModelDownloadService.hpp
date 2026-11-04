@@ -45,7 +45,7 @@ public:
     };
 
     ModelDownloadService(QString installationRoot, QString modelsDirectory,
-        QObject* parent = nullptr, QNetworkAccessManager* network = nullptr);
+        QObject* parent = nullptr, QNetworkAccessManager* network = nullptr, QString manifestPath = {});
     ~ModelDownloadService() override;
 
     const Status& status() const { return status_; }
@@ -70,6 +70,7 @@ private:
     Result installArchive();
 
     QString root_;
+    QString manifestPath_;
     QString modelsDirectory_;
     QString staging_;
     Manifest manifest_;

@@ -289,14 +289,14 @@ void testInstall(Fixture& fixture)
 void testDownload(Fixture& fixture)
 {
     Network network; network.metadata = fixture.metadataJson(); network.archive = fixture.archive;
-    Download downloader(fixture.root, nullptr, &network);
+    Download downloader(fixture.root, nullptr, &network, [] { return false; });
     bool done = false; QString error; qint64 progressBytes = 0;
     downloader.progress = [&](qint64 bytes, qint64) { progressBytes = bytes; };
     downloader.finished = [&](const Metadata&, const QString& message) { done = true; error = message; };
     downloader.start(fixture.version);
     require(!done, "download starts asynchronously"); waitFor([&] { return done; });
     require(error.isEmpty() && network.requests.size() == 2 && progressBytes == fixture.archive.size() &&
-        read(QDir(fixture.root).filePath(QStringLiteral("update/package.zip"))) == fixture.archive, "exact-tag metadata and ZIP streamed to update folder");
+        read(QDir(fixture.root).filePath(downloadRelativePath())) == fixture.archive, "exact-tag metadata and ZIP streamed to update folder");
     done = false;
     auto approved = fixture.metadata; approved.sha256 = QByteArray(64, '0');
     const auto beforeChangedApproval = network.requests.size();
@@ -314,9 +314,26 @@ void testDownload(Fixture& fixture)
     network.metadata = fixture.metadataJson();
     done = false; network.http = 200; network.archive.chop(5);
     downloader.start(fixture.version); waitFor([&] { return done; });
-    require(error.contains(QStringLiteral("did not complete")) && !QFileInfo::exists(QDir(fixture.root).filePath(QStringLiteral("update/package.zip"))), "truncated ZIP is not committed");
+    require(error.contains(QStringLiteral("did not complete")) && !QFileInfo::exists(QDir(fixture.root).filePath(downloadRelativePath())), "truncated ZIP is not committed");
     done = false; network.delay = 100; downloader.start(fixture.version); downloader.cancel(); waitFor([&] { return done; });
     require(error.contains(QStringLiteral("cancelled"), Qt::CaseInsensitive), "download cancellation reported");
+#ifdef Q_OS_MACOS
+    const QString package = QDir(fixture.root).filePath(downloadRelativePath());
+    write(package, "Installer is using this package");
+    writeResult(fixture.root, {false, false, fixture.version, {}, true});
+    Download protectedDownload(fixture.root, nullptr, &network, [] { return true; });
+    QString blocked;
+    protectedDownload.finished = [&](const Metadata&, const QString& failure) { blocked = failure; };
+    const auto requests = network.requests.size();
+    protectedDownload.start(fixture.version);
+    require(blocked.contains(QStringLiteral("Installer")) && read(package) == "Installer is using this package" &&
+            network.requests.size() == requests,
+        "a new download cannot delete a package while Apple Installer is still open");
+    require(QFile::remove(QDir(fixture.root).filePath(QStringLiteral("update/result.json"))), "remove handoff marker to simulate a manually opened PKG");
+    blocked.clear(); protectedDownload.start(fixture.version);
+    require(blocked.contains(QStringLiteral("Installer")) && read(package) == "Installer is using this package",
+        "manually opening the retained PKG also protects it from download cleanup");
+#endif
     fixture.preserve();
 }
 
@@ -371,7 +388,7 @@ void testDetachedLauncher(Fixture& fixture, const QString& release)
     const std::atomic_bool cancelled{false};
     extractPackage(fixture.root, fixture.metadata, cancelled);
     stageRuntime(fixture.root, release);
-    const auto pid = launch({fixture.root, fixture.version, 0, false, true});
+    const auto pid = launch({fixture.root, fixture.version, 0, false, true, false, {}, {}});
     require(pid > 0, "real detached launcher starts helper");
     waitFor([&] { return readResult(fixture.root).has_value(); });
     require(readResult(fixture.root)->success, "detached launcher installs local package");

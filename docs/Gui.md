@@ -52,11 +52,17 @@ These controls submit fixed-shape typed commands directly to the in-process engi
 
 ## Settings And Device Tests
 
-Preferences are stored in the single `settings/preferences.ini` file beside
-`jam2.exe` on Windows, or beside `Jam2.app` on macOS. Existing profile-based
-preferences move there on first launch if the portable INI does not already
-exist. VST3 scans use the adjacent `temp/` folder and remove their result files
-after scanning. Opening a JamJar elsewhere does not change these locations.
+Preferences use `settings/preferences.ini` beside `jam2.exe` on Windows.
+For the distributed macOS app, default writable data lives in
+`~/Library/Application Support/Jam2/`, including preferences, logs, recordings,
+tracks, songs, caches and temporary plugin-scan results. Jam2 creates the folders
+automatically; the app can live in `/Applications` or another location. Existing
+adjacent/profile preferences are copied if the new INI is absent; custom file
+destinations remain valid. Opening a JamJar elsewhere preserves that project's
+own folder and does not change the default data root.
+Source builds launched from the checkout's `release/Jam2.app` use the same
+subfolders under `release/` instead, keeping local testing separate from the
+installed app's profile. See [development and PKG testing](../RELEASE.md#daily-macos-development-and-installed-package-testing).
 
 The cog in the header opens persistent Audio, Create Connection, Create
 Defaults, Join Defaults, Logs, and Recording settings. Audio keeps Local Audio
@@ -383,15 +389,22 @@ version and download size before **Download update**. Downloading and verificati
 do not stop the jam. Closing the progress window keeps the download running;
 **Cancel update** stops it. Closing Jam2 during an incomplete download cancels it.
 
-Once verified, **Restart and install** closes Jam2 through its normal save/close
-flow, installs the update and reopens it. **Install on exit**, or closing the
-ready-update window, lets you keep playing and applies the update when you quit
-without reopening Jam2. Cancelling a save/close prompt keeps the update ready
-for the next normal exit. **Discard update** removes a queued update.
+On macOS, once verified, **Quit and Open Installer** closes Jam2 through its
+normal save/close flow and opens Apple's Installer. Follow **Continue / Install**
+and authorize if prompted. Installer shows progress and its final success/error
+screen. Jam2 stays closed; reopen it from Applications when installation finishes.
+**Later**, or closing the update dialog, keeps the package ready without opening
+Installer on a normal exit. Cancelling a save prompt keeps Jam2 open.
 
-Settings, models and user content stay intact. Failures offer a new check/retry;
-installation failures are reported on the next launch. Downloads use `update/`
-and the helper/runtime copy uses `temp/updater/`, both inside the Jam2 folder.
+On Windows, **Restart and install** closes Jam2, installs and reopens it.
+**Install on exit** queues installation on normal exit without reopening.
+**Discard update** removes the prepared update on either platform.
+
+Settings, models and user content stay intact. Downloads use `update/` and the
+helper/runtime uses `temp/updater/` under the platform's writable data root.
+macOS verifies the PKG again after exit and records Installer opening separately
+from successful installation. The expected compiled version on a later launch
+confirms installation before staging cleanup.
 
 ## JamTaster WAV Analysis
 
@@ -411,7 +424,9 @@ checks the models. Missing or damaged models offer **Download models** with the
 download size, an approval popup and progress through download, verification and
 installation. Failures show a brief error and **Retry**; **Close** cancels model
 setup and returns to the jam. Checks, downloads and extraction do not block the
-GUI or stop playback. Models and temporary files stay inside the Jam2 folder.
+GUI or stop playback. Models and temporary files stay in the writable Jam2 data
+root: `release/` for a macOS source build, or
+`~/Library/Application Support/Jam2/` for the distributed macOS app.
 No Python environment or CUDA package is needed. Analysis runs outside the Jam2
 process and uses the available processor cores.
 
@@ -482,9 +497,9 @@ instead of creating a WAV that the active project cannot load.
 
 Every new jam receives a two-word display name. Managed paths replace spaces
 with underscores: an unsaved `Purple Orbit` jam writes beneath
-`release/tracks/Purple_Orbit`, with generated, received, imported, recorded,
+`tracks/Purple_Orbit` in the writable data root, with generated, received, imported, recorded,
 prepared, and jam-recording subfolders. Saving moves that workspace to
-`release/songs/Purple_Orbit/Purple_Orbit.jamjar`; JamJar files retain the same
+`songs/Purple_Orbit/Purple_Orbit.jamjar` in that root; JamJar files retain the same
 JSON project representation and use relative paths to their adjacent assets.
 The Performance people rail exposes **Record Jam**, whose default folders are
 `Take-1`, `Take-2`, and so on.

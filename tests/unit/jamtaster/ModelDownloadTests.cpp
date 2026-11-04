@@ -312,6 +312,34 @@ void testErrors(Fixture& fixture)
         !QFileInfo::exists(QDir(fixture.root).filePath(QStringLiteral("../escaped"))), "model destination cannot escape installation root");
 }
 
+void testSeparateApplicationSupport(Fixture& fixture)
+{
+    const QString manifest = QDir(fixture.root).filePath(QStringLiteral("read-only-app/Contents/Resources/models.json"));
+    write(manifest, fixture.manifest);
+    require(QFile::setPermissions(manifest, QFile::ReadOwner), "make bundled model manifest read-only");
+    const QString data = QDir(fixture.root).filePath(QStringLiteral("Application Support/Jam2"));
+    const QString models = QDir(data).filePath(QStringLiteral("components/jamtaster/models"));
+    require(QDir().mkpath(data), "create independent user data root");
+    Network network;
+    fixture.configure(network);
+    ModelDownloadService service(data, models, nullptr, &network, manifest);
+    fixture.missing(service);
+    service.download();
+    waitFor([&] { return !service.busy(); });
+    require(service.status().state == ModelDownloadService::State::Ready,
+        "model ZIP installs using an immutable app manifest and a separate writable root");
+    for (const auto& name : fixture.names)
+        require(read(QDir(models).filePath(name)) == read(QDir(fixture.payload).filePath(QStringLiteral("models/") + name)),
+            "model weights install in Application Support");
+    require(read(manifest) == fixture.manifest && !QFileInfo::exists(QDir(data).filePath(QStringLiteral("models.json"))) &&
+            !QFileInfo::exists(QDir(data).filePath(QStringLiteral("temp/jamtaster-models"))),
+        "model installation never writes app resources or leaves ZIP staging behind");
+    const auto requests = network.requests.size();
+    service.check(); waitFor([&] { return !service.busy(); });
+    require(service.status().state == ModelDownloadService::State::Ready && network.requests.size() == requests,
+        "existing Application Support models are reused without downloading again");
+}
+
 void testCancellationAndLock(Fixture& fixture)
 {
     Network network;
@@ -426,6 +454,8 @@ int main(int argc, char** argv)
         testDownload(download);
         Fixture errors(temporary.filePath(QStringLiteral("errors")), cmake);
         testErrors(errors);
+        Fixture support(temporary.filePath(QStringLiteral("separate-support")), cmake);
+        testSeparateApplicationSupport(support);
         Fixture cancellation(temporary.filePath(QStringLiteral("cancellation")), cmake);
         testCancellationAndLock(cancellation);
         Fixture dialog(temporary.filePath(QStringLiteral("dialog")), cmake);

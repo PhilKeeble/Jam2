@@ -481,7 +481,7 @@ int main(int argc, char** argv)
         const QString releaseRoot = QDir(root.path()).absoluteFilePath(
             QStringLiteral("release-root"));
         QString error;
-        require(setAppReleaseRootForTesting(releaseRoot, error),
+        require(setAppDataRootForTesting(releaseRoot, error),
             "could not install isolated release root: " + error.toStdString());
         testStorageLifecycle(releaseRoot);
         testExternalOpenSafety(releaseRoot, root.path());
