@@ -375,13 +375,63 @@ set_tests_properties(jam2_core_recovery_accounting_units PROPERTIES
     LABELS "unit;core;audio;network;performance;four-peer;delivery;recovery"
     TIMEOUT 30)
 
-foreach(profile fast64 moderate safe)
+foreach(profile fast64 standard safe)
     add_test(NAME jam2_profile_${profile}_timing
         COMMAND $<TARGET_FILE:jam2_core_input_tests> --profile-${profile})
     set_tests_properties(jam2_profile_${profile}_timing PROPERTIES
         LABELS "unit;core;audio;network;performance;four-peer"
         TIMEOUT 120)
 endforeach()
+
+# Explicit PCM16 experiments reuse the maintained timing/Wi-Fi/session fixtures.
+add_test(NAME jam2_standard_recovery_delivery
+    COMMAND $<TARGET_FILE:jam2_audio_flow_interaction_tests> gap-hold-timers)
+add_test(NAME jam2_standard_clock_delivery
+    COMMAND $<TARGET_FILE:jam2_audio_flow_interaction_tests> clock-alias-investigation)
+add_test(NAME jam2_standard_gap_evidence_units
+    COMMAND $<TARGET_FILE:jam2_core_input_tests> --gap-learning-order)
+set_tests_properties(jam2_standard_recovery_delivery jam2_standard_clock_delivery
+    jam2_standard_gap_evidence_units PROPERTIES
+    LABELS "core;audio;network;four-peer;fake-audio;network-impairment;delivery;standard"
+    TIMEOUT 900)
+# These values never alter production presets or saved GUI defaults.
+# Enable only for explicit comparison runs: set JAM2_PROFILE_COMPARISON=1 before compile.cmd.
+if("$ENV{JAM2_PROFILE_COMPARISON}" STREQUAL "1")
+    add_test(NAME jam2_profile_gap_hold_timers
+        COMMAND $<TARGET_FILE:jam2_audio_flow_interaction_tests> gap-hold-timers)
+    set_tests_properties(jam2_profile_gap_hold_timers PROPERTIES
+        LABELS "experiment;core;audio;network;four-peer;fake-audio;network-impairment;recovery-hold"
+        TIMEOUT 900)
+    add_test(NAME jam2_profile_gap_trigger_thresholds
+        COMMAND $<TARGET_FILE:jam2_audio_flow_interaction_tests> gap-trigger-thresholds)
+    set_tests_properties(jam2_profile_gap_trigger_thresholds PROPERTIES
+        LABELS "experiment;core;audio;network;four-peer;fake-audio;network-impairment;trigger-thresholds"
+        TIMEOUT 900)
+    add_test(NAME jam2_profile_gap_order_investigation
+        COMMAND $<TARGET_FILE:jam2_core_input_tests> --gap-learning-order)
+    add_test(NAME jam2_profile_gap_delivery_investigation
+        COMMAND $<TARGET_FILE:jam2_audio_flow_interaction_tests> gap-delivery-investigation)
+    add_test(NAME jam2_profile_clock_alias_investigation
+        COMMAND $<TARGET_FILE:jam2_audio_flow_interaction_tests> clock-alias-investigation)
+    set_tests_properties(jam2_profile_gap_order_investigation jam2_profile_gap_delivery_investigation
+        jam2_profile_clock_alias_investigation PROPERTIES
+        LABELS "experiment;core;audio;network;four-peer;fake-audio;network-impairment;gap-investigation"
+        TIMEOUT 600)
+    add_test(NAME jam2_profile_comparison_wifi_diagnostics
+        COMMAND $<TARGET_FILE:jam2_core_input_tests> --compare-wifi-diagnostics)
+    set_tests_properties(jam2_profile_comparison_wifi_diagnostics PROPERTIES
+        LABELS "experiment;core;audio;network;four-peer;fake-audio;network-impairment;profile-comparison"
+        TIMEOUT 120)
+    foreach(profile fast moderate safe candidate fast128-control)
+        add_test(NAME jam2_profile_comparison_${profile}
+            COMMAND $<TARGET_FILE:jam2_core_input_tests> --compare-profile-${profile})
+        add_test(NAME jam2_profile_comparison_${profile}_network
+            COMMAND $<TARGET_FILE:jam2_audio_flow_interaction_tests> compare-profile-${profile})
+        set_tests_properties(jam2_profile_comparison_${profile} jam2_profile_comparison_${profile}_network
+            PROPERTIES LABELS "experiment;core;audio;network;four-peer;fake-audio;network-impairment;profile-comparison"
+            TIMEOUT 600)
+    endforeach()
+endif()
 
 add_executable(jam2_udp_control_transport_tests EXCLUDE_FROM_ALL
     unit/application/UdpControlTransportTests.cpp
@@ -531,6 +581,14 @@ target_link_libraries(jam2_wasapi_processing_tests PRIVATE jam2_core)
 add_test(NAME jam2_wasapi_processing_units COMMAND $<TARGET_FILE:jam2_wasapi_processing_tests>)
 set_tests_properties(jam2_wasapi_processing_units PROPERTIES
     LABELS "unit;core;audio;wasapi;four-peer;fake-audio" TIMEOUT 60)
+
+add_executable(jam2_wasapi_capture_buffer_tests EXCLUDE_FROM_ALL integration/core/WasapiCaptureBufferExperiments.cpp)
+jam2_configure_test_target(jam2_wasapi_capture_buffer_tests)
+target_link_libraries(jam2_wasapi_capture_buffer_tests PRIVATE jam2_core)
+add_test(NAME jam2_wasapi_capture_buffer_integration COMMAND $<TARGET_FILE:jam2_wasapi_capture_buffer_tests>
+    "$ENV{JAM2_CAPTURE_BUFFER_ARTIFACT_ROOT}")
+set_tests_properties(jam2_wasapi_capture_buffer_integration PROPERTIES
+    LABELS "integration;core;audio;wasapi;four-peer;fake-audio;diagnostics" TIMEOUT 90)
 
 if(APPLE)
     add_executable(jam2_coreaudio_recording_timing_tests EXCLUDE_FROM_ALL
@@ -2493,6 +2551,8 @@ endif()
 
 add_dependencies(jam2_tests_unit jam2_wasapi_processing_tests)
 add_dependencies(jam2_tests_all jam2_wasapi_processing_tests)
+add_dependencies(jam2_tests_unit jam2_wasapi_capture_buffer_tests)
+add_dependencies(jam2_tests_all jam2_wasapi_capture_buffer_tests)
 
 function(jam2_add_audio_device_gui_test backend source)
     add_executable(jam2_${backend}_gui_tests EXCLUDE_FROM_ALL ${source}
@@ -2753,6 +2813,21 @@ endif()
 add_dependencies(jam2_tests_network jam2_udp_transport_comparison_tests)
 add_dependencies(jam2_tests_all jam2_udp_transport_comparison_tests)
 add_dependencies(jam2_tests_unit jam2_receive_budget_tests)
+if(WIN32)
+    add_executable(jam2_windows_runtime_tests EXCLUDE_FROM_ALL unit/build/WindowsRuntimeTests.cpp)
+    jam2_configure_test_target(jam2_windows_runtime_tests)
+    target_link_libraries(jam2_windows_runtime_tests PRIVATE Qt6::Core)
+    add_dependencies(jam2_windows_runtime_tests jam2)
+    get_target_property(compiler_runtime_dir jam2 JAM2_COMPILER_RUNTIME_DIRECTORY)
+    add_test(NAME jam2_windows_runtime_units COMMAND $<TARGET_FILE:jam2_windows_runtime_tests>
+        "${CMAKE_SOURCE_DIR}/tools/release/SelectWindowsRuntime.ps1"
+        "${JAM2_TEST_PUBLIC_EXECUTABLE}" "${compiler_runtime_dir}")
+    set_tests_properties(jam2_windows_runtime_units PROPERTIES
+        LABELS "unit;build;release;asio" TIMEOUT 90
+        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
+    add_dependencies(jam2_tests_unit jam2_windows_runtime_tests)
+    add_dependencies(jam2_tests_all jam2_windows_runtime_tests)
+endif()
 add_dependencies(jam2_tests_unit jam2_udp_receive_timing_tests)
 add_dependencies(jam2_tests_unit jam2_udp_backend_tests)
 add_dependencies(jam2_tests_network jam2_udp_backend_tests)
@@ -2764,6 +2839,31 @@ add_dependencies(jam2_tests_network jam2_udp_receive_timing_tests)
 add_dependencies(jam2_tests_all jam2_udp_receive_timing_tests)
 add_dependencies(jam2_tests_network jam2_receive_budget_tests)
 add_dependencies(jam2_tests_network jam2_cli_boundary_tests)
+add_executable(jam2_send_pacing_tests EXCLUDE_FROM_ALL integration/network/SendPacingIntegration.cpp support/ArtifactReader.cpp)
+jam2_configure_test_target(jam2_send_pacing_tests)
+target_include_directories(jam2_send_pacing_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/support")
+target_link_libraries(jam2_send_pacing_tests PRIVATE jam2_core Qt6::Core Qt6::Network)
+add_dependencies(jam2_send_pacing_tests jam2)
+add_test(NAME jam2_four_send_pacing_integration COMMAND $<TARGET_FILE:jam2_send_pacing_tests> "${JAM2_TEST_PUBLIC_EXECUTABLE}")
+set_tests_properties(jam2_four_send_pacing_integration PROPERTIES
+    LABELS "integration;network;four-peer;fake-audio;delivery;diagnostics" TIMEOUT 120 RUN_SERIAL TRUE)
+if(WIN32)
+    add_test(NAME jam2_send_pacing_hardware_integration COMMAND $<TARGET_FILE:jam2_send_pacing_tests> "${JAM2_TEST_PUBLIC_EXECUTABLE}" --hardware)
+    set_tests_properties(jam2_send_pacing_hardware_integration PROPERTIES
+        LABELS "integration;hardware;wasapi;asio;delivery;diagnostics" TIMEOUT 300 RUN_SERIAL TRUE SKIP_RETURN_CODE 77)
+    set_tests_properties(jam2_four_send_pacing_integration jam2_send_pacing_hardware_integration PROPERTIES
+        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
+    add_dependencies(jam2_tests_wasapi jam2_send_pacing_tests)
+    add_dependencies(jam2_tests_hardware jam2_send_pacing_tests)
+    add_dependencies(jam2_tests_wasapi jam2_wasapi_capture_buffer_tests)
+    add_test(NAME jam2_wasapi_capture_buffer_hardware_integration COMMAND $<TARGET_FILE:jam2_send_pacing_tests>
+        "${JAM2_TEST_PUBLIC_EXECUTABLE}" --capture-buffer-hardware)
+    set_tests_properties(jam2_wasapi_capture_buffer_hardware_integration PROPERTIES
+        LABELS "integration;hardware;wasapi;delivery;diagnostics" TIMEOUT 480 RUN_SERIAL TRUE SKIP_RETURN_CODE 77
+        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
+endif()
+add_dependencies(jam2_tests_network jam2_send_pacing_tests)
+add_dependencies(jam2_tests_all jam2_send_pacing_tests)
 add_dependencies(jam2_tests_all jam2_receive_budget_tests)
 add_test(NAME jam2_csv_serialization_performance COMMAND $<TARGET_FILE:jam2_cli_boundary_tests> --csv-performance)
 set_tests_properties(jam2_csv_serialization_performance PROPERTIES LABELS "unit;application;network;performance;delivery" TIMEOUT 30 RUN_SERIAL TRUE)

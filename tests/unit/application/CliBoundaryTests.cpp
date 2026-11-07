@@ -300,7 +300,7 @@ void testOptionAndStatsContracts()
             options.os_priority == Jam2OsPriorityMode::High,
         "channel-list parsing preserves unique one-based CLI selections as zero-based indices");
 
-    for (const std::string_view profile : {"fast", "moderate", "safe"}) {
+    for (const std::string_view profile : {"fast", "standard", "safe"}) {
         Arguments preset{"jam2", "network", "create", "--profile", profile};
         const auto create = jam2::cli::parse_options(preset.count(), preset.data(), 3);
         const auto join = jam2::cli::parse_options(
@@ -311,6 +311,14 @@ void testOptionAndStatsContracts()
             expect(create.frame_size == 64 && create.audio_buffer_size == 32 &&
                     create.playback_prefill_frames == 64 && join.playback_prefill_frames == 64,
                 "CLI Fast defaults to 64-frame packets, 32-frame callbacks and 64-frame prefill");
+        }
+        if (profile == "standard") {
+            expect(create.frame_size == 128 && create.audio_buffer_size == 64 &&
+                    create.playback_prefill_frames == 128 && create.jitter_buffer_frames == 128 &&
+                    create.adaptive_playback_target_frames == 128 && create.adaptive_playback_min_frames == 128 &&
+                    create.adaptive_playback_max_frames == 8192 && create.playback_max_frames == 8192 &&
+                    join.adaptive_playback_max_frames == 8192,
+                "CLI Standard applies the tested packet/callback floor and bounded adaptive headroom");
         }
     }
     Arguments numericOverride{"jam2", "network", "create", "--profile", "fast",
@@ -428,7 +436,19 @@ void testOptionAndStatsContracts()
     mixerSource.recovery_low_water_frames = 42;
     mixerSource.recovery_release_events = 43;
     mixerSource.recovery_release_active = true;
+    mixerSource.delivery_gap_hold_us = 5000000;
+    mixerSource.rebuffer_required_episodes = 10;
+    mixerSource.rebuffer_window_us = 20000000;
+    mixerSource.rebuffer_window_episode_count = 7;
+    mixerSource.rebuffer_events = 2;
+    mixerSource.rebuffer_cancellations = 1;
+    mixerSource.rebuffer_goal_frames = 4096;
     jam2::cli::stats::copy_peer_mixer_stats(copied, mixerSource);
+    expect(copied.mix_delivery_gap_hold_us == 5000000 && copied.mix_rebuffer_required_episodes == 10 &&
+            copied.mix_rebuffer_window_us == 20000000 && copied.mix_rebuffer_window_episode_count == 7 &&
+            copied.mix_rebuffer_events == 2 && copied.mix_rebuffer_cancellations == 1 &&
+            copied.mix_rebuffer_goal_frames == 4096,
+        "recovery hold and refill evidence remain observable through CLI/CSV stats");
     expect(copied.mix_receive_recovery_active &&
             copied.mix_receive_recovery_events == 11 &&
             copied.mix_receive_recovery_completions == 12 &&
@@ -494,6 +514,26 @@ void testOptionAndStatsContracts()
     expect(aggregated.drift_arrival_step_threshold_us == 2000 &&
         aggregated.drift_arrival_offset_adjustments == 5 && aggregated.drift_arrival_offset_us == -3000,
         "mesh diagnostics sum offset events and retain the signed largest-magnitude peer offset");
+
+    jam2::cli::stats::SendLoopDiagnostics sendLoop;
+    jam2::cli::stats::AudioPacketStats sendStats;
+    sendLoop.finishWake(0);
+    sendLoop.applyTo(sendStats);
+    expect(sendStats.send_interval_samples == 0 && sendStats.send_catchup_events == 0,
+        "idle send turns must not manufacture packet timing observations");
+    sendLoop.packet(0); sendLoop.finishWake(1);
+    sendLoop.packet(1333); sendLoop.packet(1333); sendLoop.packet(1340); sendLoop.finishWake(3);
+    sendLoop.packet(10000); sendLoop.finishWake(1);
+    sendLoop.applyTo(sendStats);
+    expect(sendStats.send_interval_samples == 4 && sendStats.send_interval_min_us == 0 &&
+        sendStats.send_interval_max_us == 8660 && sendStats.send_interval_sum_us == 10000 &&
+        sendStats.send_catchup_events == 1 && sendStats.send_catchup_max_packets == 3,
+        "sender diagnostics retain zero-spacing bursts and gaps separately from fan-out and idle turns");
+    sendLoop.packet(9000); sendLoop.packet(10333); sendLoop.finishWake(2);
+    sendLoop.applyTo(sendStats);
+    expect(sendStats.send_interval_samples == 5 && sendStats.send_interval_sum_us == 11333 &&
+        sendStats.send_catchup_events == 2 && sendStats.send_catchup_max_packets == 3,
+        "backward clock observations re-anchor without unsigned gap underflow");
 
     jam2::cli::stats::ReceiveLoopDiagnostics receiveLoop;
     receiveLoop.beginWake(1000);
@@ -626,9 +666,9 @@ void testOptionAndStatsContracts()
         const bool schemaMatches = opened && lines.size() == 3 &&
                 csvFieldCount(header) == csvFieldCount(finalRow) &&
                 csvFieldCount(header) == csvFieldCount(periodicRow) &&
-                header.endsWith("mix_live_tail_rounding_tolerance_frames,mix_adaptive_release_alignment_margin_frames,mix_partial_release_events,mix_partial_release_frames,mix_lookahead_hold_events,mix_lookahead_hold_frames,mix_lookahead_hold_max_fraction_ppm,mix_isolated_recovery_events,mix_worker_service_gap_us,mix_worker_runway_frames,mix_playback_stopping_frames,mix_release_worker_guard_active,wasapi_capture_depth_frames,wasapi_render_padding_frames,wasapi_capture_correction_ppm,wasapi_capture_underrun_frames,wasapi_capture_overrun_frames,wasapi_capture_discontinuities,wasapi_capture_resets,wasapi_invalid_timestamps,audio_device_error,grid_phase_accepted,grid_phase_delayed,grid_phase_reordered,grid_phase_raw_error_frames,grid_phase_tolerance_frames,grid_phase_maximum_drift_ppm,grid_phase_last_accepted_age_us,mix_adaptive_path_high_water_frames,mix_delivery_gap_guard_active,mix_recovery_pending_frames,mix_recovery_retired_frames,mix_recovery_cancelled_frames,mix_recovery_safe_depth_frames,mix_recovery_low_water_frames,mix_recovery_release_events,mix_recovery_release_active,drift_arrival_step_threshold_us,drift_arrival_offset_adjustments,drift_arrival_offset_us,receive_socket_packets,receive_socket_packets_max,receive_packet_budget_yields,receive_service_budget_yields,receive_work_packet_limit,receive_service_limit_us,telemetry_service_samples,telemetry_service_sum_us,telemetry_service_max_us") &&
-                periodicRow.endsWith(",17,256,yes,18,19,20,21,22,128,256,320,64,64,23,63,31,32,33,34,35,36,37,yes,111,222,-333,444,555,6,7,8,-9,0,0,0,0,0,0,0,0,no,38,39,40,41,42,43,yes,2000,2,-3000,44,45,46,47,128,500,0,0,0") &&
-                finalRow.endsWith(",17,256,yes,18,19,20,21,22,128,256,320,64,64,23,63,31,32,33,34,35,36,37,yes,111,222,-333,444,555,6,7,8,-9,0,0,0,0,0,0,0,0,no,38,39,40,41,42,43,yes,2000,2,-3000,44,45,46,47,128,500,0,0,0");
+                header.endsWith("mix_live_tail_rounding_tolerance_frames,mix_adaptive_release_alignment_margin_frames,mix_partial_release_events,mix_partial_release_frames,mix_lookahead_hold_events,mix_lookahead_hold_frames,mix_lookahead_hold_max_fraction_ppm,mix_isolated_recovery_events,mix_worker_service_gap_us,mix_worker_runway_frames,mix_playback_stopping_frames,mix_release_worker_guard_active,wasapi_capture_depth_frames,wasapi_render_padding_frames,wasapi_capture_correction_ppm,wasapi_capture_underrun_frames,wasapi_capture_overrun_frames,wasapi_capture_discontinuities,wasapi_capture_resets,wasapi_invalid_timestamps,audio_device_error,grid_phase_accepted,grid_phase_delayed,grid_phase_reordered,grid_phase_raw_error_frames,grid_phase_tolerance_frames,grid_phase_maximum_drift_ppm,grid_phase_last_accepted_age_us,mix_adaptive_path_high_water_frames,mix_delivery_gap_guard_active,mix_recovery_pending_frames,mix_recovery_retired_frames,mix_recovery_cancelled_frames,mix_recovery_safe_depth_frames,mix_recovery_low_water_frames,mix_recovery_release_events,mix_recovery_release_active,drift_arrival_step_threshold_us,drift_arrival_offset_adjustments,drift_arrival_offset_us,receive_socket_packets,receive_socket_packets_max,receive_packet_budget_yields,receive_service_budget_yields,receive_work_packet_limit,receive_service_limit_us,telemetry_service_samples,telemetry_service_sum_us,telemetry_service_max_us,mix_delivery_gap_hold_us,mix_rebuffer_required_episodes,mix_rebuffer_window_us,mix_rebuffer_window_episode_count,mix_rebuffer_events,mix_rebuffer_cancellations,mix_rebuffer_goal_frames") &&
+                periodicRow.endsWith(",17,256,yes,18,19,20,21,22,128,256,320,64,64,23,63,31,32,33,34,35,36,37,yes,111,222,-333,444,555,6,7,8,-9,0,0,0,0,0,0,0,0,no,38,39,40,41,42,43,yes,2000,2,-3000,44,45,46,47,128,500,0,0,0,5000000,10,20000000,7,2,1,4096") &&
+                finalRow.endsWith(",17,256,yes,18,19,20,21,22,128,256,320,64,64,23,63,31,32,33,34,35,36,37,yes,111,222,-333,444,555,6,7,8,-9,0,0,0,0,0,0,0,0,no,38,39,40,41,42,43,yes,2000,2,-3000,44,45,46,47,128,500,0,0,0,5000000,10,20000000,7,2,1,4096");
         expect(schemaMatches,
             "final CSV preserves the capture-clock pacing field and schema width");
     }

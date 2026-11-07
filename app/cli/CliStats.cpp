@@ -16,6 +16,37 @@
 
 namespace jam2::cli::stats {
 
+void SendLoopDiagnostics::packet(std::uint64_t now_us) noexcept
+{
+    if (started_ && now_us >= last_us_) {
+        const auto gap = now_us - last_us_;
+        if (samples_ == 0 || gap < minimum_us_) minimum_us_ = gap;
+        sum_us_ += gap;
+        maximum_us_ = std::max(maximum_us_, gap);
+        ++samples_;
+    }
+    started_ = true;
+    last_us_ = now_us;
+}
+
+void SendLoopDiagnostics::finishWake(std::size_t packets) noexcept
+{
+    if (packets > 1) {
+        ++catchup_events_;
+        catchup_max_packets_ = std::max<std::uint64_t>(catchup_max_packets_, packets);
+    }
+}
+
+void SendLoopDiagnostics::applyTo(AudioPacketStats& target) const noexcept
+{
+    target.send_interval_min_us = minimum_us_;
+    target.send_interval_sum_us = sum_us_;
+    target.send_interval_max_us = maximum_us_;
+    target.send_interval_samples = samples_;
+    target.send_catchup_events = catchup_events_;
+    target.send_catchup_max_packets = catchup_max_packets_;
+}
+
 void ReceiveLoopDiagnostics::beginWake(std::uint64_t now_us) noexcept
 {
     if (last_wake_us_ != 0 && now_us >= last_wake_us_) {
@@ -462,6 +493,13 @@ void copy_peer_mixer_stats(
     target.mix_recovery_low_water_frames = source.recovery_low_water_frames;
     target.mix_recovery_release_events = source.recovery_release_events;
     target.mix_recovery_release_active = source.recovery_release_active;
+    target.mix_delivery_gap_hold_us = source.delivery_gap_hold_us;
+    target.mix_rebuffer_required_episodes = source.rebuffer_required_episodes;
+    target.mix_rebuffer_window_us = source.rebuffer_window_us;
+    target.mix_rebuffer_window_episode_count = source.rebuffer_window_episode_count;
+    target.mix_rebuffer_events = source.rebuffer_events;
+    target.mix_rebuffer_cancellations = source.rebuffer_cancellations;
+    target.mix_rebuffer_goal_frames = source.rebuffer_goal_frames;
     target.adaptive_delivery_gap_hold_active = source.adaptive_delivery_gap_hold_active;
     target.adaptive_delivery_gap_raise_events = source.adaptive_delivery_gap_raise_events;
     target.adaptive_delivery_gap_hold_events = source.adaptive_delivery_gap_hold_events;

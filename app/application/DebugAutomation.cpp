@@ -703,7 +703,7 @@ ParsedScenario parseScenario(const QString& path, const QJsonObject& source, con
     result.artifactRoot = canonicalArtifactRoot(path, artifacts);
     result.manifestPath = QDir(result.artifactRoot).filePath(QStringLiteral("native-manifest.json"));
 
-    const QString profile = source.value(QStringLiteral("profile")).toString(QStringLiteral("fast"));
+    const QString profile = source.value(QStringLiteral("profile")).toString(QStringLiteral("standard"));
     const QByteArray profileBytes = profile.toUtf8();
     if (jam2::find_join_profile(std::string_view(
             profileBytes.constData(), static_cast<std::size_t>(profileBytes.size()))) == nullptr) {

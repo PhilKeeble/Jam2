@@ -1060,17 +1060,18 @@ private:
 
     void determineRequestedContract()
     {
-        QString profileName = QStringLiteral("fast");
+        QString profileName = QStringLiteral("standard");
         for (int i = 0; i + 1 < originalOptions_.size(); ++i) {
             if (originalOptions_[i] == QStringLiteral("--profile")) {
                 profileName = originalOptions_[i + 1];
             }
         }
+        if (profileName == QStringLiteral("moderate")) profileName = QStringLiteral("standard");
         localProfileName_ = profileName;
         const QByteArray profileBytes = profileName.toUtf8();
         if (jam2::find_join_profile(
                 std::string_view(profileBytes.constData(), static_cast<std::size_t>(profileBytes.size()))) == nullptr) {
-            throw std::runtime_error("--profile must be fast, moderate, or safe");
+            throw std::runtime_error("--profile must be fast, standard, or safe");
         }
         if (!creator_) {
             requestedContract_ = {};
@@ -1081,7 +1082,7 @@ private:
         const jam2::CreateProfile* profile = jam2::find_create_profile(
             std::string_view(profileBytes.constData(), static_cast<std::size_t>(profileBytes.size())));
         if (profile == nullptr) {
-            throw std::runtime_error("--profile must be fast, moderate, or safe");
+            throw std::runtime_error("--profile must be fast, standard, or safe");
         }
         requestedContract_.profile = profileName;
         requestedContract_.sampleRate = profile->sample_rate;

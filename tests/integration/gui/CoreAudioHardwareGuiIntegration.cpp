@@ -115,7 +115,7 @@ int main(int argc,char** argv) {
                 auto& p=*peers[i];invoke(p,create ? "session.start" : "session.join","click-async");
                 until([&]{return snapshot(p).value("window").toObject().value("active_modal").toBool();});
                 invoke(p,"session.dialog.name","set-text",create ? "Alice" : "Bob");
-                choose(p,create ? "session.dialog.create-profile" : "session.join-dialog.profile",larger ? "Moderate" : "Fast");
+                choose(p,create ? "session.dialog.create-profile" : "session.join-dialog.profile",larger ? "Standard" : "Fast");
                 choose(p,"session.dialog.audio-device",deviceName);
                 invoke(p,"session.dialog.input-channels","set-text","1");
                 invoke(p,"session.dialog.output-channels","set-text","1,2");

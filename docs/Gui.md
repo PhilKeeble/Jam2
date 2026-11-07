@@ -12,7 +12,7 @@ On the creator's machine:
 2. In **Start Jam**, enter your name and choose the bind host and UDP port. `0.0.0.0:40440` is the usual starting point.
 3. Choose Jam2 Server for external rendezvous, STUN for creator endpoint discovery, or Direct for a supplied creator endpoint. Direct/STUN require the creator UDP port to be reachable; the creator introduces the other peers for hole punching.
 4. Choose the local audio device and input/output channels.
-5. Choose a tuning profile. `fast` is the default, `moderate` is more forgiving, and `safe` is the current Wi-Fi profile.
+5. Choose a tuning profile. `standard` is the default, `fast` enforces tighter limits, and `safe` is the current Wi-Fi profile.
 6. Start the jam and send the generated `jam2://...` URL to the other player.
 
 If session startup fails, Jam2 shows one modal **Start Jam failed** dialog with the detailed in-process network error instead of relying on console output.

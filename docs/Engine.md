@@ -24,8 +24,8 @@ macOS keeps its existing `Jam2.app` GUI launch and command-line behavior.
 jam2 list-devices
 jam2 test-device <id>
 jam2 local [audio options]
-jam2 network create --name Alice [--profile fast|moderate|safe] [options]
-jam2 network join <jam2-url> --name Alex [--profile fast|moderate|safe] [options]
+jam2 network create --name Alice [--profile fast|standard|safe] [options]
+jam2 network join <jam2-url> --name Alex [--profile fast|standard|safe] [options]
 jam2 debug describe --json
 jam2 debug run <scenario.json>
 ```
@@ -113,7 +113,7 @@ receive/playout tuning remain local to each machine.
 | Option | Purpose |
 | --- | --- |
 | `--name <letters>` | Required create/join name: 1 to 8 Unicode letters after NFC normalization; duplicate names are allowed. |
-| `--profile fast\|moderate\|safe` | Applies a named set of numeric tuning values. Explicit numeric flags override the selected profile. |
+| `--profile fast\|standard\|safe` | Applies a named set of numeric tuning values. Explicit numeric flags override the selected profile. |
 | `--audio-device` | Selects the host audio device id. |
 | `--sample-rate` | Creator-owned session sample rate. A joiner receives it from the session contract. |
 | `--audio-buffer-size` | Sets the host audio callback size in frames. |
@@ -151,6 +151,41 @@ regressions; Phase 10 replaces it with the bounded native automation contract.
 ## Stats Output
 
 Use stats while testing and tuning. The engine reports raw measurements such as packet loss, jitter, RTT, bitrate, playback depth, underruns, overruns, drift ppm, resampler ratio, jitter-buffer drops, adaptive cushion movement, requested/applied playback drops, receive loop gaps, audio callback gaps, and prepared-source frame/underrun/busy counters. Transport diagnostics retain the authenticated source peer, event counter, grid revision, typed action, source frame, requested target, and locally applied target.
+
+`send_interval_*` measures application audio-dispatch rounds immediately before
+fan-out to the active peers. `send_catchup_events` counts worker turns dispatching
+more than one round, and `send_catchup_max_packets` is the largest such turn
+(zero means there were no multi-round turns). These counters require `--stats
+enabled`; they are not NIC transmit timestamps or per-peer packet counts. A zero
+sample count means timing was not collected. The separate `send_schedule_error_*`
+fields currently have no samples.
+
+The native `jam2_four_send_pacing_integration` CTest measures the public Release
+executable with exactly four synthetic peers and 32/480-frame publications.
+`jam2_send_pacing_hardware_integration` additionally accepts an explicit
+`JAM2_SEND_PACING_HARDWARE_PROFILE` JSON file with schema
+`jam2-send-pacing-hardware-v1` and a `devices` array. Each entry selects `label`,
+`backend` (`ASIO` or `WASAPI`), stable device `id`, and optional
+`input_endpoint_id`. Hardware runs use generated input, muted monitoring, and
+unshaped localhost; they measure source dispatch rather than acoustic or WAN
+latency. Retain the reported actual callback intervals: a synthetic callback's
+requested frame count does not guarantee the nominal wall-clock rate.
+
+`jam2_wasapi_capture_buffer_integration` exercises the production capture bridge
+with four independent capture/render clock pairs, 10 ms device batches, 128-frame
+processing blocks, phase offsets, clock drift and bounded capture-delivery delays.
+Its CSV reports input age and steady capture underruns for numeric queue targets.
+Set `JAM2_CAPTURE_BUFFER_ARTIFACT_ROOT` before configuration to retain that CSV.
+`jam2_wasapi_capture_buffer_hardware_integration` uses the pacing hardware profile
+with WASAPI output/input pairs, physical input (`--test-input off`), and muted
+localhost peers. It compares 20/10/5/1 ms targets, or an explicit top-level
+`capture_targets_ms` array of one to four integers. Runs last 45 seconds per target;
+the measured window excludes the first 10 seconds and final teardown. Input-age
+quantiles are periodic snapshots of capture timestamps at engine processing,
+not an acoustic latency measurement. A smaller target can cause silence when
+capture cannot supply the next render block; compare the capture-underrun counter
+as well as input age. `JAM2_SEND_PACING_ARTIFACT_ROOT` retains pacing/hardware
+artifacts outside the build's temporary workspace.
 
 Use CSV logs for comparisons between runs:
 

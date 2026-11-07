@@ -5,10 +5,10 @@ Jam2 supports three named tuning profiles:
 | Profile | Use |
 | --- | --- |
 | `fast` | Lowest-latency starting point for stable wired or very clean local network testing. |
-| `moderate` | More forgiving general-purpose profile with a larger jitter buffer and lower packet rate. |
+| `standard` | Default general-purpose profile: low starting latency with adaptive headroom. |
 | `safe` | Safest Wi-Fi profile measured so far; higher latency, but best current dropout resistance. |
 
-The CLI accepts `--profile fast`, `--profile moderate`, or `--profile safe` on
+The CLI accepts `--profile fast`, `--profile standard`, or `--profile safe` on
 both `network create` and `network join`, and the GUI has separate profile
 selectors in **Start Jam** and **Join Jam**. A create profile owns the session's
 sample rate and packet frame size plus the creator's local tuning. A join
@@ -20,7 +20,7 @@ still override the selected local profile values.
 
 ## Fast Profile
 
-The current low-latency default profile is:
+The explicitly capped low-latency profile is:
 
 ```text
 fast
@@ -60,15 +60,15 @@ contributing source and its jitter queue are empty and output is running at
 normal speed. They still fail for withheld usable audio, release-induced
 starvation, unexplained recovery padding, sample cuts, excess latency and
 buffer growth. Underrun counts and sample discontinuities remain in the test
-metrics, including the shortages accepted by this policy. Moderate and Safe
+metrics, including the shortages accepted by this policy. Standard and Safe
 retain their stricter continuity requirements.
 
-## Moderate Profile
+## Standard Profile
 
-The moderate profile uses a larger jitter buffer and `128` frame packets:
+The standard profile starts with a low jitter target and `128` frame packets:
 
 ```text
-moderate
+standard
 ```
 
 Recommended values:
@@ -78,25 +78,27 @@ Recommended values:
 | Sample rate | `48000` |
 | Audio buffer size | `64` |
 | Frame size | `128` |
-| Playback prefill frames | `256` |
-| Playback max frames | `4096` |
+| Playback prefill frames | `128` |
+| Playback max frames | `8192` |
 | Capture ring frames | `4096` |
-| Playback ring frames | `8192` |
+| Playback ring frames | `16384` |
 | Drift correction | `on` |
 | Drift smoothing | `0.02` |
 | Drift deadband ppm | `0` |
 | Drift max correction ppm | `500` |
 | Sample-time playout | `on` |
-| Playout delay frames | `512` |
-| Jitter buffer frames | `1536` |
+| Playout delay frames | `128` |
+| Jitter buffer frames | `128` |
 | Jitter buffer max frames | `3072` |
 | Adaptive cushion | `on` |
-| Adaptive target frames | `512` |
-| Adaptive min frames | `512` |
-| Adaptive max frames | `4096` |
+| Adaptive target frames | `128` |
+| Adaptive min frames | `128` |
+| Adaptive max frames | `8192` |
 | Adaptive release ppm | `5000` |
 
-Use this when `fast` is close but shows occasional underruns or missing frames.
+Standard is the default for new sessions. `moderate` remains an input alias for older settings and clients.
+
+Qualified delivery-gap reserve is held for five seconds after its latest qualifying evidence. Ten completed hard recoveries within a rolling twenty-second window permit a bounded refill from real received audio. Safe output runway protects useful partial audio; normal retirement remains gradual at 5000 ppm. Recovery timer, refill counts, episode count and goal are exposed in CSV stats. The clock delay-step threshold also accounts for one packet interval and the configured drift bound.
 
 ## Safe Profile
 

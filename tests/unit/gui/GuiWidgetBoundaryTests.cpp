@@ -586,14 +586,20 @@ void testLocalEngineDialogState()
 
 void testSessionDefaultsAndPriorityControls()
 {
-    const auto hasFastPlaybackDefaults = [](const LocalTuningPreference& tuning) {
-        return tuning.prefillFrames == 64 && tuning.frameSize == 64 && tuning.driftDeadbandPpm == 0 &&
+    const auto hasFastPlaybackDefaults = [](const LocalTuningPreference& tuning, bool ownsPacketSize = true) {
+        return tuning.prefillFrames == 64 && (!ownsPacketSize || tuning.frameSize == 64) && tuning.driftDeadbandPpm == 0 &&
             tuning.playoutDelayFrames == 64 &&
             tuning.jitterBufferFrames == 64 &&
             tuning.jitterBufferMaxFrames == 512 &&
             tuning.adaptiveTargetFrames == 64 &&
             tuning.adaptiveMinFrames == 64 &&
             tuning.adaptiveMaxFrames == 512;
+    };
+    const auto hasStandardDefaults = [](const LocalTuningPreference& tuning) {
+        return tuning.profile == QStringLiteral("standard") && tuning.bufferSize == 64 &&
+            tuning.frameSize == 128 && tuning.prefillFrames == 128 && tuning.playbackMaxFrames == 8192 &&
+            tuning.playbackRingFrames == 16384 && tuning.jitterBufferFrames == 128 &&
+            tuning.adaptiveTargetFrames == 128 && tuning.adaptiveMinFrames == 128 && tuning.adaptiveMaxFrames == 8192;
     };
     jam2::gui::StartJamDialogState startInitial;
     jam2::gui::StartJamDialog startDialog(startInitial, {}, {});
@@ -624,11 +630,12 @@ void testSessionDefaultsAndPriorityControls()
     auto* startPriority = qobject_cast<QComboBox*>(findControl(
         startDialog, QStringLiteral("session.dialog.os-priority")));
     expect(startProfile != nullptr &&
-            hasFastPlaybackDefaults(startDialog.state().create.tuning),
-        "create dialog opens with the fully coupled Fast playback defaults");
+            hasStandardDefaults(startDialog.state().create.tuning) && startProfile->currentText() == QStringLiteral("Standard"),
+        "create dialog opens with Standard and the tested limits");
     if (startProfile != nullptr) {
-        for (const auto& name : {QStringLiteral("moderate"), QStringLiteral("safe")}) {
+        for (const auto& name : {QStringLiteral("standard"), QStringLiteral("safe")}) {
             startProfile->setCurrentIndex(startProfile->findData(name));
+            if (name == QStringLiteral("standard")) expect(hasStandardDefaults(startDialog.state().create.tuning), "Standard create action restores coupled limits");
             expect(startDialog.state().create.tuning.driftDeadbandPpm == 0,
                 "create profile selector disables drift deadband for every maintained preset");
         }
@@ -653,16 +660,17 @@ void testSessionDefaultsAndPriorityControls()
     auto* joinPriority = qobject_cast<QComboBox*>(findControl(
         joinDialog, QStringLiteral("session.dialog.os-priority")));
     expect(joinProfile != nullptr &&
-            hasFastPlaybackDefaults(joinDialog.state().join.tuning),
-        "join dialog opens with the fully coupled Fast playback defaults");
+            hasStandardDefaults(joinDialog.state().join.tuning) && joinProfile->currentText() == QStringLiteral("Standard"),
+        "join dialog opens with Standard and the tested limits");
     if (joinProfile != nullptr) {
-        for (const auto& name : {QStringLiteral("moderate"), QStringLiteral("safe")}) {
+        for (const auto& name : {QStringLiteral("standard"), QStringLiteral("safe")}) {
             joinProfile->setCurrentIndex(joinProfile->findData(name));
+            if (name == QStringLiteral("standard")) expect(hasStandardDefaults(joinDialog.state().join.tuning), "Standard join action restores coupled limits");
             expect(joinDialog.state().join.tuning.driftDeadbandPpm == 0,
                 "join profile selector disables drift deadband for every maintained preset");
         }
         joinProfile->setCurrentIndex(joinProfile->findData(QStringLiteral("fast")));
-        expect(hasFastPlaybackDefaults(joinDialog.state().join.tuning),
+        expect(hasFastPlaybackDefaults(joinDialog.state().join.tuning, false),
             "selecting Fast reapplies every join-side playback default");
     }
     expect(joinPriority != nullptr && joinPriority->count() == 2 &&

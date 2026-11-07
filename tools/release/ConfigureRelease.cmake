@@ -24,7 +24,42 @@ if(WIN32)
     endforeach()
     set(CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS_SKIP TRUE)
     include(InstallRequiredSystemLibraries)
-    set(JAM2_PACKAGE_RUNTIME_SOURCES "${CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS}")
+    # A loaded ASIO driver shares our runtime and may use a newer MSVC STL
+    # than Jam2's compiler. Never pin the process to the old toolset's DLLs.
+    list(GET CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS 0 toolset_runtime)
+    get_filename_component(toolset_runtime_dir "${toolset_runtime}" DIRECTORY)
+    set_property(TARGET jam2 PROPERTY JAM2_COMPILER_RUNTIME_DIRECTORY "${toolset_runtime_dir}")
+    set(runtime_minimum "14.40.0.0")
+    if(CMAKE_CXX_COMPILER_VERSION MATCHES "^19\\.([0-9]+)")
+        if("14.${CMAKE_MATCH_1}.0.0" VERSION_GREATER runtime_minimum)
+            set(runtime_minimum "14.${CMAKE_MATCH_1}.0.0")
+        endif()
+    endif()
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+        "${CMAKE_CURRENT_LIST_DIR}/SelectWindowsRuntime.ps1")
+    execute_process(COMMAND powershell.exe -NoProfile -ExecutionPolicy Bypass
+        -File "${CMAKE_CURRENT_LIST_DIR}/SelectWindowsRuntime.ps1"
+        -ToolsetDirectory "${toolset_runtime_dir}" -MinimumVersion "${runtime_minimum}"
+        OUTPUT_VARIABLE runtime_json ERROR_VARIABLE runtime_error RESULT_VARIABLE runtime_result
+        OUTPUT_STRIP_TRAILING_WHITESPACE)
+    if(NOT runtime_result EQUAL 0)
+        message(FATAL_ERROR "Could not select compatible Windows runtime: ${runtime_error}")
+    endif()
+    string(JSON runtime_count LENGTH "${runtime_json}")
+    math(EXPR runtime_last "${runtime_count} - 1")
+    set(JAM2_PACKAGE_RUNTIME_SOURCES "")
+    foreach(index RANGE 0 ${runtime_last})
+        string(JSON runtime GET "${runtime_json}" ${index})
+        file(TO_CMAKE_PATH "${runtime}" runtime)
+        list(APPEND JAM2_PACKAGE_RUNTIME_SOURCES "${runtime}")
+    endforeach()
+    # Refresh on ordinary builds too, including when jam2 does not relink.
+    add_custom_target(jam2_windows_runtime ALL
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${JAM2_RELEASE_DIR}"
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            ${JAM2_PACKAGE_RUNTIME_SOURCES} "${JAM2_RELEASE_DIR}"
+        COMMENT "Staging compatible x64 Microsoft C++ runtime" VERBATIM)
+    add_dependencies(jam2 jam2_windows_runtime)
     foreach(runtime IN LISTS JAM2_PACKAGE_RUNTIME_SOURCES)
         get_filename_component(name "${runtime}" NAME)
         list(APPEND JAM2_PACKAGE_APP_FILES "${name}")

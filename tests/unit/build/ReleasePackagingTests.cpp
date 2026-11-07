@@ -143,6 +143,11 @@ int main(int argc, char** argv)
         require(entries.contains("licenses/miniz-LICENSE.txt"), "release package includes the ZIP reader's license");
         require(entries.contains("components/updater/jam2-updater.exe") &&
                 entries.contains("tls/qschannelbackend.dll"), "Windows release carries updater and native TLS backend");
+        for (const auto& runtime : {"msvcp140.dll", "msvcp140_1.dll", "msvcp140_2.dll",
+                "msvcp140_atomic_wait.dll", "msvcp140_codecvt_ids.dll", "vcruntime140.dll",
+                "vcruntime140_1.dll", "concrt140.dll"}) {
+            require(entries.contains(runtime), "Windows release carries the complete selected C++ runtime");
+        }
         const QString extracted = temporary.filePath(QStringLiteral("extracted"));
         require(QDir().mkpath(extracted), "could not create manifest inspection directory");
         run(cmake, {QStringLiteral("-E"), QStringLiteral("chdir"), extracted, cmake,

@@ -397,7 +397,19 @@ int main(int argc, char** argv)
     QCoreApplication app(argc, argv);
     try {
         if (argc > 1 && QByteArrayView(argv[1]) == "--performance") { performance(); editBursts(true); controlWireRefinementPerformance(); }
-        else { controlWireCoverageFixtures(); controlWireRefinementFixtures(); recordsAndDeltas(); assets(); channels(); editBursts(false); independentSafety(); }
+        else {
+            wire::Codec profileSender, profileReceiver;
+            wire::Codec::Encoded profileBytes; wire::Codec::Decoded profileDecoded; QString profileError;
+            QJsonObject contract{{"type","session.contract"},{"protocol_version",2},{"audio_format","pcm16-mono"},
+                {"profile","standard"},{"sample_rate",48000},{"frame_size",128}};
+            require(profileSender.encode(contract,profileBytes,profileError) &&
+                profileReceiver.decode(profileBytes.operation,profileBytes.payload,profileDecoded,profileError) &&
+                profileDecoded.message == contract,"Standard session contract round trips");
+            const auto standardBytes = profileBytes.payload;
+            contract["profile"] = "moderate";
+            require(profileSender.encode(contract,profileBytes,profileError) && profileBytes.payload == standardBytes,
+                "legacy Moderate uses the unchanged Standard wire enum slot");
+            controlWireCoverageFixtures(); controlWireRefinementFixtures(); recordsAndDeltas(); assets(); channels(); editBursts(false); independentSafety(); }
         return 0;
     } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }

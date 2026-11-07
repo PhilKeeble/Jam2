@@ -11,6 +11,7 @@
 #include "network_session.hpp"
 #include "protocol.hpp"
 #include "tuning_profile.hpp"
+#include "../../support/ProfileComparison.hpp"
 
 #include <algorithm>
 #include <array>
@@ -325,6 +326,9 @@ struct WifiBurstResult {
     bool deliveryGapHoldActive = false;
     std::size_t maximumBufferedPathFrames = 0;
     double averageBufferedPathFrames = 0.0;
+    std::uint64_t deliveryGapRequiredMaxFrames = 0;
+    std::uint64_t recoveryEvents = 0;
+    std::uint64_t recoveryCompletions = 0;
 };
 
 WifiBurstResult run_profile_wifi_burst(
@@ -333,15 +337,22 @@ WifiBurstResult run_profile_wifi_burst(
     bool includeExtremeGap,
     std::size_t peerCount = 1,
     std::uint64_t routineGapUs = 100000,
-    bool deliveryGapLearning = true)
+    bool deliveryGapLearning = true,
+    const jam2::test::ProfileComparison* comparison = nullptr,
+    bool packetLoss = false, bool packetReordering = false)
 {
-    const auto* createProfile = jam2::find_create_profile(profileName);
+    const jam2::CreateProfile overrideCreate = comparison
+        ? jam2::CreateProfile{comparison->local.name, comparison->local.label, 48000,
+              comparison->packet_frames, &comparison->local}
+        : jam2::CreateProfile{};
+    const auto* createProfile = comparison ? &overrideCreate : jam2::find_create_profile(profileName);
     if (createProfile == nullptr || createProfile->local == nullptr) {
         return {.packetsAccepted = false};
     }
     const auto& profile = *createProfile->local;
     const std::size_t packetFrames = static_cast<std::size_t>(createProfile->frame_size);
     ProfileMixerSink sink(profile.playback_ring_frames, profile.playback_prefill_frames);
+    if (comparison) sink.callbackQuantum = static_cast<std::size_t>(profile.audio_buffer_size);
 
     jam2::PeerMixerConfig mixerConfig;
     mixerConfig.sample_rate = createProfile->sample_rate;
@@ -420,7 +431,8 @@ WifiBurstResult run_profile_wifi_burst(
     std::deque<PendingPacket> pending;
     const std::vector<std::uint8_t> payload(packetFrames * 2U, 0);
     constexpr std::uint64_t sampleRate = 48000;
-    constexpr std::uint64_t callbackFrames = 64;
+    const std::uint64_t callbackFrames = comparison
+        ? static_cast<std::uint64_t>(profile.audio_buffer_size) : 64;
     constexpr std::uint64_t testSeconds = 40;
     constexpr std::uint64_t impairmentStartSecond = 4;
     const std::uint64_t routineGapFrames = sampleRate * routineGapUs / 1000000U;
@@ -451,16 +463,21 @@ WifiBurstResult run_profile_wifi_burst(
                     deliveryFrame = (second + 1U) * sampleRate;
                 }
             }
-            pending.push_back({
-                deliveryFrame,
-                nextSequence,
-                static_cast<std::uint64_t>(nextSequence) * packetFrames,
-            });
+            // Equal wall-clock impairment across 64/128/256-frame profiles.
+            if (packetReordering && nextSequence != 0 && nextSequence % 19 == 0)
+                deliveryFrame += sampleRate * 8 / 1000;
+            if (!packetLoss || nextSequence == 0 || nextSequence % 43 != 0) {
+                const PendingPacket packet{deliveryFrame, nextSequence,
+                    static_cast<std::uint64_t>(nextSequence) * packetFrames};
+                const auto position = std::upper_bound(pending.begin(), pending.end(), deliveryFrame,
+                    [](std::uint64_t frame, const PendingPacket& queued) { return frame < queued.deliveryFrame; });
+                pending.insert(position, packet);
+            }
             ++nextSequence;
             nextPacketFrame += packetFrames;
         }
 
-        sink.callback();
+        sink.callback(callbackFrames);
         // The runtime expires deadlines before draining a catch-up batch.
         for (auto& stream : streams) stream->advance(nowUs);
         mixer.advance(nowUs);
@@ -532,6 +549,9 @@ WifiBurstResult run_profile_wifi_burst(
             ? static_cast<double>(bufferedPathSum /
                 static_cast<long double>(bufferedPathSamples))
             : 0.0,
+        mixer.stats().adaptive_delivery_gap_required_max_frames,
+        mixer.stats().receive_recovery_events,
+        mixer.stats().receive_recovery_completions,
     };
 }
 
@@ -3016,20 +3036,25 @@ void test_four_peer_packet_gap_association()
     }
 }
 
-void test_profiled_wifi_return_to_clean()
+void test_profiled_wifi_return_to_clean(const jam2::test::ProfileComparison* comparison = nullptr)
 {
-    for (const auto profileName : {"fast", "moderate", "safe"}) {
+    for (const auto maintainedName : {"fast", "moderate", "safe"}) {
+        if (comparison && std::string_view(maintainedName) != "fast") continue;
+        const auto profileName = comparison ? comparison->local.name : std::string_view(maintainedName);
         for (const int variant : {0, 1, 2, 3}) {
-            if (variant != 0 && std::string_view(profileName) != "fast") continue;
+            if (variant != 0 && (comparison || std::string_view(profileName) != "fast")) continue;
             for (const std::size_t remoteCount : {1U, 3U}) {
                 if (variant == 3 && remoteCount != 1) continue;
                 for (const bool depart : {false, true}) {
                     if (depart && remoteCount == 1) continue;
-                    const auto& create = *jam2::find_create_profile(profileName);
+                    const auto create = comparison
+                        ? jam2::CreateProfile{profileName, profileName, 48000, comparison->packet_frames, &comparison->local}
+                        : *jam2::find_create_profile(profileName);
                     const auto& profile = *create.local;
                     const int rate = variant == 1 ? 44100 : 48000;
-                    const std::size_t callbackFrames = variant == 1 ? 32 : 64;
-                    constexpr std::uint64_t endUs = 100000000;
+                    const std::size_t callbackFrames = comparison
+                        ? static_cast<std::size_t>(profile.audio_buffer_size) : variant == 1 ? 32 : 64;
+                    const std::uint64_t endUs = comparison ? 150000000 : 100000000;
                     constexpr std::uint64_t cleanUs = 15000000;
                     const auto packetFrames = static_cast<std::size_t>(create.frame_size);
                     ProfileMixerSink sink(profile.playback_ring_frames, profile.playback_prefill_frames, rate);
@@ -3117,7 +3142,7 @@ void test_profiled_wifi_return_to_clean()
                         const auto callback = callbackIndex * callbackFrames * 1000000ULL / rate + 137;
                         const auto next = std::min({callback, worker, endUs});
                         if (now >= 2000000 && now < 3500000) { baseIntegral += currentPath * (next - now); baseUs += next - now; }
-                        if (now >= 90000000) { finalIntegral += currentPath * (next - now); finalUs += next - now; }
+                        if (now >= endUs - 10000000) { finalIntegral += currentPath * (next - now); finalUs += next - now; }
                         now = next;
                         if (!cleanSnapshot && now >= 17000000) {
                             cleanSnapshot = true;
@@ -3210,7 +3235,8 @@ void test_profiled_wifi_return_to_clean()
 // their two-second CSV snapshots do not contain individual packet timestamps.
 void test_profiled_short_scheduler_batches(bool lowSkew = false, bool releaseOnly = false,
     std::string_view timingProfile = {}, std::size_t timingPacketFrames = 0,
-    std::size_t timingPrefillFrames = 0)
+    std::size_t timingPrefillFrames = 0,
+    const jam2::test::ProfileComparison* comparison = nullptr)
 {
     struct Scenario {
         std::string_view profileName;
@@ -3235,8 +3261,11 @@ void test_profiled_short_scheduler_batches(bool lowSkew = false, bool releaseOnl
     };
     std::vector<Scenario> scenarios;
     if (!timingProfile.empty()) {
-        const auto* profile = jam2::find_create_profile(timingProfile);
-        expect(profile != nullptr, "profile timing fixture uses a maintained profile");
+        const jam2::CreateProfile overrideCreate = comparison
+            ? jam2::CreateProfile{comparison->local.name, comparison->local.label, 48000,
+                  comparison->packet_frames, &comparison->local} : jam2::CreateProfile{};
+        const auto* profile = comparison ? &overrideCreate : jam2::find_create_profile(timingProfile);
+        expect(profile != nullptr, "profile timing fixture uses an explicit or maintained profile");
         if (profile == nullptr) return;
         for (const std::size_t peers : {1U, 3U}) {
             for (const std::uint64_t rate : {44100U, 48000U}) {
@@ -3406,7 +3435,9 @@ void test_profiled_short_scheduler_batches(bool lowSkew = false, bool releaseOnl
         const auto profileName = scenario.profileName;
         const auto callbackFrames = scenario.callbackFrames;
         const auto batched = scenario.batched;
-        const auto& create = *jam2::find_create_profile(profileName);
+        const auto create = comparison
+            ? jam2::CreateProfile{profileName, profileName, 48000, comparison->packet_frames, &comparison->local}
+            : *jam2::find_create_profile(profileName);
         auto profile = *create.local;
         // Diagnostic override only: leave the maintained product profile intact.
         if (timingPrefillFrames != 0) profile.playback_prefill_frames = timingPrefillFrames;
@@ -3949,6 +3980,103 @@ void test_profiled_short_scheduler_batches(bool lowSkew = false, bool releaseOnl
     }
 }
 
+void test_gap_learning_rebase_order()
+{
+    // Causal ordering control, not a network distribution: the same genuine
+    // underrun/debt and accepted gap are placed on either side of rebasing.
+    for (const bool gapBeforeRebase : {true, false}) {
+        ProfileMixerSink sink(16384, 128);
+        jam2::PeerMixerConfig config;
+        config.frames_per_block = 128;
+        config.deadline_frames = 3072;
+        config.output_max_frames = 8192;
+        config.adaptive_playback_cushion = true;
+        config.adaptive_target_frames = config.adaptive_min_frames = 128;
+        config.adaptive_max_frames = 8192;
+        jam2::PeerMixer mixer(config, &sink);
+        std::array<jam2::PeerStreamPlayback*, 3> sources{};
+        std::array<std::int32_t, 6400> audio{};
+        audio.fill(1048576);
+        for (std::size_t i = 0; i < sources.size(); ++i) {
+            sources[i] = mixer.addPeer(i + 1, 24576);
+            expect(sources[i] && mixer.setPeerActive(i + 1, true),
+                "gap ordering control activates exactly four participants");
+            if (!sources[i]) return;
+            sources[i]->pushFrames(std::span(audio).first(128));
+        }
+        mixer.advance(1000);
+        for (std::uint64_t now = 2333; now < 110000; now += 1333) {
+            sink.callback();
+            mixer.advance(now);
+            mixer.finishReceiveBatch(false);
+        }
+        expect(mixer.stats().receive_recovery_active && mixer.stats().receive_recovery_debt_frames > 0,
+            "ordering control establishes real callback starvation and timeline debt");
+        if (gapBeforeRebase) sources[0]->observeDeliveryGap({110000, 4993});
+        for (auto* source : sources) source->pushFrames(audio);
+        mixer.advance(110000);
+        const auto afterRebase = mixer.stats();
+        if (!gapBeforeRebase) sources[0]->observeDeliveryGap({110001, 4993});
+        // Equal post-rebase starvation gives both observations an association
+        // opportunity. No controller state or private queue is manipulated.
+        for (int i = 0; i < 8; ++i) sink.callback();
+        mixer.advance(111000);
+        std::cout << "GAP_ORDER before_rebase=" << gapBeforeRebase
+                  << " underruns=" << sink.underrunFrames()
+                  << " rebased_target=" << afterRebase.adaptive_target_frames
+                  << " gap_required=" << mixer.stats().adaptive_delivery_gap_required_max_frames
+                  << " target=" << mixer.stats().adaptive_target_frames
+                  << " gap_raises=" << mixer.stats().adaptive_delivery_gap_raise_events
+                  << " recovery_events=" << mixer.stats().receive_recovery_events << '\n';
+        expect(mixer.stats().adaptive_delivery_gap_required_max_frames == 4993,
+            "ordering control observes the same qualified gap requirement");
+        expect(mixer.stats().adaptive_target_frames >= 4993,
+            "fresh starvation-associated gap evidence survives timeline rebasing");
+    }
+}
+
+void test_profile_comparison(std::string_view name, bool wifiOnly = false)
+{
+    const auto comparison = jam2::test::comparisonProfile(name);
+    const auto& p = comparison.local;
+    std::cout << "CONFIG comparison=" << name << " format=pcm16 sample_rate=48000 packet_frames="
+              << comparison.packet_frames << " callback_frames=" << p.audio_buffer_size
+              << " prefill=" << p.playback_prefill_frames << " jitter_target=" << p.jitter_buffer_frames
+              << " jitter_max=" << p.jitter_buffer_max_frames << " adaptive_start=" << p.adaptive_playback_target_frames
+              << " adaptive_min=" << p.adaptive_playback_min_frames << " adaptive_max=" << p.adaptive_playback_max_frames
+              << " playback_max=" << p.playback_max_frames << " ring_capacity=" << p.playback_ring_frames << '\n';
+    struct Condition { const char* name; std::uint64_t gapUs; bool extreme = false, loss = false, reorder = false; };
+    for (const auto peers : {1U, 3U}) {
+        for (const auto c : {Condition{"clean", 0}, {"gap4ms", 4000}, {"gap8ms", 8000},
+                {"gap20ms", 20000}, {"gap40ms", 40000}, {"gap100ms", 100000},
+                {"gap170ms", 100000, true}, {"loss", 0, false, true}, {"reorder", 0, false, false, true},
+                {"loss-reorder", 0, false, true, true}}) {
+            const auto r = run_profile_wifi_burst(name, c.gapUs != 0, c.extreme, peers, c.gapUs,
+                true, &comparison, c.loss, c.reorder);
+            std::cout << "COMPARE profile=" << name << " condition=" << c.name << " participants=" << peers + 1
+                      << " format=pcm16 avg_path_ms=" << r.averageBufferedPathFrames / 48.0
+                      << " max_path_ms=" << r.maximumBufferedPathFrames / 48.0
+                      << " underrun_bursts=" << r.underrunBursts << " underrun_frames=" << r.underrunFrames
+                      << " startup_padding=" << r.startupPaddingFrames << " padding=" << r.paddingFrames
+                      << " trimmed=" << r.trimmedFrames << " loss=" << r.sequenceLoss
+                      << " missing_frames=" << r.missingAudioFrames << " final_target=" << r.adaptiveTargetFrames
+                      << " gap_raises=" << r.deliveryGapRaiseEvents << " hold_active=" << r.deliveryGapHoldActive
+                      << " gap_required_max=" << r.deliveryGapRequiredMaxFrames
+                      << " recovery_events=" << r.recoveryEvents << " recovery_completions=" << r.recoveryCompletions << '\n';
+            expect(r.packetsAccepted, "comparison accepts every delivered packet inside its reorder window");
+            expect(r.adaptiveTargetFrames <= p.adaptive_playback_max_frames,
+                "comparison respects its explicit adaptive maximum");
+            if (!c.loss) expect(r.sequenceLoss == 0 && r.missingAudioFrames == 0,
+                "lossless comparison retains every source packet");
+            if (c.loss) expect(r.sequenceLoss > 0 && r.missingAudioFrames > 0,
+                "loss experiment exercises real sequence loss and missing source audio");
+        }
+    }
+    if (wifiOnly) return;
+    test_profiled_wifi_return_to_clean(&comparison);
+    test_profiled_short_scheduler_batches(true, false, name, comparison.packet_frames, 0, &comparison);
+}
+
 void test_profiled_recurring_wifi_bursts_match_observed_session()
 {
     const WifiBurstResult fastClean = run_profile_wifi_burst("fast", false, false);
@@ -4082,13 +4210,26 @@ int main(int argc, char** argv)
         if (failures == 0) std::cout << "Jam2 playback recovery tests passed\n";
         return failures == 0 ? 0 : 1;
     }
+    if (argc == 2 && std::string_view(argv[1]) == "--gap-learning-order") {
+        test_gap_learning_rebase_order();
+        return failures == 0 ? 0 : 1;
+    }
+    if (argc == 2 && std::string_view(argv[1]) == "--compare-wifi-diagnostics") {
+        for (const auto name : {"fast", "moderate", "safe", "candidate", "fast128-control"})
+            test_profile_comparison(name, true);
+        return failures == 0 ? 0 : 1;
+    }
+    if (argc == 2 && std::string_view(argv[1]).starts_with("--compare-profile-")) {
+        test_profile_comparison(std::string_view(argv[1]).substr(18));
+        return failures == 0 ? 0 : 1;
+    }
     if (argc == 2 && std::string_view(argv[1]).starts_with("--profile-")) {
         const auto mode = std::string_view(argv[1]).substr(10);
         if (mode == "fast64" || mode == "fast128") {
             test_profiled_short_scheduler_batches(true, false, "fast", mode == "fast64" ? 64 : 128);
         } else if (mode == "fast64-prefill64") {
             test_profiled_short_scheduler_batches(true, false, "fast", 64, 64);
-        } else if (mode == "moderate" || mode == "safe") {
+        } else if (mode == "standard" || mode == "moderate" || mode == "safe") {
             test_profiled_short_scheduler_batches(true, false, mode);
         } else {
             return 2;

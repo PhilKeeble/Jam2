@@ -21,25 +21,25 @@ struct AudioDevicePreference {
 };
 
 struct LocalTuningPreference {
-    QString profile = QStringLiteral("fast");
-    int bufferSize = 32;
-    int frameSize = 64;
-    int prefillFrames = 64;
-    int playbackMaxFrames = 1024;
+    QString profile = QStringLiteral("standard");
+    int bufferSize = 64;
+    int frameSize = 128;
+    int prefillFrames = 128;
+    int playbackMaxFrames = 8192;
     int captureRingFrames = 4096;
-    int playbackRingFrames = 4096;
+    int playbackRingFrames = 16384;
     bool driftCorrection = true;
     double driftSmoothing = 0.02;
     int driftDeadbandPpm = 0;
     int driftMaxCorrectionPpm = 500;
     bool sampleTimePlayout = true;
-    int playoutDelayFrames = 64;
-    int jitterBufferFrames = 64;
-    int jitterBufferMaxFrames = 512;
+    int playoutDelayFrames = 128;
+    int jitterBufferFrames = 128;
+    int jitterBufferMaxFrames = 3072;
     bool adaptiveCushion = true;
-    int adaptiveTargetFrames = 64;
-    int adaptiveMinFrames = 64;
-    int adaptiveMaxFrames = 512;
+    int adaptiveTargetFrames = 128;
+    int adaptiveMinFrames = 128;
+    int adaptiveMaxFrames = 8192;
     int adaptiveReleasePpm = 5000;
     int adaptiveRatioRampMs = 250;
     bool operator==(const LocalTuningPreference&) const = default;
@@ -211,7 +211,7 @@ struct SyncPreference {
 };
 
 struct UserPreferences {
-    static constexpr int kSchemaVersion = 11;
+    static constexpr int kSchemaVersion = 12;
     AudioDevicePreference localAudio;
     AudioDevicePreference networkAudio;
     bool splitNetworkAudioByRole = false;

@@ -33,6 +33,14 @@ updating and compiling. Probe files are temporary and removed afterward.
 
 ## Release packages
 
+Windows builds require a complete x64 Microsoft Visual C++ runtime 14.40 or
+newer (and at least the compiler's major/minor version). Install the
+[latest x64 Redistributable](https://aka.ms/vc14/vc_redist.x64.exe) if configuration
+reports it missing. Compilation and packaging select the newer complete runtime
+from the compiler's redist folder or the installed Windows runtime, and stage it
+beside `release/jam2.exe`. ASIO drivers share that runtime: bundling the older
+14.36 DLLs can crash newer drivers when they lock a mutex.
+
 For distribution, use `./build-release.ps1 --version 0.1.1` on Windows. On macOS,
 use the [signed PKG build/publish commands in RELEASE.md](../RELEASE.md#macos-build-and-publish-commands-on-the-configured-release-mac),
 including the Application identity, Installer identity, notary profile and

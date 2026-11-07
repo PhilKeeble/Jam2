@@ -130,9 +130,56 @@ void saveAudio(QSettings& settings, const AudioDevicePreference& value)
     settings.setValue(QStringLiteral("buffer_size"), value.bufferSize);
 }
 
+LocalTuningPreference profileTuning(std::string_view name)
+{
+    LocalTuningPreference value;
+    const auto* create = jam2::find_create_profile(name);
+    if (!create) return value;
+    const auto& profile = *create->local;
+    value.profile = QString::fromUtf8(profile.name.data(), static_cast<qsizetype>(profile.name.size()));
+    value.bufferSize = static_cast<int>(profile.audio_buffer_size);
+    value.frameSize = create->frame_size;
+    value.prefillFrames = static_cast<int>(profile.playback_prefill_frames);
+    value.playbackMaxFrames = static_cast<int>(profile.playback_max_frames);
+    value.captureRingFrames = static_cast<int>(profile.capture_ring_frames);
+    value.playbackRingFrames = static_cast<int>(profile.playback_ring_frames);
+    value.driftCorrection = profile.drift_correction;
+    value.driftSmoothing = profile.drift_smoothing;
+    value.driftDeadbandPpm = profile.drift_deadband_ppm;
+    value.driftMaxCorrectionPpm = profile.drift_max_correction_ppm;
+    value.sampleTimePlayout = profile.sample_time_playout;
+    value.playoutDelayFrames = static_cast<int>(profile.playout_delay_frames);
+    value.jitterBufferFrames = static_cast<int>(profile.jitter_buffer_frames);
+    value.jitterBufferMaxFrames = static_cast<int>(profile.jitter_buffer_max_frames);
+    value.adaptiveCushion = profile.adaptive_playback_cushion;
+    value.adaptiveTargetFrames = static_cast<int>(profile.adaptive_playback_target_frames);
+    value.adaptiveMinFrames = static_cast<int>(profile.adaptive_playback_min_frames);
+    value.adaptiveMaxFrames = static_cast<int>(profile.adaptive_playback_max_frames);
+    value.adaptiveReleasePpm = profile.adaptive_playback_release_ppm;
+    value.adaptiveRatioRampMs = profile.adaptive_playback_ratio_ramp_ms;
+    return value;
+}
+
+LocalTuningPreference previousModerateTuning()
+{
+    auto value = profileTuning("standard");
+    value.profile = QStringLiteral("moderate");
+    value.prefillFrames = 256;
+    value.playbackMaxFrames = 4096;
+    value.playbackRingFrames = 8192;
+    value.playoutDelayFrames = 512;
+    value.jitterBufferFrames = 1536;
+    value.adaptiveTargetFrames = value.adaptiveMinFrames = 512;
+    value.adaptiveMaxFrames = 4096;
+    return value;
+}
+
 void loadTuning(QSettings& s, LocalTuningPreference& v)
 {
-    v.profile = s.value(QStringLiteral("profile"), v.profile).toString();
+    const auto name = s.value(QStringLiteral("profile"), v.profile).toString();
+    // Missing numeric keys inherit the selected preset, not another profile.
+    v = profileTuning(name.toStdString());
+    v.profile = name;
     v.bufferSize = s.value(QStringLiteral("buffer_size"), v.bufferSize).toInt();
     v.frameSize = s.value(QStringLiteral("frame_size"), v.frameSize).toInt();
     v.prefillFrames = s.value(QStringLiteral("prefill_frames"), v.prefillFrames).toInt();
@@ -233,23 +280,47 @@ void migrateProfileTimingDefaults(LocalTuningPreference& value, bool ownsPacketS
     legacy.adaptiveMaxFrames = static_cast<int>(profile.adaptive_playback_max_frames);
     legacy.adaptiveReleasePpm = profile.adaptive_playback_release_ppm;
     legacy.adaptiveRatioRampMs = profile.adaptive_playback_ratio_ramp_ms;
+    if (value.profile == QStringLiteral("moderate")) {
+        legacy = previousModerateTuning();
+        legacy.bufferSize = value.bufferSize;
+        legacy.frameSize = ownsPacketSize ? 128 : value.frameSize;
+        legacy.driftDeadbandPpm = 25;
+    }
     if (value.profile == QStringLiteral("fast")) {
         if (ownsPacketSize) legacy.frameSize = 64;
         legacy.prefillFrames = 64;
     }
     if (value == legacy) {
-        value.frameSize = create->frame_size;
-        value.prefillFrames = static_cast<int>(profile.playback_prefill_frames);
+        if (value.profile != QStringLiteral("moderate")) {
+            value.frameSize = create->frame_size;
+            value.prefillFrames = static_cast<int>(profile.playback_prefill_frames);
+        }
         value.driftDeadbandPpm = profile.drift_deadband_ppm;
     }
 }
 
 void migrateFastPacketSizeDefault(LocalTuningPreference& value)
 {
-    LocalTuningPreference previous;
+    auto previous = profileTuning("fast");
     previous.frameSize = 128;
     previous.bufferSize = value.bufferSize;
     if (value == previous) value.frameSize = 64;
+}
+
+void migrateStandardProfile(LocalTuningPreference& value, bool ownsPacketSize)
+{
+    if (value.profile != QStringLiteral("moderate")) return;
+    auto previous = previousModerateTuning();
+    previous.bufferSize = value.bufferSize;
+    if (!ownsPacketSize) previous.frameSize = value.frameSize;
+    if (value == previous) {
+        auto updated = profileTuning("standard");
+        updated.bufferSize = value.bufferSize;
+        value = updated;
+    } else {
+        // An explicit custom tuple retains every numeric override.
+        value.profile = QStringLiteral("standard");
+    }
 }
 
 void saveTuning(QSettings& s, const LocalTuningPreference& v)
@@ -507,6 +578,10 @@ UserPreferences UserPreferencesStore::load()
     if (schemaVersion < 11) {
         migrateFastPacketSizeDefault(out.create.tuning);
         migrateFastPacketSizeDefault(out.join.tuning);
+    }
+    if (schemaVersion < 12) {
+        migrateStandardProfile(out.create.tuning, true);
+        migrateStandardProfile(out.join.tuning, false);
     }
     if (schemaVersion >= 2) {
         settings.beginGroup(QStringLiteral("logging"));

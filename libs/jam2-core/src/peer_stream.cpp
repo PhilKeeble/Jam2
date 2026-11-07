@@ -269,7 +269,7 @@ struct PeerStream::Impl {
         stats.adaptive_playback_target_frames = adaptive_target_frames;
         stats.adaptive_playback_min_frames = config.adaptive_playback_min_frames;
         stats.adaptive_playback_max_frames = config.adaptive_playback_max_frames;
-        stats.drift_arrival_step_threshold_us = config.drift_arrival_step_threshold_us;
+        stats.drift_arrival_step_threshold_us = arrivalStepThresholdUs();
     }
 
     std::uint64_t currentPlayoutDelayFrames() const noexcept
@@ -305,6 +305,16 @@ struct PeerStream::Impl {
         drift_observation_packets = 1;
     }
 
+    std::uint64_t arrivalStepThresholdUs() const noexcept
+    {
+        if (!config.drift_arrival_step_threshold_us) return 0;
+        // The low-delay observation can move by one packet as batch phase
+        // crosses a boundary. Permit that plus the configured clock-rate bound.
+        const auto phase = packet_interval_us + (kDriftObservationWindowUs *
+            static_cast<std::uint64_t>(config.drift_max_correction_ppm) + 999999) / 1000000;
+        return std::max(config.drift_arrival_step_threshold_us, phase);
+    }
+
     void applyDriftObservation() noexcept
     {
         if (!drift_observation_active ||
@@ -333,7 +343,7 @@ struct PeerStream::Impl {
                 const double local_interval_us = static_cast<double>(
                     drift_observation_best_receive_time_us - drift_previous_receive_time_us);
                 const double residual = local_interval_us - remote_interval_us / clock_scale;
-                if (std::abs(residual) >= config.drift_arrival_step_threshold_us) {
+                if (std::abs(residual) >= arrivalStepThresholdUs()) {
                     drift_arrival_offset_us += residual;
                     ++stats.drift_arrival_offset_adjustments;
                     stats.drift_arrival_offset_us = static_cast<std::int64_t>(std::llround(drift_arrival_offset_us));

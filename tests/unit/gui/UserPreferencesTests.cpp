@@ -160,11 +160,12 @@ int main(int argc, char** argv)
                 tuning.adaptiveMinFrames == 64 &&
                 tuning.adaptiveMaxFrames == 512;
         };
-        require(hasFastPlaybackDefaults(actual.create.tuning) &&
-                hasFastPlaybackDefaults(actual.join.tuning) &&
+        require(actual.create.tuning == LocalTuningPreference{} &&
+                actual.join.tuning == LocalTuningPreference{} &&
+                actual.create.tuning.profile == QStringLiteral("standard") &&
                 actual.create.runtime.osPriority == QStringLiteral("high") &&
                 actual.join.runtime.osPriority == QStringLiteral("high"),
-            "new create and join preferences must use the measured Fast playback defaults");
+            "new create and join preferences use Standard defaults");
 
         const QString legacyPath = directory.filePath(QStringLiteral("legacy-preferences.ini"));
         {
@@ -322,6 +323,10 @@ int main(int argc, char** argv)
                 wanted.frameSize = 64;
                 wanted.prefillFrames = 64;
             }
+            if (old.profile == QStringLiteral("moderate")) {
+                wanted = LocalTuningPreference{};
+                wanted.bufferSize = old.bufferSize;
+            }
             if (!(updated.create.tuning == wanted && updated.join.tuning == wanted)) {
                 std::cerr << "Migration profile=" << preset.name
                     << " create_match=" << (updated.create.tuning == wanted)
@@ -339,6 +344,22 @@ int main(int argc, char** argv)
             const auto repeated = UserPreferencesStore::load();
             require(repeated.create.tuning == wanted && repeated.join.tuning == wanted,
                 "updated profile defaults survive a save/reload without a second migration");
+            if (old.profile == QStringLiteral("moderate")) {
+                auto recent = previous;
+                recent.create.tuning.driftDeadbandPpm = recent.join.tuning.driftDeadbandPpm = 0;
+                UserPreferencesStore::save(recent);
+                { QSettings settings(path, QSettings::IniFormat); settings.setValue(QStringLiteral("schema_version"), 11); }
+                const auto currentMigration = UserPreferencesStore::load();
+                require(currentMigration.create.tuning == wanted && currentMigration.join.tuning == wanted,
+                    "current schema11 Moderate preferences migrate to the tested Standard limits");
+                recent.create.tuning.prefillFrames = recent.join.tuning.prefillFrames = 333;
+                UserPreferencesStore::save(recent);
+                { QSettings settings(path, QSettings::IniFormat); settings.setValue(QStringLiteral("schema_version"), 11); }
+                const auto customMigration = UserPreferencesStore::load();
+                recent.create.tuning.profile = recent.join.tuning.profile = QStringLiteral("standard");
+                require(customMigration.create.tuning == recent.create.tuning && customMigration.join.tuning == recent.join.tuning,
+                    "current custom Moderate preferences are renamed without changing numeric overrides");
+            }
             for (int custom = 0; custom < 4; ++custom) {
                 UserPreferences customized;
                 customized.create.tuning = customized.join.tuning = old;
@@ -356,6 +377,8 @@ int main(int argc, char** argv)
                     settings.setValue(QStringLiteral("schema_version"), 9);
                 }
                 const auto preserved = UserPreferencesStore::load();
+                if (old.profile == QStringLiteral("moderate"))
+                    customized.create.tuning.profile = customized.join.tuning.profile = QStringLiteral("standard");
                 require(preserved.create.tuning == customized.create.tuning &&
                         preserved.join.tuning == customized.join.tuning,
                     "profile timing migration preserves customized numeric presets");
@@ -366,6 +389,12 @@ int main(int argc, char** argv)
         require(UserPreferencesStore::setFilePathForTesting(packetDefaultPath, error),
             "previous Fast packet default test path accepted");
         UserPreferences previousPacketDefault;
+        auto& fast = previousPacketDefault.create.tuning;
+        fast.profile = QStringLiteral("fast"); fast.bufferSize = 32; fast.frameSize = 64;
+        fast.prefillFrames = 64; fast.playbackMaxFrames = 1024; fast.playbackRingFrames = 4096;
+        fast.playoutDelayFrames = 64; fast.jitterBufferFrames = 64; fast.jitterBufferMaxFrames = 512;
+        fast.adaptiveTargetFrames = fast.adaptiveMinFrames = 64; fast.adaptiveMaxFrames = 512;
+        previousPacketDefault.join.tuning = fast;
         previousPacketDefault.create.tuning.frameSize = previousPacketDefault.join.tuning.frameSize = 128;
         previousPacketDefault.join.tuning.bufferSize = 64;
         UserPreferencesStore::save(previousPacketDefault);

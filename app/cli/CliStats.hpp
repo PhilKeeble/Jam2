@@ -386,6 +386,14 @@ struct AudioPacketStats {
     std::uint64_t mix_recovery_low_water_frames = 0;
     std::uint64_t mix_recovery_release_events = 0;
     bool mix_recovery_release_active = false;
+    std::uint64_t mix_delivery_gap_hold_us = 0;
+    std::uint64_t mix_rebuffer_required_episodes = 0;
+    std::uint64_t mix_rebuffer_window_us = 0;
+    std::uint64_t mix_rebuffer_window_episode_count = 0;
+    std::uint64_t mix_rebuffer_events = 0;
+    std::uint64_t mix_rebuffer_cancellations = 0;
+    std::uint64_t mix_rebuffer_goal_frames = 0;
+
     std::uint64_t metronome_epoch_sample_time = 0;
     std::uint64_t local_metronome_beat = 0;
     std::uint64_t remote_metronome_beat = 0;
@@ -407,6 +415,21 @@ struct AudioPacketStats {
     bool final_local_monitor_enabled = false;
     double final_local_monitor_level = 0.0;
     OsSchedulingStatus os_scheduling;
+};
+
+// Network-worker packet rounds, measured before sendToActive fan-out. One round
+// may send to multiple peers; these are application dispatch times, not NIC times.
+class SendLoopDiagnostics final {
+public:
+    void packet(std::uint64_t now_us) noexcept;
+    void finishWake(std::size_t packets) noexcept;
+    void applyTo(AudioPacketStats& target) const noexcept;
+
+private:
+    bool started_ = false;
+    std::uint64_t last_us_ = 0;
+    std::uint64_t minimum_us_ = 0, sum_us_ = 0, maximum_us_ = 0, samples_ = 0;
+    std::uint64_t catchup_events_ = 0, catchup_max_packets_ = 0;
 };
 
 class ReceiveLoopDiagnostics final {
@@ -760,7 +783,8 @@ public:
                 "mix_live_tail_rounding_tolerance_frames,mix_adaptive_release_alignment_margin_frames,mix_partial_release_events,mix_partial_release_frames,mix_lookahead_hold_events,mix_lookahead_hold_frames,mix_lookahead_hold_max_fraction_ppm,mix_isolated_recovery_events,mix_worker_service_gap_us,mix_worker_runway_frames,mix_playback_stopping_frames,mix_release_worker_guard_active,wasapi_capture_depth_frames,wasapi_render_padding_frames,wasapi_capture_correction_ppm,wasapi_capture_underrun_frames,wasapi_capture_overrun_frames,wasapi_capture_discontinuities,wasapi_capture_resets,wasapi_invalid_timestamps,audio_device_error,grid_phase_accepted,grid_phase_delayed,grid_phase_reordered,grid_phase_raw_error_frames,grid_phase_tolerance_frames,grid_phase_maximum_drift_ppm,grid_phase_last_accepted_age_us,mix_adaptive_path_high_water_frames,mix_delivery_gap_guard_active,mix_recovery_pending_frames,mix_recovery_retired_frames,mix_recovery_cancelled_frames,mix_recovery_safe_depth_frames,mix_recovery_low_water_frames,mix_recovery_release_events,mix_recovery_release_active,drift_arrival_step_threshold_us,drift_arrival_offset_adjustments,drift_arrival_offset_us,"
                 "receive_socket_packets,receive_socket_packets_max,receive_packet_budget_yields,"
                 "receive_service_budget_yields,receive_work_packet_limit,receive_service_limit_us,"
-                "telemetry_service_samples,telemetry_service_sum_us,telemetry_service_max_us\n";
+                "telemetry_service_samples,telemetry_service_sum_us,telemetry_service_max_us,"
+                "mix_delivery_gap_hold_us,mix_rebuffer_required_episodes,mix_rebuffer_window_us,mix_rebuffer_window_episode_count,mix_rebuffer_events,mix_rebuffer_cancellations,mix_rebuffer_goal_frames\n";
     }
 
     explicit operator bool() const { return out_.is_open(); }
@@ -1353,7 +1377,14 @@ public:
              << ',' << stats.receive_socket_packets << ',' << stats.receive_socket_packets_max
              << ',' << stats.receive_packet_budget_yields << ',' << stats.receive_service_budget_yields
              << ',' << stats.receive_work_packet_limit << ',' << stats.receive_service_limit_us
-             << ',' << stats.telemetry_service_samples << ',' << stats.telemetry_service_sum_us << ',' << stats.telemetry_service_max_us;
+             << ',' << stats.telemetry_service_samples << ',' << stats.telemetry_service_sum_us << ',' << stats.telemetry_service_max_us
+             << ',' << stats.mix_delivery_gap_hold_us
+             << ',' << stats.mix_rebuffer_required_episodes
+             << ',' << stats.mix_rebuffer_window_us
+             << ',' << stats.mix_rebuffer_window_episode_count
+             << ',' << stats.mix_rebuffer_events
+             << ',' << stats.mix_rebuffer_cancellations
+             << ',' << stats.mix_rebuffer_goal_frames;
         out_ << '\n';
         if (row_type == "final") {
             out_.flush();
@@ -1923,6 +1954,13 @@ public:
         set(551, stats.telemetry_service_samples);
         set(552, stats.telemetry_service_sum_us);
         set(553, stats.telemetry_service_max_us);
+        set(554, stats.mix_delivery_gap_hold_us);
+        set(555, stats.mix_rebuffer_required_episodes);
+        set(556, stats.mix_rebuffer_window_us);
+        set(557, stats.mix_rebuffer_window_episode_count);
+        set(558, stats.mix_rebuffer_events);
+        set(559, stats.mix_rebuffer_cancellations);
+        set(560, stats.mix_rebuffer_goal_frames);
         periodic_row_.clear();
         periodic_row_.reserve(8192);
         for (std::size_t i = 0; i < fields.size(); ++i) {
@@ -1937,7 +1975,7 @@ private:
     Context context_;
     std::filesystem::path path_;
     std::ofstream out_;
-    std::array<std::string, 554> periodic_fields_;
+    std::array<std::string, 561> periodic_fields_;
     std::string periodic_row_;
 };
 

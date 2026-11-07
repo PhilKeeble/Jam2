@@ -8,6 +8,7 @@
 #include "input_source.hpp"
 #include "network_session.hpp"
 #include "tuning_profile.hpp"
+#include "../../support/ProfileComparison.hpp"
 
 #include <algorithm>
 #include <array>
@@ -15,6 +16,9 @@
 #include <cmath>
 #include <cstdint>
 #include <iostream>
+#include <fstream>
+#include <filesystem>
+#include <cstdlib>
 #include <limits>
 #include <memory>
 #include <span>
@@ -51,10 +55,14 @@ public:
             rate * jam2::audio::kPlaybackReleaseReturnRampMs / 1000);
     }
     std::size_t depthFrames() const noexcept override { return ring.available_read(); }
-    std::size_t callbackFrames() const noexcept override { return ::callbackFrames; }
+    std::size_t callbackFrames() const noexcept override { return callbackQuantum; }
     std::uint64_t underrunFrames() const noexcept override { return ring.underrun_frames(); }
     jam2::audio::PlaybackRecoveryState playbackRecoveryState() const noexcept override
-    { return jam2::audio::device_processing::read_playback_recovery_state(control); }
+    {
+        auto state = jam2::audio::device_processing::read_playback_recovery_state(control);
+        state.padding_policy = paddingPolicy;
+        return state;
+    }
     std::size_t pushFrames(std::span<const std::int32_t> frames) noexcept override { return ring.push(frames); }
     void requestDropFrames(std::size_t frames) noexcept override { ring.request_drop_oldest(frames); }
     void setResamplerRatio(double ratio) noexcept override
@@ -72,19 +80,37 @@ public:
         if (!started && ring.available_read() < prefill) return;
         started = true;
         jam2::audio::device_processing::pop_resampled_playback(
-            &ring, &control, resampler, scratch, output);
+            &ring, &control, resampler, scratch, std::span(output).first(callbackQuantum));
         ++callbacks;
-        for (auto sample : output) nonzeroFrames += sample != 0 ? 1U : 0U;
+        for (auto sample : std::span(output).first(callbackQuantum)) {
+            nonzeroFrames += sample != 0 ? 1U : 0U;
+            if (measureWaveform) {
+                if (havePreviousSample) {
+                    const auto step = static_cast<std::uint64_t>(std::abs(static_cast<std::int64_t>(sample) - previousSample));
+                    maximumSampleStep = std::max(maximumSampleStep, step);
+                    largeSampleSteps += step > sampleStepThreshold;
+                }
+                previousSample = sample; havePreviousSample = true;
+                zeroRun = sample == 0 ? zeroRun + 1 : 0;
+                maximumZeroRun = std::max(maximumZeroRun, zeroRun);
+            }
+        }
     }
     jam2::audio::MonoRingBuffer ring;
     jam2::audio::StreamControl control;
     jam2::audio::device_processing::PlaybackResamplerState resampler;
-    std::array<std::int32_t, 70> scratch{};
-    std::array<std::int32_t, ::callbackFrames> output{};
+    std::array<std::int32_t, 520> scratch{};
+    std::array<std::int32_t, 256> output{};
+    std::size_t callbackQuantum = ::callbackFrames;
+    jam2::audio::RecoveryPaddingPolicy paddingPolicy = jam2::audio::RecoveryPaddingPolicy::LearnedCushion;
     std::size_t prefill;
     bool started = false;
     std::uint64_t callbacks = 0, nonzeroFrames = 0;
     std::uint64_t generation = 0;
+    bool measureWaveform = false, havePreviousSample = false;
+    std::int32_t previousSample = 0;
+    std::uint64_t sampleStepThreshold = 4200000, maximumSampleStep = 0, largeSampleSteps = 0;
+    std::uint64_t zeroRun = 0, maximumZeroRun = 0;
 };
 
 jam2::PeerStreamConfig streamConfig(const jam2::JoinProfile& profile,int frames=int(packetFrames),
@@ -163,8 +189,8 @@ jam2::PeerAudioResult deliver(jam2::PeerStream& stream, std::uint32_t sequence,
     std::uint64_t frame, std::uint64_t now, std::span<const std::int32_t> samples,
     jam2::NetworkAudioFormat format=jam2::NetworkAudioFormat::Pcm24Mono)
 {
-    std::array<std::uint8_t, 128 * 3> storage{};
-    if (samples.size()>128) throw std::runtime_error("experiment packet exceeds fixture capacity");
+    std::array<std::uint8_t, 256 * 3> storage{};
+    if (samples.size()>256) throw std::runtime_error("experiment packet exceeds fixture capacity");
     auto payload=std::span(storage).first(samples.size()*jam2::protocol::audio_bytes_per_sample(format));
     if (!jam2::protocol::pack_audio_q31_into(format, samples, payload))
         throw std::runtime_error("failed to pack experiment audio");
@@ -867,14 +893,18 @@ void largeRecoveryExperiments()
 ClockResult clockCase(int senderPpm, int receiverPpm, bool adaptive, bool interruptPeer = false,
     std::uint64_t deliveryBatchUs = 0,int releasePpm = -1,std::int64_t gapMinimumUs=-1,int durationSeconds=180,
     std::uint64_t callbackPhaseUs=137,std::uint64_t workerPeriodUs=250,int frames=int(packetFrames),
-    std::uint64_t deliveryJitterUs=0, std::uint64_t workerStallUs=0, bool stampArrival=false)
+    std::uint64_t deliveryJitterUs=0, std::uint64_t workerStallUs=0, bool stampArrival=false,
+    const jam2::test::ProfileComparison* comparison=nullptr, std::uint64_t delayStepUs=0)
 {
-    auto profile = *jam2::find_join_profile("fast");
+    auto profile = comparison ? comparison->local : *jam2::find_join_profile("fast");
+    const auto format = comparison ? jam2::NetworkAudioFormat::Pcm16Mono : jam2::NetworkAudioFormat::Pcm24Mono;
+    const auto callbackFrames = comparison ? static_cast<std::size_t>(profile.audio_buffer_size) : ::callbackFrames;
     profile.adaptive_playback_cushion = adaptive;
     if (releasePpm>=0) profile.adaptive_playback_release_ppm=releasePpm;
     // Fixed mode needs a useful runway for an isolated oscillator experiment.
     if (!adaptive) profile.playout_delay_frames = profile.playback_prefill_frames = 256;
-    Receiver receiver(0, profile,gapMinimumUs,frames); // one receiver + three remote senders = four peers
+    Receiver receiver(0, profile,gapMinimumUs,frames,format); // one receiver + three remote senders = four peers
+    receiver.sink.callbackQuantum = callbackFrames;
     const auto base = receiver.session->schedule().startTimeUs();
     const std::uint64_t end = std::uint64_t(durationSeconds)*1000000;
     const std::uint64_t lateBegin = end-60000000;
@@ -919,14 +949,15 @@ ClockResult clockCase(int senderPpm, int receiverPpm, bool adaptive, bool interr
                 const auto random = std::uint32_t(number) * 1664525U + 1013904223U;
                 const auto sent=timeAt(number * std::uint64_t(frames),senderPpm) +
                     (deliveryJitterUs ? 7500 + random % (deliveryJitterUs + 1) : 0);
-                return deliveryBatchUs ? (sent / deliveryBatchUs + 1) * deliveryBatchUs : sent;
+                const auto delayed = sent + (sent >= 30000000 ? delayStepUs : 0);
+                return deliveryBatchUs ? (delayed / deliveryBatchUs + 1) * deliveryBatchUs : delayed;
             };
             while (packetDue(packet) <= now) {
                 for (std::size_t peer = 1; peer < participants; ++peer) {
                     if (interruptPeer && peer == 3 && now >= 5000000 && now < 25000000) continue;
                     const auto result = deliver(receiver.session->peerStream({peer + 1}),
                         static_cast<std::uint32_t>(packet), (packet - 1) * std::uint64_t(frames),
-                        base + (stampArrival ? packetDue(packet) : now), audio);
+                        base + (stampArrival ? packetDue(packet) : now), audio, format);
                     expect(result == jam2::PeerAudioResult::Accepted ||
                         (interruptPeer && peer == 3 && now >= 25000000 && now < 25010000 &&
                          result == jam2::PeerAudioResult::ForwardGapRejected),
@@ -971,10 +1002,13 @@ ClockResult clockCase(int senderPpm, int receiverPpm, bool adaptive, bool interr
         observedUs > 0 ? static_cast<double>(pathIntegral / observedUs) : 0, releaseFrames};
     result.recoveries=final.recovery;result.completions=final.completions;
     const auto& mix = receiver.session->mixStats();
-    std::cout << "METRIC clock sender_ppm=" << senderPpm << " receiver_ppm=" << receiverPpm
+    std::cout << "METRIC clock profile=" << profile.name
+        << " format=" << (format == jam2::NetworkAudioFormat::Pcm16Mono ? "pcm16" : "pcm24")
+        << " callback_frames=" << callbackFrames
+        << " sender_ppm=" << senderPpm << " receiver_ppm=" << receiverPpm
         << " adaptive=" << adaptive << " duration_s=" << durationSeconds << " late_window_s=60"
         << " delivery_batch_us=" << deliveryBatchUs
-        << " delivery_jitter_us=" << deliveryJitterUs
+        << " delivery_jitter_us=" << deliveryJitterUs << " delay_step_us=" << delayStepUs
         << " release_ppm=" << profile.adaptive_playback_release_ppm
         << " gap_minimum_us_override=" << gapMinimumUs
         << " callback_phase_us=" << callbackPhaseUs
@@ -986,6 +1020,8 @@ ClockResult clockCase(int senderPpm, int receiverPpm, bool adaptive, bool interr
         << " sample_rate=" << rate
         << " interrupted_peer=" << interruptPeer
         << " estimated_drift_ppm=" << result.drift << " source_ratio=" << result.sourceRatio
+        << " arrival_offset_adjustments=" << stream.drift_arrival_offset_adjustments
+        << " arrival_offset_us=" << stream.drift_arrival_offset_us
         << " local_device_drift_ppm=" << receiver.session->deviceClockStats().ppm
         << " desired_relative_ratio=" << (1.0 + senderPpm / 1000000.0) / (1.0 + receiverPpm / 1000000.0)
         << " late_underruns=" << result.lateUnderruns << " late_trimmed=" << result.lateTrims
@@ -997,6 +1033,429 @@ ClockResult clockCase(int senderPpm, int receiverPpm, bool adaptive, bool interr
         << " total_padding=" << mix.adaptive_padding_frames
         << " recovery_completions=" << final.completions << '\n';
     return result;
+}
+
+struct GapDeliveryScenario {
+    std::string_view name;
+    std::uint64_t pauseUs = 0;
+    std::size_t affectedPeers = 3;
+    std::uint64_t serializationUs = 0;
+    std::size_t receiveBudget = 64;
+    std::uint64_t repeatUs = 1000000;
+    std::size_t maximumPauses = 100;
+    bool irregular = false;
+    bool dropHeld = false;
+    bool localWorkerStall = false;
+    bool expireBeforeReceive = true;
+    std::uint64_t peerStaggerUs = 0;
+    jam2::audio::RecoveryPaddingPolicy paddingPolicy = jam2::audio::RecoveryPaddingPolicy::LearnedCushion;
+    std::uint64_t workerPeriodUs = 250;
+    std::size_t pausesPerCluster = 0;
+    std::uint64_t clusterQuietUs = 0;
+};
+
+template<class Stats>
+std::uint64_t rebufferEvents(const Stats& stats)
+{
+    if constexpr (requires { stats.rebuffer_events; }) return stats.rebuffer_events;
+    return 0;
+}
+
+struct RebufferTriggerStats { std::uint64_t required = 0, windowUs = 0; };
+template<class Stats>
+RebufferTriggerStats rebufferTrigger(const Stats& stats)
+{
+    if constexpr (requires { stats.rebuffer_required_episodes; stats.rebuffer_window_us; })
+        return {stats.rebuffer_required_episodes, stats.rebuffer_window_us};
+    return {};
+}
+
+template<class Stats>
+std::uint64_t recoveryHoldUs(const Stats& stats)
+{
+    if constexpr (requires { stats.delivery_gap_hold_us; }) return stats.delivery_gap_hold_us;
+    return 0;
+}
+
+void writeComparisonWave(const std::filesystem::path& path, std::span<const std::int16_t> samples)
+{
+    std::ofstream file(path, std::ios::binary);
+    if (!file) throw std::runtime_error("cannot create comparison WAV");
+    const auto u16 = [&](std::uint16_t v) { file.put(static_cast<char>(v)); file.put(static_cast<char>(v >> 8)); };
+    const auto u32 = [&](std::uint32_t v) { u16(static_cast<std::uint16_t>(v)); u16(static_cast<std::uint16_t>(v >> 16)); };
+    file.write("RIFF",4); u32(36 + static_cast<std::uint32_t>(samples.size()*2)); file.write("WAVEfmt ",8);
+    u32(16); u16(1); u16(1); u32(static_cast<std::uint32_t>(rate)); u32(static_cast<std::uint32_t>(rate*2));
+    u16(2); u16(16); file.write("data",4); u32(static_cast<std::uint32_t>(samples.size()*2));
+    for (const auto sample:samples) u16(static_cast<std::uint16_t>(sample));
+    if (!file) throw std::runtime_error("comparison WAV write failed");
+}
+
+void gapDeliveryCase(const jam2::test::ProfileComparison& comparison, const GapDeliveryScenario& scenario,
+    bool triggerStudy = false, bool holdStudy = false)
+{
+    constexpr std::uint64_t endUs = 120000000, impairmentEndUs = 40000000;
+    struct Pause { std::uint64_t begin, end; };
+    std::vector<Pause> pauses;
+    constexpr std::array<std::uint64_t, 8> irregularPauses{20000, 40000, 80000, 120000, 35000, 100000, 65000, 145000};
+    constexpr std::array<std::uint64_t, 4> irregularSpacing{1370000, 2630000, 730000, 4110000};
+    if (scenario.pauseUs) {
+        for (std::uint64_t start = 4000000; start < impairmentEndUs && pauses.size() < scenario.maximumPauses;) {
+            const auto index = pauses.size();
+            const auto duration = scenario.irregular ? irregularPauses[index % irregularPauses.size()] : scenario.pauseUs;
+            pauses.push_back({start, start + duration});
+            if (scenario.pausesPerCluster && pauses.size() % scenario.pausesPerCluster == 0)
+                start += duration + scenario.clusterQuietUs;
+            else start += scenario.irregular ? irregularSpacing[index % irregularSpacing.size()] : scenario.repeatUs;
+        }
+    }
+    const std::uint64_t lastPauseEnd = pauses.empty() ? 0 : pauses.back().end +
+        (scenario.affectedPeers ? (scenario.affectedPeers - 1) * scenario.peerStaggerUs : 0);
+    // All packet generation is offline input injection. The receiver retains
+    // production authentication, packet parsing, clocks, mixer and callbacks.
+    struct Delivery { std::uint64_t due; std::uint32_t sequence; bool drop; };
+    std::array<std::vector<Delivery>, 3> deliveries;
+    for (std::size_t peer = 0; peer < deliveries.size(); ++peer) {
+        std::uint64_t previousDue = 0;
+        for (std::uint32_t number = 1;; ++number) {
+            const auto nominal = std::uint64_t(number) * comparison.packet_frames * 1000000 / rate + 300 + peer * 137;
+            if (nominal > endUs) break;
+            auto due = nominal;
+            bool held = false;
+            if (!scenario.localWorkerStall && peer < scenario.affectedPeers) {
+                const auto stagger = peer * scenario.peerStaggerUs;
+                for (const auto& pause : pauses) {
+                    if (nominal >= pause.begin + stagger && nominal < pause.end + stagger) {
+                        due = pause.end + stagger;
+                        held = true;
+                        break;
+                    }
+                }
+            }
+            due = std::max(due, previousDue + scenario.serializationUs);
+            previousDue = due;
+            deliveries[peer].push_back({due, number, held && scenario.dropHeld});
+        }
+    }
+    Receiver receiver(0, comparison.local, -1, comparison.packet_frames, jam2::NetworkAudioFormat::Pcm16Mono);
+    const auto callbackQuantum = static_cast<std::size_t>(comparison.local.audio_buffer_size);
+    receiver.sink.callbackQuantum = callbackQuantum;
+    receiver.sink.paddingPolicy = scenario.paddingPolicy;
+    const auto base = receiver.session->schedule().startTimeUs();
+    std::vector<std::int32_t> audio(static_cast<std::size_t>(comparison.packet_frames));
+    std::vector<std::int32_t> tone(static_cast<std::size_t>(rate));
+    for (std::size_t i=0;i<tone.size();++i) tone[i]=static_cast<std::int32_t>(
+        std::sin(2.0*3.14159265358979323846*220*i/rate)*(67108864.0/3));
+    const char* waveDirectory = std::getenv("JAM2_RECOVERY_AUDIO_DIR");
+    const bool saveWave = waveDirectory && comparison.local.name == "candidate" &&
+        (scenario.name == "clean" || scenario.name == "isolated8-one" ||
+         scenario.name == "isolated100-one" || scenario.name == "periodic100-one-atomic" ||
+         scenario.name == "measured-shortage100-one" || (holdStudy &&
+            (scenario.name == "burst5-quiet6s-one" || scenario.name == "burst5-quiet12s-one" ||
+             scenario.name == "irregular-one")));
+    std::vector<std::int16_t> recording;
+    const std::uint64_t recordingEndUs = holdStudy ? 80000000 : triggerStudy ? 26000000 : 12000000;
+    if (saveWave) recording.reserve(static_cast<std::size_t>(rate)*(holdStudy ? 78 : triggerStudy ? 24 : 10));
+    std::array<std::size_t, 3> indices{};
+    std::array<std::uint64_t, 3> lastArrival{}, lastApplication{};
+    std::uint64_t now = 0, worker = scenario.workerPeriodUs, callback = 1, accepted = 0, dropped = 0;
+    std::uint64_t maximumArrivalGap = 0, maximumApplicationGap = 0, maximumTarget = 0, maximumPath = 0;
+    std::uint64_t firstRequirementUs = 0, firstRaiseUs = 0, firstHoldUs = 0, traceCount = 0, nextTraceUs = 4000000;
+    std::uint64_t firstRebufferUs = 0;
+    const bool traceHold = holdStudy && comparison.local.name == "candidate" &&
+        scenario.name == "periodic100-one-atomic";
+    std::uint64_t nextHoldTraceUs = 4000000;
+    std::uint64_t previousRecoveries = 0, previousHoldEvents = 0, holdDeadlineUs = 0;
+    std::uint64_t recoveriesInTwoSeconds = 0, maximumRecoveriesInTwoSeconds = 0, recoveryBin = 0;
+    std::uint64_t firstHoldClearAfterPause = 0, holdExpirations = 0;
+    bool previousHoldActive = false;
+    std::array<long double, 4> decayIntegral{};
+    std::array<std::uint64_t, 4> decayDuration{};
+    constexpr std::array<std::uint64_t, 5> decayEdges{0,5000000,10000000,20000000,40000000};
+    std::uint64_t traceTarget = 0, traceRequired = 0, traceDebt = 0, traceRaises = 0, traceRecoveries = 0;
+    long double cleanIntegral = 0, impairedIntegral = 0, finalIntegral = 0;
+    std::uint64_t cleanDuration = 0, impairedDuration = 0, finalDuration = 0;
+    Observations settled, impairmentEnd;
+    bool settledCaptured = false, impairmentEndCaptured = false;
+    auto sample = [&](std::string_view stage) {
+        const auto& mix = receiver.session->mixStats();
+        if (traceHold && now >= nextHoldTraceUs && now <= 80000000) {
+            std::cout << "HOLD_TRACE time_us=" << now << " hold_us=" << recoveryHoldUs(mix)
+                      << " active=" << mix.adaptive_delivery_gap_hold_active
+                      << " remaining_us=" << mix.adaptive_delivery_gap_hold_remaining_us
+                      << " hold_events=" << mix.adaptive_delivery_gap_hold_events
+                      << " target=" << mix.adaptive_target_frames << " required=" << mix.adaptive_delivery_gap_required_frames
+                      << " path=" << receiver.path() << " recoveries=" << mix.receive_recovery_events
+                      << " rebuffers=" << rebufferEvents(mix) << " underruns=" << receiver.sink.underrunFrames() << '\n';
+            nextHoldTraceUs += 1000000;
+        }
+        if (now / 2000000 != recoveryBin) {
+            maximumRecoveriesInTwoSeconds = std::max(maximumRecoveriesInTwoSeconds, recoveriesInTwoSeconds);
+            recoveriesInTwoSeconds = 0;
+            recoveryBin = now / 2000000;
+        }
+        recoveriesInTwoSeconds += mix.receive_recovery_events - previousRecoveries;
+        previousRecoveries = mix.receive_recovery_events;
+        if (mix.adaptive_delivery_gap_hold_events != previousHoldEvents)
+            holdDeadlineUs = now + mix.adaptive_delivery_gap_hold_remaining_us;
+        previousHoldEvents = mix.adaptive_delivery_gap_hold_events;
+        if (previousHoldActive && !mix.adaptive_delivery_gap_hold_active) {
+            ++holdExpirations;
+            if (holdStudy && recoveryHoldUs(mix))
+                expect(now + scenario.workerPeriodUs >= holdDeadlineUs,
+                    "learned recovery hold cannot expire before its packet-timestamp deadline");
+        }
+        previousHoldActive = mix.adaptive_delivery_gap_hold_active;
+        if (!firstHoldClearAfterPause && firstHoldUs && now >= lastPauseEnd && !mix.adaptive_delivery_gap_hold_active)
+            firstHoldClearAfterPause = now;
+        maximumTarget = std::max(maximumTarget, mix.adaptive_target_frames);
+        if (!firstRequirementUs && mix.adaptive_delivery_gap_required_max_frames) firstRequirementUs = now;
+        if (!firstRaiseUs && mix.adaptive_delivery_gap_raise_events) firstRaiseUs = now;
+        if (!firstHoldUs && mix.adaptive_delivery_gap_hold_events) firstHoldUs = now;
+        if (!firstRebufferUs && rebufferEvents(mix)) firstRebufferUs = now;
+        if (comparison.local.name == "candidate" && scenario.name == "periodic100-all-atomic" &&
+            now >= 4000000 && now <= 5200000 && traceCount < 100 &&
+            (now >= nextTraceUs || mix.adaptive_target_frames < traceTarget || mix.adaptive_target_frames >= traceTarget + 1024 ||
+                traceRequired != mix.adaptive_delivery_gap_required_max_frames ||
+                traceDebt != mix.receive_recovery_debt_frames || traceRaises != mix.adaptive_delivery_gap_raise_events ||
+                traceRecoveries != mix.receive_recovery_events)) {
+            ++traceCount;
+            std::cout << "GAP_TRACE stage=" << stage << " time_us=" << now
+                      << " target=" << mix.adaptive_target_frames << " requirement=" << mix.adaptive_delivery_gap_required_max_frames
+                      << " gap_raises=" << mix.adaptive_delivery_gap_raise_events << " debt=" << mix.receive_recovery_debt_frames
+                      << " recoveries=" << mix.receive_recovery_events << " underruns=" << receiver.sink.underrunFrames()
+                      << " hold_events=" << mix.adaptive_delivery_gap_hold_events
+                      << " hold_active=" << mix.adaptive_delivery_gap_hold_active << " path=" << receiver.path() << '\n';
+            nextTraceUs = now + 100000;
+            traceTarget = mix.adaptive_target_frames; traceRequired = mix.adaptive_delivery_gap_required_max_frames;
+            traceDebt = mix.receive_recovery_debt_frames; traceRaises = mix.adaptive_delivery_gap_raise_events;
+            traceRecoveries = mix.receive_recovery_events;
+        }
+    };
+    auto nextPeer = [&]() {
+        std::size_t chosen = deliveries.size();
+        for (std::size_t peer = 0; peer < deliveries.size(); ++peer) {
+            if (indices[peer] < deliveries[peer].size() &&
+                (chosen == deliveries.size() || deliveries[peer][indices[peer]].due < deliveries[chosen][indices[chosen]].due))
+                chosen = peer;
+        }
+        return chosen;
+    };
+    while (now < endUs) {
+        const auto callbackUs = callback * callbackQuantum * 1000000 / rate + 137;
+        const auto next = std::min({callbackUs, worker, endUs});
+        auto integrate = [&](std::uint64_t begin, std::uint64_t end, long double& integral, std::uint64_t& duration) {
+            const auto left = std::max(now, begin), right = std::min(next, end);
+            if (right > left) { integral += receiver.path() * static_cast<long double>(right - left); duration += right - left; }
+        };
+        integrate(2000000, 3500000, cleanIntegral, cleanDuration);
+        integrate(5000000, impairmentEndUs, impairedIntegral, impairedDuration);
+        integrate(endUs - 10000000, endUs, finalIntegral, finalDuration);
+        if (holdStudy && lastPauseEnd)
+            for (std::size_t i=0; i<decayIntegral.size(); ++i)
+                integrate(lastPauseEnd+decayEdges[i], lastPauseEnd+decayEdges[i+1], decayIntegral[i], decayDuration[i]);
+        now = next;
+        if (!impairmentEndCaptured && now >= impairmentEndUs) { impairmentEnd = observe(receiver); impairmentEndCaptured = true; }
+        if (!settledCaptured && now >= impairmentEndUs + 2000000) { settled = observe(receiver); settledCaptured = true; }
+        if (now == callbackUs) {
+            receiver.sink.measureWaveform = now >= 2000000;
+            receiver.sink.publishClock(callback * callbackQuantum, base + now);
+            receiver.sink.callback();
+            if (saveWave && now >= 2000000 && now < recordingEndUs)
+                for (const auto sample:std::span(receiver.sink.output).first(callbackQuantum))
+                    recording.push_back(static_cast<std::int16_t>(sample >> 16));
+            ++callback;
+        }
+        if (now == worker) {
+            const bool blocked = scenario.localWorkerStall && std::any_of(pauses.begin(), pauses.end(),
+                [&](const Pause& pause) { return now >= pause.begin && now < pause.end; });
+            if (blocked) { worker += scenario.workerPeriodUs; continue; }
+            if (scenario.expireBeforeReceive) receiver.session->advance(base + now);
+            sample("pre-receive");
+            std::size_t drained = 0;
+            auto peer = nextPeer();
+            while (peer < deliveries.size() && deliveries[peer][indices[peer]].due <= now && drained < scenario.receiveBudget) {
+                const auto packet = deliveries[peer][indices[peer]++];
+                if (packet.drop) { ++dropped; peer = nextPeer(); continue; }
+                const auto sourceFrame = std::uint64_t(packet.sequence-1)*comparison.packet_frames;
+                for (std::size_t i=0;i<audio.size();++i) audio[i]=tone[(sourceFrame+i)%tone.size()];
+                expect(deliver(receiver.session->peerStream({peer + 2}), packet.sequence,
+                        std::uint64_t(packet.sequence - 1) * comparison.packet_frames, base + now, audio,
+                        jam2::NetworkAudioFormat::Pcm16Mono) == jam2::PeerAudioResult::Accepted,
+                    "gap delivery investigation accepts every delivered authenticated packet");
+                ++accepted; ++drained;
+                if (lastArrival[peer]) maximumArrivalGap = std::max(maximumArrivalGap, packet.due - lastArrival[peer]);
+                if (lastApplication[peer]) maximumApplicationGap = std::max(maximumApplicationGap, now - lastApplication[peer]);
+                lastArrival[peer] = packet.due; lastApplication[peer] = now;
+                peer = nextPeer();
+            }
+            sample("after-datagrams");
+            const bool exhausted = peer < deliveries.size() && deliveries[peer][indices[peer]].due <= now;
+            receiver.session->advance(base + now);
+            sample("post-receive");
+            receiver.session->finishReceiveBatch(exhausted);
+            sample("finish-batch");
+            // Saturated turns retry promptly; a periodic turn is an additional
+            // controlled scheduling constraint, not packet serialization.
+            worker += exhausted ? 1 : scenario.workerPeriodUs;
+            maximumPath = std::max(maximumPath, receiver.path());
+        }
+    }
+    std::uint64_t loss = 0;
+    for (std::size_t peer = 0; peer < deliveries.size(); ++peer)
+        loss += receiver.session->peerStream({peer + 2}).stats().sequence.lost;
+    const auto final = observe(receiver);
+    const auto& mix = receiver.session->mixStats();
+    std::cout << "GAP_DELIVERY profile=" << comparison.local.name << " scenario=" << scenario.name
+              << " format=pcm16 participants=4 pause_us=" << scenario.pauseUs << " affected_peers=" << scenario.affectedPeers
+              << " serialization_us=" << scenario.serializationUs << " receive_budget=" << scenario.receiveBudget
+              << " worker_period_us=" << scenario.workerPeriodUs
+              << " pause_count=" << pauses.size() << " repeat_us=" << scenario.repeatUs << " irregular=" << scenario.irregular
+              << " drop_held=" << scenario.dropHeld << " worker_stall=" << scenario.localWorkerStall
+              << " pre_receive_expiry=" << scenario.expireBeforeReceive << " peer_stagger_us=" << scenario.peerStaggerUs
+              << " padding_policy=" << (scenario.paddingPolicy == jam2::audio::RecoveryPaddingPolicy::MeasuredShortage
+                    ? "measured-shortage" : "learned-cushion")
+              << " clean_ms=" << static_cast<double>(cleanIntegral / cleanDuration) / 48
+              << " impaired_ms=" << static_cast<double>(impairedIntegral / impairedDuration) / 48
+              << " final_ms=" << static_cast<double>(finalIntegral / finalDuration) / 48
+              << " max_path=" << maximumPath << " max_target=" << maximumTarget << " final_target=" << final.target
+              << " underruns=" << final.underruns << " late_underruns=" << final.underruns - settled.underruns
+              << " padding=" << final.padding << " late_padding=" << final.padding - settled.padding
+              << " trimmed=" << final.trims << " late_trimmed=" << final.trims - settled.trims
+              << " gap_required=" << mix.adaptive_delivery_gap_required_max_frames
+              << " gap_raises=" << mix.adaptive_delivery_gap_raise_events << " recovery_events=" << final.recovery
+              << " hold_events=" << mix.adaptive_delivery_gap_hold_events << " first_hold_us=" << firstHoldUs
+              << " impairment_end_target=" << impairmentEnd.target << " impairment_end_path=" << impairmentEnd.path
+              << " recovery_completions=" << final.completions << " first_requirement_us=" << firstRequirementUs
+              << " first_gap_raise_us=" << firstRaiseUs << " arrival_gap_us=" << maximumArrivalGap
+              << " application_gap_us=" << maximumApplicationGap << " delivered=" << accepted << " dropped=" << dropped
+              << " sequence_loss=" << loss
+              << " max_sample_step_q31=" << receiver.sink.maximumSampleStep
+              << " sample_step_threshold_q31=" << receiver.sink.sampleStepThreshold
+              << " large_sample_steps=" << receiver.sink.largeSampleSteps
+              << " max_zero_run_frames=" << receiver.sink.maximumZeroRun
+              << " rebuffer_events=" << rebufferEvents(mix)
+              << " first_rebuffer_us=" << firstRebufferUs
+              << " trigger_required=" << rebufferTrigger(mix).required
+              << " trigger_window_us=" << rebufferTrigger(mix).windowUs
+              << " recovery_hold_us=" << recoveryHoldUs(mix)
+              << " last_pause_end_us=" << lastPauseEnd
+              << " hold_expirations=" << holdExpirations
+              << " first_hold_clear_after_pause_us=" << firstHoldClearAfterPause
+              << " max_recoveries_per_2s=" << std::max(maximumRecoveriesInTwoSeconds,recoveriesInTwoSeconds);
+    for (std::size_t i=0; i<decayIntegral.size(); ++i)
+        std::cout << " post" << decayEdges[i]/1000000 << "_" << decayEdges[i+1]/1000000 << "_ms="
+                  << (decayDuration[i] ? static_cast<double>(decayIntegral[i]/decayDuration[i])/48 : 0);
+    std::cout << '\n';
+    if (saveWave) {
+        std::filesystem::create_directories(waveDirectory);
+        writeComparisonWave(std::filesystem::path(waveDirectory)/(std::string(scenario.name)+".wav"),recording);
+    }
+    expect(accepted > 50000 && maximumTarget <= comparison.local.adaptive_playback_max_frames,
+        "gap investigation sustains real production audio within configured target bounds");
+    expect(scenario.dropHeld || loss == 0, "lossless delivery variants preserve every source sequence");
+    const auto trigger = rebufferTrigger(mix);
+    if (holdStudy && recoveryHoldUs(mix) && firstHoldUs && scenario.name == "isolated100-one") {
+        const auto tolerance = 2ULL * comparison.packet_frames * 1000000 / rate + scenario.workerPeriodUs;
+        expect(firstHoldClearAfterPause >= lastPauseEnd + recoveryHoldUs(mix) &&
+                firstHoldClearAfterPause <= lastPauseEnd + recoveryHoldUs(mix) + tolerance,
+            "an isolated learned gap expires at the configured hold duration after the final delayed arrival");
+    }
+    if (trigger.required >= 5 && (scenario.name == "periodic100-every3s-one" ||
+            scenario.name == "periodic100-every4s-one" || scenario.name == "cluster4-one"))
+        expect(rebufferEvents(mix) == 0, "refill qualification uses a true rolling window, not a chain of nearby events");
+    if (trigger.required == 10 && (scenario.name == "cluster5-one" || scenario.name == "cluster9-one"))
+        expect(rebufferEvents(mix) == 0, "short clusters below the threshold never request a refill");
+    if (trigger.required && firstRebufferUs && scenario.name.starts_with("cluster") && !scenario.irregular)
+        expect(firstRebufferUs >= 4000000 + (trigger.required - 1) * scenario.repeatUs + scenario.pauseUs,
+            "refill cannot start before the required number of distinct interruptions");
+    if (scenario.name == "clean" || scenario.name.starts_with("isolated") || scenario.name.starts_with("sparse4") ||
+            scenario.name.starts_with("sparse8") || scenario.name.starts_with("sparse20") || scenario.name == "sparse100-one")
+        expect(rebufferEvents(mix) == 0, "clean delivery and isolated or sparse small spikes never request a refill");
+}
+
+void gapDeliveryExperiments(bool triggerStudy = false, bool holdStudy = false)
+{
+    std::vector<GapDeliveryScenario> scenarios{{"clean"}, {"periodic20-all-atomic", 20000},
+        {"periodic40-all-atomic", 40000}, {"periodic60-all-atomic", 60000}, {"periodic70-all-atomic", 70000},
+        {"periodic100-all-atomic", 100000}, {"periodic100-one-atomic", 100000, 1},
+        {"periodic100-one-serial50", 100000, 1, 50}, {"periodic100-all-serial50", 100000, 3, 50},
+        {"periodic100-all-serial250", 100000, 3, 250}, {"periodic100-all-budget8", 100000, 3, 0, 8},
+        {"periodic100-one-budget8", 100000, 1, 0, 8},
+        {"isolated100-one", 100000, 1, 50, 64, 1000000, 1},
+        {"sparse100-one", 100000, 1, 50, 64, 8000000},
+        {"irregular-one", 100000, 1, 50, 64, 1000000, 100, true},
+        {"irregular-all", 100000, 3, 50, 64, 1000000, 100, true},
+        {"lost100-one", 100000, 1, 0, 64, 1000000, 100, false, true},
+        {"worker-stall100", 100000, 3, 0, 64, 1000000, 100, false, false, true},
+        {"post-receive-only-control", 100000, 3, 0, 64, 1000000, 100, false, false, false, false},
+        {"periodic100-all-staggered", 100000, 3, 50, 64, 1000000, 100, false, false, false, true, 10000}};
+    for (const std::size_t index : {5U, 6U}) {
+        auto scenario = scenarios[index];
+        scenario.name = index == 5 ? "measured-shortage100-all" : "measured-shortage100-one";
+        scenario.paddingPolicy = jam2::audio::RecoveryPaddingPolicy::MeasuredShortage;
+        scenarios.push_back(scenario);
+        scenario = scenarios[index];
+        scenario.name = index == 5 ? "periodic100-all-worker1ms" : "periodic100-one-worker1ms";
+        scenario.workerPeriodUs = 1000;
+        scenarios.push_back(scenario);
+    }
+    scenarios.push_back({"periodic4-all", 4000});
+    scenarios.push_back({"periodic8-one", 8000, 1});
+    for (const auto duration : {1600U, 4000U, 8000U, 12000U, 20000U}) {
+        static constexpr std::array<std::string_view,5> labels{"isolated1_6-one","isolated4-one","isolated8-one","isolated12-one","isolated20-one"};
+        const std::size_t index = duration == 1600 ? 0 : duration == 4000 ? 1 : duration == 8000 ? 2 : duration == 12000 ? 3 : 4;
+        scenarios.push_back({labels[index],duration,1,50,64,1000000,1});
+    }
+    scenarios.push_back({"sparse4-one",4000,1,50,64,16000000});
+    scenarios.push_back({"sparse8-one",8000,1,50,64,16000000});
+    scenarios.push_back({"sparse20-one",20000,1,50,64,16000000});
+    if (triggerStudy) {
+        scenarios.push_back({"periodic100-every2s-one",100000,1,50,64,2000000});
+        scenarios.push_back({"periodic100-every3s-one",100000,1,50,64,3000000});
+        scenarios.push_back({"periodic100-every4s-one",100000,1,50,64,4000000});
+        scenarios.push_back({"cluster4-one",100000,1,50,64,1000000,4});
+        scenarios.push_back({"cluster5-one",100000,1,50,64,1000000,5});
+        scenarios.push_back({"cluster9-one",100000,1,50,64,1000000,9});
+        scenarios.push_back({"cluster10-one",100000,1,50,64,1000000,10});
+    }
+    if (holdStudy) {
+        for (const auto entry : {std::pair{"burst5-quiet6s-one",6000000ULL},
+                std::pair{"burst5-quiet12s-one",12000000ULL}, std::pair{"burst5-quiet25s-one",25000000ULL},
+                std::pair{"burst10-quiet6s-one",6000000ULL}, std::pair{"burst10-quiet12s-one",12000000ULL}}) {
+            GapDeliveryScenario scenario{entry.first,100000,1,50};
+            scenario.pausesPerCluster = std::string_view(entry.first).starts_with("burst10") ? 10 : 5;
+            scenario.clusterQuietUs = entry.second;
+            scenarios.push_back(scenario);
+        }
+        scenarios.push_back({"periodic100-every6s-one",100000,1,50,64,6000000});
+        scenarios.push_back({"periodic100-every12s-one",100000,1,50,64,12000000});
+    }
+    for (const auto name : {"fast", "candidate", "moderate", "safe", "fast128-control"}) {
+        const auto comparison = jam2::test::comparisonProfile(name);
+        for (const auto& scenario : scenarios) gapDeliveryCase(comparison, scenario, triggerStudy, holdStudy);
+    }
+}
+
+void clockAliasExperiments()
+{
+    // Fixed 8 ms batches are exactly three 128-frame packets at 48 kHz.
+    // Vary the period, timestamp scatter and sample rate without altering the
+    // estimator or its existing accuracy assertions.
+    for (const auto name : {"candidate", "moderate", "safe"}) {
+        const auto comparison = jam2::test::comparisonProfile(name);
+        for (const std::uint64_t batch : {7900U, 8000U, 8100U})
+            (void)clockCase(17, 0, true, false, batch, -1, -1, 180, 137, 250,
+                comparison.packet_frames, 0, 0, false, &comparison);
+    }
+    const auto comparison = jam2::test::comparisonProfile("candidate");
+    for (const std::uint64_t scatter : {300U, 3600U})
+        (void)clockCase(17, 0, true, false, 8000, -1, -1, 180, 137, 250,
+            comparison.packet_frames, scatter, 0, false, &comparison);
+    for (const auto step : {3000U,12000U,40000U})
+        (void)clockCase(17,0,true,false,0,-1,-1,180,137,250,comparison.packet_frames,0,0,false,&comparison,step);
+    rate = 44100;
+    (void)clockCase(17, 0, true, false, 8000, -1, -1, 180, 137, 250,
+        comparison.packet_frames, 0, 0, false, &comparison);
 }
 
 void coalescingExperiments()
@@ -1222,7 +1681,22 @@ int main(int argc, char** argv)
         jam2::NetworkRuntime runtime;
         if (argc != 2) throw std::runtime_error("expected capture, interruption, or clock");
         const std::string_view experiment = argv[1];
-        if (experiment == "wasapi") wasapiMesh();
+        if (experiment == "gap-hold-timers") gapDeliveryExperiments(true,true);
+        else if (experiment == "gap-trigger-thresholds") gapDeliveryExperiments(true);
+        else if (experiment == "gap-delivery-investigation") gapDeliveryExperiments();
+        else if (experiment == "clock-alias-investigation") clockAliasExperiments();
+        else if (experiment.starts_with("compare-profile-")) {
+            const auto comparison = jam2::test::comparisonProfile(experiment.substr(16));
+            struct Condition { int skew; std::uint64_t batch, jitter, stall; };
+            for (const auto c : {Condition{0,0,0,0}, {17,0,0,0}, {17,4000,0,0},
+                    {17,8000,0,0}, {17,0,3600,0}, {17,0,0,6000}}) {
+                const auto r = clockCase(c.skew, 0, true, false, c.batch, -1, -1,
+                    180, 137, 250, comparison.packet_frames, c.jitter, c.stall, false, &comparison);
+                expect(r.lateUnderruns == 0 && r.lateTrims == 0 && r.latePadding == 0,
+                    "comparison final minute has no underruns, source trimming or recovery padding");
+            }
+        }
+        else if (experiment == "wasapi") wasapiMesh();
         else if (experiment == "wasapi-fast") wasapiMesh(true);
         else if (experiment == "capture") captureOverflow();
         else if (experiment == "interruption") {

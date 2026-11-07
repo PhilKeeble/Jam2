@@ -12,9 +12,9 @@ constexpr std::array<JoinProfile, 3> kJoinProfiles{{
         true, 64, 64, 512, 5000, 250,
     },
     {
-        "moderate", "Moderate", 64, 256, 8192, 4096, 4096,
-        true, 0.02, 0, 500, true, 512, 1536, 3072,
-        true, 512, 512, 4096, 5000, 250,
+        "standard", "Standard", 64, 128, 16384, 8192, 4096,
+        true, 0.02, 0, 500, true, 128, 128, 3072,
+        true, 128, 128, 8192, 5000, 250,
     },
     {
         "safe", "Safe", 64, 1024, 8192, 7168, 4096,
@@ -25,7 +25,7 @@ constexpr std::array<JoinProfile, 3> kJoinProfiles{{
 
 constexpr std::array<CreateProfile, 3> kCreateProfiles{{
     {"fast", "Fast", 48000, 64, &kJoinProfiles[0]},
-    {"moderate", "Moderate", 48000, 128, &kJoinProfiles[1]},
+    {"standard", "Standard", 48000, 128, &kJoinProfiles[1]},
     {"safe", "Safe", 48000, 256, &kJoinProfiles[2]},
 }};
 
@@ -36,6 +36,7 @@ std::span<const CreateProfile> create_profiles() { return kCreateProfiles; }
 
 const JoinProfile* find_join_profile(std::string_view name)
 {
+    if (name == "moderate") name = "standard"; // Saved settings and older clients.
     for (const auto& profile : kJoinProfiles) {
         if (profile.name == name) return &profile;
     }
@@ -44,14 +45,15 @@ const JoinProfile* find_join_profile(std::string_view name)
 
 const CreateProfile* find_create_profile(std::string_view name)
 {
+    if (name == "moderate") name = "standard";
     for (const auto& profile : kCreateProfiles) {
         if (profile.name == name) return &profile;
     }
     return nullptr;
 }
 
-const JoinProfile& default_join_profile() { return kJoinProfiles.front(); }
-const CreateProfile& default_create_profile() { return kCreateProfiles.front(); }
+const JoinProfile& default_join_profile() { return kJoinProfiles[1]; }
+const CreateProfile& default_create_profile() { return kCreateProfiles[1]; }
 
 std::string tuning_profile_names()
 {

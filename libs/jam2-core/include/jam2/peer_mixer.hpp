@@ -51,6 +51,13 @@ struct PeerMixerPeerStats {
 };
 
 struct PeerMixerStats {
+    std::uint64_t delivery_gap_hold_us = 0;
+    std::uint64_t rebuffer_required_episodes = 0;
+    std::uint64_t rebuffer_window_us = 0;
+    std::uint64_t rebuffer_window_episode_count = 0;
+    std::uint64_t rebuffer_events = 0;
+    std::uint64_t rebuffer_cancellations = 0;
+    std::uint64_t rebuffer_goal_frames = 0;
     std::uint64_t active_peers = 0;
     std::uint64_t contributing_peers = 0;
     std::uint64_t active_slots = 0;

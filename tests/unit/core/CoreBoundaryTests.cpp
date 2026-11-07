@@ -1256,20 +1256,21 @@ void testSmallDiagnosticBoundaries()
         expect(profile.drift_correction && profile.drift_deadband_ppm == 0,
             "every maintained profile corrects small clock differences without deadband");
     }
-    const jam2::JoinProfile* moderate = jam2::find_join_profile("moderate");
-    const jam2::CreateProfile* moderate_create = jam2::find_create_profile("moderate");
-    expect(moderate != nullptr && moderate_create != nullptr &&
-            moderate_create->local == moderate &&
-            moderate_create->sample_rate == 48000 && moderate_create->frame_size == 128 &&
-            moderate->audio_buffer_size == 64 && moderate->drift_deadband_ppm == 0 &&
-            moderate->playback_prefill_frames == 256 &&
-            moderate->playout_delay_frames == 512 &&
-            moderate->jitter_buffer_frames == 1536 &&
-            moderate->jitter_buffer_max_frames == 3072 &&
-            moderate->adaptive_playback_target_frames == 512 &&
-            moderate->adaptive_playback_min_frames == 512 &&
-            moderate->adaptive_playback_max_frames == 4096,
-        "moderate create and join profiles preserve the measured 256-frame prefill and 1536-frame jitter target");
+    const auto* standard = jam2::find_join_profile("standard");
+    const auto* standardCreate = jam2::find_create_profile("standard");
+    expect(standard && standardCreate && standardCreate->local == standard &&
+            standard->label == "Standard" && standardCreate->frame_size == 128 &&
+            standard->audio_buffer_size == 64 && standard->playback_prefill_frames == 128 &&
+            standard->playback_ring_frames == 16384 && standard->playback_max_frames == 8192 &&
+            standard->playout_delay_frames == 128 && standard->jitter_buffer_frames == 128 &&
+            standard->jitter_buffer_max_frames == 3072 && standard->adaptive_playback_target_frames == 128 &&
+            standard->adaptive_playback_min_frames == 128 && standard->adaptive_playback_max_frames == 8192,
+        "Standard exposes the tested low floor and adaptive/playback headroom");
+    expect(&jam2::default_join_profile() == standard && &jam2::default_create_profile() == standardCreate &&
+            jam2::find_join_profile("moderate") == standard && jam2::find_create_profile("moderate") == standardCreate &&
+            jam2::tuning_profile_names() == "fast, standard, safe",
+        "Standard is the public default and Moderate is a compatibility alias only");
+
 }
 
 void testQ31NetworkAudioConversion()

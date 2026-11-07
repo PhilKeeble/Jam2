@@ -91,7 +91,7 @@ void print_audio_options_help()
 {
     std::cout << R"(
 Audio and engine options:
-  --profile <fast|moderate|safe>       Apply a tuning profile; later flags override it
+  --profile <fast|standard|safe>       Apply a tuning profile; later flags override it
   --audio-device <id>                  Use a real audio device
   --wasapi-input <endpoint-id|none>     WASAPI input (default: none); output selected by --audio-device
   --wasapi-capture-target-ms <ms>       Capture queue target, default 20

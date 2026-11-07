@@ -343,6 +343,12 @@ struct PeerMixer::Impl {
     std::vector<std::int32_t> silence_output;
     bool started = false;
     std::size_t pending_recovery_padding_frames = 0;
+    std::size_t recovery_rebuffer_goal_frames = 0;
+    std::uint64_t recovery_rebuffer_deadline_us = 0;
+    static constexpr std::size_t kRebufferRequiredEpisodes = 10;
+    static constexpr std::uint64_t kRebufferWindowUs = 20000000;
+    std::array<std::uint64_t, 10> rebuffer_episode_times{};
+    std::size_t rebuffer_episode_count = 0;
     std::size_t slot_frames_released = 0;
     bool slot_had_missing = false;
     std::uint64_t next_deadline_us = 0;
@@ -468,6 +474,9 @@ struct PeerMixer::Impl {
         }
         stats.adaptive_playback_cushion_enabled = config.adaptive_playback_cushion;
         stats.adaptive_target_frames = adaptive_target_frames;
+        stats.delivery_gap_hold_us = kAdaptiveGapHoldUs;
+        stats.rebuffer_required_episodes = kRebufferRequiredEpisodes;
+        stats.rebuffer_window_us = kRebufferWindowUs;
         stats.receive_recovery_trigger_frames = config.receive_recovery_trigger_frames;
         // Cover ordinary packet dispatch or two device callback quanta,
         // whichever is larger. A 256-frame device callback is not four
@@ -550,10 +559,21 @@ struct PeerMixer::Impl {
             : target;
     }
 
+    std::size_t learnedRecoveryTarget() const noexcept
+    {
+        if (!config.adaptive_playback_cushion || current_advance_us >= adaptive_gap_hold_until_us) return 0;
+        const auto target = std::max<std::size_t>(config.adaptive_min_frames, adaptive_gap_target_frames);
+        return config.output_max_frames ? std::min(target, config.output_max_frames) : target;
+    }
+
     std::size_t receiveRecoveryTailFrames() const noexcept
     {
         const std::size_t minimum_tail =
             static_cast<std::size_t>(config.frames_per_block) * 2U;
+        if (const auto learned = learnedRecoveryTarget(); learned && output != nullptr) {
+            const auto depth = output->depthFrames();
+            return std::max(minimum_tail, learned > depth ? learned - depth : 0);
+        }
         if (config.adaptive_playback_cushion || output == nullptr) {
             return minimum_tail;
         }
@@ -572,11 +592,11 @@ struct PeerMixer::Impl {
             : 0;
         return std::max<std::size_t>(
             static_cast<std::size_t>(config.frames_per_block) * 2U,
-            std::max(config.adaptive_min_frames, fixed_target));
+            std::max({config.adaptive_min_frames, fixed_target, learnedRecoveryTarget()}));
     }
 
     static constexpr std::uint64_t kAdaptiveGapAssociationUs = 250000ULL;
-    static constexpr std::uint64_t kAdaptiveGapHoldUs = 30000000ULL;
+    static constexpr std::uint64_t kAdaptiveGapHoldUs = 5000000ULL;
 
     void extendAdaptiveGapHold(std::uint64_t receive_time_us) noexcept
     {
@@ -824,6 +844,31 @@ struct PeerMixer::Impl {
 
     void completeReceiveRecovery(std::uint64_t now_us) noexcept
     {
+        // Establish real runway only at the end of an actual hard recovery.
+        // No padding is added on a healthy path or merely on packet arrival.
+        if (const auto goal = learnedRecoveryTarget(); goal > config.adaptive_min_frames) {
+            // Count distinct completed recoveries in a bounded rolling
+            // window. A chain of individually nearby events is insufficient.
+            std::size_t retained = 0;
+            for (std::size_t i = 0; i < rebuffer_episode_count; ++i) {
+                const auto time = rebuffer_episode_times[i];
+                if (now_us >= time && now_us - time <= kRebufferWindowUs)
+                    rebuffer_episode_times[retained++] = time;
+            }
+            if (retained == rebuffer_episode_times.size()) {
+                std::move(rebuffer_episode_times.begin()+1, rebuffer_episode_times.end(), rebuffer_episode_times.begin());
+                --retained;
+            }
+            rebuffer_episode_times[retained++] = now_us;
+            rebuffer_episode_count = retained;
+            stats.rebuffer_window_episode_count = retained;
+            if (retained >= kRebufferRequiredEpisodes) {
+                recovery_rebuffer_goal_frames = goal;
+                recovery_rebuffer_deadline_us = now_us + goal * 1000000ULL / config.sample_rate + 250000;
+                stats.rebuffer_goal_frames = goal;
+                ++stats.rebuffer_events;
+            }
+        }
         if (output != nullptr && config.output_max_frames > 0) {
             const std::size_t output_tail = receiveRecoveryOutputTailFrames();
             const std::size_t output_depth = output->depthFrames();
@@ -1413,6 +1458,21 @@ struct PeerMixer::Impl {
         if (output != nullptr && !output->acceptsFrames()) {
             return;
         }
+        if (recovery_rebuffer_goal_frames != 0 && output != nullptr) {
+            std::size_t common = (std::numeric_limits<std::size_t>::max)();
+            for (const auto& peer : peers) if (peer->stats.active && peer->stats.contributing)
+                common = std::min(common, peer->queued);
+            const bool cancelled = common == (std::numeric_limits<std::size_t>::max)() ||
+                now_us >= recovery_rebuffer_deadline_us || now_us >= adaptive_gap_hold_until_us;
+            // Intentional refill silence is not new network-starvation evidence.
+            observed_output_underrun_frames = output->underrunFrames();
+            adaptive_last_update_us = now_us;
+            output->setResamplerRatio(1.0);
+            if (!cancelled && output->depthFrames() + common < recovery_rebuffer_goal_frames) return;
+            stats.rebuffer_cancellations += cancelled;
+            recovery_rebuffer_goal_frames = 0;
+            stats.rebuffer_goal_frames = 0;
+        }
         // Cover a held interpolation neighbour at the measured worker boundary.
         // Predicting one sample cannot cover a whole missing callback, and is
         // unnecessary when real queued audio already covers the next turn.
@@ -1452,6 +1512,12 @@ struct PeerMixer::Impl {
                 updateAdaptiveReleaseState(false, false);
                 return;
             }
+        }
+        // Associate fresh, source-owned observations before destructive timeline
+        // recovery can clear them. Arrival gaps alone still cannot raise delay.
+        if (started) {
+            observeAdaptiveDeliveryGaps(now_us);
+            if (output_underrun_changed) applyPendingAdaptiveGapAfterUnderrun(now_us);
         }
         const bool recovery_rebase_was_started = receive_rebase_started;
         processReceiveRecovery(now_us);
@@ -1547,6 +1613,15 @@ struct PeerMixer::Impl {
                 if (!readiness.any_ready && !output_underrun_observed) {
                     break;
                 }
+                // A remembered delivery gap does not make an incomplete
+                // slot urgent while real output already covers the next turn.
+                // This retains existing audio only; it creates no silence or
+                // new target and stops waiting before callback runway is lost.
+                const auto callback = output != nullptr ? output->callbackFrames() : 0;
+                const auto safe_output = std::max<std::size_t>(mixed_output.size(), callback * 2U) +
+                    static_cast<std::size_t>(stats.worker_runway_frames);
+                if (learnedRecoveryTarget() > config.adaptive_min_frames && output != nullptr &&
+                    callback != 0 && output->depthFrames() > safe_output) break;
                 if (now_us < next_deadline_us) {
                     break;
                 }

@@ -96,7 +96,7 @@ Config configuration(const QJsonObject& p) {
     require(c.statsIntervalMs>=100 && c.statsIntervalMs<=2000,"invalid stats interval");
     c.backend=p.value("schema")=="jam2-coreaudio-delivery-profile-v1" ? Config::Backend::CoreAudio : Config::Backend::Asio;
     c.tuningProfile=p.value("tuning_profile").toString("fast");
-    require(c.tuningProfile=="fast" || c.tuningProfile=="moderate","invalid tuning profile");
+    require(c.tuningProfile=="fast" || c.tuningProfile=="standard" || c.tuningProfile=="moderate","invalid tuning profile");
     c.jitterFrames=p.value("jitter_buffer_frames").toInt(-1);
     c.adaptiveTarget=p.value("adaptive_playback_target_frames").toInt(-1);
     c.adaptiveMin=p.value("adaptive_playback_min_frames").toInt(-1);

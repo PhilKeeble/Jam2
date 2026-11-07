@@ -160,7 +160,8 @@ std::span<const char* const> enumValues(Type type)
     static constexpr const char* phases[]{"idle", "armed", "ready", "waiting", "count-in", "recording", "complete", "finalizing"};
     static constexpr const char* scopes[]{"tracks", "idea.full", "idea.chords", "idea.beats"};
     static constexpr const char* formats[]{"pcm16-mono", "pcm24-mono"};
-    static constexpr const char* profiles[]{"fast", "moderate", "safe"};
+    // Keep Standard in Moderate's existing wire slot for older peers.
+    static constexpr const char* profiles[]{"fast", "standard", "safe"};
     static constexpr const char* ideas[]{"off", "chords", "beats", "full"};
     switch (type) {
     case Type::Lane: return lanes; case Type::Phase: return phases; case Type::Scope: return scopes;
@@ -813,7 +814,9 @@ bool Codec::encode(const QJsonObject& message, Encoded& out, QString& error, qsi
         case Type::Lane: case Type::Phase: case Type::Scope: case Type::Format: case Type::Profile: case Type::Ideas: {
             const auto values = enumValues(field.type); quint8 id = 1;
             if (!value.isString()) { error = QStringLiteral("Server enum is not text at the application boundary"); return false; }
-            for (const auto* text : values) { if (value.toString() == QLatin1String(text)) break; ++id; }
+            const auto name = field.type == Type::Profile && value.toString() == QStringLiteral("moderate")
+                ? QStringLiteral("standard") : value.toString();
+            for (const auto* text : values) { if (name == QLatin1String(text)) break; ++id; }
             if (id > values.size()) { error = QStringLiteral("Server enum value is unknown"); return false; }
             fields.number<quint8>(id); break;
         }

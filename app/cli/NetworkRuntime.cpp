@@ -1981,6 +1981,7 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
     std::uint64_t mesh_work_budget_yields = 0;
     std::uint64_t mesh_receive_batch_max = 0;
     jam2::cli::stats::ReceiveLoopDiagnostics mesh_receive_loop_diagnostics;
+    jam2::cli::stats::SendLoopDiagnostics mesh_send_loop_diagnostics;
     std::uint64_t mesh_telemetry_samples = 0, mesh_telemetry_sum_us = 0, mesh_telemetry_max_us = 0;
     std::uint64_t mesh_ping_reply_turnaround_min_us = 0;
     std::uint64_t mesh_ping_reply_turnaround_sum_us = 0;
@@ -2331,6 +2332,7 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
     AudioPacketStats retired_peer_stats;
     auto aggregate_stats = [&]() {
         AudioPacketStats stats = retired_peer_stats;
+        mesh_send_loop_diagnostics.applyTo(stats);
         stats.telemetry_service_samples = mesh_telemetry_samples;
         stats.telemetry_service_sum_us = mesh_telemetry_sum_us;
         stats.telemetry_service_max_us = mesh_telemetry_max_us;
@@ -3600,6 +3602,7 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                 payload = packed_audio_payload;
             }
             receive_phase(jam2::ReceiveServicePhase::AudioSend);
+            if (options.stats_enabled) mesh_send_loop_diagnostics.packet(jam2::monotonic_us());
             (void)network_session.sendToActive(
                 jam2::protocol::PacketType::Audio,
                 packet_schedule.audioSequence(),
@@ -3622,6 +3625,7 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                         remaining_capture_frames);
             }
         }
+        if (options.stats_enabled) mesh_send_loop_diagnostics.finishWake(sends_this_loop);
         bool audio_send_retry_immediately = false;
         if (capture_clock_packet_pacing &&
             !capture_packet_pacer.packetRequiresSpacing() &&

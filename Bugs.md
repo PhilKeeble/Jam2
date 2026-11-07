@@ -1,5 +1,7 @@
 ## Tweaks
 
+Pinned for tonight (6 November 2026): compare NIC/network packet pacing with a second machine. Use matched 164-byte/750 pps and 420-byte/375 pps UDP streams, record actual send and receive spacing/bursts, and compare interrupt moderation off/on/off before changing EEE. A Wi-Fi sender is acceptable for an initial comparison; prefer wired confirmation and separate same-eero versus wired-backhaul paths. Use short batching comparisons followed by 10–15 minute runs to cover the recurring three-minute disturbance. Interrupt moderation is currently disabled; restore/check each case explicitly. This is a saved follow-up, not a scheduled notification.
+
 do STUN testing with other netwroks to see what works and whether port forwarding needed 
 
 need to add docs on how to use cli for mac as its embedded
@@ -31,6 +33,15 @@ someitme jacks audio doesnt recover
 maybe look at bringing track seeking back in
 
 cant manually sync when auto is on - wanted it when open jamjar didnt sync
+
+jamtaster analyusis during jam copied over wavs but sections were odd and didnt copy until he played and then chords and beats didnt copy over
+(codex resume 01a1ad40-6912-77e0-aa8a-4106d532ccf2)
+ran a jam as a joiner, then in the same gui went to create a jam and jam2 server rejected it, seems like something is getting cached 
+
+jamtaster didnt use GPU when it was avaialble
+
+check to see if moderate could be made to be a better all rounder
+
 
 ## Bugs - MacOS
 
@@ -70,9 +81,11 @@ https://www.youtube.com/watch?v=_ertZZTaN3k - 4 mins in - trap
 
 # Tweaks
 
-Naming peers in a jam 
-friends type system 
+
 
 ## Recovery bug
 
 One of the metronome cases failed in the full suite sometimes because recovery was sustained and just couldnt recover. Happens in the fast profile and can lead to a situation where some peers are ok and some arent.
+
+
+
