@@ -639,6 +639,8 @@ void GuiTestAgent::handle(const QJsonObject& command)
                 {QStringLiteral("active_modal"), QApplication::activeModalWidget() != nullptr},
                 {QStringLiteral("active_modal_title"), QApplication::activeModalWidget()
                     ? QApplication::activeModalWidget()->windowTitle() : QString{}},
+                {QStringLiteral("active_modal_text"), qobject_cast<QMessageBox*>(QApplication::activeModalWidget())
+                    ? boundedText(qobject_cast<QMessageBox*>(QApplication::activeModalWidget())->text()) : QString{}},
             });
             page.insert(QStringLiteral("jam"), window_.automationJamSnapshot());
             page.insert(QStringLiteral("content"), window_.automationContentSnapshot());
@@ -972,7 +974,11 @@ void GuiTestAgent::handle(const QJsonObject& command)
     }
     if (type == QStringLiteral("application.boundary")) {
         const QString action = command.value(QStringLiteral("action")).toString();
-        if (!onlyFields(command, {"format", "type", "id", "action"}) ||
+        const bool convertedApply = action == QStringLiteral("jamtaster-apply") &&
+            command.contains(QStringLiteral("converted_song"));
+        if (!(convertedApply
+                ? onlyFields(command, {"format", "type", "id", "action", "converted_song", "options"})
+                : onlyFields(command, {"format", "type", "id", "action"})) ||
             action.isEmpty() || action.toUtf8().size() > 128) {
             reject(command, QStringLiteral("boundary action is invalid"));
             return;
@@ -1028,21 +1034,41 @@ void GuiTestAgent::handle(const QJsonObject& command)
                 return;
             }
         } else if (action == QStringLiteral("jamtaster-apply")) {
-            const QJsonObject tempo{
-                {QStringLiteral("bpm"), 136.75},
-                {QStringLiteral("project_bpm"), 137},
-                {QStringLiteral("beats_per_bar"), 7},
-            };
-            window_.applyJamTasterTempo(tempo);
-            window_.applyJamTasterQuick(
-                tempo,
-                {},
-                QJsonObject{
-                    {QStringLiteral("tempo"), true},
-                    {QStringLiteral("stems"), false},
-                },
-                {});
-            window_.showJamTasterSessionHeaderStatus();
+            if (convertedApply) {
+                const auto path = command.value(QStringLiteral("converted_song"));
+                const auto options = command.value(QStringLiteral("options"));
+                if (!path.isString() || !options.isObject() ||
+                    QDir(path.toString()).entryList({QStringLiteral("*.jamjar")}, QDir::Files).size() != 1) {
+                    reject(command, QStringLiteral("converted JamTaster result is invalid"));
+                    return;
+                }
+                const QJsonObject selected = options.toObject();
+                for (auto it = selected.constBegin(); it != selected.constEnd(); ++it) {
+                    if (!it.value().isBool() ||
+                        !QStringList{QStringLiteral("chords"), QStringLiteral("drums"), QStringLiteral("bass"),
+                            QStringLiteral("stems"), QStringLiteral("sections"), QStringLiteral("tempo")}.contains(it.key())) {
+                        reject(command, QStringLiteral("JamTaster apply options are invalid"));
+                        return;
+                    }
+                }
+                window_.applyJamTasterConverted(path.toString(), selected);
+            } else {
+                const QJsonObject tempo{
+                    {QStringLiteral("bpm"), 136.75},
+                    {QStringLiteral("project_bpm"), 137},
+                    {QStringLiteral("beats_per_bar"), 7},
+                };
+                window_.applyJamTasterTempo(tempo);
+                window_.applyJamTasterQuick(
+                    tempo,
+                    {},
+                    QJsonObject{
+                        {QStringLiteral("tempo"), true},
+                        {QStringLiteral("stems"), false},
+                    },
+                    {});
+                window_.showJamTasterSessionHeaderStatus();
+            }
         } else if (action == QStringLiteral("save-session-defaults")) {
             window_.saveCreateDefaults();
             window_.saveJoinDefaults();

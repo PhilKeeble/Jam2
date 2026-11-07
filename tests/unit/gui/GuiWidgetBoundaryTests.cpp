@@ -584,6 +584,46 @@ void testLocalEngineDialogState()
         "local engine dialog returns the edited persistence choice");
 }
 
+void testCreateDialogCommitsFreshIdentity()
+{
+    jam2::SessionInfo identity;
+    identity.session_id = 71;
+    identity.key.fill(0x5a); // The identity retained from a previously joined jam.
+    const auto joined = identity;
+    int generations = 0;
+    jam2::gui::StartJamDialogState initial;
+    initial.create.name = QStringLiteral("Alice");
+    jam2::gui::StartJamDialogCallbacks callbacks;
+    callbacks.generateSession = [&] {
+        ++generations;
+        identity.session_id = jam2::random_u64();
+        identity.key = jam2::random_key();
+    };
+    jam2::gui::StartJamDialog cancelled(initial, {}, callbacks);
+    QTimer::singleShot(0, &cancelled, [&] {
+        auto* save = qobject_cast<QPushButton*>(findControl(cancelled, QStringLiteral("session.start-dialog.save-defaults")));
+        auto* cancel = qobject_cast<QPushButton*>(findControl(cancelled, QStringLiteral("session.start-dialog.cancel")));
+        expect(save && cancel, "create dialog exposes its real save and cancel actions");
+        if (save) save->click();
+        if (cancel) cancel->click(); else cancelled.reject();
+    });
+    expect(cancelled.exec() == QDialog::Rejected && generations == 0 &&
+            identity.session_id == joined.session_id && identity.key == joined.key,
+        "opening, saving defaults and cancelling Create do not change the joined identity");
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        const auto previous = identity;
+        jam2::gui::StartJamDialog accepted(initial, {}, callbacks);
+        QTimer::singleShot(0, &accepted, [&] {
+            auto* start = qobject_cast<QPushButton*>(findControl(accepted, QStringLiteral("session.start-dialog.accept")));
+            expect(start && start->isEnabled(), "valid Create exposes an enabled Start action");
+            if (start) start->click(); else accepted.reject();
+        });
+        expect(accepted.exec() == QDialog::Accepted && generations == attempt + 1 &&
+                identity.session_id != previous.session_id && identity.key != previous.key,
+            "every accepted Create commits a fresh ID and key before returning to session startup");
+    }
+}
+
 void testSessionDefaultsAndPriorityControls()
 {
     const auto hasFastPlaybackDefaults = [](const LocalTuningPreference& tuning, bool ownsPacketSize = true) {
@@ -2144,6 +2184,7 @@ int main(int argc, char** argv)
     testTimelineHelpers();
     testGuiInteractionPolicy();
     testLocalEngineDialogState();
+    testCreateDialogCommitsFreshIdentity();
     testSessionDefaultsAndPriorityControls();
     testAudioDeviceUiSupport();
     testConnectionGuidance();

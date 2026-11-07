@@ -795,6 +795,131 @@ bool shutDown(FourPeerCoordinator& coordinator)
     return true;
 }
 
+bool exerciseJamTasterSharing(FourPeerCoordinator& coordinator, const QString& folder,
+    const QString& wavPath, const QString& wavHash, std::array<QJsonObject, 4>& states)
+{
+    // The automation startup bypasses the initial local-audio dialog. Dismiss
+    // that existing dialog before checking for errors from the analysis apply.
+    for (std::size_t peer = 0; peer < states.size(); ++peer) {
+        if (states[peer].value("window").toObject().value("active_modal_title").toString() == "Start Local Engine" &&
+            !apply(coordinator, peer, {{"type", "invoke"}, {"id", "dismiss-startup-audio"},
+                {"control", "application.local-engine.cancel"}, {"operation", "click"}})) return false;
+    }
+    const auto snapshotSong = [&](std::size_t peer) -> QJsonObject {
+        if (!send(coordinator.peer(peer), {{"type","song.snapshot"},{"id","jamtaster-source"}})) return {};
+        const auto event = receive(coordinator.peer(peer), "song.snapshot");
+        return event ? QJsonDocument::fromJson(qUncompress(QByteArray::fromBase64(
+            event->value("song_zlib_base64").toString().toLatin1()))).object() : QJsonObject{};
+    };
+    const QJsonObject original = snapshotSong(0);
+    if (original.value("sections").toArray().isEmpty()) return false;
+    struct Case { const char* policy; const char* chord; const char* bass; int drum; std::size_t author; bool chords = true, drums = true; };
+    const std::array cases{
+        Case{"full","Dm","D2",0,0}, Case{"full","Em","E2",1,2},
+        Case{"chords","Gm","G2",2,1}, Case{"beats","Am","A2",3,0},
+        Case{"off","Bm","B2",4,3}, Case{"full","Cm","C2",5,2,true,false},
+        Case{"full","Fm","F2",6,1,false,false}};
+    int sequence = 0;
+    for (const auto& test : cases) {
+        ++sequence;
+        const QString policy = QString::fromLatin1(test.policy);
+        if (!apply(coordinator,0,policyCommand(QStringLiteral("jamtaster-policy-%1").arg(sequence),policy)) ||
+            !waitForAll(coordinator,"JamTaster sharing policy",[&](std::size_t,const QJsonObject& state) {
+                return state.value("jam").toObject().value("policy").toObject().value("generated_ideas").toString()==policy;
+            },states,false)) return false;
+        std::array<QJsonObject,4> before;
+        std::array<qint64,4> revisions{};
+        for (std::size_t peer=0; peer<4; ++peer) {
+            const auto content=states[peer].value("content").toObject();
+            before[peer]=content.value("first_section").toObject();
+            revisions[peer]=content.value("arrangement_revision").toInteger();
+        }
+        auto generated = original;
+        auto sections = generated.value("sections").toArray();
+        auto section = sections[0].toObject();
+        auto chords = section.value("chords").toArray(); chords[0]=QString::fromLatin1(test.chord); section["chords"]=chords;
+        auto patterns = section.value("musical_patterns").toArray();
+        QJsonArray rests;
+        for (int i=0;i<4;++i) rests.append(QJsonObject{{"state","rest"},{"value",""},{"velocity",96}});
+        auto pitched=rests; pitched[0]=QJsonObject{{"state","onset"},{"value",test.chord},{"velocity",96}};
+        auto bass=rests; bass[0]=QJsonObject{{"state","onset"},{"value",test.bass},{"velocity",96}};
+        patterns[0]=QJsonObject{{"division",4},{"chords",pitched},{"melody",rests},{"bass",bass},{"support",rests}};
+        section["musical_patterns"]=patterns;
+        auto beats=section.value("beat_patterns").toArray(); QJsonArray lanes;
+        for (int i=0;i<10;++i) lanes.append(i==test.drum ? "f..." : "....");
+        beats[0]=QJsonObject{{"division",4},{"lanes",lanes}}; section["beat_patterns"]=beats;
+        sections[0]=section; generated["sections"]=sections;
+        if (sequence==1) {
+            auto looper=generated.value("looper").toObject(); auto banks=looper.value("banks").toArray();
+            // Converted analysis contains stems, not the GUI's empty lane placeholders.
+            for (int index = 0; index < banks.size(); ++index) {
+                auto emptyBank = banks[index].toObject();
+                emptyBank["lanes"] = QJsonArray{};
+                banks[index] = emptyBank;
+            }
+            auto bank=banks[0].toObject();
+            bank["lanes"]=QJsonArray{QJsonObject{{"id","analysis-stem"},{"asset_path",wavPath},{"asset_hash",wavHash},
+                {"name","Analysed drums"},{"sample_rate",48000},{"source_frames","1024"},
+                {"start_frame","0"},{"stop_frame","1024"},{"loop_start_frame","-1"},{"loop_end_frame","-1"},
+                {"gain_db",0},{"muted",false},{"solo",false},{"loop_enabled",false},{"origin_kind","imported"}}};
+            banks[0]=bank;looper["banks"]=banks;generated["looper"]=looper;
+        }
+        const QString converted=QDir(folder).filePath(QStringLiteral("converted-%1").arg(sequence));
+        if (!QDir().mkpath(converted)) return false;
+        QFile file(QDir(converted).filePath("result.jamjar"));
+        const auto bytes=QJsonDocument(generated).toJson();
+        if (!file.open(QIODevice::WriteOnly) || file.write(bytes)!=bytes.size()) return false;
+        file.close();
+        if (!apply(coordinator,test.author,{{"type","application.boundary"},
+                {"id",QStringLiteral("apply-jamtaster-%1").arg(sequence)},{"action","jamtaster-apply"},
+                {"converted_song",converted},{"options",QJsonObject{{"chords",test.chords},{"bass",true},
+                    {"drums",test.drums},{"stems",sequence==1},{"sections",false},{"tempo",false}}}})) return false;
+        const bool sharePitched = policy=="full" || policy=="chords";
+        const bool shareBeats = test.drums && (policy=="full" || policy=="beats");
+        const auto expectedChord = test.chords ? QString::fromLatin1(test.chord) : before[test.author].value("chord_0").toString();
+        bool applyFailed = false;
+        if (!waitForAll(coordinator,QStringLiteral("JamTaster %1 result convergence").arg(sequence),
+                [&](std::size_t peer,const QJsonObject& state) {
+                    const auto window = state.value("window").toObject();
+                    if (window.value("active_modal").toBool() && !applyFailed) {
+                        fail(QStringLiteral("JamTaster apply opened an unexpected dialog: %1: %2")
+                            .arg(window.value("active_modal_title").toString(), window.value("active_modal_text").toString()));
+                        applyFailed = true;
+                    }
+                    if (applyFailed) return true;
+                    const auto content=state.value("content").toObject();
+                    const auto current=content.value("first_section").toObject();
+                    const bool pitchedAllowed = peer==test.author || sharePitched;
+                    const bool beatsAllowed = test.drums && (peer==test.author || shareBeats);
+                    return meshOperational(peer,state) && transferIdle(state) && assetCount(state,wavHash)==1 &&
+                        content.value("arrangement_revision").toInteger()>revisions[peer] &&
+                        current.value("chord_0").toString()==(pitchedAllowed ? expectedChord : before[peer].value("chord_0").toString()) &&
+                        (pitchedAllowed ? current.value("chord_fingerprint")!=before[peer].value("chord_fingerprint")
+                                        : current.value("chord_fingerprint")==before[peer].value("chord_fingerprint")) &&
+                        (beatsAllowed ? current.value("beat_fingerprint")!=before[peer].value("beat_fingerprint")
+                                      : current.value("beat_fingerprint")==before[peer].value("beat_fingerprint"));
+                },states,false) || applyFailed) return false;
+        const auto authored = states[test.author].value("content").toObject().value("first_section").toObject();
+        for (const auto& state : states) {
+            const auto received = state.value("content").toObject().value("first_section").toObject();
+            if ((sharePitched && received.value("chord_fingerprint") != authored.value("chord_fingerprint")) ||
+                (shareBeats && received.value("beat_fingerprint") != authored.value("beat_fingerprint"))) {
+                fail("shared JamTaster grids differ from the applied analysis");
+                return false;
+            }
+        }
+        if (sharePitched) for (std::size_t peer=0;peer<4;++peer) {
+            const auto receivedSections = snapshotSong(peer).value("sections").toArray();
+            const auto receivedPatterns = receivedSections.isEmpty() ? QJsonArray{} : receivedSections[0].toObject().value("musical_patterns").toArray();
+            const auto receivedBass = receivedPatterns.isEmpty() ? QJsonArray{} : receivedPatterns[0].toObject().value("bass").toArray();
+            if (receivedBass.isEmpty() || receivedBass[0].toObject().value("value").toString()!=QString::fromLatin1(test.bass)) {
+                fail("analysed bass did not cross the harmonic sharing route");return false;
+            }
+        }
+    }
+    return verifyAssetFiles(states,wavHash);
+}
+
 } // namespace
 
 int main(int argc, char* argv[])
@@ -805,7 +930,8 @@ int main(int argc, char* argv[])
         return 2;
     }
     TestSignaler signaler;
-    const bool serverMode = argc >= 3;
+    const bool jamTasterOnly = argc == 3 && QString::fromLocal8Bit(argv[2]) == QStringLiteral("jamtaster");
+    const bool serverMode = argc >= 3 && !jamTasterOnly;
     const bool bulkOnly = argc == 4 && QString::fromLocal8Bit(argv[3]) == QStringLiteral("unthrottled");
     bulkUdpFixtures = bulkOnly;
     const bool sharingOnly = argc == 4 && QString::fromLocal8Bit(argv[3]) == QStringLiteral("sharing");
@@ -938,6 +1064,13 @@ int main(int argc, char* argv[])
         if (!multiplex.value(QStringLiteral("enabled")).toBool() || multiplex.value(QStringLiteral("links")).toArray().size() != 3) {
             fail(QStringLiteral("shared WAV workflow did not use exactly three physical UDP peer links")); return 1;
         }
+    }
+
+    if (jamTasterOnly) {
+        if (!exerciseJamTasterSharing(coordinator,fixtureFolder.path(),automaticWavPath,automaticWavHash,states)) return 1;
+        if (!shutDown(coordinator) || failures != 0) return 1;
+        coordinator.markSuccessful();
+        return 0;
     }
 
     if (bulkOnly) {

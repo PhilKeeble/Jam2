@@ -2,6 +2,7 @@
 #include "TestTiming.hpp"
 #include "LoopbackPortReservations.hpp"
 #include "pcm16_wav.hpp"
+#include "common.hpp"
 
 #include <QCoreApplication>
 #include <QCryptographicHash>
@@ -3292,6 +3293,7 @@ int main(int argc, char* argv[])
         return 1;
     }
 
+    QString priorJoinedInvite;
     if (startupOnly) {
     for (std::size_t index = 0; index < FourPeerCoordinator::kPeerCount; ++index) {
         const QString id = QStringLiteral("prepare-dialog-runtime-%1").arg(index + 1);
@@ -3347,6 +3349,7 @@ int main(int argc, char* argv[])
     const QJsonObject creatorJam = creatorState->value(
         QStringLiteral("jam")).toObject();
     const QString invite = creatorJam.value(QStringLiteral("invite_url")).toString();
+    priorJoinedInvite = invite;
     if (creatorJam.value(QStringLiteral("role")).toString() !=
             QStringLiteral("creator") || invite.isEmpty()) {
         fail(QStringLiteral("real Start Jam accept did not create an invite-bearing session"));
@@ -4309,6 +4312,47 @@ int main(int argc, char* argv[])
             }, runtimeStates, 20s)) {
         return 1;
     }
+    }
+
+    if (startupOnly) {
+        auto& formerJoiner = coordinator.peer(1);
+        std::array<QJsonObject, FourPeerCoordinator::kPeerCount> recreatedStates;
+        openModal(formerJoiner, QStringLiteral("role-swap-open"), QStringLiteral("session.start"));
+        (void)invokeAndReceive(formerJoiner, "role-swap-name", "session.dialog.name", "set-text", "Bob");
+        (void)invokeAndReceive(formerJoiner, "role-swap-direct", "session.dialog.connection-strategy", "set-index", 2);
+        (void)invokeAndReceive(formerJoiner, "role-swap-bind", "session.dialog.bind-host", "set-text", "127.0.0.1");
+        (void)invokeAndReceive(formerJoiner, "role-swap-public", "session.dialog.public-host", "set-text", "127.0.0.1");
+        (void)invokeAndReceive(formerJoiner, "role-swap-port", "session.dialog.port", "set-value", int(ports[1]));
+        closeModal(formerJoiner, "role-swap-accept", "session.start-dialog.accept");
+        const auto recreated = runtimeSnapshot(formerJoiner, "role-swap-created");
+        if (!recreated) return 1;
+        const auto nextInvite = recreated->value("jam").toObject().value("invite_url").toString();
+        if (nextInvite.isEmpty()) { fail("former joiner did not create a new invitation"); return 1; }
+        // Every other participant retained the joined identity too. None presses
+        // New Session before the former joiner accepts the real Create dialog.
+        const auto oldIdentity = jam2::parse_jam_url(
+            priorJoinedInvite.toStdString());
+        const auto newIdentity = jam2::parse_jam_url(nextInvite.toStdString());
+        if (oldIdentity.session_id == newIdentity.session_id || oldIdentity.key == newIdentity.key) {
+            fail("accepted Create reused the previously joined session ID or key");
+            return 1;
+        }
+        for (std::size_t peer = 0; peer < FourPeerCoordinator::kPeerCount; ++peer) {
+            if (peer == 1) continue;
+            if (!send(coordinator.peer(peer), {{"type","jam.join"},{"id",QStringLiteral("role-swap-join-%1").arg(peer)},
+                    {"name","Alex"},{"port",ports[peer]},{"invite_url",nextInvite}}) ||
+                !receiveApplied(coordinator.peer(peer), QStringLiteral("role-swap-join-%1").arg(peer))) return 1;
+        }
+        if (!waitForAll(coordinator, "former joiner hosts a freshly authenticated four-peer jam",
+                [](std::size_t, const QJsonObject& state) {
+                    const auto jam = state.value("jam").toObject();
+                    return jam.value("remote_peer_count").toInt() == 3 &&
+                        jam.value("active_remote_peer_count").toInt() == 3 && jam.value("network_running").toBool();
+                }, recreatedStates)) return 1;
+        // Leave the new creator last; its departure closes the remaining jam.
+        for (const std::size_t peer : {3U, 2U, 0U, 1U})
+            (void)invokeAndReceive(coordinator.peer(peer), QStringLiteral("role-swap-leave-%1").arg(peer),
+                "session.leave", "click");
     }
 
     for (std::size_t index = 0; index < FourPeerCoordinator::kPeerCount; ++index) {

@@ -586,7 +586,12 @@ StartJamDialog::StartJamDialog(
     connect(saveDefaults, &QPushButton::clicked, this, [this] {
         if (callbacks_.saveDefaults) callbacks_.saveDefaults(state());
     });
-    connect(buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::accepted, this, [this] {
+        // Acceptance creates a new jam, including after leaving a joined jam.
+        // Merely opening, saving defaults or cancelling keeps the current identity.
+        if (callbacks_.generateSession) callbacks_.generateSession();
+        accept();
+    });
     connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
 
     auto* outer = new QVBoxLayout(this);

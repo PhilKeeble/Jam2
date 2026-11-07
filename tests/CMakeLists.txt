@@ -1842,6 +1842,16 @@ target_link_libraries(jam2_four_shared_content_integration PRIVATE
 add_test(NAME jam2_four_shared_content_integration
     COMMAND $<TARGET_FILE:jam2_four_shared_content_integration>
         "${JAM2_TEST_PUBLIC_EXECUTABLE}")
+add_test(NAME jam2_four_jamtaster_sharing_integration
+    COMMAND $<TARGET_FILE:jam2_four_shared_content_integration>
+        "${JAM2_TEST_PUBLIC_EXECUTABLE}" jamtaster)
+set_tests_properties(jam2_four_jamtaster_sharing_integration PROPERTIES
+    LABELS "integration;gui;four-peer;shared-content;jamtaster;fake-audio"
+    TIMEOUT 240)
+if(WIN32)
+    set_tests_properties(jam2_four_jamtaster_sharing_integration PROPERTIES
+        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
+endif()
 set_tests_properties(jam2_four_shared_content_integration PROPERTIES
     LABELS "integration;gui;four-peer;shared-content"
     TIMEOUT 180)

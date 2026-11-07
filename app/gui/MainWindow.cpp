@@ -8798,6 +8798,15 @@ void MainWindow::applyJamTasterConverted(
             refreshSongViews();
             regeneratePreparedMix();
             syncLooperArrangement();
+            // Track snapshots intentionally preserve remote musical grids.
+            // Publish the selected analysis through their existing policy routes.
+            if (options.value(QStringLiteral("chords")).toBool() ||
+                options.value(QStringLiteral("bass")).toBool()) {
+                sendSongSnapshot(std::nullopt, SongSyncScope::IdeaChords);
+            }
+            if (options.value(QStringLiteral("drums")).toBool()) {
+                sendSongSnapshot(std::nullopt, SongSyncScope::IdeaBeats);
+            }
             if (sourceDisposition == QStringLiteral("delete") &&
                 QFileInfo(sourcePath).isFile() && !QFile::moveToTrash(sourcePath)) {
                 QMessageBox::warning(
